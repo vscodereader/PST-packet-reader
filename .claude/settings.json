@@ -1,4 +1,9 @@
 {
+  "worktree": {
+    "symlinkDirectories": ["node_modules", ".husky/_"],
+    "baseRef": "fresh",
+    "bgIsolation": "worktree"
+  },
   "hooks": {
     "TaskCreated": [
       {

@@ -19,6 +19,39 @@ Tasks without `addBlockedBy` may be dispatched in parallel — use the
 `superpowers:dispatching-parallel-agents` skill when 2+ independent tasks
 exist.
 
+## Worktrees for parallel work
+
+`.claude/settings.json` is configured to give each parallel agent its own
+git worktree:
+
+- `worktree.baseRef = "fresh"` — branches each worktree from
+  `origin/<default>` (clean slate, no in-flight changes).
+- `worktree.symlinkDirectories = ["node_modules", ".husky/_"]` — shares the
+  installed deps and the Husky wrapper directory across worktrees so
+  spawning a new one is near-instant (no `pnpm install` per worktree, and
+  the commit hooks fire immediately).
+- `worktree.bgIsolation = "worktree"` — background sessions get an
+  isolated worktree by default so they can't edit the main checkout while
+  you are working in it.
+
+**When dispatching parallel agents**, prefer the `Agent` tool with
+`isolation: "worktree"` for any agent that will edit files. Read-only
+exploration agents don't need isolation.
+
+For manual experimentation:
+
+```bash
+# Spawn a worktree at a sibling path for an issue branch
+git worktree add ../pstmacro-feat-3 -b feat/3
+ln -s "$(pwd)/node_modules" ../pstmacro-feat-3/node_modules
+ln -s "$(pwd)/.husky/_"     ../pstmacro-feat-3/.husky/_
+# ...work there...
+git worktree remove ../pstmacro-feat-3   # when done
+```
+
+Do **not** symlink `src-tauri/target` or `dist` — concurrent Cargo / Vite
+builds on a shared output directory corrupt each other.
+
 ## Branch & PR workflow
 
 **Master is protected.** Direct pushes to `master`/`main` are blocked by the
