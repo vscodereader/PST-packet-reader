@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "macro",
+  "productName": "pstmacro",
   "version": "0.1.0",
-  "identifier": "com.beyondsoft.macro",
+  "identifier": "com.beyondsoft.pstmacro",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "macro",
+        "title": "pstmacro",
         "width": 800,
         "height": 600
       }
