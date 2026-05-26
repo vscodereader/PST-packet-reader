@@ -21,20 +21,29 @@ exist.
 
 ## Branch & PR workflow
 
-The TaskCompleted hook attempts to push the current branch and open or update
-a PR with `Closes #<issue>` so merging the PR closes the matching issue.
+**Master is protected.** Direct pushes to `master`/`main` are blocked by the
+`.husky/pre-push` hook. All changes reach the default branch via pull
+request.
 
-For this to work:
+**Branch naming**: `<type>/<issue-number>` where `<type>` is one of `feat`,
+`fix`, `chore`, `refactor`, `docs`, `test` (matches the commitlint types).
+Examples: `feat/12`, `fix/47`, `chore/3`. One issue per branch keeps the PR
+focused.
 
-- Do code work on a **feature branch**, not on `master`/`main`. Create one
-  per logical group of related tasks (typically one branch per PR scope).
-- Make sure the local default branch tracks `origin/<default>` so the hook
-  can compute "ahead by N commits".
-- The hook is silent on the main branch and on branches with no new commits.
+**Per-task workflow**:
+
+1. `gh issue create ...` (or rely on the TaskCreated hook to create one
+   automatically).
+2. `git checkout -b feat/<issue-number>` off the latest `master`.
+3. Commit work on that branch. The Husky `pre-commit` hook runs
+   lint-staged; `commit-msg` validates the conventional commit format.
+4. When done, the TaskCompleted hook pushes the branch and opens (or
+   updates) a PR whose body contains `Closes #<issue>`, so merging the PR
+   closes the issue.
 
 If a task is purely investigative (no code change), the TaskCompleted hook
-will skip PR creation; the issue remains open until you close it manually or
-mention it in another PR.
+will skip PR creation; the issue remains open until you close it manually
+or reference it from another PR.
 
 ## Manual operations
 

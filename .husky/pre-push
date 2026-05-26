@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Block direct pushes to master / main. All changes to those branches
+# must go through a pull request.
+
+protected='^refs/heads/(master|main)$'
+
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  if [[ "$remote_ref" =~ $protected ]]; then
+    echo ""
+    echo "  ✖ Direct push to $remote_ref is blocked." >&2
+    echo "    Open a pull request from a feature branch instead" >&2
+    echo "    (branch naming: feat/<issue-number>)." >&2
+    echo ""
+    exit 1
+  fi
+done
+
+exit 0
