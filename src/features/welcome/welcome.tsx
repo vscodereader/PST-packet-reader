@@ -1,3 +1,4 @@
+import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 
 import reactLogo from "@/assets/react.svg";
@@ -6,13 +7,10 @@ import { commands } from "@/shared/bindings/commands";
 import "./welcome.css";
 
 export function Welcome() {
-  const [greetMsg, setGreetMsg] = useState("");
   const [name, setName] = useState("");
-
-  async function greet() {
-    // Typed via tauri-specta — see docs/adr/0002.
-    setGreetMsg(await commands.greet(name));
-  }
+  const greetMutation = useMutation({
+    mutationFn: (input: string) => commands.greet(input),
+  });
 
   return (
     <main className="container">
@@ -35,7 +33,7 @@ export function Welcome() {
         className="row"
         onSubmit={(e) => {
           e.preventDefault();
-          greet();
+          greetMutation.mutate(name);
         }}
       >
         <input
@@ -43,9 +41,14 @@ export function Welcome() {
           onChange={(e) => setName(e.currentTarget.value)}
           placeholder="Enter a name..."
         />
-        <button type="submit">Greet</button>
+        <button type="submit" disabled={greetMutation.isPending}>
+          {greetMutation.isPending ? "Greeting..." : "Greet"}
+        </button>
       </form>
-      <p>{greetMsg}</p>
+      {greetMutation.data && <p>{greetMutation.data}</p>}
+      {greetMutation.error && (
+        <p role="alert">Error: {greetMutation.error.message}</p>
+      )}
     </main>
   );
 }
