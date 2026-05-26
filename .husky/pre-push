@@ -15,4 +15,13 @@ while read -r _local_ref _local_sha remote_ref _remote_sha; do
   fi
 done
 
+# Run the test suite before push — fail fast on broken tests
+if ! ./node_modules/.bin/vitest run --silent; then
+  echo ""
+  echo "  ✖ Tests failed. Fix the failing tests before pushing." >&2
+  echo "    Run 'pnpm test' locally to see the details." >&2
+  echo ""
+  exit 1
+fi
+
 exit 0

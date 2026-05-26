@@ -1,0 +1,48 @@
+name: Test required
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  test-required:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Every new src/**/*.{ts,tsx} needs a sibling test file
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          git fetch origin "$BASE" --depth=1
+          missing=()
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            dir=$(dirname "$f")
+            base=$(basename "$f")
+            stem="${base%.*}"
+            if [ -f "$dir/$stem.test.ts" ] || [ -f "$dir/$stem.test.tsx" ]; then
+              continue
+            fi
+            missing+=("$f")
+          done < <(
+            git diff --name-only --diff-filter=A "origin/$BASE...HEAD" \
+              | grep -E '^src/.*\.(ts|tsx)$' \
+              | grep -v -E '\.(test|spec)\.(ts|tsx)$' \
+              | grep -v -E '^src/test/' \
+              | grep -v -E '^src/main\.tsx$' \
+              | grep -v -E '^src/vite-env\.d\.ts$' || true
+          )
+          if [ ${#missing[@]} -ne 0 ]; then
+            for f in "${missing[@]}"; do
+              echo "::error file=$f::New source file requires an adjacent test (e.g. ${f%.*}.test.${f##*.})"
+            done
+            exit 1
+          fi
+          echo "OK: all new source files have tests."
