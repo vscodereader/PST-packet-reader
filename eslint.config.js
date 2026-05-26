@@ -1,5 +1,6 @@
 import js from "@eslint/js";
 import globals from "globals";
+import boundaries from "eslint-plugin-boundaries";
 import importPlugin from "eslint-plugin-import";
 import react from "eslint-plugin-react";
 import reactHooks from "eslint-plugin-react-hooks";
@@ -24,6 +25,7 @@ export default tseslint.config(
       "react-refresh": reactRefresh,
       import: importPlugin,
       "unused-imports": unusedImports,
+      boundaries,
     },
     rules: {
       ...react.configs.recommended.rules,
@@ -65,6 +67,21 @@ export default tseslint.config(
           argsIgnorePattern: "^_",
         },
       ],
+
+      // v5-style rule names still work in v6.x; migrate to
+      // boundaries/dependencies + object selectors when upgrading later.
+      "boundaries/element-types": [
+        "error",
+        {
+          default: "disallow",
+          rules: [
+            { from: "app", allow: ["features", "shared", "hooks"] },
+            { from: "features", allow: ["shared", "hooks"] },
+            { from: "shared", allow: ["shared"] },
+            { from: "hooks", allow: ["shared"] },
+          ],
+        },
+      ],
     },
     settings: {
       react: { version: "detect" },
@@ -72,6 +89,18 @@ export default tseslint.config(
         typescript: true,
         node: true,
       },
+      "boundaries/elements": [
+        { type: "app", pattern: "src/app/**" },
+        { type: "features", pattern: "src/features/*", mode: "folder" },
+        { type: "shared", pattern: "src/shared/**" },
+        { type: "hooks", pattern: "src/hooks/**" },
+      ],
+      "boundaries/ignore": [
+        "src/assets/**",
+        "src/test/**",
+        "src/vite-env.d.ts",
+        "**/*.test.{ts,tsx}",
+      ],
     },
   },
   {
