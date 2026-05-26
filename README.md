@@ -36,3 +36,22 @@ cd src-tauri
 cargo fmt              # format Rust sources
 cargo clippy           # lint
 ```
+
+## Commit message convention
+
+Commits are validated by commitlint (`@commitlint/config-conventional`) via a
+`commit-msg` hook. Use the [Conventional Commits](https://www.conventionalcommits.org/)
+format:
+
+```
+<type>(<optional scope>): <subject>
+```
+
+Common types: `feat`, `fix`, `chore`, `refactor`, `docs`, `test`, `build`, `ci`, `perf`, `style`.
+
+## VS Code
+
+Opening the workspace in VS Code prompts to install the recommended extensions
+(`.vscode/extensions.json`) — Prettier, ESLint, Stylelint, EditorConfig, Tauri,
+rust-analyzer, Vitest Explorer. Workspace settings enable auto-save (1s delay),
+format-on-save with Prettier, and ESLint/Stylelint autofix on save.
