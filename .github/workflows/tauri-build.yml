@@ -1,7 +1,11 @@
 name: Tauri build
 
 on:
+  # Multi-OS Tauri build is expensive — only run on PRs targeting the
+  # default branch (skip stacked / intermediate PRs) and on pushes to
+  # the default branch itself.
   pull_request:
+    branches: [master, main]
   push:
     branches: [master, main]
 
@@ -13,11 +17,11 @@ jobs:
         platform: [ubuntu-22.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
