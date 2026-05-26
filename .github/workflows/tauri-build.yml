@@ -1,7 +1,11 @@
 name: Tauri build
 
 on:
+  # Multi-OS Tauri build is expensive — only run on PRs targeting the
+  # default branch (skip stacked / intermediate PRs) and on pushes to
+  # the default branch itself.
   pull_request:
+    branches: [master, main]
   push:
     branches: [master, main]
 
