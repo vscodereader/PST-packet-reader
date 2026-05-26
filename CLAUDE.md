@@ -78,6 +78,21 @@ If a task is purely investigative (no code change), the TaskCompleted hook
 will skip PR creation; the issue remains open until you close it manually
 or reference it from another PR.
 
+## TDD enforcement
+
+- **Coverage gate**: `pnpm test:coverage` (run in CI) fails when any of
+  lines / statements / functions / branches drops below **70%**. The
+  config is in `vitest.config.ts` under `test.coverage`.
+- **Pre-push tests**: `.husky/pre-push` runs `vitest run --silent` and
+  blocks the push on any failure.
+- **New-file-needs-test**: `.github/workflows/test-required.yml` checks
+  the PR diff. Any added `src/**/*.{ts,tsx}` (excluding `*.test.*`,
+  `src/test/**`, `src/main.tsx`, `src/vite-env.d.ts`) must have an
+  adjacent `*.test.{ts,tsx}` or the PR can't merge.
+- **Test-file lint**: `@vitest/eslint-plugin` rules enforce
+  `no-disabled-tests`, `no-focused-tests`, `require-top-level-describe`
+  on `**/*.test.{ts,tsx}` and `src/test/**`.
+
 ## Manual operations
 
 | What                              | Command                                                               |
