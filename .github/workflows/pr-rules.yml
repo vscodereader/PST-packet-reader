@@ -12,7 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     # Only feat/<n> branches require an issue link. Trunk-based commit-level
     # work (chore/fix/refactor/etc.) is exempt — see CLAUDE.md.
-    if: startsWith(github.event.pull_request.head.ref, 'feat/')
+    # Dependabot PRs are also exempt — they're machine-generated.
+    if: |
+      startsWith(github.event.pull_request.head.ref, 'feat/') &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
       - name: PR body must reference an issue with Closes/Fixes/Resolves #N
         env:
@@ -27,6 +30,10 @@ jobs:
 
   conventional-title:
     runs-on: ubuntu-latest
+    # Dependabot generates its own conventional-ish titles
+    # ("chore(deps): Bump X from Y to Z") that don't match our strict
+    # lowercase-subject rule. Skip rather than fight the bot.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
       - uses: amannn/action-semantic-pull-request@v5
         env:
@@ -50,6 +57,9 @@ jobs:
 
   branch-name:
     runs-on: ubuntu-latest
+    # Dependabot uses its own branch naming (dependabot/<ecosystem>/<dep>-<ver>)
+    # that doesn't fit the trunk-based <type>/<slug-or-issue> shape.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
       - name: Branch name must match the trunk-based convention
         env:
