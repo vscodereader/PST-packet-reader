@@ -74,6 +74,14 @@ focused.
    updates) a PR whose body contains `Closes #<issue>`, so merging the PR
    closes the issue.
 
+**These rules are CI-enforced** by `.github/workflows/pr-rules.yml`:
+
+- Branch name must match `^(feat|fix|chore|refactor|docs|test|build|ci|perf|style)/\d+$`.
+- PR title must be a conventional commit form (`type(scope?): subject`).
+- PR body must contain `Closes #<n>` (or `Fixes`/`Resolves`).
+
+A PR failing any of the three is non-mergeable.
+
 If a task is purely investigative (no code change), the TaskCompleted hook
 will skip PR creation; the issue remains open until you close it manually
 or reference it from another PR.
@@ -92,6 +100,17 @@ or reference it from another PR.
 - **Test-file lint**: `@vitest/eslint-plugin` rules enforce
   `no-disabled-tests`, `no-focused-tests`, `require-top-level-describe`
   on `**/*.test.{ts,tsx}` and `src/test/**`.
+## Architecture & code style enforcement
+
+- **Import order**: `eslint-plugin-import` enforces groups (builtin →
+  external → internal → parent → sibling → index) with alphabetized
+  members and a blank line between groups. Auto-fixable.
+- **No duplicate / dead imports**: `import/no-duplicates` +
+  `unused-imports/no-unused-imports`.
+- **TypeScript strictness**: `tsconfig.json` enables
+  `noUncheckedIndexedAccess` (array/dict access yields `T | undefined`)
+  and `exactOptionalPropertyTypes` (`{ x?: T }` ≠ `{ x: T | undefined }`).
+  Tighter than `strict: true` alone — guard accordingly.
 
 ## Manual operations
 

@@ -1,0 +1,60 @@
+name: PR rules
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  closes-ref:
+    runs-on: ubuntu-latest
+    steps:
+      - name: PR body must reference an issue with Closes/Fixes/Resolves #N
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if printf '%s' "$BODY" | grep -Eqi '(closes|fixes|resolves)[[:space:]]+#[0-9]+'; then
+            echo "OK: PR body references an issue."
+          else
+            echo "::error::PR body must contain 'Closes #<n>' (or Fixes/Resolves)."
+            exit 1
+          fi
+
+  conventional-title:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            chore
+            refactor
+            docs
+            test
+            build
+            ci
+            perf
+            style
+          requireScope: false
+          subjectPattern: ^[^A-Z].+$
+          subjectPatternError: |
+            PR title subject must start with a lowercase letter.
+
+  branch-name:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Branch name must match <type>/<issue-number>
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if printf '%s' "$BRANCH" | grep -Eq '^(feat|fix|chore|refactor|docs|test|build|ci|perf|style)/[0-9]+$'; then
+            echo "OK: branch '$BRANCH' matches the convention."
+          else
+            echo "::error::Branch '$BRANCH' must match <type>/<issue-number>, e.g. feat/12."
+            exit 1
+          fi
