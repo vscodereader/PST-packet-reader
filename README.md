@@ -1,6 +1,14 @@
-# Tauri + React + Typescript
+# pstmacro
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+![CI](https://github.com/beyondsoft-kr/pstmacro/actions/workflows/ci.yml/badge.svg)
+![Tauri build](https://github.com/beyondsoft-kr/pstmacro/actions/workflows/tauri-build.yml/badge.svg)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+
+Tauri + React + TypeScript desktop app.
+
+Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
+(enforced by commitlint). Branch naming and Claude task automation are
+documented in [CLAUDE.md](./CLAUDE.md).
 
 ## Recommended IDE Setup
 
