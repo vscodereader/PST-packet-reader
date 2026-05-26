@@ -85,6 +85,7 @@ export default tseslint.config(
     },
     settings: {
       react: { version: "detect" },
+      "import/internal-regex": "^@/",
       "import/resolver": {
         typescript: true,
         node: true,
