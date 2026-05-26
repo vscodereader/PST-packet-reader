@@ -20,8 +20,9 @@ export default defineConfig({
       include: ["src/**/*.{ts,tsx}"],
       exclude: [
         "src/test/**",
-        "src/main.tsx",
+        "src/app/main.tsx",
         "src/vite-env.d.ts",
+        "src/shared/bindings/**",
         "**/*.test.{ts,tsx}",
       ],
       thresholds: {
