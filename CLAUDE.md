@@ -100,6 +100,7 @@ or reference it from another PR.
 - **Test-file lint**: `@vitest/eslint-plugin` rules enforce
   `no-disabled-tests`, `no-focused-tests`, `require-top-level-describe`
   on `**/*.test.{ts,tsx}` and `src/test/**`.
+
 ## Architecture & code style enforcement
 
 - **Import order**: `eslint-plugin-import` enforces groups (builtin →
