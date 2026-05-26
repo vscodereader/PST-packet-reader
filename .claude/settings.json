@@ -1,0 +1,31 @@
+{
+  "worktree": {
+    "symlinkDirectories": ["node_modules", ".husky/_"],
+    "baseRef": "fresh",
+    "bgIsolation": "worktree"
+  },
+  "hooks": {
+    "TaskCreated": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/task-create-to-issue.sh",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/task-complete-to-pr.sh",
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}

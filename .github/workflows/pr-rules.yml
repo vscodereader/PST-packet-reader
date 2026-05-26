@@ -1,0 +1,69 @@
+name: PR rules
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  closes-ref:
+    runs-on: ubuntu-latest
+    # Only feat/<n> branches require an issue link. Trunk-based commit-level
+    # work (chore/fix/refactor/etc.) is exempt — see CLAUDE.md.
+    if: startsWith(github.event.pull_request.head.ref, 'feat/')
+    steps:
+      - name: PR body must reference an issue with Closes/Fixes/Resolves #N
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if printf '%s' "$BODY" | grep -Eqi '(closes|fixes|resolves)[[:space:]]+#[0-9]+'; then
+            echo "OK: PR body references an issue."
+          else
+            echo "::error::feat/<n> PRs must contain 'Closes #<n>' (or Fixes/Resolves)."
+            exit 1
+          fi
+
+  conventional-title:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            chore
+            refactor
+            docs
+            test
+            build
+            ci
+            perf
+            style
+          requireScope: false
+          subjectPattern: ^[^A-Z].+$
+          subjectPatternError: |
+            PR title subject must start with a lowercase letter.
+
+  branch-name:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Branch name must match the trunk-based convention
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          # feat/<issue-number> for full-ceremony feature work.
+          # <type>/<slug> for commit-level work (chore/fix/refactor/etc.).
+          feat_pattern='^feat/[0-9]+$'
+          slug_pattern='^(fix|chore|refactor|docs|test|build|ci|perf|style)/[a-z][a-z0-9-]*$'
+          if printf '%s' "$BRANCH" | grep -Eq "$feat_pattern"; then
+            echo "OK: feat branch '$BRANCH' uses an issue number."
+          elif printf '%s' "$BRANCH" | grep -Eq "$slug_pattern"; then
+            echo "OK: commit-level branch '$BRANCH' uses a slug."
+          else
+            echo "::error::Branch '$BRANCH' must be feat/<n> or <type>/<slug>; types: fix|chore|refactor|docs|test|build|ci|perf|style."
+            exit 1
+          fi
