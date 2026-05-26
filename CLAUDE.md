@@ -74,6 +74,14 @@ focused.
    updates) a PR whose body contains `Closes #<issue>`, so merging the PR
    closes the issue.
 
+**These rules are CI-enforced** by `.github/workflows/pr-rules.yml`:
+
+- Branch name must match `^(feat|fix|chore|refactor|docs|test|build|ci|perf|style)/\d+$`.
+- PR title must be a conventional commit form (`type(scope?): subject`).
+- PR body must contain `Closes #<n>` (or `Fixes`/`Resolves`).
+
+A PR failing any of the three is non-mergeable.
+
 If a task is purely investigative (no code change), the TaskCompleted hook
 will skip PR creation; the issue remains open until you close it manually
 or reference it from another PR.
