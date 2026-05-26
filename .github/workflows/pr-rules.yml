@@ -10,6 +10,9 @@ permissions:
 jobs:
   closes-ref:
     runs-on: ubuntu-latest
+    # Only feat/<n> branches require an issue link. Trunk-based commit-level
+    # work (chore/fix/refactor/etc.) is exempt — see CLAUDE.md.
+    if: startsWith(github.event.pull_request.head.ref, 'feat/')
     steps:
       - name: PR body must reference an issue with Closes/Fixes/Resolves #N
         env:
@@ -18,7 +21,7 @@ jobs:
           if printf '%s' "$BODY" | grep -Eqi '(closes|fixes|resolves)[[:space:]]+#[0-9]+'; then
             echo "OK: PR body references an issue."
           else
-            echo "::error::PR body must contain 'Closes #<n>' (or Fixes/Resolves)."
+            echo "::error::feat/<n> PRs must contain 'Closes #<n>' (or Fixes/Resolves)."
             exit 1
           fi
 
@@ -48,13 +51,19 @@ jobs:
   branch-name:
     runs-on: ubuntu-latest
     steps:
-      - name: Branch name must match <type>/<issue-number>
+      - name: Branch name must match the trunk-based convention
         env:
           BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
-          if printf '%s' "$BRANCH" | grep -Eq '^(feat|fix|chore|refactor|docs|test|build|ci|perf|style)/[0-9]+$'; then
-            echo "OK: branch '$BRANCH' matches the convention."
+          # feat/<issue-number> for full-ceremony feature work.
+          # <type>/<slug> for commit-level work (chore/fix/refactor/etc.).
+          feat_pattern='^feat/[0-9]+$'
+          slug_pattern='^(fix|chore|refactor|docs|test|build|ci|perf|style)/[a-z][a-z0-9-]*$'
+          if printf '%s' "$BRANCH" | grep -Eq "$feat_pattern"; then
+            echo "OK: feat branch '$BRANCH' uses an issue number."
+          elif printf '%s' "$BRANCH" | grep -Eq "$slug_pattern"; then
+            echo "OK: commit-level branch '$BRANCH' uses a slug."
           else
-            echo "::error::Branch '$BRANCH' must match <type>/<issue-number>, e.g. feat/12."
+            echo "::error::Branch '$BRANCH' must be feat/<n> or <type>/<slug>; types: fix|chore|refactor|docs|test|build|ci|perf|style."
             exit 1
           fi

@@ -37,6 +37,25 @@ SUBJECT=$(extract "'task.subject', 'subject', 'tool_input.subject'")
 DESCRIPTION=$(extract "'task.description', 'description', 'tool_input.description'")
 TASK_ID=$(extract "'task.id', 'task_id', 'id', 'tool_input.id'")
 
+# Trunk-based policy: only feat-flavored work warrants an issue + PR.
+# chore/fix/refactor/docs/style/test/perf/ci/build land as commit-level
+# PRs (no issue link required). Skip issue creation for them.
+shopt -s nocasematch
+case "$SUBJECT" in
+  feat:*|feat\(*|feature:*|"feat "*|"feature "*) ;;  # proceed
+  fix:*|fix\(*|"fix "*) exit 0 ;;
+  chore:*|chore\(*|"chore "*) exit 0 ;;
+  refactor:*|refactor\(*|"refactor "*) exit 0 ;;
+  docs:*|docs\(*|"docs "*) exit 0 ;;
+  style:*|style\(*|"style "*) exit 0 ;;
+  test:*|test\(*|"test "*) exit 0 ;;
+  perf:*|perf\(*|"perf "*) exit 0 ;;
+  ci:*|ci\(*|"ci "*) exit 0 ;;
+  build:*|build\(*|"build "*) exit 0 ;;
+  *) ;;  # untyped tasks: default to creating an issue
+esac
+shopt -u nocasematch
+
 # Skip silently if gh is missing or unauthenticated.
 if ! command -v gh >/dev/null 2>&1; then exit 0; fi
 if ! gh auth status >/dev/null 2>&1; then exit 0; fi

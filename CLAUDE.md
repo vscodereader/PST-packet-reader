@@ -52,39 +52,65 @@ git worktree remove ../pstmacro-feat-3   # when done
 Do **not** symlink `src-tauri/target` or `dist` — concurrent Cargo / Vite
 builds on a shared output directory corrupt each other.
 
-## Branch & PR workflow
+## Branch & PR workflow (Trunk-Based Development)
 
-**Master is protected.** Direct pushes to `master`/`main` are blocked by the
-`.husky/pre-push` hook. All changes reach the default branch via pull
-request.
+This project follows **Trunk-Based Development**: small, frequent commits
+land on `master` through short-lived branches. Long-lived feature
+branches are an anti-pattern here.
 
-**Branch naming**: `<type>/<issue-number>` where `<type>` is one of `feat`,
-`fix`, `chore`, `refactor`, `docs`, `test` (matches the commitlint types).
-Examples: `feat/12`, `fix/47`, `chore/3`. One issue per branch keeps the PR
-focused.
+**Master is protected.** Direct pushes to `master`/`main` are blocked by
+the `.husky/pre-push` hook. Every change still goes through a branch +
+PR — the difference is how heavyweight that ceremony is.
 
-**Per-task workflow**:
+### Two work tracks
 
-1. `gh issue create ...` (or rely on the TaskCreated hook to create one
-   automatically).
+**1. `feat/<issue>` — full ceremony** (new user-facing behavior, anything
+non-trivial):
+
+1. `gh issue create ...` (or the TaskCreated hook does it).
 2. `git checkout -b feat/<issue-number>` off the latest `master`.
-3. Commit work on that branch. The Husky `pre-commit` hook runs
-   lint-staged; `commit-msg` validates the conventional commit format.
-4. When done, the TaskCompleted hook pushes the branch and opens (or
-   updates) a PR whose body contains `Closes #<issue>`, so merging the PR
-   closes the issue.
+3. TDD-first: write a failing test, then the code that makes it pass.
+   Pre-commit (`lint-staged`), `commit-msg` (commitlint), and pre-push
+   (`vitest run`) gate each commit / push.
+4. PR with `Closes #<issue>` in the body — the rules below apply.
 
-**These rules are CI-enforced** by `.github/workflows/pr-rules.yml`:
+**2. `<type>/<short-slug>` — commit-level work** (chore, fix, refactor,
+docs, style, test, perf, ci, build):
 
-- Branch name must match `^(feat|fix|chore|refactor|docs|test|build|ci|perf|style)/\d+$`.
+1. **No issue required.** Branch off `master` with a descriptive slug
+   (`chore/bump-deps`, `fix/login-typo`, `refactor/extract-helper`).
+2. Keep it to one logical change, ideally one commit. Same hook gates
+   apply (pre-commit / commit-msg / pre-push).
+3. Push and open a PR. Mark it ready and auto-merge:
+   `gh pr merge --auto --squash --delete-branch`. No review wait, no
+   issue link required.
+
+If a chore / fix is the natural counterpart to in-flight feat work,
+commit it directly on the feat branch instead of spinning a separate
+branch — that's the simplest path.
+
+### Multi-task parallelism (worktrees)
+
+When two or more tasks can proceed in parallel without shared file
+edits, dispatch them in separate worktrees so they don't trample each
+other's working tree. `.claude/settings.json` is configured for this:
+`baseRef: fresh`, `symlinkDirectories: [node_modules, .husky/_]`,
+`bgIsolation: worktree`. Use `Agent` with `isolation: "worktree"` for
+write-capable subagents, or `git worktree add` manually for hand-run
+parallelism (see the Worktrees section above).
+
+### CI-enforced rules (`.github/workflows/pr-rules.yml`)
+
+- Branch name must match `^(feat|fix|chore|refactor|docs|test|build|ci|perf|style)/(\d+|[a-z][a-z0-9-]*)$` (either an issue number for feat, or a slug for the other types).
 - PR title must be a conventional commit form (`type(scope?): subject`).
-- PR body must contain `Closes #<n>` (or `Fixes`/`Resolves`).
+- For `feat/<n>` branches only: PR body must contain `Closes #<n>` (or
+  `Fixes`/`Resolves`). Other branch types are exempt.
 
-A PR failing any of the three is non-mergeable.
+A PR failing any rule applicable to its branch type is non-mergeable.
 
-If a task is purely investigative (no code change), the TaskCompleted hook
-will skip PR creation; the issue remains open until you close it manually
-or reference it from another PR.
+If a task is purely investigative (no code change), the TaskCompleted
+hook will skip PR creation; for a feat task the issue stays open until
+closed manually or via a later PR.
 
 ## TDD enforcement
 
