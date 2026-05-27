@@ -21,4 +21,15 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "cookies", "json"] }
+rsa = "0.9"
+num-bigint-dig = "0.8"
+hex = "0.4"
+rand = "0.8"
+base64 = "0.22"
+tokio = { version = "1", features = ["full"] }
+thiserror = "1"
+
+[dev-dependencies]
+mockito = "1"
 
