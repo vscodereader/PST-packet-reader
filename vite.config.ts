@@ -5,6 +5,10 @@ import { defineConfig } from "vite";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
+// @ts-expect-error process is a nodejs global
+const tauriPlatform = process.env.TAURI_ENV_PLATFORM;
+// @ts-expect-error process is a nodejs global
+const tauriDebug = !!process.env.TAURI_ENV_DEBUG;
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
@@ -36,5 +40,22 @@ export default defineConfig(async () => ({
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
     },
+  },
+
+  build: {
+    // Tauri ships a known modern webview per OS — skip polyfills.
+    target: tauriPlatform === "windows" ? "chrome105" : "safari14",
+    minify: tauriDebug ? false : "esbuild",
+    sourcemap: tauriDebug,
+  },
+
+  esbuild: {
+    // Strip console/debugger in production bundles only.
+    drop: tauriDebug ? [] : ["console", "debugger"],
+  },
+
+  optimizeDeps: {
+    // Pre-bundle Mantine on cold dev start so the first navigation is snappy.
+    include: ["@mantine/core", "@mantine/hooks"],
   },
 }));
