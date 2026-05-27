@@ -23,6 +23,10 @@
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
 
+    /* Incremental compilation */
+    "incremental": true,
+    "tsBuildInfoFile": "./node_modules/.cache/tsc/tsconfig.tsbuildinfo",
+
     /* Path aliases */
     "paths": {
       "@/*": ["./src/*"]
