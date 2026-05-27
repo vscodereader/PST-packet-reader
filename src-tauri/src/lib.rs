@@ -7,16 +7,8 @@ fn greet(name: &str) -> String {
 }
 
 #[tauri::command]
-async fn naver_login(
-    pub_key_url: String,
-    login_url: String,
-    profile_url: String,
-    id: String,
-    pw: String,
-) -> Result<serde_json::Value, String> {
-    auth::login(&pub_key_url, &login_url, &profile_url, &id, &pw)
-        .await
-        .map_err(|e| e.to_string())
+async fn naver_login(id: String, pw: String) -> Result<serde_json::Value, String> {
+    auth::login(&id, &pw).await.map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
