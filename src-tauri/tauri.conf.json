@@ -3,6 +3,7 @@
   "productName": "pstmacro",
   "version": "0.1.0",
   "identifier": "com.beyondsoft.pstmacro",
+  "mainBinaryName": "pstmacro",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
