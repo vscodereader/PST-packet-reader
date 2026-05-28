@@ -41,8 +41,6 @@ type SavedBatchConfig = {
   port: number;
 };
 
-const entrySeparator = "\n---\n";
-
 // 실행 환경에 따라 Chrome DevTools 기본 접속값을 고르는 함수입니다.
 function defaultDevtoolsEndpoint() {
   const platform = window.navigator.platform.toLowerCase();
@@ -54,16 +52,16 @@ function defaultDevtoolsEndpoint() {
   return { host: "172.24.32.1", port: 9223 };
 }
 
-// CSV에서 가져온 여러 항목을 텍스트창 표시용 문자열로 합치는 함수입니다.
-function joinEntries(entries: string[]) {
-  return entries.join(entrySeparator);
+// 목록의 모든 항목 index를 선택 상태로 만드는 함수입니다.
+function allEntryIndexes(entries: string[]) {
+  return entries.map((_, index) => index);
 }
 
-// 텍스트창 값을 실행 가능한 항목 목록으로 다시 나누는 함수입니다.
-function splitEntries(value: string) {
-  return value
-    .split(/\n---\n/g)
-    .map((entry) => entry.trim())
+// 선택된 index 목록을 실제 실행할 텍스트 목록으로 변환하는 함수입니다.
+function entriesBySelection(entries: string[], indexes: number[]) {
+  return indexes
+    .filter((index) => index >= 0 && index < entries.length)
+    .map((index) => entries[index]?.trim() ?? "")
     .filter(Boolean);
 }
 
@@ -77,24 +75,146 @@ function modeLabel(mode: PickMode) {
 // 제목, 내용, 댓글내용의 선택 모드가 실행 가능한 상태인지 검증하는 함수입니다.
 function validateMode(entries: string[], mode: PickMode, label: string) {
   if (entries.length === 0) {
-    return `${label}이 비어 있습니다. CSV를 가져오거나 텍스트창에 입력하세요.`;
+    return `${label}을 하나 이상 선택하세요. CSV를 가져온 뒤 목록에서 사용할 항목을 클릭하세요.`;
   }
 
   if (mode === "single" && entries.length !== 1) {
-    return `${label}의 1개만은 값이 정확히 1개일 때만 선택할 수 있습니다.`;
+    return `${label}의 1개만은 선택된 값이 정확히 1개일 때만 선택할 수 있습니다.`;
   }
 
   return "";
 }
 
-// CSV로 가져온 문구를 텍스트창에서 수정할 때 지켜야 할 안내를 그리는 컴포넌트입니다.
-function EditGuide() {
+// CSV 항목 목록을 표시하고 클릭 선택, 더블클릭 수정을 제공하는 컴포넌트입니다.
+function EntryListEditor({
+  entries,
+  emptyLabel,
+  label,
+  onEntriesChange,
+  onSelectionChange,
+  selectedIndexes,
+}: {
+  entries: string[];
+  emptyLabel: string;
+  label: string;
+  onEntriesChange: (entries: string[]) => void;
+  onSelectionChange: (indexes: number[]) => void;
+  selectedIndexes: number[];
+}) {
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editingValue, setEditingValue] = useState("");
+
+  // 목록 항목을 클릭했을 때 선택/해제를 토글하는 함수입니다.
+  function toggleSelection(index: number) {
+    onSelectionChange(
+      selectedIndexes.includes(index)
+        ? selectedIndexes.filter((value) => value !== index)
+        : [...selectedIndexes, index].sort((a, b) => a - b),
+    );
+  }
+
+  // 목록 항목을 더블클릭했을 때 수정 모드로 전환하는 함수입니다.
+  function beginEdit(index: number) {
+    setEditingIndex(index);
+    setEditingValue(entries[index] ?? "");
+  }
+
+  // 수정 모드에서 입력한 값을 목록에 저장하는 함수입니다.
+  function saveEdit() {
+    if (editingIndex === null) return;
+
+    const nextEntries = [...entries];
+    nextEntries[editingIndex] = editingValue.trim();
+    onEntriesChange(nextEntries.filter(Boolean));
+    setEditingIndex(null);
+    setEditingValue("");
+  }
+
+  // 수정 모드를 취소하고 기존 값을 유지하는 함수입니다.
+  function cancelEdit() {
+    setEditingIndex(null);
+    setEditingValue("");
+  }
+
   return (
-    <Text size="xs" c="dimmed" className="macro-editor-field-guide">
-      CSV로 가져온 여러 항목은 --- 줄로 구분됩니다. --- 줄은 지우거나 바꾸지
-      마세요. 수정할 문장만 드래그해서 고친 뒤 설정 저장을 누르세요. 항목 사이에
-      엔터를 추가하지 마세요.
-    </Text>
+    <Stack gap={6}>
+      <Text fw={700}>{label}</Text>
+      <div
+        className="macro-editor-entry-list"
+        role="listbox"
+        aria-label={label}
+      >
+        {entries.length === 0 ? (
+          <Text c="dimmed" size="sm" className="macro-editor-entry-empty">
+            {emptyLabel}
+          </Text>
+        ) : (
+          entries.map((entry, index) => {
+            const selected = selectedIndexes.includes(index);
+            const editing = editingIndex === index;
+
+            return (
+              <div
+                key={`${label}-${index}`}
+                role="option"
+                aria-selected={selected}
+                tabIndex={0}
+                className={`macro-editor-entry-item ${
+                  selected ? "macro-editor-entry-item-selected" : ""
+                }`}
+                onClick={() => {
+                  if (!editing) toggleSelection(index);
+                }}
+                onDoubleClick={() => beginEdit(index)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    toggleSelection(index);
+                  }
+                }}
+              >
+                {editing ? (
+                  <div
+                    className="macro-editor-entry-edit"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <Textarea
+                      autosize
+                      minRows={1}
+                      value={editingValue}
+                      onChange={(event) =>
+                        setEditingValue(event.currentTarget.value)
+                      }
+                    />
+                    <Group gap="xs" justify="end">
+                      <Button size="xs" onClick={saveEdit}>
+                        저장
+                      </Button>
+                      <Button size="xs" variant="light" onClick={cancelEdit}>
+                        취소
+                      </Button>
+                    </Group>
+                  </div>
+                ) : (
+                  <>
+                    <span className="macro-editor-entry-index">
+                      {index + 1}
+                    </span>
+                    <span className="macro-editor-entry-text">{entry}</span>
+                  </>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+      <Text size="xs" c="dimmed" className="macro-editor-field-guide">
+        CSV에서 가져온 항목은 목록으로 표시됩니다. 클릭하면 사용할 항목을
+        선택하거나 해제할 수 있고, 더블클릭하면 내용을 수정할 수 있습니다. 한
+        번에 최대 5개까지 보이며, 더 많은 항목은 목록 안에서 스크롤해서
+        확인하세요.
+      </Text>
+    </Stack>
   );
 }
 
@@ -138,9 +258,16 @@ export function StockBatchPanel() {
   const [showStockList, setShowStockList] = useState(false);
   const [fileLoaded, setFileLoaded] = useState(false);
   const [fileName, setFileName] = useState("");
-  const [titleText, setTitleText] = useState("");
-  const [bodyText, setBodyText] = useState("");
-  const [commentText, setCommentText] = useState("");
+  const [titleEntries, setTitleEntries] = useState<string[]>([]);
+  const [bodyEntries, setBodyEntries] = useState<string[]>([]);
+  const [commentEntries, setCommentEntries] = useState<string[]>([]);
+  const [selectedTitleIndexes, setSelectedTitleIndexes] = useState<number[]>(
+    [],
+  );
+  const [selectedBodyIndexes, setSelectedBodyIndexes] = useState<number[]>([]);
+  const [selectedCommentIndexes, setSelectedCommentIndexes] = useState<
+    number[]
+  >([]);
   const [titleMode, setTitleMode] = useState<PickMode>("random");
   const [bodyMode, setBodyMode] = useState<PickMode>("random");
   const [commentMode, setCommentMode] = useState<PickMode>("random");
@@ -153,10 +280,22 @@ export function StockBatchPanel() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
-  const titles = useMemo(() => splitEntries(titleText), [titleText]);
-  const bodies = useMemo(() => splitEntries(bodyText), [bodyText]);
-  const comments = useMemo(() => splitEntries(commentText), [commentText]);
+  const selectedTitles = useMemo(
+    () => entriesBySelection(titleEntries, selectedTitleIndexes),
+    [selectedTitleIndexes, titleEntries],
+  );
+  const selectedBodies = useMemo(
+    () => entriesBySelection(bodyEntries, selectedBodyIndexes),
+    [bodyEntries, selectedBodyIndexes],
+  );
+  const selectedComments = useMemo(
+    () => entriesBySelection(commentEntries, selectedCommentIndexes),
+    [commentEntries, selectedCommentIndexes],
+  );
   const actionInvalid = Boolean(error) && !runPost && !runComment;
+  const showPostPanel = runPost;
+  const showCommentPanel = runComment;
+  const showCountSelector = runPost || runComment;
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -194,7 +333,7 @@ export function StockBatchPanel() {
     }
   }
 
-  // 사용자가 선택한 CSV 파일을 읽고 Rust CSV parser 결과를 텍스트창에 반영하는 함수입니다.
+  // 사용자가 선택한 CSV 파일을 읽고 Rust CSV parser 결과를 목록 UI에 반영하는 함수입니다.
   async function importTemplate(file: File) {
     setError("");
     setMessage("");
@@ -211,9 +350,12 @@ export function StockBatchPanel() {
       csvText,
     });
 
-    setTitleText(joinEntries(parsed.titles));
-    setBodyText(joinEntries(parsed.bodies));
-    setCommentText(joinEntries(parsed.comments));
+    setTitleEntries(parsed.titles);
+    setBodyEntries(parsed.bodies);
+    setCommentEntries(parsed.comments);
+    setSelectedTitleIndexes(allEntryIndexes(parsed.titles));
+    setSelectedBodyIndexes(allEntryIndexes(parsed.bodies));
+    setSelectedCommentIndexes(allEntryIndexes(parsed.comments));
     setFileLoaded(true);
     setFileName(file.name);
     setMessage(
@@ -256,9 +398,9 @@ export function StockBatchPanel() {
     }
 
     const validations = [
-      runPost ? validateMode(titles, titleMode, "제목") : "",
-      runPost ? validateMode(bodies, bodyMode, "내용") : "",
-      runComment ? validateMode(comments, commentMode, "댓글내용") : "",
+      runPost ? validateMode(selectedTitles, titleMode, "제목") : "",
+      runPost ? validateMode(selectedBodies, bodyMode, "내용") : "",
+      runComment ? validateMode(selectedComments, commentMode, "댓글내용") : "",
     ].filter(Boolean);
 
     if (validations.length > 0) {
@@ -267,9 +409,9 @@ export function StockBatchPanel() {
     }
 
     return {
-      bodies,
+      bodies: selectedBodies,
       bodyMode,
-      comments,
+      comments: selectedComments,
       commentMode,
       count,
       host: defaultEndpoint.host,
@@ -278,7 +420,7 @@ export function StockBatchPanel() {
       runPost,
       stocks: selectedStocks,
       titleMode,
-      titles,
+      titles: selectedTitles,
     };
   }
 
@@ -440,72 +582,101 @@ export function StockBatchPanel() {
           />
         </Group>
 
-        <div className="macro-editor-template-grid">
-          <Stack gap="xs">
-            <Textarea
-              minRows={5}
-              label="제목"
-              value={titleText}
-              onChange={(event) => setTitleText(event.currentTarget.value)}
-              placeholder="CSV 2행 1열부터 가져옵니다. 여러 항목은 --- 줄로 구분됩니다."
-            />
-            <EditGuide />
-            <ModeSelector
-              entries={titles}
-              label="제목"
-              mode={titleMode}
-              onChange={setTitleMode}
-            />
-          </Stack>
+        {!showPostPanel && !showCommentPanel ? (
+          <Text c="dimmed" size="sm">
+            글쓰기 또는 댓글쓰기를 선택하면 필요한 설정 목록이 표시됩니다.
+          </Text>
+        ) : null}
 
-          <Stack gap="xs">
-            <Textarea
-              minRows={5}
-              label="내용"
-              value={bodyText}
-              onChange={(event) => setBodyText(event.currentTarget.value)}
-              placeholder="CSV 2행 2열부터 가져옵니다."
-            />
-            <EditGuide />
-            <ModeSelector
-              entries={bodies}
-              label="내용"
-              mode={bodyMode}
-              onChange={setBodyMode}
-            />
-          </Stack>
+        {showPostPanel ? (
+          <section className="macro-editor-action-panel">
+            <Text fw={800}>글쓰기 설정</Text>
+            <div className="macro-editor-template-grid macro-editor-template-grid-post">
+              <Stack gap="xs">
+                <EntryListEditor
+                  entries={titleEntries}
+                  emptyLabel="CSV 2행 1열부터 제목을 가져옵니다."
+                  label="제목"
+                  selectedIndexes={selectedTitleIndexes}
+                  onEntriesChange={setTitleEntries}
+                  onSelectionChange={setSelectedTitleIndexes}
+                />
+                <ModeSelector
+                  entries={selectedTitles}
+                  label="제목"
+                  mode={titleMode}
+                  onChange={setTitleMode}
+                />
+              </Stack>
 
-          <Stack gap="xs">
-            <Textarea
-              minRows={5}
-              label="댓글 내용"
-              value={commentText}
-              onChange={(event) => setCommentText(event.currentTarget.value)}
-              placeholder="CSV 2행 3열부터 가져옵니다."
-            />
-            <EditGuide />
-            <ModeSelector
-              entries={comments}
-              label="댓글"
-              mode={commentMode}
-              onChange={setCommentMode}
-            />
-          </Stack>
-        </div>
+              <Stack gap="xs">
+                <EntryListEditor
+                  entries={bodyEntries}
+                  emptyLabel="CSV 2행 2열부터 내용을 가져옵니다."
+                  label="내용"
+                  selectedIndexes={selectedBodyIndexes}
+                  onEntriesChange={setBodyEntries}
+                  onSelectionChange={setSelectedBodyIndexes}
+                />
+                <ModeSelector
+                  entries={selectedBodies}
+                  label="내용"
+                  mode={bodyMode}
+                  onChange={setBodyMode}
+                />
+              </Stack>
+            </div>
+          </section>
+        ) : null}
 
-        <Group>
-          <Text fw={700}>작성 개수</Text>
-          <Checkbox
-            checked={count === 3}
-            label="3개"
-            onChange={() => setCount(3)}
-          />
-          <Checkbox
-            checked={count === 5}
-            label="5개"
-            onChange={() => setCount(5)}
-          />
-        </Group>
+        {showCommentPanel ? (
+          <section className="macro-editor-action-panel">
+            <Text fw={800}>댓글쓰기 설정</Text>
+            {runPost ? (
+              <Text c="dimmed" size="sm">
+                글쓰기와 댓글쓰기를 같이 선택하면 Rust가 먼저 글을 등록한 뒤,
+                방금 등록한 글 URL에 댓글 패킷을 전송합니다.
+              </Text>
+            ) : (
+              <Text c="dimmed" size="sm">
+                댓글쓰기만 선택하면 선택한 종목의 토론글 중 하나를 패킷으로 고른
+                뒤 댓글을 작성합니다.
+              </Text>
+            )}
+            <Stack gap="xs">
+              <EntryListEditor
+                entries={commentEntries}
+                emptyLabel="CSV 2행 3열부터 댓글내용을 가져옵니다."
+                label="댓글 내용"
+                selectedIndexes={selectedCommentIndexes}
+                onEntriesChange={setCommentEntries}
+                onSelectionChange={setSelectedCommentIndexes}
+              />
+              <ModeSelector
+                entries={selectedComments}
+                label="댓글"
+                mode={commentMode}
+                onChange={setCommentMode}
+              />
+            </Stack>
+          </section>
+        ) : null}
+
+        {showCountSelector ? (
+          <Group>
+            <Text fw={700}>작성 개수</Text>
+            <Checkbox
+              checked={count === 3}
+              label="3개"
+              onChange={() => setCount(3)}
+            />
+            <Checkbox
+              checked={count === 5}
+              label="5개"
+              onChange={() => setCount(5)}
+            />
+          </Group>
+        ) : null}
 
         <div className="macro-editor-run-row">
           <Button variant="light" onClick={saveConfig}>

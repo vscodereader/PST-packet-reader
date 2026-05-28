@@ -7,7 +7,7 @@ pub mod types;
 
 pub use types::{
     AutomationReport, AutomationTarget, DiscussionSelection, DiscussionStock,
-    NaverDiscussionRequest, NaverLoginProfile,
+    NaverDiscussionRequest, NaverLoginProfile, NaverPostWithCommentRequest,
 };
 
 use devtools_connection::{normalize_debug_host, select_or_create_target, websocket_url_for_host};
@@ -133,6 +133,73 @@ pub fn run_naver_discussion_macro(
         selected,
         target: request.target,
     })
+}
+
+// 글쓰기 패킷 등록 후 방금 작성한 글 URL에 댓글 패킷을 이어서 전송하는 함수입니다.
+pub fn run_naver_post_with_comment_macro(
+    request: NaverPostWithCommentRequest,
+) -> AutomationResult<Vec<AutomationReport>> {
+    let title = request.title.trim();
+    let body = request.body.trim();
+    let comment = request.comment.trim();
+
+    if title.is_empty() {
+        return Err(AutomationError::new("제목이 비어 있습니다."));
+    }
+
+    if body.is_empty() {
+        return Err(AutomationError::new("내용이 비어 있습니다."));
+    }
+
+    if comment.is_empty() {
+        return Err(AutomationError::new("댓글 내용이 비어 있습니다."));
+    }
+
+    let host = normalize_debug_host(&request.host);
+    let mut chrome = CdpClient::connect_to_existing_chrome(&host, request.port)?;
+    chrome.enable()?;
+    chrome.ensure_discussion_page()?;
+
+    let packet_client = chrome.build_naver_packet_client()?;
+    let login_profile = packet_client.read_login_profile()?;
+
+    if !login_profile.logged_in {
+        return Err(AutomationError::new(format!(
+            "네이버 로그인이 확인되지 않았습니다. Chrome에서 로그인한 뒤 다시 실행하세요. ({})",
+            login_profile.message
+        )));
+    }
+
+    let selected = match request.stock.as_ref() {
+        Some(stock) => chrome.open_selected_discussion_room(stock)?,
+        None => chrome.open_random_discussion_room(&packet_client)?,
+    };
+
+    let post_url = chrome.submit_post_and_refresh(&packet_client, title, body)?;
+    let post_report = AutomationReport {
+        current_url: chrome.current_url()?,
+        login_profile: login_profile.clone(),
+        register_button_highlighted: false,
+        submitted: true,
+        selected: selected.clone(),
+        target: AutomationTarget::Post,
+    };
+
+    chrome.navigate(&post_url)?;
+    chrome.wait_for_ready_state(Duration::from_secs(30))?;
+    sleep(Duration::from_secs(2));
+    packet_client.ensure_profile_intro_setup(&post_url)?;
+    chrome.submit_comment_and_refresh(&packet_client, comment)?;
+    let comment_report = AutomationReport {
+        current_url: chrome.current_url()?,
+        login_profile,
+        register_button_highlighted: false,
+        submitted: true,
+        selected,
+        target: AutomationTarget::Comment,
+    };
+
+    Ok(vec![post_report, comment_report])
 }
 
 struct CdpClient {

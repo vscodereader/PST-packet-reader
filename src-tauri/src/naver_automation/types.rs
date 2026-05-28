@@ -13,6 +13,18 @@ pub struct NaverDiscussionRequest {
     pub stock: Option<DiscussionStock>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+// 글쓰기 후 방금 작성한 글에 댓글까지 이어서 달 때 필요한 입력값을 담는 구조체입니다.
+pub struct NaverPostWithCommentRequest {
+    pub title: String,
+    pub body: String,
+    pub comment: String,
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub stock: Option<DiscussionStock>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 // 자동화 대상이 글쓰기인지 댓글쓰기인지 구분하는 enum입니다.

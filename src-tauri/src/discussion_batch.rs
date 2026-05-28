@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::naver_automation::{
-    run_naver_discussion_macro, AutomationReport, AutomationTarget, DiscussionStock,
-    NaverDiscussionRequest,
+    run_naver_discussion_macro, run_naver_post_with_comment_macro, AutomationReport,
+    AutomationTarget, DiscussionStock, NaverDiscussionRequest, NaverPostWithCommentRequest,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +166,29 @@ pub fn run_discussion_batch(
 
     for index in 0..request.count {
         let stock = request.stocks[index % request.stocks.len()].clone();
+
+        if request.run_post && request.run_comment {
+            let title = pick_text(&request.titles, &request.title_mode, index, "제목")?;
+            let body = pick_text(&request.bodies, &request.body_mode, index, "내용")?;
+            let comment = pick_text(&request.comments, &request.comment_mode, index, "댓글내용")?;
+            let pair_reports = run_naver_post_with_comment_macro(NaverPostWithCommentRequest {
+                title,
+                body,
+                comment,
+                host: request.host.clone(),
+                port: request.port,
+                stock: Some(stock),
+            })
+            .map_err(|error| error.to_string())?;
+
+            for report in pair_reports {
+                reports.push(report);
+                completed_actions += 1;
+                sleep_between_actions(completed_actions, total_actions);
+            }
+
+            continue;
+        }
 
         if request.run_post {
             let title = pick_text(&request.titles, &request.title_mode, index, "제목")?;

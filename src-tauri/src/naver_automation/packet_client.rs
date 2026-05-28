@@ -372,6 +372,27 @@ impl NaverPacketClient {
             .unwrap_or_default())
     }
 
+    // 글쓰기 add 응답의 post_id를 현재 토론방 기준 토론글 URL로 바꾸는 함수입니다.
+    pub(super) fn post_url_from_id(
+        &self,
+        page_url: &str,
+        post_id: &str,
+    ) -> AutomationResult<String> {
+        if post_id.trim().is_empty() {
+            return Err(AutomationError::new(
+                "글쓰기 add 응답에서 작성 글 ID를 찾지 못했습니다.",
+            ));
+        }
+
+        let target = discussion_target_from_url(page_url)?;
+
+        Ok(discussion_url_for(
+            &target.discussion_type,
+            &target.item_code,
+            Some(post_id),
+        ))
+    }
+
     // stock.naver.com JSON API를 공통 헤더로 호출하고 JSON으로 파싱하는 함수입니다.
     fn get_stock_json(&self, path: &str, referer: &str, label: &str) -> AutomationResult<Value> {
         let response_text = self

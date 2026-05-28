@@ -166,11 +166,14 @@ impl CdpClient {
         packet_client: &NaverPacketClient,
         title: &str,
         body: &str,
-    ) -> AutomationResult<()> {
+    ) -> AutomationResult<String> {
         let current_url = self.current_url()?;
-        packet_client.submit_post(&current_url, title, body)?;
+        let post_id = packet_client.submit_post(&current_url, title, body)?;
+        let post_url = packet_client.post_url_from_id(&current_url, &post_id)?;
 
-        self.reload_after_submit()
+        self.reload_after_submit()?;
+
+        Ok(post_url)
     }
 
     // Wireshark/F12에서 확인한 cbox 토큰 발급/댓글 생성 패킷 구조로 댓글을 등록하는 함수입니다.
