@@ -4,7 +4,6 @@ import {
   Button,
   Checkbox,
   Group,
-  NumberInput,
   Stack,
   Text,
   Textarea,
@@ -88,6 +87,17 @@ function validateMode(entries: string[], mode: PickMode, label: string) {
   return "";
 }
 
+// CSV로 가져온 문구를 텍스트창에서 수정할 때 지켜야 할 안내를 그리는 컴포넌트입니다.
+function EditGuide() {
+  return (
+    <Text size="xs" c="dimmed" className="macro-editor-field-guide">
+      CSV로 가져온 여러 항목은 --- 줄로 구분됩니다. --- 줄은 지우거나 바꾸지
+      마세요. 수정할 문장만 드래그해서 고친 뒤 설정 저장을 누르세요. 항목 사이에
+      엔터를 추가하지 마세요.
+    </Text>
+  );
+}
+
 // 랜덤, 순차, 1개만 선택 UI를 그리는 컴포넌트입니다.
 function ModeSelector({
   entries,
@@ -122,8 +132,6 @@ function ModeSelector({
 export function StockBatchPanel() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const defaultEndpoint = useMemo(defaultDevtoolsEndpoint, []);
-  const [host, setHost] = useState(defaultEndpoint.host);
-  const [port, setPort] = useState<number | string>(defaultEndpoint.port);
   const [stockQuery, setStockQuery] = useState("");
   const [stockOptions, setStockOptions] = useState<StockCandidate[]>([]);
   const [selectedStocks, setSelectedStocks] = useState<StockCandidate[]>([]);
@@ -140,6 +148,7 @@ export function StockBatchPanel() {
   const [runComment, setRunComment] = useState(false);
   const [count, setCount] = useState<3 | 5>(3);
   const [savedConfig, setSavedConfig] = useState<SavedBatchConfig | null>(null);
+  const [chromeOpening, setChromeOpening] = useState(false);
   const [running, setRunning] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -166,6 +175,22 @@ export function StockBatchPanel() {
       setStockOptions(stocks ?? []);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  // 일반 사용자가 IP/포트를 몰라도 되도록 시크릿 Chrome을 Rust에서 여는 함수입니다.
+  async function openIncognitoChrome() {
+    setError("");
+    setMessage("");
+    setChromeOpening(true);
+
+    try {
+      const result = await invoke<string>("open_incognito_chrome");
+      setMessage(result);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setChromeOpening(false);
     }
   }
 
@@ -215,8 +240,6 @@ export function StockBatchPanel() {
 
   // 현재 화면 값을 저장/실행 가능한 batch 설정 객체로 만드는 함수입니다.
   function buildConfig(): SavedBatchConfig | null {
-    const chromePort = typeof port === "number" ? port : Number(port);
-
     if (!fileLoaded) {
       setError("CSV 파일을 먼저 가져오세요.");
       return null;
@@ -229,11 +252,6 @@ export function StockBatchPanel() {
 
     if (!runPost && !runComment) {
       setError("행동을 선택하세요.");
-      return null;
-    }
-
-    if (!Number.isInteger(chromePort) || chromePort <= 0) {
-      setError("Chrome DevTools 포트 번호가 올바르지 않습니다.");
       return null;
     }
 
@@ -254,8 +272,8 @@ export function StockBatchPanel() {
       comments,
       commentMode,
       count,
-      host,
-      port: chromePort,
+      host: defaultEndpoint.host,
+      port: defaultEndpoint.port,
       runComment,
       runPost,
       stocks: selectedStocks,
@@ -331,6 +349,13 @@ export function StockBatchPanel() {
         <div className="macro-editor-batch-top">
           <Button onClick={() => fileInputRef.current?.click()}>
             가져오기
+          </Button>
+          <Button
+            variant="light"
+            loading={chromeOpening}
+            onClick={openIncognitoChrome}
+          >
+            시크릿 Chrome 열기
           </Button>
 
           <div className="macro-editor-stock-search">
@@ -424,6 +449,7 @@ export function StockBatchPanel() {
               onChange={(event) => setTitleText(event.currentTarget.value)}
               placeholder="CSV 2행 1열부터 가져옵니다. 여러 항목은 --- 줄로 구분됩니다."
             />
+            <EditGuide />
             <ModeSelector
               entries={titles}
               label="제목"
@@ -440,6 +466,7 @@ export function StockBatchPanel() {
               onChange={(event) => setBodyText(event.currentTarget.value)}
               placeholder="CSV 2행 2열부터 가져옵니다."
             />
+            <EditGuide />
             <ModeSelector
               entries={bodies}
               label="내용"
@@ -456,6 +483,7 @@ export function StockBatchPanel() {
               onChange={(event) => setCommentText(event.currentTarget.value)}
               placeholder="CSV 2행 3열부터 가져옵니다."
             />
+            <EditGuide />
             <ModeSelector
               entries={comments}
               label="댓글"
@@ -480,38 +508,6 @@ export function StockBatchPanel() {
         </Group>
 
         <div className="macro-editor-run-row">
-          <TextInput
-            label="Chrome DevTools host"
-            value={host}
-            onChange={(event) => setHost(event.currentTarget.value)}
-          />
-          <NumberInput
-            allowDecimal={false}
-            allowNegative={false}
-            label="Chrome DevTools 포트"
-            max={65535}
-            min={1}
-            value={port}
-            onChange={setPort}
-          />
-          <Button
-            variant="light"
-            onClick={() => {
-              setHost("127.0.0.1");
-              setPort(9222);
-            }}
-          >
-            Windows
-          </Button>
-          <Button
-            variant="light"
-            onClick={() => {
-              setHost("172.24.32.1");
-              setPort(9223);
-            }}
-          >
-            WSL
-          </Button>
           <Button variant="light" onClick={saveConfig}>
             설정 저장
           </Button>

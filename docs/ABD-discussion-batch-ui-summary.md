@@ -69,7 +69,8 @@ src/features/macro-editor/stock-batch-panel.tsx
 - 제목, 내용, 댓글내용 텍스트창
 - 랜덤, 순차, 1개만 선택 UI
 - 3개, 5개 실행 개수 선택 UI
-- Chrome DevTools host/port 입력
+- 시크릿 Chrome 열기 버튼
+- Chrome DevTools host/port 내부 자동 설정
 - 설정 저장 버튼
 - 실행 버튼
 
@@ -183,9 +184,42 @@ CSV에서 제목이 여러 개 들어오면 텍스트창에는 아래처럼 보�
 
 한글 직접 입력까지 완전히 해결하려면 WSLg 한글 IME 설정이 별도로 필요하다.
 
+## CSV 텍스트창 수정 안내
+
+제목, 내용, 댓글내용 텍스트창 아래에는 작은 안내 문구를 추가했다.
+
+안내의 목적은 CSV에서 가져온 여러 문구를 사용자가 잘못 수정해서 구분선이 깨지는 문제를 줄이는 것이다.
+
+화면에는 아래 의미의 문구가 표시된다.
+
+```text
+CSV로 가져온 여러 항목은 --- 줄로 구분됩니다.
+--- 줄은 지우거나 바꾸지 마세요.
+수정할 문장만 드래그해서 고친 뒤 설정 저장을 누르세요.
+항목 사이에 엔터를 추가하지 마세요.
+```
+
+예를 들어 제목이 두 개라면 아래처럼 들어온다.
+
+```text
+첫 번째 제목
+---
+두 번째 제목
+```
+
+사용자가 첫 번째 제목의 오타만 고치고 싶다면 `첫 번째 제목` 부분만 수정해야 한다.
+
+아래 구분선은 건드리면 안 된다.
+
+```text
+---
+```
+
+이 구분선이 사라지면 프로그램은 제목 두 개를 하나의 긴 제목으로 볼 수 있다.
+
 ## Chrome DevTools 관련 경고
 
-실행 중 아래 경고가 보일 수 있다.
+개발 중 WSL에서 `pnpm tauri dev`를 실행하면 아래 경고가 보일 수 있다.
 
 ```text
 libEGL warning
@@ -196,9 +230,22 @@ MESA: error: ZINK: failed to choose pdev
 
 Tauri 창이 뜨고 UI가 동작한다면 치명적인 오류는 아니다.
 
+Windows 배포판 사용자는 WSL을 사용하지 않으므로 이 경고를 볼 가능성이 낮다.
+
 ## 시크릿 Chrome 실행
 
 배포하거나 다른 사람이 실행할 때는 일반 Chrome 대신 시크릿 Chrome 전용 디버깅 세션을 사용한다.
+
+이번 수정 후 일반 사용자 화면에는 아래 설정을 표시하지 않는다.
+
+```text
+Chrome DevTools host
+Chrome DevTools 포트
+Windows
+WSL
+```
+
+이 값들은 개발자가 알면 되는 값이고, 일반 사용자가 직접 입력할 필요가 없다.
 
 추가한 실행 파일:
 
@@ -219,21 +266,46 @@ scripts/start-chrome-incognito-debug.bat
 
 일반 Chrome 프로필과 자동화용 Chrome 프로필을 분리하기 위해 `--user-data-dir`을 별도로 둔다. 사용자는 이 시크릿 창에서 네이버 로그인을 완료한 뒤 프로그램을 실행한다.
 
-Windows 배포 앱에서 기본 DevTools 값은 아래를 사용한다.
+또한 Tauri 앱 안에 `시크릿 Chrome 열기` 버튼을 추가했다.
+
+이 버튼은 Windows 배포판에서 아래 옵션으로 Chrome을 연다.
+
+```text
+--remote-debugging-port=9222
+--remote-debugging-address=127.0.0.1
+--user-data-dir=%TEMP%\pstmacro-chrome-incognito-debug
+--incognito
+--disable-quic
+--no-first-run
+--no-default-browser-check
+https://www.naver.com
+```
+
+Windows 배포 앱에서 내부 기본 DevTools 값은 아래를 사용한다.
 
 ```text
 host: 127.0.0.1
 port: 9222
 ```
 
-WSL 개발 환경에서 Windows Chrome에 연결해야 할 때는 아래 값을 사용한다.
+`127.0.0.1`은 사용자 본인 컴퓨터를 뜻한다.
+
+즉 다른 사람 컴퓨터에 배포해도 그 사람의 컴퓨터 안에서 열린 시크릿 Chrome에 붙는다.
+
+그래서 배포받은 사람마다 IP를 따로 알 필요가 없다.
+
+`9222`는 Chrome이 자동화 명령을 받을 수 있게 여는 로컬 포트다.
+
+프로그램이 같은 번호로 Chrome을 열고 같은 번호로 붙기 때문에 일반 사용자가 포트를 고를 필요가 없다.
+
+WSL 개발 환경에서만 Windows Chrome에 연결해야 할 때는 내부적으로 아래 값을 사용한다.
 
 ```text
 host: 172.24.32.1
 port: 9223
 ```
 
-화면에는 `Windows`, `WSL` 버튼을 추가해 두 값 중 하나를 바로 넣을 수 있게 했다.
+이 값은 개발환경용 예외이므로 배포 UI에서는 숨겼다.
 
 ## 배포 시 남는 위험
 
