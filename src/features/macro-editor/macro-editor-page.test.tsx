@@ -1,4 +1,5 @@
 import { MantineProvider } from "@mantine/core";
+import { invoke } from "@tauri-apps/api/core";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,54 +21,53 @@ function renderMacroEditor() {
 describe("MacroEditorPage", () => {
   beforeEach(() => {
     localStorage.clear();
+    vi.mocked(invoke).mockImplementation((command) => {
+      if (command === "search_stocks") {
+        return Promise.resolve([
+          {
+            code: "005930",
+            link: "https://stock.naver.com/domestic/stock/005930/discussion?chip=all",
+            name: "삼성전자",
+          },
+        ]);
+      }
+
+      if (command === "parse_template_csv") {
+        return Promise.resolve({
+          bodies: ["내용1"],
+          comments: ["댓글1"],
+          titles: ["제목1", "제목2"],
+        });
+      }
+
+      return Promise.resolve({ completed: 1, reports: [] });
+    });
   });
 
-  it("saves, selects, edits, and deletes titles", async () => {
+  it("renders the batch UI without the legacy picker panels", () => {
+    renderMacroEditor();
+
+    expect(screen.getByText("패킷 기반 종목/글/댓글 실행 설정")).toBeInTheDocument();
+    expect(screen.queryByText("토론방 자동 입력")).not.toBeInTheDocument();
+    expect(screen.queryByText("제목을 선택하세요")).not.toBeInTheDocument();
+  });
+
+  it("imports CSV values into editable textareas", async () => {
     const user = userEvent.setup();
     renderMacroEditor();
 
-    await user.type(screen.getByLabelText("제목 작성"), "A");
-    await user.click(screen.getAllByRole("button", { name: "저장" })[0]!);
-    await user.type(screen.getByLabelText("제목 작성"), "C");
-    await user.click(screen.getAllByRole("button", { name: "저장" })[0]!);
+    const file = new File(["제목,내용,댓글내용\n제목1,내용1,댓글1"], "template.csv", {
+      type: "text/csv",
+    });
+    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]');
 
-    await user.click(screen.getByLabelText("제목을 선택하세요 열기"));
-    await user.click(screen.getByRole("button", { name: "A" }));
-    await user.click(screen.getByRole("button", { name: "C" }));
+    expect(fileInput).not.toBeNull();
 
-    expect(screen.getByLabelText("제목을 선택하세요 열기")).toBeChecked();
-    expect(screen.getByLabelText("A")).toBeInTheDocument();
-    expect(screen.getByLabelText("C")).toBeInTheDocument();
+    await user.upload(fileInput!, file);
 
-    await user.click(screen.getByLabelText("A"));
-    await user.click(screen.getAllByRole("button", { name: "편집" })[0]!);
-    await user.clear(screen.getByLabelText("선택된 제목 편집"));
-    await user.type(screen.getByLabelText("선택된 제목 편집"), "A edited");
-    await user.click(screen.getAllByRole("button", { name: "저장" })[2]!);
-
-    expect(screen.getByLabelText("A edited")).toBeInTheDocument();
-
-    await user.click(screen.getAllByRole("button", { name: "삭제" })[0]!);
-
-    expect(screen.queryByLabelText("A edited")).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "A edited" }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("saves and edits content separately from titles", async () => {
-    const user = userEvent.setup();
-    renderMacroEditor();
-
-    await user.type(screen.getByLabelText("내용 작성"), "내용 1");
-    await user.click(screen.getAllByRole("button", { name: "저장" })[1]!);
-    await user.click(screen.getByLabelText("내용을 선택하세요 열기"));
-    await user.click(screen.getByRole("button", { name: "내용 1" }));
-    await user.click(screen.getByLabelText("내용 1"));
-    await user.click(screen.getAllByRole("button", { name: "편집" })[1]!);
-    await user.type(screen.getByLabelText("선택된 내용 편집"), " 추가");
-    await user.click(screen.getAllByRole("button", { name: "저장" })[3]!);
-
-    expect(screen.getByLabelText("내용 1 추가")).toBeInTheDocument();
+      await screen.findByText("template.csv에서 제목 2개, 내용 1개, 댓글내용 1개를 가져왔습니다."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("template.csv")).toBeInTheDocument();
   });
 });

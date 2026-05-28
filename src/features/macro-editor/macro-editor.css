@@ -23,6 +23,123 @@ body {
   text-align: center;
 }
 
+.macro-editor-batch {
+  max-width: 1280px;
+  margin: 0 auto 20px;
+  padding: 16px;
+  border: 1px solid #d7dee8;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 10px 28px rgb(15 23 42 / 8%);
+}
+
+.macro-editor-batch-top {
+  display: grid;
+  grid-template-columns: 120px minmax(260px, 1fr);
+  gap: 12px;
+  align-items: end;
+}
+
+.macro-editor-stock-search {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 44px;
+  gap: 8px;
+  align-items: end;
+}
+
+.macro-editor-stock-toggle {
+  min-width: 44px;
+  padding-inline: 0;
+}
+
+.macro-editor-hidden-file {
+  display: none;
+}
+
+.macro-editor-stock-options {
+  display: grid;
+  max-height: 240px;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid #dbe3ec;
+  border-radius: 8px;
+  background: #f8fafc;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.macro-editor-stock-option {
+  display: flex;
+  gap: 8px;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  align-items: center;
+}
+
+.macro-editor-stock-option small {
+  display: block;
+  color: #64748b;
+}
+
+.macro-editor-stock-option:hover {
+  border-color: #21a67a;
+  background: #f0fdf8;
+}
+
+.macro-editor-selected-stocks {
+  display: flex;
+  min-height: 44px;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.macro-editor-stock-chip {
+  min-height: 34px;
+  padding: 7px 11px;
+  border: 1px solid #94d3b8;
+  border-radius: 999px;
+  color: #064e3b;
+  background: #dff8eb;
+  cursor: pointer;
+}
+
+.macro-editor-stock-detail {
+  display: grid;
+  padding: 10px;
+  border: 1px solid #e1e7ef;
+  border-radius: 8px;
+  background: #f8fafc;
+  gap: 4px;
+}
+
+.macro-editor-action-invalid {
+  padding: 8px;
+  border: 2px solid #f03e3e;
+  border-radius: 8px;
+}
+
+.macro-editor-template-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.macro-editor-mode-row {
+  min-height: 32px;
+}
+
+.macro-editor-run-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) 150px 112px 112px;
+  gap: 10px;
+  align-items: end;
+}
+
 .macro-editor-layout {
   display: grid;
   grid-template-columns: minmax(300px, 0.95fr) minmax(420px, 1.35fr);
@@ -99,6 +216,12 @@ body {
 }
 
 @media (width <= 860px) {
+  .macro-editor-batch-top,
+  .macro-editor-template-grid,
+  .macro-editor-run-row {
+    grid-template-columns: 1fr;
+  }
+
   .macro-editor-layout {
     grid-template-columns: 1fr;
   }

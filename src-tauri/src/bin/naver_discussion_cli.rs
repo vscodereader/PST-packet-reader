@@ -66,6 +66,7 @@ fn run() -> Result<(), String> {
         port: args.port,
         target,
         submit_after_fill: true,
+        stock: None,
     })
     .map_err(|error| error.to_string())?;
 

@@ -1,0 +1,237 @@
+# ABD. CSV 기반 네이버 증권 토론 batch UI 작업 정리
+
+날짜: 2026-05-28
+
+## 목적
+
+기존 PowerShell CLI 입력 방식은 빠르게 검증하기에는 좋지만, 실제 사용자가 여러 제목, 여러 본문, 여러 댓글을 한 번에 가져와서 실행하기 어렵다.
+
+이번 작업의 목적은 다음과 같다.
+
+- CSV 파일에서 제목, 내용, 댓글내용을 가져온다.
+- 사용자가 화면에서 종목을 선택한다.
+- 사용자가 글쓰기 또는 댓글쓰기를 체크박스로 선택한다.
+- 랜덤, 순차, 1개만 모드로 제목/내용/댓글내용을 선택한다.
+- 3개 또는 5개 실행 개수를 고른다.
+- 실제 등록은 Rust 패킷 기반 함수가 수행한다.
+- 기존 CLI와 패킷 기반 등록 함수는 제거하지 않는다.
+
+## 구현 파일
+
+### Rust batch 실행 파일
+
+```text
+src-tauri/src/discussion_batch.rs
+```
+
+역할:
+
+- CSV 파싱
+- 제목, 내용, 댓글내용 헤더 처리
+- 2행부터 실제 데이터 추출
+- 빈 값 제거
+- 네이버 증권 종목 API 조회
+- 종목명과 종목코드 분리
+- 랜덤, 순차, 1개만 선택 모드 검증
+- 3개 또는 5개 실행 개수 검증
+- 글쓰기/댓글쓰기 반복 실행
+- 등록 후 다음 등록까지 1분 대기
+
+### Tauri command 연결
+
+```text
+src-tauri/src/lib.rs
+```
+
+추가한 command:
+
+- `parse_template_csv`
+- `search_stocks`
+- `run_naver_discussion_batch`
+
+프론트 화면은 이 command들을 호출한다. 실제 CSV 파싱과 실행은 Rust에서 한다.
+
+### 새 batch UI
+
+```text
+src/features/macro-editor/stock-batch-panel.tsx
+```
+
+역할:
+
+- CSV 파일 가져오기 버튼
+- 종목 검색 입력창
+- 종목 목록 열기 버튼
+- 종목 radio 선택 목록
+- 선택된 종목 chip 표시
+- 종목명, 종목코드, 링크 표시
+- 글쓰기/댓글쓰기 체크박스
+- 제목, 내용, 댓글내용 텍스트창
+- 랜덤, 순차, 1개만 선택 UI
+- 3개, 5개 실행 개수 선택 UI
+- Chrome DevTools host/port 입력
+- 설정 저장 버튼
+- 실행 버튼
+
+### 메인 화면 연결
+
+```text
+src/features/macro-editor/macro-editor-page.tsx
+```
+
+기존 아래쪽 저장/선택 패널은 새 batch UI와 혼동되어 화면에서 제거했다.
+
+중요한 점:
+
+- 관련 기존 컴포넌트 파일은 삭제하지 않았다.
+- 현재 첫 화면에서는 새 batch UI만 보이게 했다.
+- 기존 기능을 되돌려야 하면 컴포넌트를 다시 렌더링하면 된다.
+
+### 스타일
+
+```text
+src/features/macro-editor/macro-editor.css
+```
+
+추가한 스타일:
+
+- batch UI 박스
+- 종목 검색 영역
+- 종목 목록 grid
+- 선택 종목 chip
+- 종목 상세 영역
+- 행동 미선택 빨간 테두리
+- 제목/내용/댓글 텍스트창 grid
+- 저장/실행 버튼 row
+
+## 종목명이 숫자로만 보이던 문제
+
+문제:
+
+화면에 종목명이 `005930`, 종목코드도 `005930`처럼 보였다.
+
+원인:
+
+네이버 증권 API 응답 필드가 실제로는 아래처럼 소문자였다.
+
+```json
+{
+  "itemname": "흥아해운",
+  "itemcode": "003280"
+}
+```
+
+기존 코드는 `itemName`, `itemCode` 같은 camelCase만 찾고 있었다.
+
+수정:
+
+`itemname`, `itemcode`, `stockname`, `stockcode` 같은 소문자 필드도 읽도록 수정했다.
+
+결과:
+
+종목 목록은 아래처럼 보여야 한다.
+
+```text
+삼성전자
+005930
+```
+
+선택된 종목 chip은 아래처럼 보여야 한다.
+
+```text
+삼성전자 · 005930
+```
+
+## 제목 선택 방식
+
+이전 화면에서는 아래쪽에 기존 제목 선택 패널이 같이 보여서 헷갈렸다.
+
+이번 수정 후에는 텍스트창 기준으로만 사용한다.
+
+CSV에서 제목이 여러 개 들어오면 텍스트창에는 아래처럼 보인다.
+
+```text
+이게되네 ㅋㅋㅋ
+---
+뭣
+```
+
+`---`는 여러 제목을 구분하는 구분선이다.
+
+선택 방식은 텍스트창 아래 체크박스에서 고른다.
+
+- 랜덤: 여러 제목 중 하나를 실행 시점에 고른다.
+- 순차: 첫 번째 실행은 첫 번째 제목, 두 번째 실행은 두 번째 제목을 사용한다.
+- 1개만: 제목이 정확히 하나일 때만 사용할 수 있다.
+
+내용과 댓글내용도 같은 방식이다.
+
+## WSLg 리눅스 창에서 한글 입력이 안 되는 문제
+
+현재 `pnpm tauri dev`는 WSL Ubuntu 안에서 Tauri 앱을 실행한다.
+
+그래서 뜨는 창은 Windows Chrome 창이 아니라 WSLg 리눅스 GUI 창이다.
+
+이 환경에서는 Windows 한글 IME가 그대로 붙지 않아 한글 입력이 안 되거나 영어만 입력될 수 있다.
+
+이번 UI는 이 문제를 줄이기 위해 아래 방식으로 사용할 수 있다.
+
+- 종목명 검색을 꼭 한글로 입력하지 않아도 된다.
+- 종목 목록 열기 버튼을 눌러 마우스로 선택할 수 있다.
+- 종목코드 숫자로도 검색할 수 있다.
+- 제목, 내용, 댓글내용은 CSV UTF-8 파일에서 가져오면 직접 한글 타이핑이 줄어든다.
+
+한글 직접 입력까지 완전히 해결하려면 WSLg 한글 IME 설정이 별도로 필요하다.
+
+## Chrome DevTools 관련 경고
+
+실행 중 아래 경고가 보일 수 있다.
+
+```text
+libEGL warning
+MESA: error: ZINK: failed to choose pdev
+```
+
+이 메시지는 WSLg 그래픽 드라이버 경고다.
+
+Tauri 창이 뜨고 UI가 동작한다면 치명적인 오류는 아니다.
+
+## 테스트 결과
+
+아래 검증을 통과했다.
+
+```text
+cargo check
+cargo test discussion_batch
+pnpm test -- --run
+pnpm build
+```
+
+테스트에서 확인한 내용:
+
+- CSV 헤더 제외
+- CSV quoted field 파싱
+- 1개만 모드 검증
+- 네이버 API 소문자 필드 `itemname`, `itemcode`에서 종목명/종목코드 추출
+- 새 batch UI 렌더링
+- 기존 혼동 패널 미표시
+- CSV 가져오기 상태 표시
+
+## GitHub에 올릴 때 포함할 파일
+
+```text
+src-tauri/Cargo.toml
+src-tauri/src/discussion_batch.rs
+src-tauri/src/lib.rs
+src-tauri/src/naver_automation.rs
+src-tauri/src/naver_automation/discussion_room.rs
+src-tauri/src/naver_automation/types.rs
+src-tauri/src/bin/naver_discussion_cli.rs
+src/features/macro-editor/stock-batch-panel.tsx
+src/features/macro-editor/macro-editor-page.tsx
+src/features/macro-editor/macro-editor-page.test.tsx
+src/features/macro-editor/macro-editor.css
+docs/adr/0003-discussion-batch-ui-and-rust-executor.md
+docs/discussion-batch-ui-guide.md
+docs/ABD-discussion-batch-ui-summary.md
+```

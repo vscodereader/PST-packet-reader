@@ -6,8 +6,8 @@ mod post_form;
 pub mod types;
 
 pub use types::{
-    AutomationReport, AutomationTarget, DiscussionSelection, NaverDiscussionRequest,
-    NaverLoginProfile,
+    AutomationReport, AutomationTarget, DiscussionSelection, DiscussionStock,
+    NaverDiscussionRequest, NaverLoginProfile,
 };
 
 use devtools_connection::{normalize_debug_host, select_or_create_target, websocket_url_for_host};
@@ -95,9 +95,10 @@ pub fn run_naver_discussion_macro(
         )));
     }
 
-    let selected = chrome.open_random_discussion_room(&packet_client)?;
-    let selected_url = chrome.current_url()?;
-    packet_client.ensure_profile_intro_setup(&selected_url)?;
+    let selected = match request.stock.as_ref() {
+        Some(stock) => chrome.open_selected_discussion_room(stock)?,
+        None => chrome.open_random_discussion_room(&packet_client)?,
+    };
 
     let (register_button_highlighted, submitted) = match request.target {
         AutomationTarget::Post => {
@@ -111,6 +112,8 @@ pub fn run_naver_discussion_macro(
             }
         }
         AutomationTarget::Comment => {
+            let selected_url = chrome.current_url()?;
+            packet_client.ensure_profile_intro_setup(&selected_url)?;
             chrome.open_random_discussion_post(&packet_client)?;
             if request.submit_after_fill {
                 chrome.submit_comment_and_refresh(&packet_client, body)?;

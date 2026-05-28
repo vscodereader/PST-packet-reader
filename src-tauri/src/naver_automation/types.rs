@@ -9,6 +9,8 @@ pub struct NaverDiscussionRequest {
     pub port: u16,
     pub target: AutomationTarget,
     pub submit_after_fill: bool,
+    #[serde(default)]
+    pub stock: Option<DiscussionStock>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,6 +19,14 @@ pub struct NaverDiscussionRequest {
 pub enum AutomationTarget {
     Post,
     Comment,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+// 사용자가 UI에서 선택한 종목명, 종목코드, 링크를 담는 구조체입니다.
+pub struct DiscussionStock {
+    pub name: String,
+    pub code: String,
+    pub link: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

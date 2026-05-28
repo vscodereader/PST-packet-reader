@@ -2,7 +2,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use super::packet_client::NaverPacketClient;
-use super::types::DiscussionSelection;
+use super::types::{DiscussionSelection, DiscussionStock};
 use super::{AutomationResult, CdpClient};
 
 impl CdpClient {
@@ -17,6 +17,28 @@ impl CdpClient {
         self.wait_for_stock_discussion_url(Duration::from_secs(12))?;
         sleep(Duration::from_secs(1));
         Ok(room.selection)
+    }
+
+    // UI에서 선택한 종목 코드로 토론방 URL을 만들고 Chrome 화면을 이동시키는 함수입니다.
+    pub(super) fn open_selected_discussion_room(
+        &mut self,
+        stock: &DiscussionStock,
+    ) -> AutomationResult<DiscussionSelection> {
+        self.require_manual_npay_agreement_if_present()?;
+        let discussion_url = format!(
+            "https://stock.naver.com/domestic/stock/{}/discussion?chip=all",
+            stock.code.trim()
+        );
+        self.navigate(&discussion_url)?;
+        self.wait_for_stock_discussion_url(Duration::from_secs(12))?;
+        sleep(Duration::from_secs(1));
+
+        Ok(DiscussionSelection {
+            category: "사용자 선택".to_owned(),
+            rank: "-".to_owned(),
+            item_text: format!("{} ({})", stock.name.trim(), stock.code.trim()),
+            method: "ui-selected-stock".to_owned(),
+        })
     }
 
     // 패킷 API로 현재 종목의 랜덤 토론글을 선택하고 Chrome 화면을 해당 게시글 URL로 이동시키는 함수입니다.
