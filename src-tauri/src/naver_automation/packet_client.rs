@@ -1077,3 +1077,174 @@ fn header_value(value: &str, label: &str) -> AutomationResult<HeaderValue> {
     HeaderValue::from_str(value)
         .map_err(|error| AutomationError::new(format!("{label} 헤더 값 생성 실패: {error}")))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn strip_jsonp_extracts_get_profile_payload() {
+        let payload = r#"jsonp_123({"rtn_cd":"0","rtn_msg":"Success","nick_name":"테스트","image_url":"u"});"#;
+
+        let json_text = strip_jsonp(payload).expect("JSONP wrapper should be removed");
+        let value = parse_json(json_text, "getProfile").expect("payload should be valid JSON");
+
+        assert_eq!(value["rtn_cd"], "0");
+        assert_eq!(value["nick_name"], "테스트");
+    }
+
+    #[test]
+    fn discussion_target_from_url_detects_stock_and_index_types() {
+        let stock = discussion_target_from_url(
+            "https://stock.naver.com/domestic/stock/005930/discussion?chip=all",
+        )
+        .expect("domestic stock URL should parse");
+        let index = discussion_target_from_url(
+            "https://stock.naver.com/domestic/index/KOSPI/discussion?chip=all",
+        )
+        .expect("domestic index URL should parse");
+
+        assert_eq!(stock.discussion_type, "domesticStock");
+        assert_eq!(stock.item_code, "005930");
+        assert_eq!(index.discussion_type, "domesticIndex");
+        assert_eq!(index.item_code, "KOSPI");
+    }
+
+    #[test]
+    fn object_id_from_url_extracts_discussion_post_id() {
+        let object_id = object_id_from_url(
+            "https://stock.naver.com/domestic/stock/005930/discussion/421063210?chip=all",
+        )
+        .expect("discussion post URL should contain object id");
+
+        assert_eq!(object_id, "421063210");
+    }
+
+    #[test]
+    fn collect_stock_candidates_finds_nested_candidates_and_dedupes() {
+        let value = json!({
+            "result": {
+                "stocks": [
+                    {
+                        "rank": 1,
+                        "itemCode": "005930",
+                        "itemName": "삼성전자"
+                    },
+                    {
+                        "rank": 2,
+                        "stockCode": "000660",
+                        "stockName": "SK하이닉스"
+                    },
+                    {
+                        "rank": 3,
+                        "itemCode": "005930",
+                        "itemName": "삼성전자 중복"
+                    },
+                    {
+                        "rank": 4,
+                        "itemCode": "NO_CODE",
+                        "itemName": "무효"
+                    }
+                ]
+            }
+        });
+
+        let candidates = collect_stock_candidates(&value);
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].item_code, "005930");
+        assert_eq!(candidates[0].item_name, "삼성전자");
+        assert_eq!(candidates[0].rank, "1");
+        assert_eq!(candidates[1].item_code, "000660");
+        assert_eq!(candidates[1].item_name, "SK하이닉스");
+    }
+
+    #[test]
+    fn collect_post_candidates_finds_nested_ids_and_dedupes() {
+        let value = json!({
+            "result": {
+                "posts": [
+                    { "postId": "421063210", "title": "첫 글" },
+                    { "id": 421029979, "title": "둘째 글" },
+                    { "discussionPostId": "421063210", "title": "중복 글" },
+                    { "id": "abc", "title": "무효 글" }
+                ]
+            }
+        });
+
+        let candidates = collect_post_candidates(&value);
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].post_id, "421063210");
+        assert_eq!(candidates[1].post_id, "421029979");
+    }
+
+    #[test]
+    fn discussion_url_for_builds_room_and_post_urls() {
+        let room_url = discussion_url_for("domesticStock", "005930", None);
+        let post_url = discussion_url_for("domesticStock", "005930", Some("421063210"));
+
+        assert_eq!(
+            room_url,
+            "https://stock.naver.com/domestic/stock/005930/discussion?chip=all"
+        );
+        assert_eq!(
+            post_url,
+            "https://stock.naver.com/domestic/stock/005930/discussion/421063210?chip=all"
+        );
+    }
+
+    #[test]
+    fn build_post_payload_matches_captured_add_packet_shape() {
+        let target = DiscussionTarget {
+            discussion_type: "domesticStock".to_owned(),
+            item_code: "005930".to_owned(),
+        };
+
+        let payload = build_post_payload("테스트 제목", "본문 내용", &target, "tx-123");
+
+        assert_eq!(payload["title"], "테스트 제목");
+        assert_eq!(payload["discussionType"], "domesticStock");
+        assert_eq!(payload["itemCode"], "005930");
+        assert_eq!(payload["txId"], "tx-123");
+        assert_eq!(payload["inflow"], "NFS-P-P");
+        assert_eq!(payload["contentJson"]["document"]["version"], "2.9.0");
+        assert_eq!(
+            payload["contentJson"]["document"]["components"][0]["value"][0]["nodes"][0]["value"],
+            "본문 내용"
+        );
+    }
+
+    #[test]
+    fn build_comment_form_contains_captured_create_packet_fields() {
+        let form = build_comment_form(
+            "421063210",
+            "https://stock.naver.com/domestic/stock/005930/discussion/421063210",
+            "댓글 내용",
+            "token-123",
+        );
+        let pairs = url::form_urlencoded::parse(form.as_bytes())
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(pairs.get("objectId").map(String::as_str), Some("421063210"));
+        assert_eq!(
+            pairs.get("objectUrl").map(String::as_str),
+            Some("https://stock.naver.com/domestic/stock/005930/discussion/421063210")
+        );
+        assert_eq!(pairs.get("contents").map(String::as_str), Some("댓글 내용"));
+        assert_eq!(pairs.get("commentType").map(String::as_str), Some("txt"));
+        assert_eq!(
+            pairs.get("validateBanWords").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            pairs.get("cbox_token").map(String::as_str),
+            Some("token-123")
+        );
+    }
+}

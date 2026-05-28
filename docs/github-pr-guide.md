@@ -127,7 +127,7 @@ wsl -d Ubuntu -- bash -lc 'cd ~/projects/pstmacro && git push -u origin codex/pa
 - CLI에서 `1. 글쓰기`, `2. 댓글쓰기`를 선택할 수 있게 했습니다.
 - 글쓰기 선택 시 제목/본문을 입력받고 등록까지 실행합니다.
 - 댓글쓰기 선택 시 댓글 내용을 입력받고 랜덤 게시글을 열어 댓글 등록까지 실행합니다.
-- 프로필 생성이 필요한 경우 `글쓰기 > 설정하기 > 소개 2222 > 완료` 흐름을 처리합니다.
+- 프로필 생성이 필요한 경우 패킷 API로 소개 `2222`를 설정합니다.
 - 기능별로 Rust 모듈과 함수를 분리했습니다.
 - 함수 바로 위에 역할 설명 주석을 추가했습니다.
 - 패킷 분석 내용과 ADR 문서를 추가했습니다.
@@ -161,21 +161,23 @@ wsl -d Ubuntu -- bash -lc 'cd ~/projects/pstmacro && git push -u origin codex/pa
 cd ~/projects/pstmacro/src-tauri
 cargo fmt --all
 cargo check
+cargo test packet_client
 ```
-````
 
-`cargo check` 성공을 확인했습니다.
+`cargo check`와 `cargo test packet_client` 성공을 확인했습니다.
 
 ## 참고 사항
 
 추가 Wireshark 캡처를 반영해 getProfile 로그인 확인, 랜덤 종목 선택, 랜덤 게시글 선택, 프로필 소개 `2222` 설정도 Rust `reqwest` 패킷 함수로 전환했습니다.
 Chrome DevTools는 로그인 세션 쿠키 추출, 화면 이동, 등록 후 새로고침에 사용합니다.
 
-```
-
 ## 10. PR 생성 버튼 클릭
 
 내용을 확인한 뒤 `Create pull request` 버튼을 누른다.
 
 팀에서 바로 리뷰하지 말고 초안으로 보라고 했다면 `Create draft pull request`를 선택한다.
+
 ```
+
+```
+````
