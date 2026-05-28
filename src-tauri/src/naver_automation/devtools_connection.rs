@@ -150,6 +150,14 @@ fn read_http_response(stream: &mut TcpStream) -> AutomationResult<String> {
 
                 std::thread::sleep(Duration::from_millis(50));
             }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::ConnectionReset | ErrorKind::UnexpectedEof
+                ) && response_body_complete(&bytes) =>
+            {
+                break;
+            }
             Err(error) => return Err(error.into()),
         }
     }

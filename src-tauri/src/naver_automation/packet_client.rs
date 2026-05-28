@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::blocking::Client;
@@ -175,7 +176,8 @@ impl NaverPacketClient {
                 "/api/domestic/market/stock/default?tradeType=KRX&marketType=ALL&orderType=quantTop&startIdx=0&pageSize=10",
             ),
         ];
-        let start = pseudo_index(categories.len());
+        let seed = selection_seed();
+        let start = pseudo_index_with_seed(categories.len(), seed, 0xCA7E);
 
         for offset in 0..categories.len() {
             let (category, path) = categories[(start + offset) % categories.len()];
@@ -186,7 +188,8 @@ impl NaverPacketClient {
                 continue;
             }
 
-            let picked = &candidates[pseudo_index(candidates.len())];
+            let picked =
+                &candidates[pseudo_index_with_seed(candidates.len(), seed, 0x51 + offset as u128)];
             let discussion_url = discussion_url_for("domesticStock", &picked.item_code, None);
 
             return Ok(PacketDiscussionRoom {
@@ -230,7 +233,7 @@ impl NaverPacketClient {
                 continue;
             }
 
-            let picked = &posts[pseudo_index(posts.len())];
+            let picked = &posts[pseudo_index_with_seed(posts.len(), selection_seed(), 0xB057)];
             let post_url = discussion_url_for(
                 &target.discussion_type,
                 &target.item_code,
@@ -701,9 +704,9 @@ fn collect_stock_candidates_from_value(value: &Value, candidates: &mut Vec<Stock
                 collect_stock_candidates_from_value(item, candidates);
             }
         }
-        Value::Object(_) => {
-            if let Some(item_code) = first_string_deep(
-                value,
+        Value::Object(object) => {
+            if let Some(item_code) = direct_string(
+                object,
                 &[
                     "itemCode",
                     "stockCode",
@@ -714,8 +717,8 @@ fn collect_stock_candidates_from_value(value: &Value, candidates: &mut Vec<Stock
                 ],
             ) {
                 if looks_like_stock_code(&item_code) {
-                    let item_name = first_string_deep(
-                        value,
+                    let item_name = direct_string(
+                        object,
                         &[
                             "itemName",
                             "stockName",
@@ -726,7 +729,7 @@ fn collect_stock_candidates_from_value(value: &Value, candidates: &mut Vec<Stock
                         ],
                     )
                     .unwrap_or_else(|| item_code.clone());
-                    let rank = first_number_deep(value, &["rank", "ranking", "rankNo", "no"])
+                    let rank = direct_number(object, &["rank", "ranking", "rankNo", "no"])
                         .map(|rank| rank.to_string())
                         .unwrap_or_else(|| (candidates.len() + 1).to_string());
 
@@ -738,10 +741,8 @@ fn collect_stock_candidates_from_value(value: &Value, candidates: &mut Vec<Stock
                 }
             }
 
-            if let Some(object) = value.as_object() {
-                for child in object.values() {
-                    collect_stock_candidates_from_value(child, candidates);
-                }
+            for child in object.values() {
+                collect_stock_candidates_from_value(child, candidates);
             }
         }
         _ => {}
@@ -764,8 +765,8 @@ fn collect_post_candidates_from_value(value: &Value, candidates: &mut Vec<PostCa
             }
         }
         Value::Object(object) => {
-            if let Some(post_id) = first_string_deep(
-                value,
+            if let Some(post_id) = direct_string(
+                object,
                 &[
                     "postId",
                     "discussionPostId",
@@ -787,52 +788,6 @@ fn collect_post_candidates_from_value(value: &Value, candidates: &mut Vec<PostCa
     }
 }
 
-// 중첩 JSON에서 지정한 키들 중 첫 번째 문자열 값을 찾는 함수입니다.
-fn first_string_deep(value: &Value, keys: &[&str]) -> Option<String> {
-    match value {
-        Value::Object(object) => {
-            for key in keys {
-                if let Some(value) = object.get(*key).and_then(value_to_string) {
-                    return Some(value);
-                }
-            }
-
-            for child in object.values() {
-                if let Some(value) = first_string_deep(child, keys) {
-                    return Some(value);
-                }
-            }
-
-            None
-        }
-        Value::Array(items) => items.iter().find_map(|item| first_string_deep(item, keys)),
-        _ => None,
-    }
-}
-
-// 중첩 JSON에서 지정한 키들 중 첫 번째 숫자 값을 찾는 함수입니다.
-fn first_number_deep(value: &Value, keys: &[&str]) -> Option<u64> {
-    match value {
-        Value::Object(object) => {
-            for key in keys {
-                if let Some(value) = object.get(*key).and_then(value_to_u64) {
-                    return Some(value);
-                }
-            }
-
-            for child in object.values() {
-                if let Some(value) = first_number_deep(child, keys) {
-                    return Some(value);
-                }
-            }
-
-            None
-        }
-        Value::Array(items) => items.iter().find_map(|item| first_number_deep(item, keys)),
-        _ => None,
-    }
-}
-
 // JSON 문자열 또는 숫자를 후보 추출용 문자열로 바꾸는 함수입니다.
 fn value_to_string(value: &Value) -> Option<String> {
     match value {
@@ -849,6 +804,18 @@ fn value_to_u64(value: &Value) -> Option<u64> {
         Value::String(value) => value.parse().ok(),
         _ => None,
     }
+}
+
+// 현재 JSON 객체의 직접 필드에서만 문자열 후보를 찾는 함수입니다.
+fn direct_string(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(value_to_string))
+}
+
+// 현재 JSON 객체의 직접 필드에서만 숫자 후보를 찾는 함수입니다.
+fn direct_number(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(value_to_u64))
 }
 
 // 같은 종목 코드가 여러 번 발견됐을 때 첫 후보만 남기는 함수입니다.
@@ -1063,13 +1030,26 @@ fn timestamp_nanos() -> u128 {
         .unwrap_or_default()
 }
 
-// 후보 목록에서 시간값 기반으로 하나를 고르는 함수입니다.
-fn pseudo_index(len: usize) -> usize {
+// 실행 시점, 프로세스 ID, salt를 섞어 후보 목록에서 하나를 고르는 함수입니다.
+fn pseudo_index_with_seed(len: usize, seed: u128, salt: u128) -> usize {
     if len == 0 {
         return 0;
     }
 
-    (timestamp_nanos() as usize) % len
+    (mix_seed(seed, salt) as usize) % len
+}
+
+// 프로세스마다 다른 랜덤 선택 기준 seed를 만드는 함수입니다.
+fn selection_seed() -> u128 {
+    timestamp_nanos() ^ ((process::id() as u128) << 64)
+}
+
+// seed와 salt를 섞어 낮은 자리수 편향을 줄이는 함수입니다.
+fn mix_seed(seed: u128, salt: u128) -> u128 {
+    let mut value = seed ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15_6A09_E667_F3BC_C909_u128);
+    value ^= value >> 64;
+    value = value.wrapping_mul(0xBF58_476D_1CE4_E5B9_94D0_49BB_1331_11EB_u128);
+    value ^ (value >> 61)
 }
 
 // 문자열을 reqwest HeaderValue로 변환하고 오류 메시지에 헤더 이름을 붙이는 함수입니다.
@@ -1161,6 +1141,29 @@ mod tests {
         assert_eq!(candidates[0].rank, "1");
         assert_eq!(candidates[1].item_code, "000660");
         assert_eq!(candidates[1].item_name, "SK하이닉스");
+    }
+
+    #[test]
+    fn collect_stock_candidates_uses_direct_row_fields_for_rank() {
+        let value = json!({
+            "result": {
+                "rank": 99,
+                "stocks": [
+                    {
+                        "rank": 7,
+                        "itemCode": "297570",
+                        "itemName": "알로이스"
+                    }
+                ]
+            }
+        });
+
+        let candidates = collect_stock_candidates(&value);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].item_code, "297570");
+        assert_eq!(candidates[0].item_name, "알로이스");
+        assert_eq!(candidates[0].rank, "7");
     }
 
     #[test]
