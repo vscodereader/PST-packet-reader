@@ -1,5 +1,6 @@
 mod accounts;
 mod adb;
+pub mod config;
 mod error;
 mod paths;
 mod playwright;
@@ -22,6 +23,7 @@ use paths::ensure_runtime_dirs;
 use playwright::{run_playwright_login, run_playwright_login_without_app};
 use scrcpy::ensure_adb;
 
+/// 런타임 환경을 초기화하고 필요한 디렉토리와 도구들을 준비한다.
 pub async fn bootstrap_runtime() -> Result<RuntimePaths, OrchestratorError> {
     let paths = paths_for_root(app_data_root()?);
     ensure_runtime_dirs(&paths)?;
@@ -46,6 +48,7 @@ async fn process_account(
     run_playwright_login(app, &paths, &account, headless).await
 }
 
+/// 계정의 쿠키를 새로고침한다.
 pub async fn refresh_account_cookie(
     account: Account,
     headless: bool,

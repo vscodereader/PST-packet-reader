@@ -6,17 +6,15 @@ use std::{
 
 use zip::ZipArchive;
 
-use super::{error::OrchestratorError, types::RuntimePaths};
+use super::{config, error::OrchestratorError, types::RuntimePaths};
 
-pub const SCRCPY_URL: &str =
-    "https://github.com/Genymobile/scrcpy/releases/download/v4.0/scrcpy-win64-v4.0.zip";
-
+/// ADB 실행 파일을 확인하고 없으면 다운로드하여 설치한다.
 pub async fn ensure_adb(paths: &RuntimePaths) -> Result<(), OrchestratorError> {
     if paths.adb_path.exists() {
         return Ok(());
     }
 
-    let bytes = wreq::get(SCRCPY_URL).send().await?.bytes().await?;
+    let bytes = wreq::get(config::SCRCPY_URL).send().await?.bytes().await?;
     extract_scrcpy_zip(&bytes, &paths.scrcpy_dir)?;
 
     if !paths.adb_path.exists() {
@@ -58,12 +56,11 @@ fn extract_scrcpy_zip(bytes: &[u8], output_dir: &Path) -> Result<(), Orchestrato
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn scrcpy_url_targets_v4_win64_zip() {
         assert_eq!(
-            SCRCPY_URL,
+            super::config::SCRCPY_URL,
             "https://github.com/Genymobile/scrcpy/releases/download/v4.0/scrcpy-win64-v4.0.zip"
         );
     }

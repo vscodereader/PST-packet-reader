@@ -6,39 +6,32 @@ import {
   validateInput,
 } from "./naver-login.ts";
 
+const BASE_INPUT = {
+  accountId: "user1",
+  id: "user1",
+  password: "secret",
+  cookiesPath: "cookies/user1.json",
+  chromePath: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+  cdpPort: 9222,
+};
+
 describe("naver-login sidecar helpers", () => {
   it("validates input json", () => {
-    expect(() =>
-      validateInput({
-        accountId: "user1",
-        id: "user1",
-        password: "secret",
-        cookiesPath: "cookies/user1.json",
-      }),
-    ).not.toThrow();
-
+    expect(() => validateInput(BASE_INPUT)).not.toThrow();
     expect(() => validateInput({ id: "user1" })).toThrow(/accountId/);
+    expect(() => validateInput({ ...BASE_INPUT, chromePath: "" })).toThrow(
+      /chromePath/,
+    );
+    expect(() => validateInput({ ...BASE_INPUT, cdpPort: 0 })).toThrow(
+      /cdpPort/,
+    );
   });
 
   it("defaults headless to false and accepts headless mode", () => {
-    expect(
-      validateInput({
-        accountId: "user1",
-        id: "user1",
-        password: "secret",
-        cookiesPath: "cookies/user1.json",
-      }).headless,
-    ).toBe(false);
-
-    expect(
-      validateInput({
-        accountId: "user1",
-        id: "user1",
-        password: "secret",
-        cookiesPath: "cookies/user1.json",
-        headless: true,
-      }).headless,
-    ).toBe(true);
+    expect(validateInput(BASE_INPUT).headless).toBe(false);
+    expect(validateInput({ ...BASE_INPUT, headless: true }).headless).toBe(
+      true,
+    );
   });
 
   it("detects required Naver session cookies", () => {

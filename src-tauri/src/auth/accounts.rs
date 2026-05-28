@@ -8,6 +8,7 @@ use super::{
     util::safe_file_stem,
 };
 
+/// 계정 정보를 파일에 저장한다.
 pub fn save_accounts_file(accounts: &[Account]) -> Result<Vec<Account>, OrchestratorError> {
     let paths = paths_for_root(app_data_root()?);
     ensure_runtime_dirs(&paths)?;
@@ -16,6 +17,7 @@ pub fn save_accounts_file(accounts: &[Account]) -> Result<Vec<Account>, Orchestr
     Ok(accounts.to_vec())
 }
 
+/// 파일에서 계정 정보를 읽어온다.
 pub(crate) fn load_accounts_file(paths: &RuntimePaths) -> Result<Vec<Account>, OrchestratorError> {
     if !paths.accounts_file.exists() {
         return Ok(Vec::new());
@@ -25,6 +27,7 @@ pub(crate) fn load_accounts_file(paths: &RuntimePaths) -> Result<Vec<Account>, O
     Ok(serde_json::from_str(&text)?)
 }
 
+/// 계정의 쿠키 정보를 읽어온다.
 pub fn read_account_cookies(account_id: &str) -> Result<Option<Value>, OrchestratorError> {
     let paths = paths_for_root(app_data_root()?);
     let path = paths
@@ -41,7 +44,7 @@ pub fn read_account_cookies(account_id: &str) -> Result<Option<Value>, Orchestra
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orchestrator::paths::{ensure_runtime_dirs, paths_for_root};
+    use crate::auth::paths::{ensure_runtime_dirs, paths_for_root};
 
     #[test]
     fn account_json_round_trips() {

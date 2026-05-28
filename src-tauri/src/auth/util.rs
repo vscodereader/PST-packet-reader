@@ -1,5 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// 파일명으로 사용 가능하도록 문자열을 정제한다.
 pub(crate) fn safe_file_stem(value: &str) -> String {
     value
         .chars()
@@ -13,6 +14,7 @@ pub(crate) fn safe_file_stem(value: &str) -> String {
         .collect()
 }
 
+/// 현재 시간을 밀리초 단위로 반환한다.
 pub(crate) fn now_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

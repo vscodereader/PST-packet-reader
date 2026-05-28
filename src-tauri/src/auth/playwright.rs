@@ -3,11 +3,13 @@ use std::{env, fs, path::PathBuf, process::Command};
 use tauri::{AppHandle, Manager};
 
 use super::{
+    config,
     error::OrchestratorError,
     types::{Account, RuntimePaths},
     util::safe_file_stem,
 };
 
+/// Playwright를 사용하여 로그인 스크립트를 실행한다 (앱 핸들 포함).
 pub async fn run_playwright_login(
     app: &AppHandle,
     paths: &RuntimePaths,
@@ -18,6 +20,7 @@ pub async fn run_playwright_login(
     run_login_script(script, paths, account, headless).await
 }
 
+/// Playwright를 사용하여 로그인 스크립트를 실행한다 (앱 핸들 없이).
 pub async fn run_playwright_login_without_app(
     paths: &RuntimePaths,
     account: &Account,
@@ -45,6 +48,8 @@ async fn run_login_script(
         "password": account.password,
         "cookiesPath": cookies_path,
         "headless": headless,
+        "chromePath": config::chrome_path(),
+        "cdpPort": config::find_free_port(),
     });
     fs::write(&input_path, serde_json::to_string_pretty(&input)?)?;
 
@@ -71,13 +76,13 @@ async fn run_login_script(
 }
 
 fn locate_login_script(app: Option<&AppHandle>) -> Result<PathBuf, OrchestratorError> {
-    if let Ok(path) = env::var("PSTMACRO_LOGIN_SCRIPT") {
+    if let Ok(path) = env::var(config::LOGIN_SCRIPT_ENV) {
         return Ok(PathBuf::from(path));
     }
 
     if let Some(app) = app {
         if let Ok(path) = app.path().resolve(
-            "src/features/playwright/naver-login.ts",
+            config::LOGIN_SCRIPT_PATH,
             tauri::path::BaseDirectory::Resource,
         ) {
             if path.exists() {
@@ -86,7 +91,7 @@ fn locate_login_script(app: Option<&AppHandle>) -> Result<PathBuf, OrchestratorE
         }
         if let Ok(path) = app
             .path()
-            .resolve("naver-login.ts", tauri::path::BaseDirectory::Resource)
+            .resolve(config::LOGIN_SCRIPT_FILENAME, tauri::path::BaseDirectory::Resource)
         {
             if path.exists() {
                 return Ok(path);
@@ -100,5 +105,5 @@ fn locate_login_script(app: Option<&AppHandle>) -> Result<PathBuf, OrchestratorE
         .join("src")
         .join("features")
         .join("playwright")
-        .join("naver-login.ts"))
+        .join(config::LOGIN_SCRIPT_FILENAME))
 }

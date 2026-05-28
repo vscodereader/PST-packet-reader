@@ -27,6 +27,7 @@ pub struct QueueState {
     inner: Arc<Mutex<QueueInner>>,
 }
 
+/// 계정들을 처리 큐에 추가하고 필요시 처리를 시작한다.
 pub fn enqueue_accounts(
     state: &QueueState,
     app: AppHandle,
@@ -66,6 +67,7 @@ pub fn enqueue_accounts(
     get_queue_status(state)
 }
 
+/// 현재 큐의 상태를 조회한다.
 pub fn get_queue_status(state: &QueueState) -> Result<QueueStatus, OrchestratorError> {
     let inner = state
         .inner
