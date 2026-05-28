@@ -6,6 +6,8 @@ import { MacroEditorPage } from "@/features/macro-editor/macro-editor-page";
 
 import "@mantine/core/styles.css";
 
+import { AppProviders } from "./providers";
+
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <MantineProvider>
