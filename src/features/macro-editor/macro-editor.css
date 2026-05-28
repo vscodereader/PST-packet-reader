@@ -2,7 +2,12 @@
   color: #1f2933;
   background: #edf1f5;
   font-family:
-    Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    Inter,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
 }
 
 body {
@@ -135,7 +140,7 @@ body {
 
 .macro-editor-run-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) 150px 112px 112px;
+  grid-template-columns: minmax(180px, 1fr) 150px 88px 88px 112px 112px;
   gap: 10px;
   align-items: end;
 }
@@ -211,7 +216,7 @@ body {
 .macro-editor-status-text {
   margin: 0;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
   font-family: inherit;
 }
 

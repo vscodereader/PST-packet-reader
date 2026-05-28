@@ -44,6 +44,17 @@ type SavedBatchConfig = {
 
 const entrySeparator = "\n---\n";
 
+// 실행 환경에 따라 Chrome DevTools 기본 접속값을 고르는 함수입니다.
+function defaultDevtoolsEndpoint() {
+  const platform = window.navigator.platform.toLowerCase();
+
+  if (platform.includes("win")) {
+    return { host: "127.0.0.1", port: 9222 };
+  }
+
+  return { host: "172.24.32.1", port: 9223 };
+}
+
 // CSV에서 가져온 여러 항목을 텍스트창 표시용 문자열로 합치는 함수입니다.
 function joinEntries(entries: string[]) {
   return entries.join(entrySeparator);
@@ -110,8 +121,9 @@ function ModeSelector({
 // CSV 가져오기, 종목 선택, batch 저장/실행을 담당하는 화면 컴포넌트입니다.
 export function StockBatchPanel() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [host, setHost] = useState("172.24.32.1");
-  const [port, setPort] = useState<number | string>(9223);
+  const defaultEndpoint = useMemo(defaultDevtoolsEndpoint, []);
+  const [host, setHost] = useState(defaultEndpoint.host);
+  const [port, setPort] = useState<number | string>(defaultEndpoint.port);
   const [stockQuery, setStockQuery] = useState("");
   const [stockOptions, setStockOptions] = useState<StockCandidate[]>([]);
   const [selectedStocks, setSelectedStocks] = useState<StockCandidate[]>([]);
@@ -163,7 +175,9 @@ export function StockBatchPanel() {
     setMessage("");
 
     if (!file.name.toLowerCase().endsWith(".csv")) {
-      setError("현재 가져오기는 CSV 파일만 지원합니다. 엑셀에서 CSV UTF-8 형식으로 저장한 뒤 가져오세요.");
+      setError(
+        "현재 가져오기는 CSV 파일만 지원합니다. 엑셀에서 CSV UTF-8 형식으로 저장한 뒤 가져오세요.",
+      );
       return;
     }
 
@@ -177,7 +191,9 @@ export function StockBatchPanel() {
     setCommentText(joinEntries(parsed.comments));
     setFileLoaded(true);
     setFileName(file.name);
-    setMessage(`${file.name}에서 제목 ${parsed.titles.length}개, 내용 ${parsed.bodies.length}개, 댓글내용 ${parsed.comments.length}개를 가져왔습니다.`);
+    setMessage(
+      `${file.name}에서 제목 ${parsed.titles.length}개, 내용 ${parsed.bodies.length}개, 댓글내용 ${parsed.comments.length}개를 가져왔습니다.`,
+    );
   }
 
   // 검색 결과에서 고른 종목을 선택 목록에 추가하는 함수입니다.
@@ -192,7 +208,9 @@ export function StockBatchPanel() {
 
   // 선택된 종목 chip을 눌렀을 때 해당 종목을 목록에서 제거하는 함수입니다.
   function removeStock(code: string) {
-    setSelectedStocks((current) => current.filter((stock) => stock.code !== code));
+    setSelectedStocks((current) =>
+      current.filter((stock) => stock.code !== code),
+    );
   }
 
   // 현재 화면 값을 저장/실행 가능한 batch 설정 객체로 만드는 함수입니다.
@@ -255,7 +273,9 @@ export function StockBatchPanel() {
     if (!config) return;
 
     setSavedConfig(config);
-    setMessage("현재 화면의 종목, 제목, 내용, 댓글내용, 실행 설정을 저장했습니다.");
+    setMessage(
+      "현재 화면의 종목, 제목, 내용, 댓글내용, 실행 설정을 저장했습니다.",
+    );
   }
 
   // 저장된 설정 또는 현재 화면 설정을 Rust batch 실행 command로 전달하는 함수입니다.
@@ -276,7 +296,9 @@ export function StockBatchPanel() {
         },
       );
       setSavedConfig(config);
-      setMessage(`실행 완료: ${report.completed}회 설정을 처리했고, 등록 결과 ${report.reports.length}건을 받았습니다.`);
+      setMessage(
+        `실행 완료: ${report.completed}회 설정을 처리했고, 등록 결과 ${report.reports.length}건을 받았습니다.`,
+      );
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -307,7 +329,9 @@ export function StockBatchPanel() {
         />
 
         <div className="macro-editor-batch-top">
-          <Button onClick={() => fileInputRef.current?.click()}>가져오기</Button>
+          <Button onClick={() => fileInputRef.current?.click()}>
+            가져오기
+          </Button>
 
           <div className="macro-editor-stock-search">
             <TextInput
@@ -470,6 +494,24 @@ export function StockBatchPanel() {
             value={port}
             onChange={setPort}
           />
+          <Button
+            variant="light"
+            onClick={() => {
+              setHost("127.0.0.1");
+              setPort(9222);
+            }}
+          >
+            Windows
+          </Button>
+          <Button
+            variant="light"
+            onClick={() => {
+              setHost("172.24.32.1");
+              setPort(9223);
+            }}
+          >
+            WSL
+          </Button>
           <Button variant="light" onClick={saveConfig}>
             설정 저장
           </Button>

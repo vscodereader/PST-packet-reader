@@ -196,6 +196,58 @@ MESA: error: ZINK: failed to choose pdev
 
 Tauri 창이 뜨고 UI가 동작한다면 치명적인 오류는 아니다.
 
+## 시크릿 Chrome 실행
+
+배포하거나 다른 사람이 실행할 때는 일반 Chrome 대신 시크릿 Chrome 전용 디버깅 세션을 사용한다.
+
+추가한 실행 파일:
+
+```text
+scripts/start-chrome-incognito-debug.bat
+```
+
+이 배치 파일은 아래 옵션으로 Chrome을 실행한다.
+
+```text
+--remote-debugging-port=9222
+--user-data-dir=%TEMP%\pstmacro-chrome-incognito-debug
+--incognito
+--disable-quic
+--no-first-run
+--no-default-browser-check
+```
+
+일반 Chrome 프로필과 자동화용 Chrome 프로필을 분리하기 위해 `--user-data-dir`을 별도로 둔다. 사용자는 이 시크릿 창에서 네이버 로그인을 완료한 뒤 프로그램을 실행한다.
+
+Windows 배포 앱에서 기본 DevTools 값은 아래를 사용한다.
+
+```text
+host: 127.0.0.1
+port: 9222
+```
+
+WSL 개발 환경에서 Windows Chrome에 연결해야 할 때는 아래 값을 사용한다.
+
+```text
+host: 172.24.32.1
+port: 9223
+```
+
+화면에는 `Windows`, `WSL` 버튼을 추가해 두 값 중 하나를 바로 넣을 수 있게 했다.
+
+## 배포 시 남는 위험
+
+아래 문제는 코드만으로 완전히 없앨 수 없다.
+
+- 네이버 정책 또는 계정 제한 위험
+- 네이버 API 응답 구조 변경
+- 사용자가 로그인과 2차 인증을 완료하지 않은 상태
+- Chrome 원격 디버깅 포트 노출
+- WSLg 한글 입력기 문제
+- Windows가 아닌 환경에서 Chrome 경로가 다른 문제
+
+특히 원격 디버깅 포트는 로그인 쿠키를 읽을 수 있으므로 실행 중에는 자동화용 시크릿 Chrome에서 네이버만 사용하는 편이 안전하다.
+
 ## 테스트 결과
 
 아래 검증을 통과했다.
