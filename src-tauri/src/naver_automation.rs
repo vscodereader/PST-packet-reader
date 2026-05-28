@@ -2,7 +2,6 @@ mod browser_flow;
 mod devtools_connection;
 mod discussion_room;
 mod packet_client;
-mod packet_profile;
 mod post_form;
 pub mod types;
 
@@ -86,7 +85,8 @@ pub fn run_naver_discussion_macro(
     chrome.enable()?;
     chrome.ensure_discussion_page()?;
 
-    let login_profile = chrome.read_login_profile_from_packet()?;
+    let packet_client = chrome.build_naver_packet_client()?;
+    let login_profile = packet_client.read_login_profile()?;
 
     if !login_profile.logged_in {
         return Err(AutomationError::new(format!(
@@ -95,24 +95,25 @@ pub fn run_naver_discussion_macro(
         )));
     }
 
-    let selected = chrome.open_random_discussion_room()?;
+    let selected = chrome.open_random_discussion_room(&packet_client)?;
+    let selected_url = chrome.current_url()?;
+    packet_client.ensure_profile_intro_setup(&selected_url)?;
 
     let (register_button_highlighted, submitted) = match request.target {
         AutomationTarget::Post => {
-            chrome.open_write_modal()?;
             if request.submit_after_fill {
-                chrome.submit_post_and_refresh(title, body)?;
+                chrome.submit_post_and_refresh(&packet_client, title, body)?;
                 (false, true)
             } else {
+                chrome.open_write_modal()?;
                 chrome.fill_post_form(title, body)?;
                 (chrome.highlight_manual_submit_target()?, false)
             }
         }
         AutomationTarget::Comment => {
-            chrome.ensure_profile_setup_for_comment()?;
-            chrome.open_random_discussion_post()?;
+            chrome.open_random_discussion_post(&packet_client)?;
             if request.submit_after_fill {
-                chrome.submit_comment_and_refresh(body)?;
+                chrome.submit_comment_and_refresh(&packet_client, body)?;
                 (false, true)
             } else {
                 chrome.fill_comment_form(body)?;

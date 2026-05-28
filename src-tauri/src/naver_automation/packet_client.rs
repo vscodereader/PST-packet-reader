@@ -9,11 +9,15 @@ use reqwest::header::{
 use serde_json::{json, Value};
 use url::form_urlencoded::Serializer;
 
+use super::types::{DiscussionSelection, NaverLoginProfile};
 use super::{AutomationError, AutomationResult, CdpClient};
 
 const STOCK_ORIGIN: &str = "https://stock.naver.com";
 const M_STOCK_ORIGIN: &str = "https://m.stock.naver.com";
 const CBOX_ORIGIN: &str = "https://apis.naver.com";
+const STATIC_NID_ORIGIN: &str = "https://static.nid.naver.com";
+const DEFAULT_REFERER: &str = "https://stock.naver.com/discussion";
+const DEFAULT_PROFILE_INTRODUCTION: &str = "2222";
 
 pub(super) struct NaverPacketClient {
     client: Client,
@@ -24,6 +28,25 @@ pub(super) struct NaverPacketClient {
 struct DiscussionTarget {
     discussion_type: String,
     item_code: String,
+}
+
+pub(super) struct PacketDiscussionRoom {
+    pub selection: DiscussionSelection,
+    pub discussion_url: String,
+}
+
+pub(super) struct PacketDiscussionPost {
+    pub post_url: String,
+}
+
+struct StockCandidate {
+    item_code: String,
+    item_name: String,
+    rank: String,
+}
+
+struct PostCandidate {
+    post_id: String,
 }
 
 impl CdpClient {
@@ -95,6 +118,210 @@ impl CdpClient {
 }
 
 impl NaverPacketClient {
+    // Wireshark에서 확인한 static.nid.naver.com getProfile 패킷을 Rust HTTP 요청으로 재현하는 함수입니다.
+    pub(super) fn read_login_profile(&self) -> AutomationResult<NaverLoginProfile> {
+        let callback = format!("pstmacroProfile_{}", timestamp_nanos());
+        let url = format!("{STATIC_NID_ORIGIN}/getProfile?svc=my&callback={callback}");
+        let response_text = self
+            .client
+            .get(url)
+            .headers(self.static_headers(DEFAULT_REFERER)?)
+            .send()
+            .map_err(|error| AutomationError::new(format!("getProfile 패킷 전송 실패: {error}")))
+            .and_then(|response| response_text(response, "getProfile"))?;
+        let json_text = strip_jsonp(&response_text)?;
+        let value = parse_json(json_text, "getProfile")?;
+
+        Ok(NaverLoginProfile {
+            logged_in: value
+                .get("rtn_cd")
+                .and_then(Value::as_str)
+                .map(|code| code == "0")
+                .unwrap_or(false),
+            nickname: value
+                .get("nick_name")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            image_url: value
+                .get("image_url")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            message: value
+                .get("rtn_msg")
+                .or_else(|| value.get("rtn_cd"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned(),
+        })
+    }
+
+    // Wireshark에서 확인한 랭킹/시세 API를 호출해 랜덤 종목 토론방을 선택하는 함수입니다.
+    pub(super) fn select_random_discussion_room(&self) -> AutomationResult<PacketDiscussionRoom> {
+        let categories = [
+            (
+                "토론급상승",
+                "/api/community/discussion/rankings?nationType=KOR&page=1&size=10&postType=HOT",
+            ),
+            (
+                "상승",
+                "/api/domestic/market/stock/default?tradeType=KRX&marketType=ALL&orderType=up&startIdx=0&pageSize=10",
+            ),
+            (
+                "하락",
+                "/api/domestic/market/stock/default?tradeType=KRX&marketType=ALL&orderType=down&startIdx=0&pageSize=10",
+            ),
+            (
+                "거래량",
+                "/api/domestic/market/stock/default?tradeType=KRX&marketType=ALL&orderType=quantTop&startIdx=0&pageSize=10",
+            ),
+        ];
+        let start = pseudo_index(categories.len());
+
+        for offset in 0..categories.len() {
+            let (category, path) = categories[(start + offset) % categories.len()];
+            let value = self.get_stock_json(path, DEFAULT_REFERER, category)?;
+            let candidates = collect_stock_candidates(&value);
+
+            if candidates.is_empty() {
+                continue;
+            }
+
+            let picked = &candidates[pseudo_index(candidates.len())];
+            let discussion_url = discussion_url_for("domesticStock", &picked.item_code, None);
+
+            return Ok(PacketDiscussionRoom {
+                selection: DiscussionSelection {
+                    category: category.to_owned(),
+                    rank: picked.rank.clone(),
+                    item_text: format!("{} ({})", picked.item_name, picked.item_code),
+                    method: "packet-api".to_owned(),
+                },
+                discussion_url,
+            });
+        }
+
+        Err(AutomationError::new(
+            "패킷 API 응답에서 선택 가능한 랜덤 종목을 찾지 못했습니다.",
+        ))
+    }
+
+    // Wireshark에서 확인한 posts/by-item API를 호출해 랜덤 토론글 URL을 선택하는 함수입니다.
+    pub(super) fn select_random_discussion_post(
+        &self,
+        page_url: &str,
+    ) -> AutomationResult<PacketDiscussionPost> {
+        let target = discussion_target_from_url(page_url)?;
+        let attempts = [
+            format!(
+                "/api/community/discussion/posts/by-item?discussionType={}&itemCode={}&isHolderOnly=false&excludesItemNews=false&isItemNewsOnly=false&isCleanbotPassedOnly=true&pageSize=10",
+                target.discussion_type, target.item_code
+            ),
+            format!(
+                "/api/community/discussion/posts/by-item?discussionType={}&itemCode={}&isHolderOnly=false&excludesItemNews=false&isItemNewsOnly=false&isCleanbotPassedOnly=false&pageSize=30",
+                target.discussion_type, target.item_code
+            ),
+        ];
+
+        for path in attempts {
+            let value = self.get_stock_json(&path, page_url, "토론글 목록")?;
+            let posts = collect_post_candidates(&value);
+
+            if posts.is_empty() {
+                continue;
+            }
+
+            let picked = &posts[pseudo_index(posts.len())];
+            let post_url = discussion_url_for(
+                &target.discussion_type,
+                &target.item_code,
+                Some(&picked.post_id),
+            );
+
+            return Ok(PacketDiscussionPost { post_url });
+        }
+
+        Err(AutomationError::new(
+            "패킷 API 응답에서 선택 가능한 랜덤 토론글을 찾지 못했습니다.",
+        ))
+    }
+
+    // Wireshark 성공 캡처에서 확인한 status/form/validate/PUT 패킷으로 프로필 소개를 설정하는 함수입니다.
+    pub(super) fn ensure_profile_intro_setup(&self, referer: &str) -> AutomationResult<bool> {
+        let status = self.get_stock_json(
+            "/api/community/profile/users/status",
+            referer,
+            "프로필 상태",
+        )?;
+        let status_text = status
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+
+        if status_text == "existent" {
+            return Ok(false);
+        }
+
+        let profile_id = status
+            .get("profileId")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| {
+                AutomationError::new("프로필 상태 응답에서 profileId를 찾지 못했습니다.")
+            })?;
+        let form =
+            self.get_stock_json("/api/community/profile/users/form", referer, "프로필 form")?;
+        let nickname = form
+            .get("nickname")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .map(Ok)
+            .unwrap_or_else(|| self.recommend_profile_nickname(referer))?;
+
+        self.validate_profile_introduction(referer)?;
+
+        let payload = json!({
+            "nickname": nickname,
+            "introduction": DEFAULT_PROFILE_INTRODUCTION,
+            "imageUrl": form.get("imageUrl").cloned().unwrap_or(Value::Null),
+            "danglingImages": [],
+        });
+        let response_text = self
+            .client
+            .put(format!(
+                "{STOCK_ORIGIN}/api/community/profile/users/{profile_id}"
+            ))
+            .headers(self.stock_json_headers(referer)?)
+            .json(&payload)
+            .send()
+            .map_err(|error| {
+                AutomationError::new(format!("프로필 저장 PUT 패킷 전송 실패: {error}"))
+            })
+            .and_then(|response| response_text(response, "프로필 저장 PUT"))?;
+
+        if !response_text.trim().is_empty() {
+            let _ = parse_json(&response_text, "프로필 저장 PUT");
+        }
+
+        let updated = self.get_stock_json(
+            "/api/community/profile/users/status",
+            referer,
+            "프로필 상태 재확인",
+        )?;
+        let updated_status = updated
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+
+        if updated_status != "existent" {
+            return Err(AutomationError::new(format!(
+                "프로필 저장 후 상태가 existent가 아닙니다: {updated_status}"
+            )));
+        }
+
+        Ok(true)
+    }
+
     // Rust HTTP 클라이언트로 글쓰기 form 패킷에서 txId를 받고 add 패킷으로 글을 등록하는 함수입니다.
     pub(super) fn submit_post(
         &self,
@@ -140,6 +367,73 @@ impl NaverPacketClient {
                     .map(ToOwned::to_owned)
             })
             .unwrap_or_default())
+    }
+
+    // stock.naver.com JSON API를 공통 헤더로 호출하고 JSON으로 파싱하는 함수입니다.
+    fn get_stock_json(&self, path: &str, referer: &str, label: &str) -> AutomationResult<Value> {
+        let response_text = self
+            .client
+            .get(format!("{STOCK_ORIGIN}{path}"))
+            .headers(self.stock_json_headers(referer)?)
+            .send()
+            .map_err(|error| AutomationError::new(format!("{label} GET 패킷 전송 실패: {error}")))
+            .and_then(|response| response_text(response, label))?;
+
+        parse_json(&response_text, label)
+    }
+
+    // 프로필 form에 nickname이 없을 때 네이버 추천 닉네임 패킷을 호출하는 함수입니다.
+    fn recommend_profile_nickname(&self, referer: &str) -> AutomationResult<String> {
+        let response_text = self
+            .client
+            .post(format!(
+                "{STOCK_ORIGIN}/api/community/profile/users/nickname/recommend"
+            ))
+            .headers(self.stock_json_headers(referer)?)
+            .json(&json!({ "unusedNickname": "" }))
+            .send()
+            .map_err(|error| AutomationError::new(format!("닉네임 추천 패킷 전송 실패: {error}")))
+            .and_then(|response| response_text(response, "닉네임 추천"))?;
+        let value = parse_json(&response_text, "닉네임 추천")?;
+
+        value
+            .get("recommendedNickname")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| {
+                AutomationError::new("닉네임 추천 응답에서 recommendedNickname을 찾지 못했습니다.")
+            })
+    }
+
+    // 프로필 소개 2222가 저장 가능한 값인지 검증 패킷으로 확인하는 함수입니다.
+    fn validate_profile_introduction(&self, referer: &str) -> AutomationResult<()> {
+        let response_text = self
+            .client
+            .post(format!(
+                "{STOCK_ORIGIN}/api/community/profile/users/introduction/validate"
+            ))
+            .headers(self.stock_json_headers(referer)?)
+            .json(&json!({ "targetValue": DEFAULT_PROFILE_INTRODUCTION }))
+            .send()
+            .map_err(|error| {
+                AutomationError::new(format!("프로필 소개 검증 패킷 전송 실패: {error}"))
+            })
+            .and_then(|response| response_text(response, "프로필 소개 검증"))?;
+        let value = parse_json(&response_text, "프로필 소개 검증")?;
+
+        if value
+            .get("isValid")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+
+        Err(AutomationError::new(format!(
+            "프로필 소개 2222 검증 실패: {}",
+            packet_error_message(&value, &response_text)
+        )))
     }
 
     // Rust HTTP 클라이언트로 cbox 토큰 발급 패킷과 댓글 생성 패킷을 차례대로 호출하는 함수입니다.
@@ -189,6 +483,7 @@ impl NaverPacketClient {
             .unwrap_or_default())
     }
 
+    // 글쓰기 add 패킷에 필요한 txId를 form 패킷으로 발급받는 함수입니다.
     fn issue_post_tx_id(
         &self,
         page_url: &str,
@@ -230,6 +525,7 @@ impl NaverPacketClient {
             .ok_or_else(|| AutomationError::new("글쓰기 form 응답에서 txId를 찾지 못했습니다."))
     }
 
+    // 댓글 생성에 필요한 cbox_token을 토큰 발급 패킷으로 가져오는 함수입니다.
     fn issue_cbox_token(
         &self,
         object_id: &str,
@@ -279,8 +575,9 @@ impl NaverPacketClient {
             })
     }
 
+    // m.stock.naver.com JSON 요청에 사용하는 공통 헤더를 만드는 함수입니다.
     fn json_headers(&self, referer: &str) -> AutomationResult<HeaderMap> {
-        let mut headers = self.base_headers(referer)?;
+        let mut headers = self.base_headers(referer, "same-site")?;
         headers.insert(
             ACCEPT,
             HeaderValue::from_static("application/json, text/plain, */*"),
@@ -288,6 +585,21 @@ impl NaverPacketClient {
         Ok(headers)
     }
 
+    // stock.naver.com JSON API 요청에 사용하는 공통 헤더를 만드는 함수입니다.
+    fn stock_json_headers(&self, referer: &str) -> AutomationResult<HeaderMap> {
+        let mut headers = self.base_headers(referer, "same-origin")?;
+        headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+        Ok(headers)
+    }
+
+    // static.nid.naver.com getProfile 요청에 사용하는 공통 헤더를 만드는 함수입니다.
+    fn static_headers(&self, referer: &str) -> AutomationResult<HeaderMap> {
+        let mut headers = self.base_headers(referer, "same-site")?;
+        headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+        Ok(headers)
+    }
+
+    // apis.naver.com 댓글 form-urlencoded 요청에 사용하는 공통 헤더를 만드는 함수입니다.
     fn form_headers(&self, referer: &str) -> AutomationResult<HeaderMap> {
         let mut headers = self.json_headers(referer)?;
         headers.insert(
@@ -297,7 +609,12 @@ impl NaverPacketClient {
         Ok(headers)
     }
 
-    fn base_headers(&self, referer: &str) -> AutomationResult<HeaderMap> {
+    // User-Agent, Cookie, Referer 등 패킷 재현에 공통으로 필요한 헤더를 조립하는 함수입니다.
+    fn base_headers(
+        &self,
+        referer: &str,
+        sec_fetch_site: &'static str,
+    ) -> AutomationResult<HeaderMap> {
         let mut headers = HeaderMap::new();
         headers.insert(ORIGIN, HeaderValue::from_static(STOCK_ORIGIN));
         headers.insert(REFERER, header_value(referer, "referer")?);
@@ -307,13 +624,14 @@ impl NaverPacketClient {
             ACCEPT_LANGUAGE,
             HeaderValue::from_static("ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"),
         );
-        headers.insert("sec-fetch-site", HeaderValue::from_static("same-site"));
+        headers.insert("sec-fetch-site", HeaderValue::from_static(sec_fetch_site));
         headers.insert("sec-fetch-mode", HeaderValue::from_static("cors"));
         headers.insert("sec-fetch-dest", HeaderValue::from_static("empty"));
         Ok(headers)
     }
 }
 
+// 현재 토론방 URL에서 네이버 discussionType과 itemCode를 계산하는 함수입니다.
 fn discussion_target_from_url(page_url: &str) -> AutomationResult<DiscussionTarget> {
     let path = url::Url::parse(page_url)
         .map_err(|error| AutomationError::new(format!("현재 URL 해석 실패: {error}")))?
@@ -349,6 +667,7 @@ fn discussion_target_from_url(page_url: &str) -> AutomationResult<DiscussionTarg
     })
 }
 
+// 현재 토론글 URL에서 댓글 API에 필요한 objectId를 추출하는 함수입니다.
 fn object_id_from_url(page_url: &str) -> AutomationResult<String> {
     page_url
         .split("/discussion/")
@@ -367,6 +686,231 @@ fn object_id_from_url(page_url: &str) -> AutomationResult<String> {
         })
 }
 
+// 랭킹/시세 API 응답 전체에서 종목 후보를 모으는 함수입니다.
+fn collect_stock_candidates(value: &Value) -> Vec<StockCandidate> {
+    let mut candidates = Vec::new();
+    collect_stock_candidates_from_value(value, &mut candidates);
+    dedupe_stock_candidates(candidates)
+}
+
+// 중첩 JSON을 재귀적으로 순회하면서 종목 코드와 종목명을 찾는 함수입니다.
+fn collect_stock_candidates_from_value(value: &Value, candidates: &mut Vec<StockCandidate>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                collect_stock_candidates_from_value(item, candidates);
+            }
+        }
+        Value::Object(_) => {
+            if let Some(item_code) = first_string_deep(
+                value,
+                &[
+                    "itemCode",
+                    "stockCode",
+                    "code",
+                    "symbolCode",
+                    "reutersCode",
+                    "localCode",
+                ],
+            ) {
+                if looks_like_stock_code(&item_code) {
+                    let item_name = first_string_deep(
+                        value,
+                        &[
+                            "itemName",
+                            "stockName",
+                            "name",
+                            "korName",
+                            "stockNameKr",
+                            "displayName",
+                        ],
+                    )
+                    .unwrap_or_else(|| item_code.clone());
+                    let rank = first_number_deep(value, &["rank", "ranking", "rankNo", "no"])
+                        .map(|rank| rank.to_string())
+                        .unwrap_or_else(|| (candidates.len() + 1).to_string());
+
+                    candidates.push(StockCandidate {
+                        item_code,
+                        item_name,
+                        rank,
+                    });
+                }
+            }
+
+            if let Some(object) = value.as_object() {
+                for child in object.values() {
+                    collect_stock_candidates_from_value(child, candidates);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+// 토론글 목록 API 응답 전체에서 게시글 후보를 모으는 함수입니다.
+fn collect_post_candidates(value: &Value) -> Vec<PostCandidate> {
+    let mut candidates = Vec::new();
+    collect_post_candidates_from_value(value, &mut candidates);
+    dedupe_post_candidates(candidates)
+}
+
+// 중첩 JSON을 재귀적으로 순회하면서 게시글 ID 후보를 찾는 함수입니다.
+fn collect_post_candidates_from_value(value: &Value, candidates: &mut Vec<PostCandidate>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                collect_post_candidates_from_value(item, candidates);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(post_id) = first_string_deep(
+                value,
+                &[
+                    "postId",
+                    "discussionPostId",
+                    "discussionId",
+                    "id",
+                    "articleId",
+                ],
+            ) {
+                if looks_like_post_id(&post_id) {
+                    candidates.push(PostCandidate { post_id });
+                }
+            }
+
+            for child in object.values() {
+                collect_post_candidates_from_value(child, candidates);
+            }
+        }
+        _ => {}
+    }
+}
+
+// 중첩 JSON에서 지정한 키들 중 첫 번째 문자열 값을 찾는 함수입니다.
+fn first_string_deep(value: &Value, keys: &[&str]) -> Option<String> {
+    match value {
+        Value::Object(object) => {
+            for key in keys {
+                if let Some(value) = object.get(*key).and_then(value_to_string) {
+                    return Some(value);
+                }
+            }
+
+            for child in object.values() {
+                if let Some(value) = first_string_deep(child, keys) {
+                    return Some(value);
+                }
+            }
+
+            None
+        }
+        Value::Array(items) => items.iter().find_map(|item| first_string_deep(item, keys)),
+        _ => None,
+    }
+}
+
+// 중첩 JSON에서 지정한 키들 중 첫 번째 숫자 값을 찾는 함수입니다.
+fn first_number_deep(value: &Value, keys: &[&str]) -> Option<u64> {
+    match value {
+        Value::Object(object) => {
+            for key in keys {
+                if let Some(value) = object.get(*key).and_then(value_to_u64) {
+                    return Some(value);
+                }
+            }
+
+            for child in object.values() {
+                if let Some(value) = first_number_deep(child, keys) {
+                    return Some(value);
+                }
+            }
+
+            None
+        }
+        Value::Array(items) => items.iter().find_map(|item| first_number_deep(item, keys)),
+        _ => None,
+    }
+}
+
+// JSON 문자열 또는 숫자를 후보 추출용 문자열로 바꾸는 함수입니다.
+fn value_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) if !value.trim().is_empty() => Some(value.trim().to_owned()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+// JSON 숫자 또는 숫자 문자열을 u64로 바꾸는 함수입니다.
+fn value_to_u64(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(value) => value.as_u64(),
+        Value::String(value) => value.parse().ok(),
+        _ => None,
+    }
+}
+
+// 같은 종목 코드가 여러 번 발견됐을 때 첫 후보만 남기는 함수입니다.
+fn dedupe_stock_candidates(candidates: Vec<StockCandidate>) -> Vec<StockCandidate> {
+    let mut seen = BTreeMap::new();
+    let mut unique = Vec::new();
+
+    for candidate in candidates {
+        if seen.insert(candidate.item_code.clone(), ()).is_none() {
+            unique.push(candidate);
+        }
+    }
+
+    unique
+}
+
+// 같은 게시글 ID가 여러 번 발견됐을 때 첫 후보만 남기는 함수입니다.
+fn dedupe_post_candidates(candidates: Vec<PostCandidate>) -> Vec<PostCandidate> {
+    let mut seen = BTreeMap::new();
+    let mut unique = Vec::new();
+
+    for candidate in candidates {
+        if seen.insert(candidate.post_id.clone(), ()).is_none() {
+            unique.push(candidate);
+        }
+    }
+
+    unique
+}
+
+// 문자열이 네이버 종목 코드 형태인지 대략적으로 판단하는 함수입니다.
+fn looks_like_stock_code(value: &str) -> bool {
+    let len = value.chars().count();
+    (5..=8).contains(&len)
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '.')
+        && value.chars().any(|character| character.is_ascii_digit())
+}
+
+// 문자열이 네이버 토론글 ID 형태인지 대략적으로 판단하는 함수입니다.
+fn looks_like_post_id(value: &str) -> bool {
+    let len = value.chars().count();
+    (6..=12).contains(&len) && value.chars().all(|character| character.is_ascii_digit())
+}
+
+// discussionType, itemCode, postId를 화면 이동용 네이버 토론 URL로 바꾸는 함수입니다.
+fn discussion_url_for(discussion_type: &str, item_code: &str, post_id: Option<&str>) -> String {
+    let base_path = match discussion_type {
+        "domesticIndex" => format!("{STOCK_ORIGIN}/domestic/index/{item_code}/discussion"),
+        "foreignStock" => format!("{STOCK_ORIGIN}/worldstock/stock/{item_code}/discussion"),
+        "foreignIndex" => format!("{STOCK_ORIGIN}/worldstock/index/{item_code}/discussion"),
+        _ => format!("{STOCK_ORIGIN}/domestic/stock/{item_code}/discussion"),
+    };
+
+    match post_id {
+        Some(post_id) => format!("{base_path}/{post_id}?chip=all"),
+        None => format!("{base_path}?chip=all"),
+    }
+}
+
+// Wireshark에서 확인한 글쓰기 add 요청의 JSON 본문을 만드는 함수입니다.
 fn build_post_payload(title: &str, body: &str, target: &DiscussionTarget, tx_id: &str) -> Value {
     let document_id = packet_id("DOC");
     let component_id = packet_id("TEXT");
@@ -420,6 +964,7 @@ fn build_post_payload(title: &str, body: &str, target: &DiscussionTarget, tx_id:
     })
 }
 
+// Wireshark에서 확인한 댓글 create 요청의 form-urlencoded 본문을 만드는 함수입니다.
 fn build_comment_form(object_id: &str, object_url: &str, body: &str, cbox_token: &str) -> String {
     Serializer::new(String::new())
         .append_pair("lang", "ko")
@@ -449,6 +994,7 @@ fn build_comment_form(object_id: &str, object_url: &str, body: &str, cbox_token:
         .finish()
 }
 
+// API 응답 문자열을 JSON으로 파싱하고 오류 메시지에 패킷 이름을 붙이는 함수입니다.
 fn parse_json(response_text: &str, label: &str) -> AutomationResult<Value> {
     serde_json::from_str(response_text).map_err(|error| {
         AutomationError::new(format!(
@@ -458,6 +1004,43 @@ fn parse_json(response_text: &str, label: &str) -> AutomationResult<Value> {
     })
 }
 
+// getProfile JSONP 응답에서 callback wrapper를 제거하는 함수입니다.
+fn strip_jsonp(response_text: &str) -> AutomationResult<&str> {
+    let start = response_text
+        .find('(')
+        .ok_or_else(|| AutomationError::new("JSONP 응답에서 여는 괄호를 찾지 못했습니다."))?;
+    let end = response_text
+        .rfind(')')
+        .ok_or_else(|| AutomationError::new("JSONP 응답에서 닫는 괄호를 찾지 못했습니다."))?;
+
+    if end <= start {
+        return Err(AutomationError::new(
+            "JSONP 응답 괄호 위치가 올바르지 않습니다.",
+        ));
+    }
+
+    Ok(&response_text[start + 1..end])
+}
+
+// HTTP 응답 상태를 확인하고 본문 문자열을 읽는 함수입니다.
+fn response_text(response: reqwest::blocking::Response, label: &str) -> AutomationResult<String> {
+    let status = response.status();
+    let text = response.text().map_err(|error| {
+        AutomationError::new(format!("{label} 패킷 응답 본문 읽기 실패: {error}"))
+    })?;
+
+    if status.is_success() {
+        return Ok(text);
+    }
+
+    Err(AutomationError::new(format!(
+        "{label} 패킷 HTTP 실패: status={}, body={}",
+        status.as_u16(),
+        text.chars().take(300).collect::<String>()
+    )))
+}
+
+// 네이버 API 실패 응답에서 사람이 읽을 오류 메시지를 뽑는 함수입니다.
 fn packet_error_message(value: &Value, fallback: &str) -> String {
     value
         .get("message")
@@ -467,14 +1050,29 @@ fn packet_error_message(value: &Value, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.chars().take(200).collect())
 }
 
+// 글쓰기 contentJson에 넣을 임시 문서 ID를 만드는 함수입니다.
 fn packet_id(prefix: &str) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    format!("SE-{prefix}-{nanos}")
+    format!("SE-{prefix}-{}", timestamp_nanos())
 }
 
+// 패킷 callback과 임시 ID에 사용할 현재 시간 값을 나노초 단위로 구하는 함수입니다.
+fn timestamp_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default()
+}
+
+// 후보 목록에서 시간값 기반으로 하나를 고르는 함수입니다.
+fn pseudo_index(len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+
+    (timestamp_nanos() as usize) % len
+}
+
+// 문자열을 reqwest HeaderValue로 변환하고 오류 메시지에 헤더 이름을 붙이는 함수입니다.
 fn header_value(value: &str, label: &str) -> AutomationResult<HeaderValue> {
     HeaderValue::from_str(value)
         .map_err(|error| AutomationError::new(format!("{label} 헤더 값 생성 실패: {error}")))

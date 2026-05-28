@@ -107,7 +107,7 @@ END
 END
 ```
 
-댓글쓰기 전에 프로필 생성이 필요하면 프로그램이 자동으로 `글쓰기 > 설정하기 > 소개 2222 > 완료` 흐름을 수행한다. 그 뒤 랜덤 게시글을 열고 댓글 등록 패킷을 실행한다.
+댓글쓰기 전에 프로필 생성이 필요하면 프로그램이 패킷 API로 프로필 소개 `2222`를 설정한다. 그 뒤 패킷 API로 랜덤 게시글을 선택하고 댓글 등록 패킷을 실행한다.
 
 ## 결과 확인 방법
 
@@ -127,7 +127,10 @@ END
 
 패킷 기반 함수는 아래와 같다.
 
-- 로그인 확인: `read_login_profile_from_packet`
+- 로그인 확인: `NaverPacketClient::read_login_profile`
+- 랜덤 종목 선택: `NaverPacketClient::select_random_discussion_room`
+- 랜덤 게시글 선택: `NaverPacketClient::select_random_discussion_post`
+- 프로필 소개 2222 설정: `NaverPacketClient::ensure_profile_intro_setup`
 - 글쓰기 등록 흐름: `submit_post_and_refresh`
 - 글쓰기 실제 패킷 전송: `NaverPacketClient::submit_post`
 - 댓글 등록 흐름: `submit_comment_and_refresh`

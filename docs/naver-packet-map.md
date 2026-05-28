@@ -1,19 +1,19 @@
 # 네이버 패킷 매핑 문서
 
-이 문서는 Wireshark와 Chrome F12 Network에서 확인한 HTTP 요청을 Rust 함수와 연결해 설명한다.
+이 문서는 Wireshark/tshark로 확인한 네이버 증권 패킷과 Rust 코드의 대응 관계를 설명한다.
 
 ## 패킷과 DOM의 차이
 
-패킷은 브라우저가 서버와 주고받는 HTTP 요청/응답이다.
+패킷은 브라우저와 서버가 주고받는 HTTP 요청/응답이다.
 
 예:
 
 ```text
+GET https://stock.naver.com/api/community/discussion/posts/by-item?...
 POST https://m.stock.naver.com/front-api/discussion/add
-content-type: application/json
 ```
 
-DOM selector는 화면의 버튼, 입력창, div 같은 HTML 요소를 찾기 위한 정보다.
+DOM selector는 화면의 버튼, 입력창, div 같은 HTML 요소를 찾는 정보다.
 
 예:
 
@@ -22,161 +22,185 @@ DOM selector는 화면의 버튼, 입력창, div 같은 HTML 요소를 찾기 �
 //*[@id="write-editor-modal"]/div[2]/div[3]/button
 ```
 
-따라서 `Ctrl+Shift+C`로 XPath를 보는 것은 패킷 분석이 아니라 화면 요소 분석이다. 이번 구현에서는 등록 요청은 패킷 기반 함수로 만들고, 화면 이동이나 랜덤 클릭처럼 UI 흐름이 필요한 부분은 DOM 자동화로 유지한다.
+따라서 `Ctrl+Shift+C`로 XPath를 보는 것은 패킷 분석이 아니다. 이번 구현은 Wireshark로 확인한 API 요청을 Rust 함수로 옮기고, Chrome은 로그인 세션과 결과 화면 확인에만 사용한다.
+
+## 사용한 캡처
+
+- `naver_random_capture.pcapng`: 토론급상승/상승/하락/거래량 클릭, 종목 이동, 프로필 소개 `2222` 입력 흐름
+- `naver_capture_success.pcapng`: 프로필 생성 성공 흐름
+- `keylogfile.txt`: TLS 1.3 복호화용 SSL key log
 
 ## 구현된 패킷 기반 함수
 
-| 기능 | 확인한 패킷 | Rust 함수 |
-| --- | --- | --- |
-| 로그인 확인 | `GET /getProfile?svc=my&callback=...` | `read_login_profile_from_packet` |
-| 글쓰기 txId 발급 | `POST /front-api/discussion/form?discussionType=...&itemCode=...` | `NaverPacketClient::submit_post` |
-| 글쓰기 등록 | `POST /front-api/discussion/add` | `NaverPacketClient::submit_post` |
-| 댓글 토큰 발급 | `GET /commentBox/cbox/web_naver_token_json.json?...` | `submit_comment_and_refresh` |
-| 댓글 등록 | `POST /commentBox/cbox/web_naver_create_json.json?...` | `submit_comment_and_refresh` |
+| 기능             | 확인한 패킷                                                                        | Rust 함수                                                     |
+| ---------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| 로그인 확인      | `GET static.nid.naver.com/getProfile?svc=my&callback=...`                          | `NaverPacketClient::read_login_profile`                       |
+| 랜덤 종목 선택   | `GET /api/community/discussion/rankings`, `GET /api/domestic/market/stock/default` | `NaverPacketClient::select_random_discussion_room`            |
+| 랜덤 게시글 선택 | `GET /api/community/discussion/posts/by-item`                                      | `NaverPacketClient::select_random_discussion_post`            |
+| 프로필 2222 설정 | `GET status`, `GET form`, `POST introduction/validate`, `PUT users/<profileId>`    | `NaverPacketClient::ensure_profile_intro_setup`               |
+| 글쓰기 txId 발급 | `POST /front-api/discussion/form`                                                  | `NaverPacketClient::submit_post` 내부의 `issue_post_tx_id`    |
+| 글쓰기 등록      | `POST /front-api/discussion/add`                                                   | `NaverPacketClient::submit_post`                              |
+| 댓글 토큰 발급   | `GET /commentBox/cbox/web_naver_token_json.json`                                   | `NaverPacketClient::submit_comment` 내부의 `issue_cbox_token` |
+| 댓글 등록        | `POST /commentBox/cbox/web_naver_create_json.json`                                 | `NaverPacketClient::submit_comment`                           |
 
-## 로그인 확인 패킷
+## 로그인 확인 getProfile
+
+패킷:
 
 ```text
 :method: GET
 :authority: static.nid.naver.com
-:scheme: https
 :path: /getProfile?svc=my&callback=<jsonp callback>
 ```
 
-응답에는 아래 값이 포함된다.
+응답에는 `rtn_cd`, `rtn_msg`, `nick_name`, `image_url`이 포함된다. `rtn_cd`가 `0`이면 로그인 성공으로 판단한다.
 
-```text
-rtn_cd
-rtn_msg
-nick_name
-image_url
-```
-
-코드 위치:
-
-```text
-src-tauri/src/naver_automation/packet_profile.rs
-```
-
-## 글쓰기 등록 패킷
-
-글쓰기 등록은 먼저 form 패킷으로 `txId`를 받아야 한다.
-
-```text
-:method: POST
-:authority: m.stock.naver.com
-:path: /front-api/discussion/form?discussionType=...&itemCode=...
-content-length: 0
-```
-
-응답:
-
-```text
-result.txId
-```
-
-이후 글쓰기 add 패킷을 보낸다.
-
-```text
-:method: POST
-:authority: m.stock.naver.com
-:path: /front-api/discussion/add
-content-type: application/json
-```
-
-요청 본문 주요 값:
-
-```text
-title
-contentJson
-discussionType
-itemCode
-txId
-inflow
-```
-
-응답 본문 주요 값:
-
-```text
-isSuccess: true
-result.id
-```
-
-코드 위치:
+코드:
 
 ```text
 src-tauri/src/naver_automation/packet_client.rs
-src-tauri/src/naver_automation/post_form.rs
+NaverPacketClient::read_login_profile
 ```
 
-`post_form.rs`는 흐름 함수이고, 실제 HTTP 패킷 전송은 `packet_client.rs`에서 Rust `reqwest`로 수행한다.
+## 랜덤 종목 선택
 
-## 댓글 등록 패킷
-
-댓글 등록은 먼저 토큰을 받고, 그 토큰으로 댓글 생성 요청을 보낸다.
-
-토큰 발급:
+패킷:
 
 ```text
-:method: GET
-:authority: apis.naver.com
-:path: /commentBox/cbox/web_naver_token_json.json?...
+GET /api/community/discussion/rankings?nationType=KOR&page=1&size=10&postType=HOT
+GET /api/domestic/market/stock/default?tradeType=KRX&marketType=ALL&orderType=up&startIdx=0&pageSize=10
+GET /api/domestic/market/stock/default?tradeType=KRX&marketType=ALL&orderType=down&startIdx=0&pageSize=10
+GET /api/domestic/market/stock/default?tradeType=KRX&marketType=ALL&orderType=quantTop&startIdx=0&pageSize=10
 ```
 
-응답:
-
-```text
-result.cbox_token
-```
-
-댓글 생성:
-
-```text
-:method: POST
-:authority: apis.naver.com
-:path: /commentBox/cbox/web_naver_create_json.json?ticket=finance&templateId=community&pool=cbox12&_cv=
-content-type: application/x-www-form-urlencoded
-```
-
-요청 본문 주요 값:
-
-```text
-objectId
-objectUrl
-contents
-cbox_token
-commentType=txt
-validateBanWords=true
-```
-
-코드 위치:
+코드:
 
 ```text
 src-tauri/src/naver_automation/packet_client.rs
-src-tauri/src/naver_automation/post_form.rs
+NaverPacketClient::select_random_discussion_room
 ```
 
-댓글 토큰 발급과 댓글 생성 HTTP 요청도 Rust `reqwest`가 직접 보낸다.
+처리 방식:
 
-## 패킷 증빙 파일
+1. 토론급상승/상승/하락/거래량 중 하나를 고른다.
+2. Rust가 해당 API를 호출한다.
+3. 응답 JSON에서 종목 코드와 종목명을 추출한다.
+4. 선택된 종목 코드로 토론방 URL을 만든다.
+5. Chrome은 생성된 URL로 이동만 한다.
 
-제공된 `naver_http2_detail.txt`에서 핵심 패킷 구간을 분리해 아래 파일로 저장했다.
+## 랜덤 게시글 선택
+
+패킷:
 
 ```text
-C:\Users\user\Desktop\post_packet.txt
-C:\Users\user\Desktop\comment_packet.txt
-C:\Users\user\Desktop\profile_packet.txt
+GET /api/community/discussion/posts/by-item?discussionType=domesticStock&itemCode=<종목코드>&isHolderOnly=false&excludesItemNews=false&isItemNewsOnly=false&isCleanbotPassedOnly=true&pageSize=10
 ```
 
-## 아직 DOM 기반인 부분
+코드:
 
-아래 작업은 현재 패킷 기반으로 완전히 대체하지 않았다.
+```text
+src-tauri/src/naver_automation/packet_client.rs
+NaverPacketClient::select_random_discussion_post
+```
 
-- 네이버 증권 토론 메인 이동
-- 랜덤 토론방 선택
-- 전체 토론글 보러가기 클릭
-- 글쓰기 모달 열기
-- 댓글 작성을 위한 랜덤 게시글 열기
-- 프로필 소개 `2222` 설정
+처리 방식:
 
-프로필 소개 저장 패킷은 현재 캡처에서 명확히 확인되지 않았다. 나중에 이 요청이 잡히면 `setup_profile_if_needed` 내부를 패킷 기반 함수로 교체할 수 있다.
+1. 현재 종목 토론방 URL에서 `discussionType`, `itemCode`를 계산한다.
+2. Rust가 `posts/by-item` API를 호출한다.
+3. 응답 JSON에서 게시글 ID를 추출한다.
+4. 선택된 게시글 ID로 상세 URL을 만든다.
+5. Chrome은 생성된 게시글 URL로 이동만 한다.
+
+## 프로필 소개 2222 설정
+
+성공 캡처에서 확인한 흐름:
+
+```text
+GET  /api/community/profile/users/status
+GET  /api/community/profile/users/form
+POST /api/community/profile/users/introduction/validate
+PUT  /api/community/profile/users/<profileId>
+GET  /api/community/profile/users/status
+```
+
+`introduction/validate` 요청 본문:
+
+```json
+{
+  "targetValue": "2222"
+}
+```
+
+`PUT /users/<profileId>` 요청 본문:
+
+```json
+{
+  "nickname": "<기존 nickname 또는 추천 nickname>",
+  "introduction": "2222",
+  "imageUrl": null,
+  "danglingImages": []
+}
+```
+
+코드:
+
+```text
+src-tauri/src/naver_automation/packet_client.rs
+NaverPacketClient::ensure_profile_intro_setup
+```
+
+처리 방식:
+
+1. `status`가 `existent`이면 이미 프로필이 있으므로 종료한다.
+2. `status`가 `inactive`이면 응답의 `profileId`를 사용한다.
+3. `form` API에서 기존 nickname과 imageUrl을 읽는다.
+4. nickname이 비어 있으면 nickname 추천 API를 호출한다.
+5. 소개 `2222`를 validate API로 검증한다.
+6. 성공 캡처와 동일하게 `PUT /users/<profileId>`로 저장한다.
+7. 다시 `status`를 호출해 `existent`가 되었는지 확인한다.
+
+## 글쓰기 등록
+
+패킷:
+
+```text
+POST /front-api/discussion/form?discussionType=<토론타입>&itemCode=<종목코드>
+POST /front-api/discussion/add
+```
+
+`add` 요청에는 `form` 응답의 `result.txId`가 필요하다. 직접 만든 `txId`를 보내면 `TX_ID_MISMATCH`가 발생한다.
+
+코드:
+
+```text
+src-tauri/src/naver_automation/packet_client.rs
+NaverPacketClient::submit_post
+```
+
+## 댓글 등록
+
+패킷:
+
+```text
+GET  /commentBox/cbox/web_naver_token_json.json?ticket=finance&templateId=community&pool=cbox12...
+POST /commentBox/cbox/web_naver_create_json.json?ticket=finance&templateId=community&pool=cbox12&_cv=
+```
+
+코드:
+
+```text
+src-tauri/src/naver_automation/packet_client.rs
+NaverPacketClient::submit_comment
+```
+
+## 남아 있는 브라우저 역할
+
+자동 제출 경로에서 서버 요청은 Rust 패킷 함수가 수행한다. 브라우저는 아래 역할로 남아 있다.
+
+- 네이버 로그인과 2차 인증을 사용자가 완료한 세션 제공
+- Chrome DevTools로 쿠키 읽기
+- Rust가 선택한 URL로 화면 이동
+- 등록 후 새로고침해서 사용자가 결과 확인
+- 수동 확인 모드에서 입력란 채우기와 버튼 강조
+
+이 구조 때문에 “등록 패킷을 프론트 fetch로 넘긴다”는 방식은 제거되었다.

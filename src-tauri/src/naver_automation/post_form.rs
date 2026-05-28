@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
+use super::packet_client::NaverPacketClient;
 use super::{AutomationError, AutomationResult, CdpClient};
 
 impl CdpClient {
@@ -16,19 +17,6 @@ impl CdpClient {
             sleep(Duration::from_secs(2));
         }
 
-        Ok(())
-    }
-
-    // 댓글 작성 전에 프로필 생성 요구가 있는지 확인하고 소개 2222 설정을 수행하는 함수입니다.
-    pub(super) fn ensure_profile_setup_for_comment(&mut self) -> AutomationResult<()> {
-        self.click_text("글쓰기", Duration::from_secs(20))?;
-        sleep(Duration::from_secs(2));
-
-        if self.setup_profile_if_needed()? {
-            return Ok(());
-        }
-
-        self.close_write_modal_if_present()?;
         Ok(())
     }
 
@@ -175,20 +163,23 @@ impl CdpClient {
     // Wireshark/F12에서 확인한 POST /front-api/discussion/add 패킷 구조로 글을 등록하는 함수입니다.
     pub(super) fn submit_post_and_refresh(
         &mut self,
+        packet_client: &NaverPacketClient,
         title: &str,
         body: &str,
     ) -> AutomationResult<()> {
         let current_url = self.current_url()?;
-        let packet_client = self.build_naver_packet_client()?;
         packet_client.submit_post(&current_url, title, body)?;
 
         self.reload_after_submit()
     }
 
     // Wireshark/F12에서 확인한 cbox 토큰 발급/댓글 생성 패킷 구조로 댓글을 등록하는 함수입니다.
-    pub(super) fn submit_comment_and_refresh(&mut self, body: &str) -> AutomationResult<()> {
+    pub(super) fn submit_comment_and_refresh(
+        &mut self,
+        packet_client: &NaverPacketClient,
+        body: &str,
+    ) -> AutomationResult<()> {
         let current_url = self.current_url()?;
-        let packet_client = self.build_naver_packet_client()?;
         packet_client.submit_comment(&current_url, body)?;
 
         self.reload_after_submit()

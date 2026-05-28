@@ -1,5 +1,4 @@
 use serde::Deserialize;
-use serde_json::Value;
 use std::io::ErrorKind;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -202,13 +201,4 @@ fn percent_encode(value: &str) -> String {
             _ => format!("%{byte:02X}"),
         })
         .collect()
-}
-
-// JSON 객체에서 문자열 필드를 안전하게 꺼내는 함수입니다.
-pub(super) fn string_field(value: &Value, field: &str) -> String {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .unwrap_or_default()
 }

@@ -112,7 +112,7 @@ wsl -d Ubuntu -- bash -lc 'cd ~/projects/pstmacro && git push -u origin codex/pa
 
 ## PR 내용
 
-```markdown
+````markdown
 ## 작업 배경
 
 네이버 증권 토론 자동화 기능을 기존 Python 기반 흐름이 아니라 현재 프로젝트의 Rust/Tauri/pnpm 환경에 맞춰 구현했습니다.
@@ -162,13 +162,15 @@ cd ~/projects/pstmacro/src-tauri
 cargo fmt --all
 cargo check
 ```
+````
 
 `cargo check` 성공을 확인했습니다.
 
 ## 참고 사항
 
-프로필 소개 `2222` 저장 패킷은 현재 캡처에서 명확히 확인되지 않아 UI 자동화로 유지했습니다.
-추후 해당 저장 요청의 POST/PUT/PATCH 패킷을 확보하면 별도 패킷 기반 함수로 교체할 수 있습니다.
+추가 Wireshark 캡처를 반영해 getProfile 로그인 확인, 랜덤 종목 선택, 랜덤 게시글 선택, 프로필 소개 `2222` 설정도 Rust `reqwest` 패킷 함수로 전환했습니다.
+Chrome DevTools는 로그인 세션 쿠키 추출, 화면 이동, 등록 후 새로고침에 사용합니다.
+
 ```
 
 ## 10. PR 생성 버튼 클릭
@@ -176,3 +178,4 @@ cargo check
 내용을 확인한 뒤 `Create pull request` 버튼을 누른다.
 
 팀에서 바로 리뷰하지 말고 초안으로 보라고 했다면 `Create draft pull request`를 선택한다.
+```
