@@ -1,17 +1,14 @@
-import { MantineProvider } from "@mantine/core";
 import React from "react";
 import ReactDOM from "react-dom/client";
 
 import { MacroEditorPage } from "@/features/macro-editor/macro-editor-page";
 
-import "@mantine/core/styles.css";
-
 import { AppProviders } from "./providers";
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <MantineProvider>
+    <AppProviders>
       <MacroEditorPage />
-    </MantineProvider>
+    </AppProviders>
   </React.StrictMode>,
 );
