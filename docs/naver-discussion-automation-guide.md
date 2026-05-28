@@ -128,15 +128,20 @@ END
 패킷 기반 함수는 아래와 같다.
 
 - 로그인 확인: `read_login_profile_from_packet`
-- 글쓰기 등록: `submit_post_and_refresh`
-- 댓글 등록: `submit_comment_and_refresh`
+- 글쓰기 등록 흐름: `submit_post_and_refresh`
+- 글쓰기 실제 패킷 전송: `NaverPacketClient::submit_post`
+- 댓글 등록 흐름: `submit_comment_and_refresh`
+- 댓글 실제 패킷 전송: `NaverPacketClient::submit_comment`
 
 글쓰기 등록 패킷:
 
 ```text
+POST https://m.stock.naver.com/front-api/discussion/form?discussionType=...&itemCode=...
 POST https://m.stock.naver.com/front-api/discussion/add
 content-type: application/json
 ```
+
+`form` 응답의 `result.txId`를 받은 뒤 `add` 요청에 넣어야 한다.
 
 댓글 등록 패킷:
 
@@ -161,3 +166,4 @@ C:\Users\user\Desktop\profile_packet.txt
 - 로그인은 Chrome에서 먼저 완료해야 한다.
 - 네이버페이 약관 동의 화면이 뜨면 사용자가 직접 확인하고 처리해야 한다.
 - 실제 서비스 정책 위반 여부는 별도로 확인해야 한다.
+- 실제 글쓰기/댓글 생성 HTTP 요청은 Chrome JavaScript가 아니라 Rust `reqwest` 클라이언트가 보낸다.

@@ -1,6 +1,7 @@
 mod browser_flow;
 mod devtools_connection;
 mod discussion_room;
+mod packet_client;
 mod packet_profile;
 mod post_form;
 pub mod types;

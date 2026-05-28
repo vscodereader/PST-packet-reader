@@ -121,8 +121,9 @@ wsl -d Ubuntu -- bash -lc 'cd ~/projects/pstmacro && git push -u origin codex/pa
 ## 주요 변경 사항
 
 - 네이버 로그인 상태 확인을 `GET /getProfile?svc=my&callback=...` 패킷 기반 함수로 구현했습니다.
-- 글쓰기 등록을 `POST https://m.stock.naver.com/front-api/discussion/add` 패킷 기반 함수로 구현했습니다.
+- 글쓰기 등록을 `POST /front-api/discussion/form`으로 `txId`를 받은 뒤 `POST https://m.stock.naver.com/front-api/discussion/add`를 호출하는 패킷 기반 함수로 구현했습니다.
 - 댓글 등록을 cbox token 발급 요청과 `POST /commentBox/cbox/web_naver_create_json.json` 패킷 기반 함수로 구현했습니다.
+- 실제 글쓰기/댓글 HTTP 요청은 Chrome JavaScript `fetch`가 아니라 Rust `reqwest` 클라이언트가 직접 전송합니다.
 - CLI에서 `1. 글쓰기`, `2. 댓글쓰기`를 선택할 수 있게 했습니다.
 - 글쓰기 선택 시 제목/본문을 입력받고 등록까지 실행합니다.
 - 댓글쓰기 선택 시 댓글 내용을 입력받고 랜덤 게시글을 열어 댓글 등록까지 실행합니다.
@@ -134,6 +135,8 @@ wsl -d Ubuntu -- bash -lc 'cd ~/projects/pstmacro && git push -u origin codex/pa
 ## 패킷 근거
 
 - 글쓰기 등록:
+  - `POST https://m.stock.naver.com/front-api/discussion/form?discussionType=...&itemCode=...`
+  - 응답에서 `result.txId` 확인
   - `POST https://m.stock.naver.com/front-api/discussion/add`
   - `content-type: application/json`
   - 요청 본문에 `title`, `contentJson`, `discussionType`, `itemCode`, `txId`, `inflow` 포함

@@ -185,8 +185,8 @@ fn target_label(target: &AutomationTarget) -> &'static str {
 // 선택한 작업의 등록 동작 설명을 만드는 함수입니다.
 fn target_submit_label(target: &AutomationTarget) -> &'static str {
     match target {
-        AutomationTarget::Post => "등록하기 버튼 클릭",
-        AutomationTarget::Comment => "댓글 입력 후 Enter",
+        AutomationTarget::Post => "패킷 기반 글쓰기 등록",
+        AutomationTarget::Comment => "패킷 기반 댓글 등록",
     }
 }
 

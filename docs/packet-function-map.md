@@ -29,37 +29,54 @@ Wireshark/F12에서 확인한 패킷:
 
 Wireshark/F12에서 확인한 패킷:
 
+- txId 발급:
+  - `:method`: `POST`
+  - `:authority`: `m.stock.naver.com`
+  - `:path`: `/front-api/discussion/form?discussionType=...&itemCode=...`
+  - 응답 본문 핵심값: `result.txId`
+- 글 등록:
+  - `:method`: `POST`
+  - `:authority`: `m.stock.naver.com`
+  - `:path`: `/front-api/discussion/add`
+  - `content-type`: `application/json`
+
+`/front-api/discussion/add` 요청의 `txId`는 `/front-api/discussion/form` 응답의 `result.txId`와 같아야 한다.
+
+글 등록 요청 본문 핵심값:
+
 - `:method`: `POST`
 - `:authority`: `m.stock.naver.com`
 - `:path`: `/front-api/discussion/add`
 - `content-type`: `application/json`
-- 요청 본문 핵심값:
-  - `title`
-  - `contentJson.document.version: 2.9.0`
-  - `contentJson.document.theme: default`
-  - `contentJson.document.language: ko-KR`
-  - `contentJson.document.components[0].@ctype: text`
-  - `contentJson.document.components[0].value[0].@ctype: paragraph`
-  - `contentJson.document.components[0].value[0].nodes[0].@ctype: textNode`
-  - `discussionType`
-  - `itemCode`
-  - `txId`
-  - `inflow: NFS-P-P`
+- `title`
+- `contentJson.document.version: 2.9.0`
+- `contentJson.document.theme: default`
+- `contentJson.document.language: ko-KR`
+- `contentJson.document.components[0].@ctype: text`
+- `contentJson.document.components[0].value[0].@ctype: paragraph`
+- `contentJson.document.components[0].value[0].nodes[0].@ctype: textNode`
+- `discussionType`
+- `itemCode`
+- `txId`
+- `inflow: NFS-P-P`
 - 응답 본문 핵심값:
   - `isSuccess: true`
   - `result.id`
 
 코드 위치:
 
+- `src-tauri/src/naver_automation/packet_client.rs`
 - `src-tauri/src/naver_automation/post_form.rs`
-- 함수: `CdpClient::submit_post_and_refresh`
+- 흐름 함수: `CdpClient::submit_post_and_refresh`
+- 실제 HTTP 패킷 함수: `NaverPacketClient::submit_post`
 
 역할:
 
 1. 현재 URL에서 종목 코드와 토론 타입을 읽습니다.
-2. 패킷에서 확인한 `contentJson` 구조로 글 제목/본문 요청을 만듭니다.
-3. 로그인된 Chrome 탭 안에서 `fetch`를 실행해 브라우저 쿠키를 그대로 사용합니다.
-4. 성공하면 화면을 새로고침합니다.
+2. Chrome DevTools에서 로그인 쿠키를 읽어 Rust HTTP 클라이언트에 넣습니다.
+3. Rust `reqwest`로 form 패킷을 보내 `txId`를 받습니다.
+4. Rust `reqwest`로 add 패킷을 보내 글을 등록합니다.
+5. 성공하면 화면을 새로고침합니다.
 
 ## 댓글 등록
 
@@ -85,15 +102,18 @@ Wireshark/F12에서 확인한 패킷:
 
 코드 위치:
 
+- `src-tauri/src/naver_automation/packet_client.rs`
 - `src-tauri/src/naver_automation/post_form.rs`
-- 함수: `CdpClient::submit_comment_and_refresh`
+- 흐름 함수: `CdpClient::submit_comment_and_refresh`
+- 실제 HTTP 패킷 함수: `NaverPacketClient::submit_comment`
 
 역할:
 
 1. 현재 게시글 URL에서 `objectId`를 읽습니다.
-2. 패킷에서 확인한 토큰 API로 `cbox_token`을 받습니다.
-3. 패킷에서 확인한 댓글 생성 API에 `contents`와 `cbox_token`을 전송합니다.
-4. 성공하면 화면을 새로고침합니다.
+2. Chrome DevTools에서 로그인 쿠키를 읽어 Rust HTTP 클라이언트에 넣습니다.
+3. Rust `reqwest`로 토큰 API를 호출해 `cbox_token`을 받습니다.
+4. Rust `reqwest`로 댓글 생성 API에 `contents`와 `cbox_token`을 전송합니다.
+5. 성공하면 화면을 새로고침합니다.
 
 ## DOM 자동화 흐름
 

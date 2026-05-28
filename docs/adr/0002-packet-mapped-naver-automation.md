@@ -35,6 +35,36 @@ Accepted
 
 ### 글쓰기 등록
 
+글쓰기 등록은 두 단계로 구성된다.
+
+1. 글쓰기 form 생성
+   - Method: `POST`
+   - Authority: `m.stock.naver.com`
+   - Path: `/front-api/discussion/form?discussionType=...&itemCode=...`
+   - Response Body 주요 값: `result.txId`
+
+2. 글 생성
+   - Method: `POST`
+   - Authority: `m.stock.naver.com`
+   - Path: `/front-api/discussion/add`
+   - Content-Type: `application/json`
+   - Request Body 주요 값:
+     - `title`
+     - `contentJson`
+     - `discussionType`
+     - `itemCode`
+     - `txId`
+     - `inflow`
+   - Response Body 주요 값:
+     - `isSuccess: true`
+     - `result.id`
+
+`/front-api/discussion/add`에 임의의 `txId`를 보내면 `TX_ID_MISMATCH` 오류가 발생한다. 따라서 먼저 `/front-api/discussion/form` 응답의 `result.txId`를 받은 뒤, 그 값을 `/front-api/discussion/add` 요청에 그대로 사용한다.
+
+이 패킷은 네이버 증권 토론방에 새 글을 등록하는 데 사용한다.
+
+### 기존에 확인한 add 패킷
+
 - Method: `POST`
 - Authority: `m.stock.naver.com`
 - Path: `/front-api/discussion/add`
@@ -46,12 +76,6 @@ Accepted
   - `itemCode`
   - `txId`
   - `inflow`
-- Response Body 주요 값:
-  - `isSuccess: true`
-  - `result.id`
-
-이 패킷은 네이버 증권 토론방에 새 글을 등록하는 데 사용한다.
-
 ### 댓글 등록
 
 댓글 등록은 두 단계로 구성된다.
@@ -85,7 +109,8 @@ Accepted
 - `browser_flow.rs`: 공통 브라우저 이동/약관/페이지 준비
 - `packet_profile.rs`: getProfile 패킷 기반 로그인 확인
 - `discussion_room.rs`: 토론방 이동 및 랜덤 종목/게시글 선택
-- `post_form.rs`: 프로필 설정, 글쓰기 등록, 댓글 등록
+- `packet_client.rs`: Chrome 쿠키를 기반으로 Rust `reqwest`가 실제 네이버 HTTP 패킷 요청 수행
+- `post_form.rs`: 프로필 설정, 글쓰기 등록 호출, 댓글 등록 호출
 - `types.rs`: 요청/응답 구조체
 - `bin/naver_discussion_cli.rs`: PowerShell/WSL에서 실행하는 CLI
 
@@ -95,7 +120,7 @@ Accepted
 - `submit_comment_and_refresh`: cbox token 발급 후 `POST /web_naver_create_json.json` 패킷 구조를 재현한다.
 - `read_login_profile_from_packet`: `GET /getProfile` 패킷 구조를 재현한다.
 
-네이버 쿠키 값은 코드에 저장하지 않는다. 함수는 로그인된 Chrome 탭 안에서 `fetch`를 실행하므로, Chrome이 가진 현재 세션 쿠키를 그대로 사용한다.
+네이버 쿠키 값은 코드에 저장하지 않는다. Rust는 Chrome DevTools의 `Network.getCookies`로 현재 로그인 세션 쿠키를 읽고, 실제 HTTP 요청은 Rust `reqwest` 클라이언트가 직접 보낸다. 따라서 패킷 요청 주체는 브라우저 프론트 런타임이 아니라 Rust 백엔드다.
 
 ## 현재 DOM 기반으로 남겨둔 부분
 

@@ -29,7 +29,8 @@ DOM selector는 화면의 버튼, 입력창, div 같은 HTML 요소를 찾기 �
 | 기능 | 확인한 패킷 | Rust 함수 |
 | --- | --- | --- |
 | 로그인 확인 | `GET /getProfile?svc=my&callback=...` | `read_login_profile_from_packet` |
-| 글쓰기 등록 | `POST /front-api/discussion/add` | `submit_post_and_refresh` |
+| 글쓰기 txId 발급 | `POST /front-api/discussion/form?discussionType=...&itemCode=...` | `NaverPacketClient::submit_post` |
+| 글쓰기 등록 | `POST /front-api/discussion/add` | `NaverPacketClient::submit_post` |
 | 댓글 토큰 발급 | `GET /commentBox/cbox/web_naver_token_json.json?...` | `submit_comment_and_refresh` |
 | 댓글 등록 | `POST /commentBox/cbox/web_naver_create_json.json?...` | `submit_comment_and_refresh` |
 
@@ -59,6 +60,23 @@ src-tauri/src/naver_automation/packet_profile.rs
 
 ## 글쓰기 등록 패킷
 
+글쓰기 등록은 먼저 form 패킷으로 `txId`를 받아야 한다.
+
+```text
+:method: POST
+:authority: m.stock.naver.com
+:path: /front-api/discussion/form?discussionType=...&itemCode=...
+content-length: 0
+```
+
+응답:
+
+```text
+result.txId
+```
+
+이후 글쓰기 add 패킷을 보낸다.
+
 ```text
 :method: POST
 :authority: m.stock.naver.com
@@ -87,8 +105,11 @@ result.id
 코드 위치:
 
 ```text
+src-tauri/src/naver_automation/packet_client.rs
 src-tauri/src/naver_automation/post_form.rs
 ```
+
+`post_form.rs`는 흐름 함수이고, 실제 HTTP 패킷 전송은 `packet_client.rs`에서 Rust `reqwest`로 수행한다.
 
 ## 댓글 등록 패킷
 
@@ -131,8 +152,11 @@ validateBanWords=true
 코드 위치:
 
 ```text
+src-tauri/src/naver_automation/packet_client.rs
 src-tauri/src/naver_automation/post_form.rs
 ```
+
+댓글 토큰 발급과 댓글 생성 HTTP 요청도 Rust `reqwest`가 직접 보낸다.
 
 ## 패킷 증빙 파일
 
