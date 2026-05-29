@@ -1,19 +1,306 @@
-import { Center, Stack, Text, ThemeIcon } from "@mantine/core";
+import {
+  Badge,
+  Box,
+  Button,
+  Card,
+  Center,
+  Container,
+  Group,
+  Menu,
+  Pagination,
+  Stack,
+  Text,
+  TextInput,
+  ThemeIcon,
+  Title,
+} from "@mantine/core";
+import { notifications } from "@mantine/notifications";
+import { useState } from "react";
 
+import { KIND, KIND_ICON, LIBRARY, STATUS_LABEL } from "@/shared/data/mock";
+import type { GoFn, LibraryPost, ModeValue } from "@/shared/data/types";
 import { Icon } from "@/shared/ui/icons";
 
-export function Posts() {
+import { PublishModal } from "./publish-modal";
+import { WriterModal } from "./writer-modal";
+
+const PER_PAGE = 10;
+
+function toast(message: string, color = "blue") {
+  notifications.show({ message, color, autoClose: 2400 });
+}
+
+export function Posts({ go }: { go: GoFn }) {
+  const [posts, setPosts] = useState<LibraryPost[]>(() =>
+    LIBRARY.map((p) => ({ ...p })),
+  );
+  const [filter, setFilter] = useState<"all" | ModeValue>("all");
+  const [q, setQ] = useState("");
+  const [page, setPage] = useState(1);
+  const [writerOpen, setWriterOpen] = useState(false);
+  const [writerDoc, setWriterDoc] = useState<LibraryPost | null>(null);
+  const [publishDoc, setPublishDoc] = useState<LibraryPost | null>(null);
+
+  const upsert = (doc: LibraryPost) =>
+    setPosts((ps) => {
+      const i = ps.findIndex((p) => p.id === doc.id);
+      if (i < 0) return [doc, ...ps];
+      const c = [...ps];
+      c[i] = { ...c[i], ...doc };
+      return c;
+    });
+  const openNew = () => {
+    setWriterDoc(null);
+    setWriterOpen(true);
+  };
+  const openEdit = (d: LibraryPost) => {
+    setWriterDoc(d);
+    setWriterOpen(true);
+  };
+  const dup = (d: LibraryPost) => {
+    upsert({
+      ...d,
+      id: "p" + Date.now(),
+      title: d.title + " (복사본)",
+      status: "draft",
+      updated: "방금 전",
+    });
+    toast("복제했어요", "green");
+  };
+  const del = (id: string) => {
+    setPosts((ps) => ps.filter((p) => p.id !== id));
+    toast("삭제했어요");
+  };
+
+  const tabs: { v: "all" | ModeValue; t: string; n: number }[] = [
+    { v: "all", t: "전체", n: posts.length },
+    { v: "post", t: "글", n: posts.filter((p) => p.kind === "post").length },
+    {
+      v: "comment",
+      t: "댓글",
+      n: posts.filter((p) => p.kind === "comment").length,
+    },
+    {
+      v: "both",
+      t: "글+댓글",
+      n: posts.filter((p) => p.kind === "both").length,
+    },
+  ];
+  const filtered = posts.filter(
+    (p) =>
+      (filter === "all" || p.kind === filter) && (!q || p.title.includes(q)),
+  );
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PER_PAGE));
+  const curPage = Math.min(page, totalPages);
+  const items = filtered.slice((curPage - 1) * PER_PAGE, curPage * PER_PAGE);
+
   return (
-    <Center h="100%" p="xl">
-      <Stack align="center" gap="xs">
-        <ThemeIcon size={48} radius="md" variant="light">
-          <Icon.pencil size={28} />
-        </ThemeIcon>
-        <Text fw={700}>글 관리</Text>
-        <Text c="dimmed" size="sm">
-          구현 예정
-        </Text>
+    <Container size={1020} py={32} px={36}>
+      <Group justify="space-between" align="flex-end" mb={22} wrap="wrap">
+        <Box>
+          <Title order={1} fz={25} fw={800}>
+            글 관리
+          </Title>
+          <Text size="sm" c="dimmed" mt={6}>
+            작성한 글·댓글을 모아두고, 원하는 글을 골라 여러 계정에 게시하세요.
+          </Text>
+        </Box>
+        <Button
+          size="md"
+          leftSection={<Icon.pencil size={18} />}
+          onClick={openNew}
+        >
+          글쓰기
+        </Button>
+      </Group>
+
+      <Group justify="space-between" mb={18} wrap="wrap">
+        <Group gap={6}>
+          {tabs.map((t) => (
+            <Button
+              key={t.v}
+              size="xs"
+              radius="xl"
+              variant={t.v === filter ? "filled" : "default"}
+              color={t.v === filter ? "dark" : "gray"}
+              onClick={() => {
+                setFilter(t.v);
+                setPage(1);
+              }}
+            >
+              {t.t}
+              <Text component="span" ml={6} fz={11} opacity={0.7}>
+                {t.n}
+              </Text>
+            </Button>
+          ))}
+        </Group>
+        <TextInput
+          size="sm"
+          w={240}
+          placeholder="제목 검색"
+          leftSection={<Icon.search size={17} />}
+          value={q}
+          onChange={(e) => {
+            setQ(e.currentTarget.value);
+            setPage(1);
+          }}
+        />
+      </Group>
+
+      <Stack gap={10}>
+        {items.map((d) => {
+          const st = STATUS_LABEL[d.status] ?? { t: d.status, c: "gray" };
+          const kd = KIND[d.kind] ?? KIND.post!;
+          const KI =
+            Icon[(KIND_ICON[d.kind] ?? "fileText") as keyof typeof Icon];
+          const isComment = d.kind === "comment";
+          const meta = isComment
+            ? `댓글 ${(d.comments ?? []).filter(Boolean).length}종`
+            : `${d.words}자`;
+          return (
+            <Card
+              key={d.id}
+              withBorder
+              padding="md"
+              radius="md"
+              onClick={() => openEdit(d)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 16,
+                cursor: "pointer",
+              }}
+            >
+              <ThemeIcon
+                size={44}
+                radius="md"
+                variant="light"
+                color={isComment ? "forum" : "gray"}
+              >
+                <KI size={21} />
+              </ThemeIcon>
+              <Box style={{ flex: 1, minWidth: 0 }}>
+                <Group gap={8} mb={4} wrap="nowrap">
+                  <Badge size="sm" color={kd.c} variant="light">
+                    {kd.t}
+                  </Badge>
+                  <Text fz={15} fw={700} truncate>
+                    {d.title}
+                  </Text>
+                </Group>
+                <Text fz={13} c="dimmed" truncate mb={8}>
+                  {d.excerpt}
+                </Text>
+                <Group gap={9}>
+                  <Badge size="sm" color={st.c} variant="light">
+                    {st.t}
+                  </Badge>
+                  <Text fz={11.5} c="dimmed">
+                    {meta} · {d.updated}
+                  </Text>
+                </Group>
+              </Box>
+              <Button
+                size="sm"
+                leftSection={<Icon.send size={15} />}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setPublishDoc(d);
+                }}
+              >
+                게시하기
+              </Button>
+              <Menu position="bottom-end" width={150}>
+                <Menu.Target>
+                  <Button
+                    variant="subtle"
+                    color="gray"
+                    px={8}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <Icon.dots size={18} />
+                  </Button>
+                </Menu.Target>
+                <Menu.Dropdown onClick={(e) => e.stopPropagation()}>
+                  <Menu.Item
+                    leftSection={<Icon.pencil size={16} />}
+                    onClick={() => openEdit(d)}
+                  >
+                    편집
+                  </Menu.Item>
+                  <Menu.Item
+                    leftSection={<Icon.copy size={16} />}
+                    onClick={() => dup(d)}
+                  >
+                    복제
+                  </Menu.Item>
+                  <Menu.Item
+                    color="red"
+                    leftSection={<Icon.trash size={16} />}
+                    onClick={() => del(d.id)}
+                  >
+                    삭제
+                  </Menu.Item>
+                </Menu.Dropdown>
+              </Menu>
+            </Card>
+          );
+        })}
+        {items.length === 0 && (
+          <Center py={60}>
+            <Stack align="center" gap={4}>
+              <Icon.fileText size={40} color="var(--mantine-color-gray-5)" />
+              <Text fw={600} c="gray.7">
+                글이 없어요
+              </Text>
+              <Text size="sm" c="dimmed" mb={14}>
+                새 글을 작성해 목록에 추가해보세요.
+              </Text>
+              <Button leftSection={<Icon.pencil size={16} />} onClick={openNew}>
+                글쓰기
+              </Button>
+            </Stack>
+          </Center>
+        )}
       </Stack>
-    </Center>
+
+      {filtered.length > 0 && (
+        <Group justify="space-between" mt={20}>
+          <Text size="xs" c="dimmed">
+            총 {filtered.length}개 · {curPage}/{totalPages} 페이지
+          </Text>
+          <Pagination
+            size="sm"
+            total={totalPages}
+            value={curPage}
+            onChange={setPage}
+          />
+        </Group>
+      )}
+
+      <WriterModal
+        open={writerOpen}
+        doc={writerDoc}
+        drafts={posts.filter((p) => p.status === "draft")}
+        onClose={() => setWriterOpen(false)}
+        onSave={(doc) => {
+          upsert(doc);
+          setWriterOpen(false);
+          toast("글을 저장했어요", "green");
+        }}
+        onSaveDraft={upsert}
+        onDeleteDraft={(d) => {
+          setPosts((ps) => ps.filter((p) => p.id !== d.id));
+          toast("임시저장을 삭제했어요");
+        }}
+      />
+      <PublishModal
+        open={!!publishDoc}
+        doc={publishDoc}
+        onClose={() => setPublishDoc(null)}
+        go={go}
+      />
+    </Container>
   );
 }
