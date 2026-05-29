@@ -39,7 +39,9 @@ pub fn chrome_path() -> Result<String, String> {
 
 // ADB
 pub const ADB_AIRPLANE_ENABLE_SECS: u64 = 2;
-pub const ADB_AIRPLANE_DISABLE_SECS: u64 = 8;
+pub const ADB_INTERNET_POLL_INTERVAL_MS: u64 = 1_000;
+pub const ADB_INTERNET_TIMEOUT_SECS: u64 = 30;
+pub const ADB_INTERNET_PING_HOST: &str = "8.8.8.8";
 
 // 앱 데이터 경로
 pub const APP_DATA_SUBDIR: &str = ".local";
