@@ -1,5 +1,9 @@
 import { Box } from "@mantine/core";
 
+import bandLogo from "@/assets/logos/band.svg";
+import instagramLogo from "@/assets/logos/instagram.svg";
+import navercafeLogo from "@/assets/logos/navercafe.svg";
+import threadsLogo from "@/assets/logos/threads.svg";
 import { PLATFORM } from "@/shared/data/mock";
 import type { PlatformId } from "@/shared/data/types";
 
@@ -11,19 +15,45 @@ const INITIAL: Record<PlatformId, string> = {
   threads: "@",
 };
 
+/** Real brand marks; platforms absent here fall back to the initial badge. */
+const LOGO: Partial<Record<PlatformId, string>> = {
+  naver: navercafeLogo,
+  band: bandLogo,
+  instagram: instagramLogo,
+  threads: threadsLogo,
+};
+
 interface PlatformLogoProps {
   id: PlatformId;
   size?: number;
   dim?: boolean;
 }
 
-/** Colored rounded badge standing in for each platform's brand mark. */
+/** Each platform's brand mark — the real SVG logo, or a colored initial badge. */
 export function PlatformLogo({
   id,
   size = 38,
   dim = false,
 }: PlatformLogoProps) {
   const p = PLATFORM[id];
+  const logo = LOGO[id];
+
+  if (logo) {
+    return (
+      <img
+        src={logo}
+        alt={p?.name ?? id}
+        width={size}
+        height={size}
+        style={{
+          flexShrink: 0,
+          borderRadius: size * 0.32,
+          opacity: dim ? 0.5 : 1,
+        }}
+      />
+    );
+  }
+
   return (
     <Box
       style={{
