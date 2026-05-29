@@ -22,6 +22,14 @@ pub(crate) fn now_millis() -> u128 {
         .as_millis()
 }
 
+/// 현재 시간을 초 단위 Unix timestamp로 반환한다.
+pub(crate) fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

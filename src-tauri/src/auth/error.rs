@@ -6,14 +6,10 @@ pub enum OrchestratorError {
     Io(#[from] io::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("wreq: {0}")]
-    Http(#[from] wreq::Error),
-    #[error("zip: {0}")]
-    Zip(#[from] zip::result::ZipError),
+    #[error("adb: {0}")]
+    Adb(#[from] adb_client::RustADBError),
     #[error("runtime path not available: APPDATA is not set")]
     MissingAppData,
-    #[error("adb.exe not found after scrcpy extraction")]
-    MissingAdb,
     #[error("account not found: {0}")]
     AccountNotFound(String),
     #[error("command failed: {0}")]

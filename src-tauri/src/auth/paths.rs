@@ -15,15 +15,12 @@ pub fn paths_for_root(root: impl Into<PathBuf>) -> RuntimePaths {
     let root = root.into();
     let accounts_dir = root.join(config::DIR_ACCOUNTS);
     let cookies_dir = root.join(config::DIR_COOKIES);
-    let scrcpy_dir = root.join(config::DIR_SCRCPY);
     let logs_dir = root.join(config::DIR_LOGS);
     RuntimePaths {
         accounts_file: accounts_dir.join(config::FILE_ACCOUNTS),
-        adb_path: scrcpy_dir.join(config::FILE_ADB),
         root,
         accounts_dir,
         cookies_dir,
-        scrcpy_dir,
         logs_dir,
     }
 }
@@ -32,7 +29,6 @@ pub fn paths_for_root(root: impl Into<PathBuf>) -> RuntimePaths {
 pub fn ensure_runtime_dirs(paths: &RuntimePaths) -> Result<(), OrchestratorError> {
     fs::create_dir_all(&paths.accounts_dir)?;
     fs::create_dir_all(&paths.cookies_dir)?;
-    fs::create_dir_all(&paths.scrcpy_dir)?;
     fs::create_dir_all(&paths.logs_dir)?;
     Ok(())
 }
@@ -51,7 +47,6 @@ mod tests {
             paths.accounts_file,
             paths.accounts_dir.join("accounts.json")
         );
-        assert_eq!(paths.adb_path, paths.scrcpy_dir.join("adb.exe"));
         assert!(paths.cookies_dir.ends_with("cookies"));
         assert!(paths.logs_dir.ends_with("logs"));
     }

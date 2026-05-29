@@ -6,10 +6,8 @@ pub struct RuntimePaths {
     pub root: PathBuf,
     pub accounts_dir: PathBuf,
     pub cookies_dir: PathBuf,
-    pub scrcpy_dir: PathBuf,
     pub logs_dir: PathBuf,
     pub accounts_file: PathBuf,
-    pub adb_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

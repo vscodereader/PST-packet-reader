@@ -22,10 +22,9 @@ tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-wreq = "6.0.0-rc.28"
-zip = "2"
 tokio = { version = "1", features = ["full"] }
 thiserror = "1"
+adb_client = { version = "3.2.1", features = ["usb"] }
 
 [dev-dependencies]
 tempfile = "3"
