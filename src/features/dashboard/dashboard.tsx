@@ -234,16 +234,16 @@ export function Dashboard({ go }: { go: GoFn }) {
                 </Box>
               </Group>
               {p.soon ? (
-                <Badge color="blue" variant="light">
+                <Badge size="sm" color="blue" variant="light">
                   출시 예정
                 </Badge>
               ) : (
                 <Group gap={8}>
-                  <Badge color="green" variant="light">
+                  <Badge size="sm" color="green" variant="light">
                     활성 {activeCount}
                   </Badge>
                   {errCount > 0 && (
-                    <Badge color="red" variant="light">
+                    <Badge size="sm" color="red" variant="light">
                       오류 {errCount}
                     </Badge>
                   )}

@@ -43,8 +43,10 @@ const band: MantineColorsTuple = [
 
 export const theme = createTheme({
   primaryColor: "blue",
+  // @fontsource/pretendard registers the family "Pretendard" (imported in
+  // providers.tsx). Lead with it so the loaded face is the one that applies.
   fontFamily:
-    "Pretendard Variable, Pretendard, -apple-system, BlinkMacSystemFont, system-ui, 'Segoe UI', Roboto, sans-serif",
+    "Pretendard, -apple-system, BlinkMacSystemFont, system-ui, 'Segoe UI', Roboto, sans-serif",
   defaultRadius: "sm",
   colors: { forum, naver, band },
 });

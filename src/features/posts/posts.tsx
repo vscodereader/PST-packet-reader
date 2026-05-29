@@ -167,6 +167,7 @@ export function Posts({ go }: { go: GoFn }) {
               onClick={() => openEdit(d)}
               style={{
                 display: "flex",
+                flexDirection: "row",
                 alignItems: "center",
                 gap: 16,
                 cursor: "pointer",

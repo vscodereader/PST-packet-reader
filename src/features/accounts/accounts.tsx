@@ -191,6 +191,7 @@ function StatusBadge({
   const st = STATUS_ACCOUNT[value] ?? { t: value, c: "gray" };
   return (
     <Badge
+      size="sm"
       color={st.c}
       variant="light"
       style={{ cursor: "pointer" }}
@@ -368,7 +369,11 @@ export function Accounts({ go }: { go: GoFn }) {
           >
             내보내기
           </Button>
-          <Button leftSection={<Icon.plus size={17} />} onClick={addRow}>
+          <Button
+            size="md"
+            leftSection={<Icon.plus size={17} />}
+            onClick={addRow}
+          >
             계정 추가
           </Button>
         </Group>
@@ -391,7 +396,7 @@ export function Accounts({ go }: { go: GoFn }) {
           <Text size="xs" c="dimmed">
             곧 같은 방식으로 계정을 추가할 수 있어요.
           </Text>
-          <Badge color="blue" variant="light" ml="auto">
+          <Badge size="sm" color="blue" variant="light" ml="auto">
             출시 예정
           </Badge>
         </Group>

@@ -653,6 +653,7 @@ function WriterModalInner({
                       >
                         <Group gap={10} wrap="nowrap">
                           <Badge
+                            size="sm"
                             variant="light"
                             color="blue"
                             styles={{ label: { fontFamily: "monospace" } }}

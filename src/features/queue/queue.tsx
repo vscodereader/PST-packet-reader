@@ -107,6 +107,7 @@ export function Queue({ go }: { go: GoFn }) {
           </Text>
         </Box>
         <Button
+          size="md"
           leftSection={<Icon.pencil size={17} />}
           onClick={() => go("posts")}
         >
@@ -224,7 +225,7 @@ export function Queue({ go }: { go: GoFn }) {
 
               {running ? (
                 <Group gap={8} wrap="nowrap">
-                  <Badge color="blue" variant="light">
+                  <Badge size="sm" color="blue" variant="light">
                     처리중 {q.progress?.[0]}/{q.progress?.[1]}
                   </Badge>
                   <Icon.chevronRight
@@ -337,7 +338,7 @@ export function Queue({ go }: { go: GoFn }) {
                 </Group>
                 <LocSummary locs={q.locs} />
               </Box>
-              <Badge color="yellow" variant="light">
+              <Badge size="sm" color="yellow" variant="light">
                 예약됨
               </Badge>
               <Button
