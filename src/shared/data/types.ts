@@ -83,6 +83,22 @@ export interface LibraryPost {
   commentCount?: number;
 }
 
+/** A single account×destination upload target, expanded from a publish request. */
+export interface PublishJob {
+  key: string;
+  platform: PlatformId;
+  loginId: string;
+  targetName: string;
+  code?: string;
+  board: string;
+  status: AccountStatus;
+}
+
+export interface PublishResult extends PublishJob {
+  ok: boolean;
+  msg: string;
+}
+
 export interface Scheduled {
   id: string;
   title: string;

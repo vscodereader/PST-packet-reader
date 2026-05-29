@@ -12,3 +12,32 @@
   margin: 8px 0;
   display: block;
 }
+
+/* rendered post body inside the preview modal */
+.preview-body p {
+  margin: 0 0 10px;
+}
+
+.preview-body blockquote {
+  margin: 10px 0;
+  padding: 8px 14px;
+  border-left: 3px solid var(--mantine-color-gray-3);
+  color: var(--mantine-color-gray-6);
+}
+
+.preview-body ul,
+.preview-body ol {
+  margin: 10px 0;
+  padding-left: 22px;
+}
+
+.preview-body a {
+  color: var(--mantine-color-blue-6);
+}
+
+.preview-body img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 10px;
+  margin: 8px 0;
+}
