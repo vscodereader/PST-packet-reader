@@ -1,8 +1,9 @@
 import { Center, Stack, Text, ThemeIcon } from "@mantine/core";
 
+import type { LogFilter } from "@/shared/data/types";
 import { Icon } from "@/shared/ui/icons";
 
-export function Notifications() {
+export function Notifications(_props: { filter: LogFilter | null }) {
   return (
     <Center h="100%" p="xl">
       <Stack align="center" gap="xs">

@@ -1,7 +1,16 @@
 export type ViewId = "dashboard" | "posts" | "queue" | "log" | "accounts";
 
-/** Navigate to a top-level view. */
-export type GoFn = (view: ViewId) => void;
+export interface LogFilter {
+  loginId?: string;
+  platform?: PlatformId;
+}
+
+export interface GoOpts {
+  logFilter?: LogFilter | null;
+}
+
+/** Navigate to a top-level view, optionally carrying view-specific options. */
+export type GoFn = (view: ViewId, opts?: GoOpts) => void;
 
 export type PlatformId = "forum" | "naver" | "band" | "instagram" | "threads";
 

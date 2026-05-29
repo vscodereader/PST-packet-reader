@@ -40,8 +40,9 @@
   },
   "dependencies": {
     "@fontsource/pretendard": "^5.2.5",
-    "@mantine/core": "^9.2.1",
-    "@mantine/hooks": "^9.2.1",
+    "@mantine/core": "^9.2.2",
+    "@mantine/hooks": "^9.2.2",
+    "@mantine/notifications": "^9.2.2",
     "@tabler/icons-react": "^3.44.0",
     "@tauri-apps/api": "^2",
     "react": "^19.1.0",

@@ -5,7 +5,6 @@ import {
   Group,
   Indicator,
   Text,
-  TextInput,
   ThemeIcon,
   UnstyledButton,
 } from "@mantine/core";
@@ -22,7 +21,7 @@ import {
   QUEUE_NOW,
   QUEUE_SCHEDULED,
 } from "@/shared/data/mock";
-import type { ViewId } from "@/shared/data/types";
+import type { GoFn, LogFilter, ViewId } from "@/shared/data/types";
 import { Icon, type IconName } from "@/shared/ui/icons";
 
 const VIEWS: ViewId[] = ["dashboard", "posts", "queue", "log", "accounts"];
@@ -94,9 +93,12 @@ export function MacroApp() {
     return v && VIEWS.includes(v as ViewId) ? (v as ViewId) : "dashboard";
   });
 
-  const go = (v: ViewId) => {
+  const [logFilter, setLogFilter] = useState<LogFilter | null>(null);
+
+  const go: GoFn = (v, opts) => {
     setView(v);
     localStorage.setItem("mc-view", v);
+    if (v === "log") setLogFilter(opts?.logFilter ?? null);
   };
 
   const nav: NavEntry[] = [
@@ -129,12 +131,6 @@ export function MacroApp() {
             {TITLES[view]}
           </Text>
           <Box style={{ flex: 1 }} />
-          <TextInput
-            placeholder="글·댓글 검색"
-            leftSection={<Icon.search size={16} />}
-            size="sm"
-            w={240}
-          />
           <Indicator color="red" size={8} offset={4}>
             <ThemeIcon
               variant="subtle"
@@ -161,10 +157,10 @@ export function MacroApp() {
           </ThemeIcon>
           <Box>
             <Text fw={800} size="lg" lh={1}>
-              Macro
+              PLTMacro
             </Text>
             <Text size="xs" c="dimmed" fw={600} mt={2}>
-              글·댓글 통합 작성
+              종토방·카페·밴드 등
             </Text>
           </Box>
         </Group>
@@ -192,8 +188,8 @@ export function MacroApp() {
           {view === "dashboard" && <Dashboard go={go} />}
           {view === "posts" && <Posts />}
           {view === "queue" && <Queue />}
-          {view === "log" && <Notifications />}
-          {view === "accounts" && <Accounts />}
+          {view === "log" && <Notifications filter={logFilter} />}
+          {view === "accounts" && <Accounts go={go} />}
         </Box>
       </AppShell.Main>
     </AppShell>
