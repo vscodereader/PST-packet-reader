@@ -23,13 +23,16 @@ pub async fn run_playwright_login(
         .cookies_dir
         .join(format!("{}.json", safe_file_stem(&account.id)));
 
+    let chrome = config::chrome_path()
+        .map_err(|e| OrchestratorError::CommandFailed(e))?;
+
     let input = serde_json::json!({
         "accountId": account.id,
         "id": account.id,
         "password": account.password,
         "cookiesPath": cookies_path,
         "headless": headless,
-        "chromePath": config::chrome_path(),
+        "chromePath": chrome,
     });
     fs::write(&input_path, serde_json::to_string_pretty(&input)?)?;
 

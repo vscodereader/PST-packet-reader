@@ -168,6 +168,7 @@ mod tests {
             inner.jobs.push_back(QueueJob {
                 account_id: "id1".to_string(),
                 headless: true,
+                use_adb: false,
                 status: QueueJobStatus::Pending,
                 message: "queued".to_string(),
                 queued_at: 1,
