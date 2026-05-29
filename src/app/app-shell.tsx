@@ -191,7 +191,7 @@ export function MacroApp() {
         <Box style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
           {view === "dashboard" && <Dashboard go={go} />}
           {view === "posts" && <Posts />}
-          {view === "queue" && <Queue />}
+          {view === "queue" && <Queue go={go} />}
           {view === "log" && (
             <Notifications key={logNonce} filter={logFilter} />
           )}
