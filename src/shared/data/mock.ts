@@ -8,8 +8,10 @@ import type {
   LogBatch,
   Mode,
   Platform,
+  PlatformId,
   QueueNowItem,
   QueueScheduledItem,
+  Scheduled,
   Stock,
 } from "./types";
 
@@ -618,6 +620,49 @@ export const LIBRARY: LibraryPost[] = [
   },
 ];
 
+export const SCHEDULED: Scheduled[] = [
+  {
+    id: "s1",
+    title: "삼성전자 4분기 실적 기대 — 매수 관점 정리",
+    accounts: ["a1"],
+    kind: "post",
+    when: "오늘 14:00",
+    rel: "1시간 후",
+  },
+  {
+    id: "s2",
+    title: "오늘 반도체 흐름 좋네요 / 저도 추가 매수했습니다 외",
+    accounts: ["a2", "a8"],
+    kind: "comment",
+    when: "오늘 18:30",
+    rel: "5시간 후",
+  },
+  {
+    id: "s3",
+    title: "에코프로 조정 구간 대응 전략",
+    accounts: ["a3"],
+    kind: "both",
+    when: "내일 09:00",
+    rel: "내일",
+  },
+  {
+    id: "s4",
+    title: "이번 주 시장 브리핑 정리",
+    accounts: ["a5", "a6"],
+    kind: "post",
+    when: "5/30 12:00",
+    rel: "내일",
+  },
+  {
+    id: "s5",
+    title: "POSCO 2차전지 소재 관련 코멘트 모음",
+    accounts: ["a4"],
+    kind: "comment",
+    when: "5/31 20:00",
+    rel: "모레",
+  },
+];
+
 export const ACTIVITY: ActivityItem[] = [
   {
     id: "ac1",
@@ -983,8 +1028,8 @@ export function batchStatus(
   return "partial";
 }
 
-export function acctPlatforms(ids: string[]): string[] {
-  const seen: string[] = [];
+export function acctPlatforms(ids: string[]): PlatformId[] {
+  const seen: PlatformId[] = [];
   ids.forEach((id) => {
     const a = ACCOUNTS.find((x) => x.id === id);
     if (a && !seen.includes(a.platform)) seen.push(a.platform);

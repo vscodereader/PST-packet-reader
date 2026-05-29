@@ -22,9 +22,8 @@ import {
   QUEUE_NOW,
   QUEUE_SCHEDULED,
 } from "@/shared/data/mock";
+import type { ViewId } from "@/shared/data/types";
 import { Icon, type IconName } from "@/shared/ui/icons";
-
-type ViewId = "dashboard" | "posts" | "queue" | "log" | "accounts";
 
 const VIEWS: ViewId[] = ["dashboard", "posts", "queue", "log", "accounts"];
 
@@ -190,7 +189,7 @@ export function MacroApp() {
         style={{ display: "flex", flexDirection: "column" }}
       >
         <Box style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-          {view === "dashboard" && <Dashboard />}
+          {view === "dashboard" && <Dashboard go={go} />}
           {view === "posts" && <Posts />}
           {view === "queue" && <Queue />}
           {view === "log" && <Notifications />}

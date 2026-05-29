@@ -1,3 +1,8 @@
+export type ViewId = "dashboard" | "posts" | "queue" | "log" | "accounts";
+
+/** Navigate to a top-level view. */
+export type GoFn = (view: ViewId) => void;
+
 export type PlatformId = "forum" | "naver" | "band" | "instagram" | "threads";
 
 export interface Platform {
@@ -61,6 +66,15 @@ export interface LibraryPost {
   excerpt: string;
   body?: string;
   comments?: string[];
+}
+
+export interface Scheduled {
+  id: string;
+  title: string;
+  accounts: string[];
+  kind: ModeValue;
+  when: string;
+  rel: string;
 }
 
 export interface ActivityItem {
