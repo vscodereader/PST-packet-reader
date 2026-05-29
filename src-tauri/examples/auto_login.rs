@@ -100,7 +100,6 @@ fn run_login(id: &str, password: &str, headless: bool) -> Result<String, String>
         "cookiesPath": cookies_path,
         "headless": headless,
         "chromePath": config::chrome_path(),
-        "cdpPort": config::find_free_port(),
     });
     fs::write(&input_path, serde_json::to_string_pretty(&input).unwrap())
         .map_err(|e| e.to_string())?;
@@ -131,10 +130,8 @@ fn locate_login_script() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
-        .join("src")
-        .join("features")
-        .join("playwright")
-        .join("naver-login.ts")
+        .join("scripts")
+        .join("naver-login.cjs")
 }
 
 fn value_after(args: &[String], flag: &str) -> Option<String> {

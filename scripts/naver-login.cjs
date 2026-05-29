@@ -117,15 +117,24 @@ async function waitForLogin(page, context, timeoutMs = 10 * 60 * 1000) {
   );
 }
 
+function buildLaunchArgs() {
+  return ["--incognito", "--no-first-run", "--no-default-browser-check"];
+}
+
+function buildLaunchOptions(input) {
+  return {
+    channel: "chrome",
+    executablePath: input.chromePath,
+    headless: input.headless,
+    args: buildLaunchArgs(),
+  };
+}
+
 async function run(inputPath) {
   const text = await fsPromises.readFile(inputPath, "utf8");
   const input = validateInput(JSON.parse(text));
 
-  const browser = await chromium.launch({
-    executablePath: input.chromePath,
-    headless: input.headless,
-    args: ["--no-first-run", "--no-default-browser-check", "--incognito"],
-  });
+  const browser = await chromium.launch(buildLaunchOptions(input));
 
   const context = await browser.newContext();
   const page = await context.newPage();
@@ -158,12 +167,26 @@ async function run(inputPath) {
   }
 }
 
-const inputPath = process.argv[2];
-if (!inputPath) {
-  console.error("input json path is required");
-  process.exit(1);
+if (require.main === module) {
+  const inputPath = process.argv[2];
+  if (!inputPath) {
+    console.error("input json path is required");
+    process.exit(1);
+  }
+  run(inputPath).catch((error) => {
+    console.error(error.message ?? error);
+    process.exit(1);
+  });
+} else {
+  module.exports = {
+    validateInput,
+    hasNaverSessionCookies,
+    isElementVisible,
+    queryVisible,
+    detectFailure,
+    waitForLogin,
+    buildLaunchArgs,
+    buildLaunchOptions,
+    run,
+  };
 }
-run(inputPath).catch((error) => {
-  console.error(error.message ?? error);
-  process.exit(1);
-});
