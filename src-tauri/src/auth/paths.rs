@@ -4,10 +4,8 @@ use super::{config, error::OrchestratorError, types::RuntimePaths};
 
 /// 애플리케이션 데이터 루트 디렉토리 경로를 가져온다.
 pub fn app_data_root() -> Result<PathBuf, OrchestratorError> {
-    let appdata = env::var_os("APPDATA").ok_or(OrchestratorError::MissingAppData)?;
-    Ok(PathBuf::from(appdata)
-        .join(config::APP_DATA_SUBDIR)
-        .join(config::APP_NAME))
+    let appdata = env::var_os("LOCALAPPDATA").ok_or(OrchestratorError::MissingLocalAppData)?;
+    Ok(PathBuf::from(appdata).join(config::APP_NAME))
 }
 
 /// 루트 경로로부터 실행 시간 경로들을 구성한다.
@@ -39,7 +37,7 @@ mod tests {
 
     #[test]
     fn paths_for_root_builds_expected_windows_layout() {
-        let root = PathBuf::from(r"C:\Users\me\AppData\Roaming\.local\pstmacro");
+        let root = PathBuf::from(r"C:\Users\me\AppData\Local\pstmacro");
         let paths = paths_for_root(&root);
 
         assert_eq!(paths.root, root);

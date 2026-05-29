@@ -8,8 +8,8 @@ pub enum OrchestratorError {
     Json(#[from] serde_json::Error),
     #[error("adb: {0}")]
     Adb(#[from] adb_client::RustADBError),
-    #[error("runtime path not available: APPDATA is not set")]
-    MissingAppData,
+    #[error("runtime path not available: LOCALAPPDATA is not set")]
+    MissingLocalAppData,
     #[error("account not found: {0}")]
     AccountNotFound(String),
     #[error("command failed: {0}")]

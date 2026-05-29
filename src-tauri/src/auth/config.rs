@@ -44,7 +44,6 @@ pub const ADB_INTERNET_TIMEOUT_SECS: u64 = 30;
 pub const ADB_INTERNET_PING_HOST: &str = "8.8.8.8";
 
 // 앱 데이터 경로
-pub const APP_DATA_SUBDIR: &str = ".local";
 pub const APP_NAME: &str = "pstmacro";
 pub const DIR_ACCOUNTS: &str = "accounts";
 pub const DIR_COOKIES: &str = "cookies";
