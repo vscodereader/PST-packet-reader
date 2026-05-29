@@ -37,4 +37,22 @@ describe("StockCrawlModal", () => {
       expect.objectContaining({ code: "005930", name: "삼성전자" }),
     ]);
   });
+
+  it("filters the stock list by query once the crawl finishes", async () => {
+    renderModal();
+    const search = await screen.findByPlaceholderText(
+      "종목명 또는 코드 검색",
+      undefined,
+      { timeout: 2500 },
+    );
+    await userEvent.type(search, "카카오");
+    expect(screen.getByText("카카오")).toBeInTheDocument();
+    expect(screen.queryByText("삼성전자")).not.toBeInTheDocument();
+  });
+
+  it("returns to the crawling state on 다시 크롤링", async () => {
+    renderModal();
+    await userEvent.click(screen.getByRole("button", { name: /다시 크롤링/ }));
+    expect(screen.getByText(/수집하는 중/)).toBeInTheDocument();
+  });
 });

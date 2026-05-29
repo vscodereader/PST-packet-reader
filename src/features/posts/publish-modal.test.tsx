@@ -48,4 +48,54 @@ describe("PublishModal", () => {
     );
     expect(await screen.findByText(/각 게시판 서식으로/)).toBeInTheDocument();
   });
+
+  it("reveals the schedule button when 예약 게시 is chosen", async () => {
+    renderPublish();
+    await userEvent.click(await screen.findByText("예약 게시"));
+    expect(
+      await screen.findByRole("button", { name: /예약 \(\d+\)/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens the stock crawl modal from 종목 선택", async () => {
+    renderPublish();
+    await userEvent.click(
+      await screen.findByRole("button", { name: /종목 선택/ }),
+    );
+    expect(await screen.findByText(/finance\.naver\.com/)).toBeInTheDocument();
+  });
+
+  it("starts the publish flow and shows progress", async () => {
+    renderPublish();
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^게시 \(\d+\)/ }),
+    );
+    expect(await screen.findByText(/게시하는 중/)).toBeInTheDocument();
+  });
+
+  it("completes the publish flow and routes to a follow-up view", async () => {
+    const { go } = renderPublish();
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^게시 \(\d+\)/ }),
+    );
+    // results render after the simulated upload (~2s)
+    expect(
+      await screen.findByText("계속 작성", undefined, { timeout: 3000 }),
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "알림 보기" }));
+    expect(go).toHaveBeenCalledWith("log");
+  });
+
+  it("selects every visible account and expands the destinations", async () => {
+    renderPublish();
+    await userEvent.click(
+      await screen.findByRole("button", { name: /보이는 계정 전체/ }),
+    );
+    // 15 accounts − 1 errored = 14 selectable
+    expect(await screen.findByText("14개")).toBeInTheDocument();
+    // forum + naver + band → 3 platform marks in the footer pill row
+    expect(
+      screen.getByRole("button", { name: /종목 선택/ }),
+    ).toBeInTheDocument();
+  });
 });

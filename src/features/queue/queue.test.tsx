@@ -39,4 +39,36 @@ describe("Queue", () => {
     await userEvent.click(screen.getByRole("button", { name: /새 작업 추가/ }));
     expect(go).toHaveBeenCalledWith("posts");
   });
+
+  it("cancels a waiting item", async () => {
+    renderQueue();
+    const title = "반도체 흐름 코멘트 10종";
+    expect(screen.getByText(title)).toBeInTheDocument();
+    await userEvent.click(screen.getAllByTitle("취소")[0]!);
+    expect(screen.queryByText(title)).not.toBeInTheDocument();
+  });
+
+  it("reorders waiting items with the move-down control", async () => {
+    renderQueue();
+    const q2 = "반도체 흐름 코멘트 10종";
+    const q3 = "오늘의 특징주 정리 — 장 마감 요약";
+    // boundary: moving the first waiting item up is a no-op
+    await userEvent.click(screen.getAllByTitle("우선순위 올리기")[0]!);
+    // move first waiting item down → q3 now precedes q2
+    await userEvent.click(screen.getAllByTitle("우선순위 내리기")[0]!);
+    const q2El = screen.getByText(q2);
+    const q3El = screen.getByText(q3);
+    expect(
+      q3El.compareDocumentPosition(q2El) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("exposes 즉시 처리 and 예약 취소 on scheduled rows", async () => {
+    renderQueue();
+    await userEvent.click(
+      screen.getAllByRole("button", { name: /즉시 처리/ })[0]!,
+    );
+    await userEvent.click(screen.getAllByTitle("예약 취소")[0]!);
+    expect(screen.getByText("예약 대기")).toBeInTheDocument();
+  });
 });
