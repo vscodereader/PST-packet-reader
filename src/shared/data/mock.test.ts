@@ -6,8 +6,8 @@ import {
   hasToken,
   jobLink,
   resolveTemplate,
-  type LogBatch,
 } from "./mock";
+import type { LogBatch } from "./types";
 
 describe("jobLink", () => {
   it("builds a Naver Finance URL from a stock code", () => {
