@@ -26,7 +26,9 @@ describe("Posts", () => {
   it("opens the writer modal from 글쓰기", async () => {
     renderPosts();
     await userEvent.click(screen.getByRole("button", { name: /글쓰기/ }));
-    expect(await screen.findByRole("dialog")).toHaveTextContent("글쓰기");
+    expect(
+      await screen.findByPlaceholderText("제목을 입력하세요"),
+    ).toBeInTheDocument();
   });
 
   it("opens the publish modal from a row's 게시하기", async () => {

@@ -1,0 +1,14 @@
+/* contentEditable editor affordances (writer modal) */
+[contenteditable][data-placeholder]:empty::before {
+  content: attr(data-placeholder);
+  color: var(--mantine-color-gray-5);
+  pointer-events: none;
+}
+
+[contenteditable] img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 10px;
+  margin: 8px 0;
+  display: block;
+}

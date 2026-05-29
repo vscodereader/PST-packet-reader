@@ -66,6 +66,8 @@ export interface Band {
 
 export type PostStatus = "draft" | "ready" | "scheduled" | "published";
 
+export type CommentTarget = "latest" | "popular" | "url";
+
 export interface LibraryPost {
   id: string;
   title: string;
@@ -76,6 +78,9 @@ export interface LibraryPost {
   excerpt: string;
   body?: string;
   comments?: string[];
+  commentTarget?: CommentTarget;
+  commentUrl?: string;
+  commentCount?: number;
 }
 
 export interface Scheduled {
