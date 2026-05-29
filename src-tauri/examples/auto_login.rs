@@ -135,7 +135,7 @@ fn locate_login_script() -> PathBuf {
         .join("src-tauri")
         .join("src")
         .join("naver-login")
-        .join("naver-login.cjs")
+        .join("naver-login.ts")
 }
 
 fn value_after(args: &[String], flag: &str) -> Option<String> {

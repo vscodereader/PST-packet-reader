@@ -43,7 +43,7 @@ const mocks = vi.hoisted(() => {
 // playwright-extra is not intercepted by vi.mock for CJS require — skip mocking it.
 // Instead, we spy on require('playwright').chromium.launch in the run tests.
 vi.mock("puppeteer-extra-plugin-stealth", () => ({
-  default: vi.fn(() => ({})),
+  default: vi.fn(() => ({ name: "stealth" })),
 }));
 
 // ---------------------------------------------------------------------------
@@ -57,43 +57,7 @@ const realPlaywright = require("playwright") as typeof import("playwright");
 // ---------------------------------------------------------------------------
 // Import module under test (after mocks are registered)
 // ---------------------------------------------------------------------------
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const loginModule = require("./naver-login.cjs") as {
-  validateInput: (input: unknown) => {
-    accountId: string;
-    id: string;
-    password: string;
-    cookiesPath: string;
-    headless: boolean;
-    chromePath: string;
-  };
-  hasNaverSessionCookies: (
-    cookies: Array<{ name: string; domain: string }>,
-  ) => boolean;
-  isElementVisible: (el: Element) => boolean;
-  queryVisible: (
-    page: { $eval: ReturnType<typeof vi.fn> },
-    selector: string,
-  ) => Promise<boolean>;
-  detectFailure: (page: {
-    $eval: ReturnType<typeof vi.fn>;
-    $: ReturnType<typeof vi.fn>;
-    url: ReturnType<typeof vi.fn>;
-  }) => Promise<string | null>;
-  waitForLogin: (
-    page: object,
-    context: { cookies: ReturnType<typeof vi.fn> },
-    timeoutMs?: number,
-  ) => Promise<Array<{ name: string; domain: string }>>;
-  buildLaunchArgs: () => string[];
-  buildLaunchOptions: (input: { chromePath: string; headless: boolean }) => {
-    channel: string;
-    executablePath: string;
-    headless: boolean;
-    args: string[];
-  };
-  run: (inputPath: string) => Promise<void>;
-};
+const loginModule = await import("./naver-login");
 
 const {
   validateInput,

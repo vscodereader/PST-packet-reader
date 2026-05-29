@@ -1,23 +1,53 @@
-"use strict";
+import { promises as fsPromises } from "node:fs";
+import path from "node:path";
 
-const fsPromises = require("fs").promises;
-const path = require("path");
-const { addExtra } = require("playwright-extra");
-const playwright = require("playwright");
-const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+import { addExtra } from "playwright-extra";
+import playwright, {
+  type Browser,
+  type BrowserContext,
+  type BrowserContextOptions,
+  type Cookie,
+  type Page,
+} from "playwright";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
 
-// addExtra로 playwright를 직접 주입해야 pkg 스냅샷에서 동적 탐색 없이 동작함
+type RawInput = Record<string, unknown>;
+
+export type LoginInput = {
+  accountId: string;
+  id: string;
+  password: string;
+  cookiesPath: string;
+  headless: boolean;
+  chromePath: string;
+};
+
+type VisibleQueryPage = {
+  $eval: (selector: string, pageFunction: (el: Element) => boolean) => Promise<boolean>;
+};
+
+type FailureDetectionPage = VisibleQueryPage & {
+  $: (selector: string) => Promise<unknown>;
+  url: () => string;
+};
+
+type CookieContext = {
+  cookies: BrowserContext["cookies"];
+};
+
 const chromium = addExtra(playwright.chromium);
-chromium.use(StealthPlugin());
+const stealthPlugin = StealthPlugin();
+if (stealthPlugin) {
+  chromium.use(stealthPlugin);
+}
 
 const LOGIN_URL = "https://nid.naver.com/nidlogin.login";
 const SUCCESS_COOKIE_NAMES = new Set(["NID_AUT", "NID_SES"]);
 
-// 로그인 실패 감지용 선택자 (에러 메시지 영역)
 const ERROR_SELECTOR = "#err_common";
 const LOGIN_FAIL_TIMEOUT_MS = 3000;
 
-function requiredString(input, key) {
+function requiredString(input: RawInput, key: string): string {
   const value = input[key];
   if (typeof value !== "string" || value.trim() === "") {
     throw new Error(`${key} must be a non-empty string`);
@@ -25,10 +55,11 @@ function requiredString(input, key) {
   return value;
 }
 
-function validateInput(input) {
+export function validateInput(input: unknown): LoginInput {
   if (!input || typeof input !== "object") {
     throw new Error("input must be an object");
   }
+  const rawInput = input as RawInput;
   for (const key of [
     "accountId",
     "id",
@@ -36,51 +67,48 @@ function validateInput(input) {
     "cookiesPath",
     "chromePath",
   ]) {
-    requiredString(input, key);
+    requiredString(rawInput, key);
   }
   return {
-    accountId: requiredString(input, "accountId"),
-    id: requiredString(input, "id"),
-    password: requiredString(input, "password"),
-    cookiesPath: requiredString(input, "cookiesPath"),
-    headless: input.headless === true,
-    chromePath: requiredString(input, "chromePath"),
+    accountId: requiredString(rawInput, "accountId"),
+    id: requiredString(rawInput, "id"),
+    password: requiredString(rawInput, "password"),
+    cookiesPath: requiredString(rawInput, "cookiesPath"),
+    headless: rawInput.headless === true,
+    chromePath: requiredString(rawInput, "chromePath"),
   };
 }
 
-function hasNaverSessionCookies(cookies) {
+export function hasNaverSessionCookies(cookies: Array<Pick<Cookie, "name" | "domain">>): boolean {
   const names = new Set(
     cookies.filter((c) => c.domain.includes("naver.com")).map((c) => c.name),
   );
   return [...SUCCESS_COOKIE_NAMES].every((name) => names.has(name));
 }
 
-function isElementVisible(el) {
+export function isElementVisible(el: Element): boolean {
   const style = window.getComputedStyle(el);
   return (
     style.display !== "none" &&
     style.visibility !== "hidden" &&
+    el instanceof HTMLElement &&
     el.offsetHeight > 0
   );
 }
 
-async function queryVisible(page, selector) {
+export async function queryVisible(page: VisibleQueryPage, selector: string): Promise<boolean> {
   return page.$eval(selector, isElementVisible).catch(() => false);
 }
 
-// 로그인 실패 원인을 반환. 실패가 아니면 null.
-async function detectFailure(page) {
-  // 1. 아이디/비밀번호 오류 메시지
+export async function detectFailure(page: FailureDetectionPage): Promise<string | null> {
   if (await queryVisible(page, ERROR_SELECTOR)) {
     return "로그인 실패: 아이디 또는 비밀번호를 확인해주세요";
   }
 
-  // 2. 봇 탐지 → 로그인 폼에 캡챠 출현
   if (await queryVisible(page, "#captchaDiv")) {
     return "로그인 실패: 캡챠가 감지되었습니다";
   }
 
-  // 3. 비정상 접근 차단 페이지 (로그인 폼 자체가 사라짐)
   const url = page.url();
   const isLoginPage = url.includes("nid.naver.com");
   const hasLoginForm = await page
@@ -94,7 +122,11 @@ async function detectFailure(page) {
   return null;
 }
 
-async function waitForLogin(page, context, timeoutMs = 10 * 60 * 1000) {
+export async function waitForLogin(
+  page: FailureDetectionPage,
+  context: CookieContext,
+  timeoutMs = 10 * 60 * 1000,
+): Promise<Cookie[]> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     const cookies = await context.cookies();
@@ -104,9 +136,7 @@ async function waitForLogin(page, context, timeoutMs = 10 * 60 * 1000) {
 
     const reason = await detectFailure(page);
     if (reason) {
-      await new Promise((resolve) =>
-        setTimeout(resolve, LOGIN_FAIL_TIMEOUT_MS),
-      );
+      await new Promise((resolve) => setTimeout(resolve, LOGIN_FAIL_TIMEOUT_MS));
       throw new Error(reason);
     }
 
@@ -117,11 +147,16 @@ async function waitForLogin(page, context, timeoutMs = 10 * 60 * 1000) {
   );
 }
 
-function buildLaunchArgs() {
+export function buildLaunchArgs(): string[] {
   return ["--incognito", "--no-first-run", "--no-default-browser-check"];
 }
 
-function buildLaunchOptions(input) {
+export function buildLaunchOptions(input: Pick<LoginInput, "chromePath" | "headless">): {
+  channel: "chrome";
+  executablePath: string;
+  headless: boolean;
+  args: string[];
+} {
   return {
     channel: "chrome",
     executablePath: input.chromePath,
@@ -130,14 +165,14 @@ function buildLaunchOptions(input) {
   };
 }
 
-async function run(inputPath) {
+export async function run(inputPath: string): Promise<void> {
   const text = await fsPromises.readFile(inputPath, "utf8");
   const input = validateInput(JSON.parse(text));
 
-  const browser = await chromium.launch(buildLaunchOptions(input));
+  const browser = (await chromium.launch(buildLaunchOptions(input))) as Browser;
 
-  const context = await browser.newContext();
-  const page = await context.newPage();
+  const context = (await browser.newContext({} as BrowserContextOptions)) as BrowserContext;
+  const page = (await context.newPage()) as Page & FailureDetectionPage;
   try {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
@@ -167,26 +202,19 @@ async function run(inputPath) {
   }
 }
 
-if (require.main === module) {
+function isCliEntrypoint(): boolean {
+  const entrypoint = process.argv[1];
+  return entrypoint ? path.basename(entrypoint).startsWith("naver-login") : false;
+}
+
+if (isCliEntrypoint()) {
   const inputPath = process.argv[2];
   if (!inputPath) {
     console.error("input json path is required");
     process.exit(1);
   }
-  run(inputPath).catch((error) => {
-    console.error(error.message ?? error);
+  run(inputPath).catch((error: unknown) => {
+    console.error(error instanceof Error ? error.message : error);
     process.exit(1);
   });
-} else {
-  module.exports = {
-    validateInput,
-    hasNaverSessionCookies,
-    isElementVisible,
-    queryVisible,
-    detectFailure,
-    waitForLogin,
-    buildLaunchArgs,
-    buildLaunchOptions,
-    run,
-  };
 }
