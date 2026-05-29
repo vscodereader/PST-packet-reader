@@ -35,6 +35,8 @@ pub struct QueueJob {
     pub account_id: String,
     #[serde(default)]
     pub headless: bool,
+    #[serde(default)]
+    pub use_adb: bool,
     pub status: QueueJobStatus,
     pub message: String,
     pub queued_at: u128,

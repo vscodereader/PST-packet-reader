@@ -20,7 +20,7 @@ pub use types::{Account, QueueJob, QueueJobStatus, QueueStatus, RuntimePaths};
 use accounts::load_accounts_file;
 use adb::{assert_adb_device, toggle_airplane_mode};
 use paths::ensure_runtime_dirs;
-use playwright::{run_playwright_login, run_playwright_login_without_app};
+use playwright::run_playwright_login;
 use scrcpy::ensure_adb;
 
 /// 런타임 환경을 초기화하고 필요한 디렉토리와 도구들을 준비한다.
@@ -35,27 +35,26 @@ async fn process_account(
     app: &AppHandle,
     account_id: &str,
     headless: bool,
+    use_adb: bool,
 ) -> Result<(), OrchestratorError> {
-    let paths = bootstrap_runtime().await?;
+    let paths = if use_adb {
+        bootstrap_runtime().await?
+    } else {
+        let p = paths_for_root(app_data_root()?);
+        ensure_runtime_dirs(&p)?;
+        p
+    };
+
     let accounts = load_accounts_file(&paths)?;
     let account = accounts
         .into_iter()
         .find(|account| account.id == account_id)
         .ok_or_else(|| OrchestratorError::AccountNotFound(account_id.to_string()))?;
 
-    assert_adb_device(&paths.adb_path).await?;
-    toggle_airplane_mode(&paths.adb_path).await?;
+    if use_adb {
+        assert_adb_device(&paths.adb_path).await?;
+        toggle_airplane_mode(&paths.adb_path).await?;
+    }
     run_playwright_login(app, &paths, &account, headless).await
 }
 
-/// 계정의 쿠키를 새로고침한다.
-pub async fn refresh_account_cookie(
-    account: Account,
-    headless: bool,
-) -> Result<RuntimePaths, OrchestratorError> {
-    let paths = bootstrap_runtime().await?;
-    assert_adb_device(&paths.adb_path).await?;
-    toggle_airplane_mode(&paths.adb_path).await?;
-    run_playwright_login_without_app(&paths, &account, headless).await?;
-    Ok(paths)
-}

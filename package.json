@@ -9,7 +9,8 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "pnpm build:sidecar && tsc && vite build",
+    "build:sidecar": "node scripts/bundle-login.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "lint": "eslint .",
@@ -57,6 +58,7 @@
     "@types/node": "^25.9.1",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
+    "@yao-pkg/pkg": "^6.20.0",
     "@vitejs/plugin-react": "^4.6.0",
     "@vitest/coverage-v8": "^4.1.7",
     "@vitest/eslint-plugin": "^1.6.18",

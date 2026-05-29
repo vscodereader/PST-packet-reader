@@ -14,7 +14,19 @@ pub async fn ensure_adb(paths: &RuntimePaths) -> Result<(), OrchestratorError> {
         return Ok(());
     }
 
-    let bytes = wreq::get(config::SCRCPY_URL).send().await?.bytes().await?;
+    let client = wreq::Client::builder()
+        .redirect(wreq::redirect::Policy::limited(10))
+        .build()?;
+
+    let response = client.get(config::SCRCPY_URL).send().await?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(OrchestratorError::CommandFailed(format!(
+            "scrcpy download failed: HTTP {status}"
+        )));
+    }
+
+    let bytes = response.bytes().await?;
     extract_scrcpy_zip(&bytes, &paths.scrcpy_dir)?;
 
     if !paths.adb_path.exists() {

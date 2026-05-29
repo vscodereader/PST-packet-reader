@@ -25,9 +25,16 @@ fn enqueue_cookie_refresh(
     state: tauri::State<'_, auth::QueueState>,
     account_ids: Vec<String>,
     headless: Option<bool>,
+    use_adb: Option<bool>,
 ) -> Result<auth::QueueStatus, String> {
-    auth::enqueue_accounts(&state, app, account_ids, headless.unwrap_or(false))
-        .map_err(|e| e.to_string())
+    auth::enqueue_accounts(
+        &state,
+        app,
+        account_ids,
+        headless.unwrap_or(false),
+        use_adb.unwrap_or(false),
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -45,6 +52,7 @@ fn get_account_cookies(account_id: String) -> Result<Option<serde_json::Value>, 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
         .manage(auth::QueueState::default())
         .invoke_handler(tauri::generate_handler![
             greet,

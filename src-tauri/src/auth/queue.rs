@@ -33,6 +33,7 @@ pub fn enqueue_accounts(
     app: AppHandle,
     account_ids: Vec<String>,
     headless: bool,
+    use_adb: bool,
 ) -> Result<QueueStatus, OrchestratorError> {
     let should_start = {
         let mut inner = state
@@ -43,6 +44,7 @@ pub fn enqueue_accounts(
             inner.jobs.push_back(QueueJob {
                 account_id,
                 headless,
+                use_adb,
                 status: QueueJobStatus::Pending,
                 message: "queued".to_string(),
                 queued_at: now_millis(),
@@ -107,7 +109,7 @@ async fn worker_loop(state: QueueState, app: AppHandle) {
             job
         };
 
-        let result = process_account(&app, &job.account_id, job.headless).await;
+        let result = process_account(&app, &job.account_id, job.headless, job.use_adb).await;
         let message = match &result {
             Ok(()) => "success".to_string(),
             Err(err) => err.to_string(),

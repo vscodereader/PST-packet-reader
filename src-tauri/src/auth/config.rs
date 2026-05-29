@@ -1,18 +1,8 @@
-// Chrome / CDP
+// Chrome
 pub const CHROME_PATH_WINDOWS: &str =
     "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 pub const CHROME_PATH_WSL: &str =
     "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe";
-pub const CDP_PORT: u16 = 9222;
-
-/// OS가 비어있는 포트를 자동으로 할당해 반환한다.
-pub fn find_free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("failed to bind to a free port")
-        .local_addr()
-        .expect("failed to get local address")
-        .port()
-}
 
 /// 실행 환경에 맞는 Chrome 경로를 반환한다.
 pub fn chrome_path() -> &'static str {
@@ -42,7 +32,3 @@ pub const DIR_LOGS: &str = "logs";
 pub const FILE_ACCOUNTS: &str = "accounts.json";
 pub const FILE_ADB: &str = "adb.exe";
 
-// Playwright 로그인 스크립트
-pub const LOGIN_SCRIPT_ENV: &str = "PSTMACRO_LOGIN_SCRIPT";
-pub const LOGIN_SCRIPT_PATH: &str = "src/features/playwright/naver-login.ts";
-pub const LOGIN_SCRIPT_FILENAME: &str = "naver-login.ts";
