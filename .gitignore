@@ -13,6 +13,10 @@ dist-ssr
 coverage
 *.local
 
+# Design handoff bundle (reference material, not source)
+Macro-handoff
+Macro-handoff.tar.gz
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

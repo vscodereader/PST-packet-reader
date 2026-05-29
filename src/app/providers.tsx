@@ -1,7 +1,10 @@
+import "@fontsource/pretendard";
 import "@mantine/core/styles.css";
 
 import { MantineProvider } from "@mantine/core";
 import type { ReactNode } from "react";
+
+import { theme } from "./theme";
 
 interface AppProvidersProps {
   children: ReactNode;
@@ -9,6 +12,8 @@ interface AppProvidersProps {
 
 export function AppProviders({ children }: AppProvidersProps) {
   return (
-    <MantineProvider defaultColorScheme="auto">{children}</MantineProvider>
+    <MantineProvider theme={theme} defaultColorScheme="light">
+      {children}
+    </MantineProvider>
   );
 }
