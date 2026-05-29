@@ -25,13 +25,6 @@ import type { GoFn, ViewId } from "@/shared/data/types";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo, PlatformPill } from "@/shared/ui/platform-logo";
 
-function greeting() {
-  const h = new Date().getHours();
-  if (h < 12) return "좋은 아침이에요";
-  if (h < 18) return "오늘도 수고 많아요";
-  return "오늘 하루 어땠나요";
-}
-
 const STAT_TARGET: Record<string, ViewId> = {
   accounts: "accounts",
   scheduled: "queue",
@@ -44,9 +37,6 @@ export function Dashboard({ go }: { go: GoFn }) {
     <Container size={1080} py={32} px={36}>
       <Group justify="space-between" align="flex-end" mb={28} wrap="wrap">
         <Box>
-          <Text size="sm" fw={600} c="dimmed" mb={6}>
-            {greeting()}, 지윤님 👋
-          </Text>
           <Title order={1} fz={27} fw={800}>
             오늘은 무엇을 써볼까요?
           </Title>
