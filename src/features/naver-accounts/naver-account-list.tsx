@@ -8,7 +8,7 @@ type NaverAccount = {
   password: string;
 };
 
-type QueueJobStatus = "pending" | "running" | "success" | "failed";
+type QueueJobStatus = "pending" | "expired" | "running" | "success" | "failed";
 
 type QueueJob = {
   accountId: string;
@@ -24,6 +24,7 @@ type QueueStatus = {
 
 const STATUS_LABEL: Record<QueueJobStatus, string> = {
   pending: "Pending",
+  expired: "Expired",
   running: "Running",
   success: "Done",
   failed: "Failed",

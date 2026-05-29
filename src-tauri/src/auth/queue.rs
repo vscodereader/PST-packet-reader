@@ -7,6 +7,7 @@ use std::{
 use tauri::AppHandle;
 
 use super::{
+    accounts::{account_cookie_status_for_app_data, CookieStatus},
     error::OrchestratorError,
     paths::{app_data_root, paths_for_root},
     process_account,
@@ -109,12 +110,31 @@ async fn worker_loop(state: QueueState, app: AppHandle) {
             job
         };
 
+        let cookie_status =
+            account_cookie_status_for_app_data(&job.account_id).unwrap_or(CookieStatus::Missing);
+        if cookie_status == CookieStatus::Expired {
+            if let Ok(mut inner) = state.inner.lock() {
+                if let Some(existing) = inner
+                    .jobs
+                    .iter_mut()
+                    .find(|j| j.account_id == job.account_id && j.started_at == job.started_at)
+                {
+                    existing.status = QueueJobStatus::Expired;
+                    existing.message = "expired; refreshing".to_string();
+                }
+                push_log(&mut inner, format!("{}: cookie expired", job.account_id));
+            }
+        }
+
         let result = process_account(&app, &job.account_id, job.headless, job.use_adb).await;
         let message = match &result {
+            Ok(()) if cookie_status == CookieStatus::Expired => "expired; refreshed".to_string(),
             Ok(()) => "success".to_string(),
             Err(err) => err.to_string(),
         };
-        let status = if result.is_ok() {
+        let status = if result.is_ok() && cookie_status == CookieStatus::Expired {
+            QueueJobStatus::Expired
+        } else if result.is_ok() {
             QueueJobStatus::Success
         } else {
             QueueJobStatus::Failed

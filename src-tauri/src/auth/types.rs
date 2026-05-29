@@ -22,6 +22,7 @@ pub struct Account {
 #[serde(rename_all = "camelCase")]
 pub enum QueueJobStatus {
     Pending,
+    Expired,
     Running,
     Success,
     Failed,

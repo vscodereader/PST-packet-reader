@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::fs;
+use std::{fs, path::Path};
 
 use super::{
     error::OrchestratorError,
@@ -9,6 +9,13 @@ use super::{
 };
 
 const REQUIRED_NAVER_COOKIE_NAMES: [&str; 2] = ["NID_AUT", "NID_SES"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CookieStatus {
+    Missing,
+    Valid,
+    Expired,
+}
 
 /// 계정 정보를 파일에 저장한다.
 pub fn save_accounts_file(accounts: &[Account]) -> Result<Vec<Account>, OrchestratorError> {
@@ -50,14 +57,27 @@ pub(crate) fn has_valid_account_cookies(
     paths: &RuntimePaths,
     account_id: &str,
 ) -> Result<bool, OrchestratorError> {
+    Ok(account_cookie_status(paths, account_id)? == CookieStatus::Valid)
+}
+
+pub(crate) fn account_cookie_status_for_app_data(
+    account_id: &str,
+) -> Result<CookieStatus, OrchestratorError> {
+    let paths = paths_for_root(app_data_root()?);
+    account_cookie_status(&paths, account_id)
+}
+
+pub(crate) fn account_cookie_status(
+    paths: &RuntimePaths,
+    account_id: &str,
+) -> Result<CookieStatus, OrchestratorError> {
     let path = cookie_file_path(paths, account_id);
     if !path.exists() {
-        return Ok(false);
+        return Ok(CookieStatus::Missing);
     }
 
     let text = fs::read_to_string(path)?;
-    let value = serde_json::from_str(&text)?;
-    Ok(has_valid_naver_session_cookies(&value, now_secs()))
+    cookie_status_from_text(&text)
 }
 
 fn cookie_file_path(paths: &RuntimePaths, account_id: &str) -> std::path::PathBuf {
@@ -67,23 +87,69 @@ fn cookie_file_path(paths: &RuntimePaths, account_id: &str) -> std::path::PathBu
 }
 
 fn has_valid_naver_session_cookies(value: &Value, now_secs: u64) -> bool {
+    cookie_status_from_value(value, now_secs) == CookieStatus::Valid
+}
+
+fn cookie_status_from_value(value: &Value, now_secs: u64) -> CookieStatus {
     let Some(cookies) = value.get("cookies").and_then(Value::as_array) else {
-        return false;
+        return CookieStatus::Missing;
     };
 
-    REQUIRED_NAVER_COOKIE_NAMES.iter().all(|required_name| {
-        cookies.iter().any(|cookie| {
-            let name_matches = cookie
-                .get("name")
-                .and_then(Value::as_str)
-                .is_some_and(|name| name == *required_name);
-            let domain_matches = cookie
-                .get("domain")
-                .and_then(Value::as_str)
-                .is_some_and(|domain| domain.contains("naver.com"));
-            name_matches && domain_matches && cookie_is_unexpired(cookie, now_secs)
-        })
-    })
+    let mut saw_expired_required_cookie = false;
+
+    for required_name in REQUIRED_NAVER_COOKIE_NAMES {
+        let matching_cookies: Vec<&Value> = cookies
+            .iter()
+            .filter(|cookie| is_required_naver_cookie(cookie, required_name))
+            .collect();
+        if matching_cookies.is_empty() {
+            return CookieStatus::Missing;
+        }
+
+        if !matching_cookies
+            .iter()
+            .any(|cookie| cookie_is_unexpired(cookie, now_secs))
+        {
+            saw_expired_required_cookie = true;
+        }
+    }
+
+    if saw_expired_required_cookie {
+        CookieStatus::Expired
+    } else {
+        CookieStatus::Valid
+    }
+}
+
+fn is_required_naver_cookie(cookie: &Value, required_name: &str) -> bool {
+    let name_matches = cookie
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(|name| name == required_name);
+    let domain_matches = cookie
+        .get("domain")
+        .and_then(Value::as_str)
+        .is_some_and(|domain| domain.contains("naver.com"));
+    name_matches && domain_matches
+}
+
+pub(crate) fn has_valid_cookie_file(path: &Path) -> Result<bool, OrchestratorError> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let text = fs::read_to_string(path)?;
+    has_valid_cookie_text(&text)
+}
+
+fn has_valid_cookie_text(text: &str) -> Result<bool, OrchestratorError> {
+    let value = serde_json::from_str(text)?;
+    Ok(has_valid_naver_session_cookies(&value, now_secs()))
+}
+
+fn cookie_status_from_text(text: &str) -> Result<CookieStatus, OrchestratorError> {
+    let value = serde_json::from_str(text)?;
+    Ok(cookie_status_from_value(&value, now_secs()))
 }
 
 fn cookie_is_unexpired(cookie: &Value, now_secs: u64) -> bool {
@@ -142,6 +208,7 @@ mod tests {
         });
 
         assert!(!has_valid_naver_session_cookies(&value, now));
+        assert_eq!(cookie_status_from_value(&value, now), CookieStatus::Expired);
     }
 
     #[test]

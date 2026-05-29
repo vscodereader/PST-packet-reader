@@ -1,9 +1,11 @@
-use std::fs;
+use std::{fs, path::Path, time::Duration};
 
 use tauri::AppHandle;
 use tauri_plugin_shell::ShellExt;
+use tokio::time::{sleep, Instant};
 
 use super::{
+    accounts::has_valid_cookie_file,
     config,
     error::OrchestratorError,
     types::{Account, RuntimePaths},
@@ -23,8 +25,7 @@ pub async fn run_playwright_login(
         .cookies_dir
         .join(format!("{}.json", safe_file_stem(&account.id)));
 
-    let chrome = config::chrome_path()
-        .map_err(|e| OrchestratorError::CommandFailed(e))?;
+    let chrome = config::chrome_path().map_err(|e| OrchestratorError::CommandFailed(e))?;
 
     let input = serde_json::json!({
         "accountId": account.id,
@@ -57,11 +58,28 @@ pub async fn run_playwright_login(
         )));
     }
 
-    if !cookies_path.exists() {
-        return Err(OrchestratorError::CommandFailed(
-            "Playwright login did not write a cookie file".to_string(),
-        ));
-    }
+    wait_for_valid_cookie_file(&cookies_path).await?;
 
     Ok(())
+}
+
+async fn wait_for_valid_cookie_file(path: &Path) -> Result<(), OrchestratorError> {
+    let timeout = Duration::from_secs(config::COOKIE_WRITE_TIMEOUT_SECS);
+    let interval = Duration::from_millis(config::COOKIE_WRITE_POLL_INTERVAL_MS);
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if has_valid_cookie_file(path).unwrap_or(false) {
+            return Ok(());
+        }
+
+        if Instant::now() >= deadline {
+            return Err(OrchestratorError::CommandFailed(format!(
+                "Playwright login did not write valid cookies within {} seconds",
+                config::COOKIE_WRITE_TIMEOUT_SECS
+            )));
+        }
+
+        sleep(interval).await;
+    }
 }

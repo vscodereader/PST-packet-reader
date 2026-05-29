@@ -7,15 +7,11 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 async fn bootstrap_runtime() -> Result<auth::RuntimePaths, String> {
-    auth::bootstrap_runtime()
-        .await
-        .map_err(|e| e.to_string())
+    auth::bootstrap_runtime().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn save_accounts(
-    accounts: Vec<auth::Account>,
-) -> Result<Vec<auth::Account>, String> {
+fn save_accounts(accounts: Vec<auth::Account>) -> Result<Vec<auth::Account>, String> {
     auth::save_accounts_file(&accounts).map_err(|e| e.to_string())
 }
 

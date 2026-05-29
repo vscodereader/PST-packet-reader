@@ -1,8 +1,6 @@
 // Chrome
-pub const CHROME_PATH_WINDOWS: &str =
-    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
-pub const CHROME_PATH_WSL: &str =
-    "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe";
+pub const CHROME_PATH_WINDOWS: &str = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+pub const CHROME_PATH_WSL: &str = "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe";
 
 /// 실행 환경에 맞는 Chrome 경로를 반환한다.
 ///
@@ -42,6 +40,10 @@ pub const ADB_AIRPLANE_ENABLE_SECS: u64 = 2;
 pub const ADB_INTERNET_POLL_INTERVAL_MS: u64 = 1_000;
 pub const ADB_INTERNET_TIMEOUT_SECS: u64 = 30;
 pub const ADB_INTERNET_PING_HOST: &str = "8.8.8.8";
+
+// 쿠키 저장 확인
+pub const COOKIE_WRITE_POLL_INTERVAL_MS: u64 = 200;
+pub const COOKIE_WRITE_TIMEOUT_SECS: u64 = 5;
 
 // 앱 데이터 경로
 pub const APP_NAME: &str = "pstmacro";
