@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "vite",
     "build": "pnpm build:sidecar && tsc && vite build",
-    "build:sidecar": "node scripts/bundle-login.mjs",
+    "build:sidecar": "node src-tauri/src/naver-login/bundle-login.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "lint": "eslint .",

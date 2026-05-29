@@ -37,7 +37,9 @@ fn run_single(args: &[String], headless: bool) {
     let password = value_after(args, "--password").or_else(|| env::var("NAVER_PWD").ok());
 
     let Some(id) = id else { print_usage_and_exit() };
-    let Some(password) = password else { print_usage_and_exit() };
+    let Some(password) = password else {
+        print_usage_and_exit()
+    };
 
     match run_login(&id, &password, headless) {
         Ok(cookies_json) => println!("{cookies_json}"),
@@ -130,7 +132,9 @@ fn locate_login_script() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
-        .join("scripts")
+        .join("src-tauri")
+        .join("src")
+        .join("naver-login")
         .join("naver-login.cjs")
 }
 
@@ -147,8 +151,12 @@ fn print_usage_and_exit() -> ! {
 
 fn print_usage() {
     eprintln!("usage:");
-    eprintln!("  단일 계정: NAVER_ID='id' NAVER_PWD='pw' cargo run --example auto_login [-- --headless]");
-    eprintln!("  다중 계정: cargo run --example auto_login -- --accounts accounts.json [--headless]");
+    eprintln!(
+        "  단일 계정: NAVER_ID='id' NAVER_PWD='pw' cargo run --example auto_login [-- --headless]"
+    );
+    eprintln!(
+        "  다중 계정: cargo run --example auto_login -- --accounts accounts.json [--headless]"
+    );
     eprintln!();
     eprintln!("accounts.json 형식:");
     eprintln!(r#"  [{{ "id": "id1", "password": "pw1" }}, {{ "id": "id2", "password": "pw2" }}]"#);

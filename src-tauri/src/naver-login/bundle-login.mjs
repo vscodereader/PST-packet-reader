@@ -4,15 +4,16 @@ import { mkdirSync, writeFileSync, chmodSync, cpSync, existsSync, rmSync } from 
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const sourceDir = path.dirname(fileURLToPath(import.meta.url));
+const root = path.resolve(sourceDir, '../../..');
 const buildDir = path.join(root, '.sidecar-build');
 
 if (existsSync(buildDir)) rmSync(buildDir, { recursive: true });
 mkdirSync(buildDir, { recursive: true });
 
-cpSync(path.join(root, 'scripts/naver-login.cjs'), path.join(buildDir, 'naver-login.cjs'));
-cpSync(path.join(root, 'scripts/sidecar-package.json'), path.join(buildDir, 'package.json'));
-cpSync(path.join(root, 'scripts/sidecar-package-lock.json'), path.join(buildDir, 'package-lock.json'));
+cpSync(path.join(sourceDir, 'naver-login.cjs'), path.join(buildDir, 'naver-login.cjs'));
+cpSync(path.join(sourceDir, 'sidecar-package.json'), path.join(buildDir, 'package.json'));
+cpSync(path.join(sourceDir, 'sidecar-package-lock.json'), path.join(buildDir, 'package-lock.json'));
 
 execSync('npm ci', { cwd: buildDir, stdio: 'inherit' });
 
