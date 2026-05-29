@@ -3,6 +3,7 @@ export type ViewId = "dashboard" | "posts" | "queue" | "log" | "accounts";
 export interface LogFilter {
   loginId?: string;
   platform?: PlatformId;
+  batchId?: string;
 }
 
 export interface GoOpts {

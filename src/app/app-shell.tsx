@@ -94,11 +94,15 @@ export function MacroApp() {
   });
 
   const [logFilter, setLogFilter] = useState<LogFilter | null>(null);
+  const [logNonce, setLogNonce] = useState(0);
 
   const go: GoFn = (v, opts) => {
     setView(v);
     localStorage.setItem("mc-view", v);
-    if (v === "log") setLogFilter(opts?.logFilter ?? null);
+    if (v === "log") {
+      setLogFilter(opts?.logFilter ?? null);
+      setLogNonce((n) => n + 1);
+    }
   };
 
   const nav: NavEntry[] = [
@@ -188,7 +192,9 @@ export function MacroApp() {
           {view === "dashboard" && <Dashboard go={go} />}
           {view === "posts" && <Posts />}
           {view === "queue" && <Queue />}
-          {view === "log" && <Notifications filter={logFilter} />}
+          {view === "log" && (
+            <Notifications key={logNonce} filter={logFilter} />
+          )}
           {view === "accounts" && <Accounts go={go} />}
         </Box>
       </AppShell.Main>

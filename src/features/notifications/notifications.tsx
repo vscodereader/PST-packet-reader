@@ -1,20 +1,542 @@
-import { Center, Stack, Text, ThemeIcon } from "@mantine/core";
+import {
+  Badge,
+  Box,
+  Button,
+  Card,
+  Center,
+  Container,
+  Group,
+  Loader,
+  SegmentedControl,
+  Select,
+  SimpleGrid,
+  Stack,
+  Text,
+  TextInput,
+  ThemeIcon,
+  Title,
+} from "@mantine/core";
+import { notifications } from "@mantine/notifications";
+import { useState } from "react";
 
-import type { LogFilter } from "@/shared/data/types";
+import {
+  ACTIVE_PLATFORMS,
+  ACTIVITY,
+  batchStatus,
+  KIND,
+  LOG_BATCHES,
+} from "@/shared/data/mock";
+import type { BatchItem, LogBatch, LogFilter } from "@/shared/data/types";
 import { Icon } from "@/shared/ui/icons";
+import { PlatformLogo } from "@/shared/ui/platform-logo";
 
-export function Notifications(_props: { filter: LogFilter | null }) {
+function dayBucket(time: string): "오늘" | "어제" | "이전" {
+  if (/^어제/.test(time)) return "어제";
+  if (/^오늘/.test(time) || /방금|분 전|시간 전/.test(time)) return "오늘";
+  return "이전";
+}
+
+const BATCH_STATUS: Record<string, { t: string; c: string }> = {
+  running: { t: "처리중", c: "blue" },
+  success: { t: "성공", c: "green" },
+  partial: { t: "일부 실패", c: "yellow" },
+  fail: { t: "실패", c: "red" },
+};
+
+function statusColor(s: string) {
+  return s === "success"
+    ? "green"
+    : s === "fail"
+      ? "red"
+      : s === "running"
+        ? "blue"
+        : "gray";
+}
+
+function SubLog({ item }: { item: BatchItem }) {
+  const [showTrace, setShowTrace] = useState(false);
+  const ok = item.status === "success";
+  const fail = item.status === "fail";
+  const color = statusColor(item.status);
   return (
-    <Center h="100%" p="xl">
-      <Stack align="center" gap="xs">
-        <ThemeIcon size={48} radius="md" variant="light">
-          <Icon.bell size={28} />
+    <Box
+      px={16}
+      py={9}
+      pl={52}
+      style={{
+        borderTop: "1px solid var(--mantine-color-gray-2)",
+        background: "var(--mantine-color-gray-0)",
+      }}
+    >
+      <Group gap={11} wrap="nowrap">
+        <ThemeIcon size={22} radius="xl" variant="light" color={color}>
+          {ok ? (
+            <Icon.check size={13} />
+          ) : fail ? (
+            <Icon.x size={13} />
+          ) : (
+            <Loader size={13} color={color} />
+          )}
         </ThemeIcon>
-        <Text fw={700}>알림</Text>
-        <Text c="dimmed" size="sm">
-          구현 예정
+        <PlatformLogo id={item.platform} size={20} />
+        <Group gap={5} style={{ flex: 1, minWidth: 0 }} wrap="nowrap">
+          <Text fz={12.5} fw={700} truncate>
+            {item.target}
+          </Text>
+          {item.code && (
+            <Text fz={10} fw={700} c="forum" ff="monospace">
+              {item.code}
+            </Text>
+          )}
+          <Text fz={11.5} c="dimmed" ff="monospace">
+            · {item.loginId}
+          </Text>
+        </Group>
+        <Text fz={11.5} c={fail ? "red" : "dimmed"} style={{ flexShrink: 0 }}>
+          {item.msg}
         </Text>
-      </Stack>
-    </Center>
+        {fail && item.trace && (
+          <Button
+            size="compact-xs"
+            variant="default"
+            radius="xl"
+            rightSection={
+              <Icon.chevronDown
+                size={12}
+                style={{
+                  transform: showTrace ? "rotate(180deg)" : "none",
+                  transition: "transform .15s",
+                }}
+              />
+            }
+            onClick={() => setShowTrace((s) => !s)}
+          >
+            {showTrace ? "접기" : "자세히 보기"}
+          </Button>
+        )}
+      </Group>
+      {fail && item.trace && showTrace && (
+        <Box
+          component="pre"
+          ml={33}
+          mt={9}
+          p="sm"
+          style={{
+            background: "#1f2329",
+            color: "#e6e8eb",
+            borderRadius: "var(--mantine-radius-sm)",
+            fontSize: 11.5,
+            lineHeight: 1.6,
+            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+            whiteSpace: "pre-wrap",
+            overflowX: "auto",
+          }}
+        >
+          {item.trace}
+        </Box>
+      )}
+    </Box>
+  );
+}
+
+function BatchRow({
+  batch,
+  expanded,
+  onToggle,
+}: {
+  batch: LogBatch;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const status = batchStatus(batch);
+  const bs = BATCH_STATUS[status] ?? { t: status, c: "gray" };
+  const kd = KIND[batch.kind] ?? { t: batch.kind, c: "gray" };
+  const okN = batch.items.filter((i) => i.status === "success").length;
+  const failN = batch.items.filter((i) => i.status === "fail").length;
+  return (
+    <Box style={{ borderBottom: "1px solid var(--mantine-color-gray-2)" }}>
+      <Group
+        gap={14}
+        px={16}
+        py={12}
+        wrap="nowrap"
+        style={{ cursor: "pointer" }}
+        {...(expanded ? { bg: "gray.0" } : {})}
+        onClick={onToggle}
+      >
+        <ThemeIcon size={26} radius="xl" variant="light" color={bs.c}>
+          {status === "success" ? (
+            <Icon.check size={15} />
+          ) : status === "fail" ? (
+            <Icon.x size={15} />
+          ) : status === "running" ? (
+            <Loader size={14} color={bs.c} />
+          ) : (
+            <Icon.alert size={14} />
+          )}
+        </ThemeIcon>
+        <Badge size="sm" color={kd.c} variant="light">
+          {kd.t}
+        </Badge>
+        <Box style={{ flex: 1, minWidth: 0 }}>
+          <Text fz={13.5} fw={700} truncate>
+            {batch.title}
+          </Text>
+          <Text fz={11.5} c="dimmed" mt={2}>
+            {batch.items.length}곳 · 성공 {okN}
+            {failN > 0 && (
+              <Text component="span" c="red">
+                {" "}
+                · 실패 {failN}
+              </Text>
+            )}
+          </Text>
+        </Box>
+        <Badge size="sm" color={bs.c} variant="light">
+          {bs.t}
+        </Badge>
+        <Text fz={12} c="dimmed" w={70} ta="right" style={{ flexShrink: 0 }}>
+          {batch.time.replace(/^(오늘|어제)\s/, "")}
+        </Text>
+        <Icon.chevronDown
+          size={17}
+          style={{
+            color: "var(--mantine-color-gray-5)",
+            flexShrink: 0,
+            transform: expanded ? "rotate(180deg)" : "none",
+            transition: "transform .18s",
+          }}
+        />
+      </Group>
+      {expanded && batch.items.map((item, i) => <SubLog key={i} item={item} />)}
+    </Box>
+  );
+}
+
+interface SystemRow {
+  id: string;
+  status: "success" | "fail" | "info";
+  title: string;
+  time: string;
+}
+
+export function Notifications({ filter }: { filter: LogFilter | null }) {
+  const [cat, setCat] = useState<string>(filter?.batchId ? "post" : "all");
+  const [status, setStatus] = useState("all");
+  const [plat, setPlat] = useState(filter?.platform ?? "all");
+  const [acct, setAcct] = useState<LogFilter | null>(
+    filter?.loginId ? filter : null,
+  );
+  const [q, setQ] = useState("");
+  const [expanded, setExpanded] = useState<Record<string, boolean>>(
+    filter?.batchId ? { [filter.batchId]: true } : {},
+  );
+
+  const sysRows: SystemRow[] = ACTIVITY.map((a) => ({
+    id: a.id,
+    status:
+      a.type === "error" ? "fail" : a.type === "success" ? "success" : "info",
+    title: a.text,
+    time: a.time,
+  }));
+
+  const matchBatch = (b: LogBatch) =>
+    (status === "all" || batchStatus(b) === status) &&
+    (plat === "all" || b.items.some((i) => i.platform === plat)) &&
+    (!acct || b.items.some((i) => i.loginId === acct.loginId)) &&
+    (!q ||
+      b.title.includes(q) ||
+      b.items.some((i) => i.target.includes(q) || i.loginId.includes(q)));
+  const matchSys = (s: SystemRow) =>
+    (status === "all" || s.status === status) &&
+    !acct &&
+    plat === "all" &&
+    (!q || s.title.includes(q));
+
+  type Row =
+    | { kind: "batch"; b: LogBatch; time: string }
+    | { kind: "system"; s: SystemRow; time: string };
+
+  const batches: Row[] =
+    cat === "system"
+      ? []
+      : LOG_BATCHES.filter(matchBatch).map((b) => ({
+          kind: "batch",
+          b,
+          time: b.time,
+        }));
+  const systems: Row[] =
+    cat === "post"
+      ? []
+      : sysRows
+          .filter(matchSys)
+          .map((s) => ({ kind: "system", s, time: s.time }));
+  const merged = [...batches, ...systems];
+
+  const dayOrder: Record<string, number> = { 오늘: 0, 어제: 1, 이전: 2 };
+  const groups: { day: string; rows: Row[] }[] = [];
+  merged.forEach((row) => {
+    const day = dayBucket(row.time);
+    let g = groups.find((x) => x.day === day);
+    if (!g) {
+      g = { day, rows: [] };
+      groups.push(g);
+    }
+    g.rows.push(row);
+  });
+  groups.sort((a, b) => (dayOrder[a.day] ?? 9) - (dayOrder[b.day] ?? 9));
+
+  const okCount = LOG_BATCHES.filter(
+    (b) => batchStatus(b) === "success",
+  ).length;
+  const failCount = LOG_BATCHES.filter((b) =>
+    ["fail", "partial"].includes(batchStatus(b)),
+  ).length;
+
+  const catTabs = [
+    { value: "all", label: `전체 ${LOG_BATCHES.length + sysRows.length}` },
+    { value: "post", label: `게시·댓글 ${LOG_BATCHES.length}` },
+    { value: "system", label: `시스템 ${sysRows.length}` },
+  ];
+  const summary = [
+    {
+      t: "게시 배치",
+      v: LOG_BATCHES.length,
+      color: "gray",
+      ic: "layers" as const,
+    },
+    { t: "성공", v: okCount, color: "green", ic: "checkCircle" as const },
+    { t: "실패 포함", v: failCount, color: "red", ic: "alert" as const },
+  ];
+
+  return (
+    <Container size={1020} py={32} px={36}>
+      <Group justify="space-between" align="flex-end" mb={22} wrap="wrap">
+        <Box>
+          <Title order={1} fz={25} fw={800}>
+            알림
+          </Title>
+          <Text size="sm" c="dimmed" mt={6}>
+            게시 배치별 결과와 세부 로그, 시스템 알림을 한곳에서 확인하세요.
+          </Text>
+        </Box>
+        <Button
+          variant="default"
+          leftSection={<Icon.download size={16} />}
+          onClick={() =>
+            notifications.show({
+              message: "알림 내역을 엑셀로 내보냈어요",
+              color: "green",
+            })
+          }
+        >
+          내보내기
+        </Button>
+      </Group>
+
+      {acct && (
+        <Group
+          gap={10}
+          p={11}
+          mb={16}
+          style={{
+            background: "var(--mantine-color-blue-light)",
+            border: "1px solid var(--mantine-color-blue-filled)",
+            borderRadius: "var(--mantine-radius-md)",
+          }}
+        >
+          <Icon.filter size={16} color="var(--mantine-color-blue-filled)" />
+          <Text size="sm" fw={600}>
+            계정 필터 적용됨
+          </Text>
+          <Group
+            gap={7}
+            px={10}
+            h={28}
+            style={{
+              background: "var(--mantine-color-body)",
+              border: "1px solid var(--mantine-color-gray-3)",
+              borderRadius: 999,
+            }}
+          >
+            {acct.platform && <PlatformLogo id={acct.platform} size={17} />}
+            <Text fz={12.5} fw={700} ff="monospace">
+              {acct.loginId}
+            </Text>
+          </Group>
+          <Button
+            ml="auto"
+            size="compact-xs"
+            variant="default"
+            radius="xl"
+            leftSection={<Icon.x size={13} />}
+            onClick={() => {
+              setAcct(null);
+              setPlat("all");
+            }}
+          >
+            필터 해제
+          </Button>
+        </Group>
+      )}
+
+      <SimpleGrid cols={3} spacing={14} mb={22}>
+        {summary.map((s) => {
+          const I = Icon[s.ic];
+          return (
+            <Card key={s.t} withBorder padding="md" radius="md">
+              <Group gap={13} wrap="nowrap">
+                <ThemeIcon
+                  size={40}
+                  radius="md"
+                  variant="light"
+                  color={s.color}
+                >
+                  <I size={21} />
+                </ThemeIcon>
+                <Box>
+                  <Text fz={23} fw={800} lh={1}>
+                    {s.v}
+                  </Text>
+                  <Text fz={12.5} c="dimmed" fw={600} mt={4}>
+                    {s.t}
+                  </Text>
+                </Box>
+              </Group>
+            </Card>
+          );
+        })}
+      </SimpleGrid>
+
+      <Group justify="space-between" mb={16} wrap="wrap">
+        <SegmentedControl
+          size="sm"
+          value={cat}
+          onChange={setCat}
+          data={catTabs}
+        />
+        <Group gap="sm">
+          <Select
+            size="sm"
+            w={120}
+            value={status}
+            onChange={(v) => setStatus(v ?? "all")}
+            data={[
+              { value: "all", label: "전체 상태" },
+              { value: "success", label: "성공" },
+              { value: "partial", label: "일부 실패" },
+              { value: "fail", label: "실패" },
+            ]}
+          />
+          {cat !== "system" && (
+            <Select
+              size="sm"
+              w={140}
+              value={plat}
+              onChange={(v) => {
+                const nv = v ?? "all";
+                setPlat(nv);
+                if (acct && nv !== acct.platform) setAcct(null);
+              }}
+              data={[
+                { value: "all", label: "모든 플랫폼" },
+                ...ACTIVE_PLATFORMS.map((p) => ({
+                  value: p.id,
+                  label: p.name,
+                })),
+              ]}
+            />
+          )}
+          <TextInput
+            size="sm"
+            w={200}
+            placeholder="내용·종목·계정 검색"
+            leftSection={<Icon.search size={16} />}
+            value={q}
+            onChange={(e) => setQ(e.currentTarget.value)}
+          />
+        </Group>
+      </Group>
+
+      <Card withBorder padding={0} radius="md" style={{ overflow: "hidden" }}>
+        {groups.map((g) => (
+          <Box key={g.day}>
+            <Box
+              px={16}
+              py={9}
+              bg="gray.0"
+              style={{ borderBottom: "1px solid var(--mantine-color-gray-2)" }}
+            >
+              <Text fz={11.5} fw={700} c="dimmed">
+                {g.day}
+              </Text>
+            </Box>
+            {g.rows.map((row) =>
+              row.kind === "batch" ? (
+                <BatchRow
+                  key={row.b.id}
+                  batch={row.b}
+                  expanded={!!expanded[row.b.id]}
+                  onToggle={() =>
+                    setExpanded((e) => ({ ...e, [row.b.id]: !e[row.b.id] }))
+                  }
+                />
+              ) : (
+                <Group
+                  key={row.s.id}
+                  gap={14}
+                  px={16}
+                  py={12}
+                  wrap="nowrap"
+                  style={{
+                    borderBottom: "1px solid var(--mantine-color-gray-2)",
+                  }}
+                >
+                  <ThemeIcon
+                    size={26}
+                    radius="xl"
+                    variant="light"
+                    color={statusColor(row.s.status)}
+                  >
+                    {row.s.status === "success" ? (
+                      <Icon.check size={15} />
+                    ) : row.s.status === "fail" ? (
+                      <Icon.x size={15} />
+                    ) : (
+                      <Icon.bell size={13} />
+                    )}
+                  </ThemeIcon>
+                  <Badge size="sm" color="gray" variant="light">
+                    시스템
+                  </Badge>
+                  <Text
+                    fz={13.5}
+                    fw={600}
+                    c="gray.7"
+                    truncate
+                    style={{ flex: 1 }}
+                  >
+                    {row.s.title}
+                  </Text>
+                  <Text fz={12} c="dimmed" w={70} ta="right">
+                    {row.s.time}
+                  </Text>
+                </Group>
+              ),
+            )}
+          </Box>
+        ))}
+        {merged.length === 0 && (
+          <Center py={56}>
+            <Stack align="center" gap={6}>
+              <Icon.inbox size={38} color="var(--mantine-color-gray-5)" />
+              <Text size="sm" fw={600} c="dimmed">
+                해당하는 알림이 없어요
+              </Text>
+            </Stack>
+          </Center>
+        )}
+      </Card>
+    </Container>
   );
 }
