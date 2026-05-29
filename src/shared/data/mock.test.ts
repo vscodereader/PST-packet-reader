@@ -1,13 +1,14 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  accountLog,
   acctPlatforms,
   batchStatus,
   hasToken,
   jobLink,
   resolveTemplate,
 } from "./mock";
-import type { LogBatch } from "./types";
+import type { Account, LogBatch } from "./types";
 
 describe("jobLink", () => {
   it("builds a Naver Finance URL from a stock code", () => {
@@ -40,6 +41,10 @@ describe("resolveTemplate", () => {
     expect(out).toBe("https://x.io");
   });
 
+  it("returns falsy text unchanged", () => {
+    expect(resolveTemplate("", null)).toBe("");
+  });
+
   it("leaves text without tokens untouched", () => {
     expect(resolveTemplate("plain", { code: "005930" })).toBe("plain");
   });
@@ -49,6 +54,10 @@ describe("hasToken", () => {
   it("detects any template token by default", () => {
     expect(hasToken("a #{링크} b")).toBe(true);
     expect(hasToken("no tokens")).toBe(false);
+  });
+
+  it("returns false for empty text", () => {
+    expect(hasToken("")).toBe(false);
   });
 
   it("detects a specific token kind", () => {
@@ -142,5 +151,32 @@ describe("acctPlatforms", () => {
 
   it("ignores unknown ids", () => {
     expect(acctPlatforms(["nope"])).toEqual([]);
+  });
+});
+
+describe("accountLog", () => {
+  const base: Account = {
+    id: "x",
+    platform: "forum",
+    loginId: "u",
+    pw: "p",
+    status: "new",
+    last: "—",
+    tags: [],
+  };
+
+  it("returns no entries for a brand-new account", () => {
+    expect(accountLog(base)).toEqual([]);
+  });
+
+  it("returns activity entries for an active account", () => {
+    const log = accountLog({ ...base, status: "active" });
+    expect(log.length).toBeGreaterThan(0);
+    expect(log.every((e) => e.type !== "error")).toBe(true);
+  });
+
+  it("includes an error entry for an errored account", () => {
+    const log = accountLog({ ...base, status: "error" });
+    expect(log.some((e) => e.type === "error")).toBe(true);
   });
 });

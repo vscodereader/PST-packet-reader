@@ -55,4 +55,33 @@ describe("StockCrawlModal", () => {
     await userEvent.click(screen.getByRole("button", { name: /다시 크롤링/ }));
     expect(screen.getByText(/수집하는 중/)).toBeInTheDocument();
   });
+
+  it("deselects a stock when clicked twice", async () => {
+    renderModal({ preselected: [] });
+    const search = await screen.findByPlaceholderText(
+      "종목명 또는 코드 검색",
+      undefined,
+      { timeout: 2500 },
+    );
+    await userEvent.type(search, "카카오");
+    const row = screen.getByText("카카오");
+    await userEvent.click(row); // select
+    await userEvent.click(row); // deselect
+    expect(screen.getByRole("button", { name: /적용/ })).toBeDisabled();
+  });
+
+  it("toggles a stock from the list and confirms it", async () => {
+    const { onConfirm } = renderModal({ preselected: [] });
+    const search = await screen.findByPlaceholderText(
+      "종목명 또는 코드 검색",
+      undefined,
+      { timeout: 2500 },
+    );
+    await userEvent.type(search, "카카오");
+    await userEvent.click(screen.getByText("카카오"));
+    await userEvent.click(screen.getByRole("button", { name: /적용/ }));
+    expect(onConfirm.mock.calls[0]![0]).toEqual([
+      expect.objectContaining({ name: "카카오" }),
+    ]);
+  });
 });

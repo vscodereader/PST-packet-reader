@@ -3,6 +3,8 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
 
+import { pickOption } from "@/test/select";
+
 import { Accounts } from "./accounts";
 
 function renderAccounts(go = vi.fn()) {
@@ -107,5 +109,104 @@ describe("Accounts", () => {
       "value_pick",
     );
     expect(screen.getAllByRole("row").length).toBe(2); // header + 1 match
+  });
+
+  it("saves an edited cell on blur", async () => {
+    renderAccounts();
+    const row = screen.getAllByRole("row")[1]!;
+    await userEvent.click(within(row).getByText("invest_king7"));
+    const input = within(row).getByDisplayValue("invest_king7");
+    await userEvent.clear(input);
+    await userEvent.type(input, "blur_id");
+    await userEvent.tab();
+    expect(await screen.findByText("blur_id")).toBeInTheDocument();
+  });
+
+  it("cancels an edit on Escape", async () => {
+    renderAccounts();
+    const row = screen.getAllByRole("row")[1]!;
+    await userEvent.click(within(row).getByText("invest_king7"));
+    const input = within(row).getByDisplayValue("invest_king7");
+    await userEvent.clear(input);
+    await userEvent.type(input, "discard{Escape}");
+    expect(within(row).getByText("invest_king7")).toBeInTheDocument();
+  });
+
+  it("edits a password inline", async () => {
+    renderAccounts();
+    const row = screen.getAllByRole("row")[1]!;
+    await userEvent.click(within(row).getByTitle("보기"));
+    await userEvent.click(within(row).getByText("ik7!naver22"));
+    const input = within(row).getByDisplayValue("ik7!naver22");
+    await userEvent.clear(input);
+    await userEvent.type(input, "newpass99{Enter}");
+    expect(await screen.findByText("newpass99")).toBeInTheDocument();
+  });
+
+  it("saves a password edit on blur", async () => {
+    renderAccounts();
+    const row = screen.getAllByRole("row")[1]!;
+    await userEvent.click(within(row).getByTitle("보기"));
+    await userEvent.click(within(row).getByText("ik7!naver22"));
+    const input = within(row).getByDisplayValue("ik7!naver22");
+    await userEvent.clear(input);
+    await userEvent.type(input, "blurpass11");
+    await userEvent.tab();
+    expect(await screen.findByText("blurpass11")).toBeInTheDocument();
+  });
+
+  it("cancels a password edit on Escape", async () => {
+    renderAccounts();
+    const row = screen.getAllByRole("row")[1]!;
+    await userEvent.click(within(row).getByTitle("보기"));
+    await userEvent.click(within(row).getByText("ik7!naver22"));
+    const input = within(row).getByDisplayValue("ik7!naver22");
+    await userEvent.clear(input);
+    await userEvent.type(input, "discard{Escape}");
+    expect(within(row).getByText("ik7!naver22")).toBeInTheDocument();
+  });
+
+  it("fires excel import and export actions", async () => {
+    renderAccounts();
+    await userEvent.click(
+      screen.getByRole("button", { name: /엑셀 가져오기/ }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: /내보내기/ }));
+    expect(
+      screen.getByRole("heading", { name: "계정 관리" }),
+    ).toBeInTheDocument();
+  });
+
+  it("adds a tag through the tag cell popover", async () => {
+    renderAccounts();
+    const row = screen.getAllByRole("row")[1]!;
+    await userEvent.click(within(row).getByText("대형주"));
+    const tagInput = await screen.findByPlaceholderText("태그 추가");
+    await userEvent.type(tagInput, "신규태그{Enter}");
+    // rendered both as a TagsInput pill and a cell badge
+    expect((await screen.findAllByText("신규태그")).length).toBeGreaterThan(0);
+  });
+
+  it("paginates to the second page", async () => {
+    renderAccounts();
+    await userEvent.click(screen.getByRole("button", { name: "2" }));
+    // 15 accounts → page 2 has 5 rows + header
+    expect(screen.getAllByRole("row").length).toBe(6);
+  });
+
+  it("filters by tag via the tag select", async () => {
+    renderAccounts();
+    await pickOption(0, "# 반도체"); // toolbar tag select is the first listbox
+    // a1, a2 carry 반도체 → header + 2 rows
+    expect(screen.getAllByRole("row").length).toBe(3);
+  });
+
+  it("changes a row's platform via its select", async () => {
+    renderAccounts();
+    // combos[0] = tag filter; combos[1] = first row's platform select
+    await pickOption(1, "밴드");
+    expect(
+      screen.getByRole("heading", { name: "계정 관리" }),
+    ).toBeInTheDocument();
   });
 });

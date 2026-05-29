@@ -88,4 +88,48 @@ describe("Posts", () => {
     await userEvent.click(await screen.findByText("삭제"));
     expect(screen.queryByText(firstTitle)).not.toBeInTheDocument();
   });
+
+  it("updates an existing post when edited and saved", async () => {
+    renderPosts();
+    await userEvent.click(screen.getByText("카카오 반등 시그널 분석"));
+    const title = await screen.findByDisplayValue("카카오 반등 시그널 분석");
+    await userEvent.clear(title);
+    await userEvent.type(title, "카카오 수정본");
+    await userEvent.click(screen.getByRole("button", { name: "저장" }));
+    expect(await screen.findByText("카카오 수정본")).toBeInTheDocument();
+  });
+
+  it("creates a new post from the writer", async () => {
+    renderPosts();
+    await userEvent.click(screen.getByRole("button", { name: /글쓰기/ }));
+    await userEvent.type(
+      await screen.findByPlaceholderText("제목을 입력하세요"),
+      "새로 쓴 글",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "저장" }));
+    expect(await screen.findByText("새로 쓴 글")).toBeInTheDocument();
+  });
+
+  it("saves a draft from the writer", async () => {
+    renderPosts();
+    await userEvent.click(screen.getByRole("button", { name: /글쓰기/ }));
+    await userEvent.type(
+      await screen.findByPlaceholderText("제목을 입력하세요"),
+      "초안 글",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "임시저장" }));
+    await userEvent.click(await screen.findByText("임시저장하기"));
+    expect(screen.getByText(/임시저장 목록/)).toBeInTheDocument();
+  });
+
+  it("deletes a draft from the writer list", async () => {
+    renderPosts();
+    await userEvent.click(screen.getByRole("button", { name: /글쓰기/ }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: "임시저장" }),
+    );
+    const trashes = await screen.findAllByTitle("삭제");
+    await userEvent.click(trashes[0]!);
+    expect(screen.getByText(/임시저장 목록/)).toBeInTheDocument();
+  });
 });

@@ -1,5 +1,11 @@
 import { MantineProvider } from "@mantine/core";
-import { render, screen } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
 
@@ -160,5 +166,82 @@ describe("WriterModal", () => {
     expect(
       screen.getByPlaceholderText("제목을 입력하세요"),
     ).toBeInTheDocument();
+  });
+
+  it("converts a pasted URL through the crawl helper", async () => {
+    renderWriter();
+    await screen.findByPlaceholderText("제목을 입력하세요");
+    const body = document.querySelector("[contenteditable]") as HTMLElement;
+    fireEvent.paste(body, {
+      clipboardData: {
+        getData: () =>
+          "https://finance.naver.com/item/main.naver?code=005930 참고하세요",
+      },
+    });
+    expect(body).toBeInTheDocument();
+  });
+
+  it("crawls a non-stock URL to a host placeholder", async () => {
+    renderWriter();
+    await screen.findByPlaceholderText("제목을 입력하세요");
+    const body = document.querySelector("[contenteditable]") as HTMLElement;
+    fireEvent.paste(body, {
+      clipboardData: { getData: () => "https://www.example.com/article" },
+    });
+    expect(body).toBeInTheDocument();
+  });
+
+  it("inserts a token into the body when the editor is focused", async () => {
+    renderWriter();
+    const body = document.querySelector("[contenteditable]") as HTMLElement;
+    await userEvent.click(body);
+    await userEvent.click(screen.getByRole("button", { name: "변수" }));
+    await userEvent.click(await screen.findByText("종목코드"));
+    expect(body).toBeInTheDocument();
+  });
+
+  it("inserts an image via the file picker", async () => {
+    renderWriter();
+    await screen.findByPlaceholderText("제목을 입력하세요");
+    const fileInput = document.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+    const file = new File(["x"], "pic.png", { type: "image/png" });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+    await waitFor(() =>
+      expect(
+        screen.getByPlaceholderText("제목을 입력하세요"),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("resets to a single empty row when removing the last comment", async () => {
+    renderWriter();
+    await userEvent.click(screen.getByRole("button", { name: "댓글 작성" }));
+    const ph = "자연스러운 댓글을 입력하세요";
+    let dels = await screen.findAllByTitle("삭제");
+    await userEvent.click(dels[0]!); // 2 → 1
+    dels = screen.getAllByTitle("삭제");
+    await userEvent.click(dels[0]!); // length===1 → reset to [""]
+    expect(screen.getAllByPlaceholderText(ph).length).toBe(1);
+  });
+
+  it("saves a draft from the close-confirmation dialog", async () => {
+    const onClose = vi.fn();
+    const onSaveDraft = vi.fn();
+    renderWriter({ onClose, onSaveDraft });
+    await userEvent.type(
+      await screen.findByPlaceholderText("제목을 입력하세요"),
+      "닫기 전 글",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "닫기" }));
+    const dialog = (
+      await screen.findByText("작성 중인 글을 임시저장할까요?")
+    ).closest('[role="dialog"]') as HTMLElement;
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "임시저장" }),
+    );
+    expect(onSaveDraft).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

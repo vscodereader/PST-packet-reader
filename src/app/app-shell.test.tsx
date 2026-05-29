@@ -66,4 +66,19 @@ describe("MacroApp", () => {
     renderApp();
     expect(screen.getByText("엑셀 가져오기")).toBeInTheDocument();
   });
+
+  it("opens the log view from the header bell", async () => {
+    const { container } = render(
+      <MantineProvider>
+        <MacroApp />
+      </MantineProvider>,
+    );
+    const bell = container.querySelector(".tabler-icon-bell");
+    expect(bell).toBeTruthy();
+    await userEvent.click(bell as Element);
+    expect(localStorage.getItem("mc-view")).toBe("log");
+    expect(
+      screen.getByPlaceholderText("내용·종목·계정 검색"),
+    ).toBeInTheDocument();
+  });
 });

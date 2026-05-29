@@ -33,4 +33,30 @@ describe("Dashboard", () => {
     await userEvent.click(screen.getByText("종합토론방"));
     expect(go).toHaveBeenCalledWith("accounts");
   });
+
+  it("navigates from a stat card to its target view", async () => {
+    const go = renderDash();
+    await userEvent.click(screen.getByText("운영 계정"));
+    expect(go).toHaveBeenCalledWith("accounts");
+  });
+
+  it("navigates to the queue from '큐 전체' and a scheduled row", async () => {
+    const go = renderDash();
+    await userEvent.click(screen.getByRole("button", { name: /큐 전체/ }));
+    expect(go).toHaveBeenCalledWith("queue");
+  });
+
+  it("navigates to accounts from the '계정 관리' shortcut", async () => {
+    const go = renderDash();
+    await userEvent.click(screen.getByRole("button", { name: /^계정 관리/ }));
+    expect(go).toHaveBeenCalledWith("accounts");
+  });
+
+  it("opens the queue from a scheduled row", async () => {
+    const go = renderDash();
+    await userEvent.click(
+      screen.getByText("삼성전자 4분기 실적 기대 — 매수 관점 정리"),
+    );
+    expect(go).toHaveBeenCalledWith("queue");
+  });
 });

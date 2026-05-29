@@ -1,5 +1,6 @@
 import { MantineProvider } from "@mantine/core";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
 
 import type { PublishJob } from "@/shared/data/types";
@@ -50,5 +51,35 @@ describe("PreviewModal", () => {
     });
     expect(await screen.findByText("좋네요 삼성전자")).toBeInTheDocument();
     expect(screen.getByText("댓글 1")).toBeInTheDocument();
+  });
+
+  it("falls back to a placeholder target when no jobs are given", async () => {
+    renderPreview({ jobs: [], title: "제목" });
+    // appears in both the tab pill and the card header
+    expect((await screen.findAllByText("대상 미선택")).length).toBeGreaterThan(
+      0,
+    );
+  });
+
+  it("shows a comment-target line with a url target", async () => {
+    renderPreview({
+      mode: "comment",
+      comments: ["좋아요"],
+      commentTarget: "url",
+    });
+    expect(await screen.findByText(/지정 게시글/)).toBeInTheDocument();
+  });
+
+  it("switches between target tabs", async () => {
+    const jobB = {
+      ...forumJob,
+      key: "a2-035720",
+      targetName: "카카오",
+      code: "035720",
+    };
+    renderPreview({ jobs: [forumJob, jobB], title: "제목" });
+    await userEvent.click(await screen.findByText("카카오"));
+    // 카카오 now appears in both the tab pill and the card header
+    expect(screen.getAllByText("카카오").length).toBeGreaterThan(1);
   });
 });

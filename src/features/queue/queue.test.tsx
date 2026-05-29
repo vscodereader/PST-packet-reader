@@ -1,5 +1,5 @@
 import { MantineProvider } from "@mantine/core";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
 
@@ -70,5 +70,26 @@ describe("Queue", () => {
     );
     await userEvent.click(screen.getAllByTitle("예약 취소")[0]!);
     expect(screen.getByText("예약 대기")).toBeInTheDocument();
+  });
+
+  it("reorders waiting items via drag and drop", () => {
+    renderQueue();
+    const q2 = "반도체 흐름 코멘트 10종";
+    const q3 = "오늘의 특징주 정리 — 장 마감 요약";
+    const q2row = screen.getByText(q2).closest("[draggable]")!;
+    const q3row = screen.getByText(q3).closest("[draggable]")!;
+    const dataTransfer = {
+      effectAllowed: "",
+      setData: () => {},
+      getData: () => "",
+    };
+    fireEvent.dragStart(q2row, { dataTransfer });
+    fireEvent.dragOver(q3row, { dataTransfer });
+    fireEvent.dragEnd(q2row, { dataTransfer });
+    const q2El = screen.getByText(q2);
+    const q3El = screen.getByText(q3);
+    expect(
+      q3El.compareDocumentPosition(q2El) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 });

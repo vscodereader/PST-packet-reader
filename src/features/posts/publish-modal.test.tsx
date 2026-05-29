@@ -1,9 +1,10 @@
 import { MantineProvider } from "@mantine/core";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
 
 import type { LibraryPost } from "@/shared/data/types";
+import { pickOption } from "@/test/select";
 
 import { PublishModal } from "./publish-modal";
 
@@ -74,6 +75,7 @@ describe("PublishModal", () => {
   });
 
   it("completes the publish flow and routes to a follow-up view", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(1); // force every job to succeed
     const { go } = renderPublish();
     await userEvent.click(
       await screen.findByRole("button", { name: /^게시 \(\d+\)/ }),
@@ -84,6 +86,27 @@ describe("PublishModal", () => {
     ).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "알림 보기" }));
     expect(go).toHaveBeenCalledWith("log");
+    vi.restoreAllMocks();
+  });
+
+  it("offers a retry control when a job fails", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0); // force every job to fail
+    renderPublish();
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^게시 \(\d+\)/ }),
+    );
+    expect(
+      await screen.findByRole("button", { name: "재시도" }, { timeout: 3000 }),
+    ).toBeInTheDocument();
+    vi.restoreAllMocks();
+  });
+
+  it("deselects an account when its row is clicked again", async () => {
+    renderPublish();
+    expect(await screen.findByText("1개")).toBeInTheDocument();
+    // the first usable account (a1) is preselected; click its row to deselect
+    await userEvent.click(screen.getByText("invest_king7"));
+    expect(await screen.findByText("0개")).toBeInTheDocument();
   });
 
   it("selects every visible account and expands the destinations", async () => {
@@ -97,5 +120,46 @@ describe("PublishModal", () => {
     expect(
       screen.getByRole("button", { name: /종목 선택/ }),
     ).toBeInTheDocument();
+  });
+
+  it("edits the link override when the doc has a link token", async () => {
+    renderPublish();
+    const input = await screen.findByPlaceholderText(
+      "비우면 종목별 시세 링크 자동 삽입",
+    );
+    await userEvent.type(input, "https://x.test");
+    expect(input).toHaveValue("https://x.test");
+  });
+
+  it("removes a selected stock chip", async () => {
+    renderPublish();
+    // "삼성전자" shows in the chip and in the variable-preview example;
+    // the chip (first in DOM) carries the remove button.
+    const chip = (await screen.findAllByText("삼성전자"))[0]!.closest("div")!;
+    await userEvent.click(within(chip).getByRole("button"));
+    expect(screen.queryByText("삼성전자")).not.toBeInTheDocument();
+  });
+
+  it("accepts a schedule date once 예약 게시 is chosen", async () => {
+    renderPublish();
+    await userEvent.click(await screen.findByText("예약 게시"));
+    const date = document.querySelector(
+      'input[type="date"]',
+    ) as HTMLInputElement;
+    fireEvent.change(date, { target: { value: "2026-06-01" } });
+    expect(date.value).toBe("2026-06-01");
+  });
+
+  it("changes the cafe, board, and band destinations", async () => {
+    renderPublish();
+    await userEvent.click(
+      await screen.findByRole("button", { name: /보이는 계정 전체/ }),
+    );
+    await screen.findByText("14개");
+    // DestinationPicker selects in order: cafe, board, band
+    await pickOption(0, "개미투자 카페");
+    await pickOption(1, "종목추천");
+    await pickOption(2, "단타클럽 BAND");
+    expect(screen.getByText("게시 설정")).toBeInTheDocument();
   });
 });
