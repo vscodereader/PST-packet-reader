@@ -7,6 +7,8 @@ import type { Cafe } from "@/shared/bindings/Cafe";
 import type { DashStat } from "@/shared/bindings/DashStat";
 import type { LibraryPost } from "@/shared/bindings/LibraryPost";
 import type { LogBatch } from "@/shared/bindings/LogBatch";
+import type { PostJob } from "@/shared/bindings/PostJob";
+import type { PublishOutcome } from "@/shared/bindings/PublishOutcome";
 import type { QueueNowItem } from "@/shared/bindings/QueueNowItem";
 import type { QueueScheduledItem } from "@/shared/bindings/QueueScheduledItem";
 import type { Stock } from "@/shared/bindings/Stock";
@@ -19,6 +21,8 @@ export type {
   DashStat,
   LibraryPost,
   LogBatch,
+  PostJob,
+  PublishOutcome,
   QueueNowItem,
   QueueScheduledItem,
   Stock,
@@ -70,6 +74,20 @@ export const ipc = {
   activity: { list: () => call<ActivityItem[]>("list_activity") },
   stats: { list: () => call<DashStat[]>("list_stats") },
   logBatches: { list: () => call<LogBatch[]>("list_log_batches") },
-  cafes: { list: () => call<Cafe[]>("list_cafes") },
+  cafes: {
+    list: () => call<Cafe[]>("list_cafes"),
+    /**
+     * Resolve a cafe reference (URL/slug/numeric) into a registrable cafe,
+     * using `accountId`'s session cookie. Rejects with the backend's error
+     * envelope (`{ code, message }`) on failure. Backs "+ 카페 추가".
+     */
+    resolve: (input: string, accountId: string) =>
+      call<Cafe>("resolve_cafe", { input, accountId }),
+    /** Persist a resolved cafe (upsert by cafeId); returns the updated list. */
+    upsert: (cafe: Cafe) => call<Cafe[]>("upsert_cafe", { cafe }),
+    /** Run publish jobs sequentially; returns one slim outcome per job. */
+    runPostJobs: (jobs: PostJob[]) =>
+      call<PublishOutcome[]>("run_post_jobs", { jobs }),
+  },
   bands: { list: () => call<Band[]>("list_bands") },
 };

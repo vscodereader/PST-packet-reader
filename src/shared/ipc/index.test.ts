@@ -59,6 +59,20 @@ describe("ipc facade", () => {
     });
   });
 
+  it("cafe action channels map to the right commands + args", async () => {
+    await ipc.cafes.resolve("cafe.naver.com/x", "acc1");
+    expect(mockInvoke).toHaveBeenCalledWith("resolve_cafe", {
+      input: "cafe.naver.com/x",
+      accountId: "acc1",
+    });
+    const cafe = { cafeId: 1 } as never;
+    await ipc.cafes.upsert(cafe);
+    expect(mockInvoke).toHaveBeenCalledWith("upsert_cafe", { cafe });
+    const jobs = [{ accountId: "a1" }] as never;
+    await ipc.cafes.runPostJobs(jobs);
+    expect(mockInvoke).toHaveBeenCalledWith("run_post_jobs", { jobs });
+  });
+
   it("read-only channels each invoke their list command", async () => {
     await ipc.stocks.list();
     await ipc.activity.list();
