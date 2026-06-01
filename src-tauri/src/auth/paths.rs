@@ -48,4 +48,31 @@ mod tests {
         assert!(paths.cookies_dir.ends_with("cookies"));
         assert!(paths.logs_dir.ends_with("logs"));
     }
+
+    #[test]
+    fn app_data_root_joins_localappdata_with_app_name() {
+        let _guard = config::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+
+        env::set_var("LOCALAPPDATA", temp.path());
+        assert_eq!(app_data_root().unwrap(), temp.path().join(config::APP_NAME));
+
+        env::remove_var("LOCALAPPDATA");
+        assert!(matches!(
+            app_data_root(),
+            Err(OrchestratorError::MissingLocalAppData)
+        ));
+    }
+
+    #[test]
+    fn ensure_runtime_dirs_creates_every_subdirectory() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_for_root(temp.path());
+
+        ensure_runtime_dirs(&paths).unwrap();
+
+        assert!(paths.accounts_dir.is_dir());
+        assert!(paths.cookies_dir.is_dir());
+        assert!(paths.logs_dir.is_dir());
+    }
 }
