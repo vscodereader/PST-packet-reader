@@ -34,9 +34,18 @@ execSync("npm ci", { cwd: buildDir, stdio: "inherit" });
 
 mkdirSync(path.join(root, "src-tauri/binaries"), { recursive: true });
 
-const linuxStub = path.join(root, "src-tauri/binaries/naver-login-x86_64-unknown-linux-gnu");
-writeFileSync(linuxStub, '#!/bin/sh\necho "naver-login sidecar: Linux stub only" >&2\nexit 1\n');
-chmodSync(linuxStub, 0o755);
+// Placeholder stubs for platforms whose real sidecar isn't packaged yet. Tauri
+// validates that every `externalBin` target-triple file exists at build time,
+// so each CI build OS needs its matching file present.
+for (const triple of [
+  "naver-login-x86_64-unknown-linux-gnu",
+  "naver-login-aarch64-apple-darwin",
+  "naver-login-x86_64-apple-darwin",
+]) {
+  const stub = path.join(root, "src-tauri/binaries", triple);
+  writeFileSync(stub, '#!/bin/sh\necho "naver-login sidecar: stub only" >&2\nexit 1\n');
+  chmodSync(stub, 0o755);
+}
 
 const outPath = path.join(root, "src-tauri/binaries/naver-login-x86_64-pc-windows-msvc");
 execSync(
