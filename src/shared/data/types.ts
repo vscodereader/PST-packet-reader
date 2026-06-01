@@ -99,15 +99,6 @@ export interface PublishResult extends PublishJob {
   msg: string;
 }
 
-export interface Scheduled {
-  id: string;
-  title: string;
-  accounts: string[];
-  kind: ModeValue;
-  when: string;
-  rel: string;
-}
-
 export interface ActivityItem {
   id: string;
   type: "success" | "error" | "info";

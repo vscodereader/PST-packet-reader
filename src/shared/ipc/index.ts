@@ -9,7 +9,6 @@ import type { LibraryPost } from "@/shared/bindings/LibraryPost";
 import type { LogBatch } from "@/shared/bindings/LogBatch";
 import type { QueueNowItem } from "@/shared/bindings/QueueNowItem";
 import type { QueueScheduledItem } from "@/shared/bindings/QueueScheduledItem";
-import type { Scheduled } from "@/shared/bindings/Scheduled";
 import type { Stock } from "@/shared/bindings/Stock";
 
 export type {
@@ -22,7 +21,6 @@ export type {
   LogBatch,
   QueueNowItem,
   QueueScheduledItem,
-  Scheduled,
   Stock,
 };
 
@@ -65,7 +63,6 @@ export const ipc = {
   stocks: { list: () => call<Stock[]>("list_stocks") },
   activity: { list: () => call<ActivityItem[]>("list_activity") },
   stats: { list: () => call<DashStat[]>("list_stats") },
-  scheduled: { list: () => call<Scheduled[]>("list_scheduled") },
   logBatches: { list: () => call<LogBatch[]>("list_log_batches") },
   cafes: { list: () => call<Cafe[]>("list_cafes") },
   bands: { list: () => call<Band[]>("list_bands") },

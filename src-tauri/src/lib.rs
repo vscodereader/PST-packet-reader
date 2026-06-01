@@ -3,9 +3,7 @@ mod store;
 
 use tauri::Manager;
 
-use crate::ipc::{
-    accounts, activity, bands, cafes, log_batches, posts, queue, scheduled, stats, stocks,
-};
+use crate::ipc::{accounts, activity, bands, cafes, log_batches, posts, queue, stats, stocks};
 use crate::store::JsonStore;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -88,10 +86,6 @@ pub fn run() {
                 activity::seed(),
             ));
             app.manage(JsonStore::load_or_seed(
-                dir.join("scheduled.json"),
-                scheduled::seed(),
-            ));
-            app.manage(JsonStore::load_or_seed(
                 dir.join("log-batches.json"),
                 log_batches::seed(),
             ));
@@ -124,7 +118,6 @@ pub fn run() {
             stocks::list_stocks,
             activity::list_activity,
             stats::list_stats,
-            scheduled::list_scheduled,
             log_batches::list_log_batches,
             cafes::list_cafes,
             bands::list_bands,

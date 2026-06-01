@@ -8,6 +8,5 @@ pub mod cafes;
 pub mod log_batches;
 pub mod posts;
 pub mod queue;
-pub mod scheduled;
 pub mod stats;
 pub mod stocks;

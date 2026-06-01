@@ -57,7 +57,6 @@ describe("ipc facade", () => {
     await ipc.stocks.list();
     await ipc.activity.list();
     await ipc.stats.list();
-    await ipc.scheduled.list();
     await ipc.logBatches.list();
     await ipc.cafes.list();
     await ipc.bands.list();
@@ -65,7 +64,6 @@ describe("ipc facade", () => {
       "list_stocks",
       "list_activity",
       "list_stats",
-      "list_scheduled",
       "list_log_batches",
       "list_cafes",
       "list_bands",
