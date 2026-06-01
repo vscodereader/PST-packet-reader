@@ -19,8 +19,16 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+ts-rs = "12"
+tokio = { version = "1", features = ["full"] }
+thiserror = "1"
+adb_client = { version = "3.2.1", features = ["usb"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 opt-level = "s"   # optimize for size; perf cost negligible for a Tauri UI shell
@@ -28,5 +36,3 @@ lto = true        # link-time optimization across crate boundaries
 codegen-units = 1 # better optimization at the cost of slower release builds
 strip = true      # strip debug symbols from the final binary
 panic = "abort"   # drop unwinding tables — smaller binary, faster panics
-
-

@@ -3,6 +3,12 @@ name: Test required
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
+      - ".editorconfig"
 
 permissions:
   contents: read
@@ -36,8 +42,10 @@ jobs:
               | grep -E '^src/.*\.(ts|tsx)$' \
               | grep -v -E '\.(test|spec)\.(ts|tsx)$' \
               | grep -v -E '^src/test/' \
+              | grep -v -E '^src/shared/bindings/' \
               | grep -v -E '^src/main\.tsx$' \
-              | grep -v -E '^src/vite-env\.d\.ts$' || true
+              | grep -v -E '^src/vite-env\.d\.ts$' \
+              | grep -v -E '^src/shared/data/types\.ts$' || true
           )
           if [ ${#missing[@]} -ne 0 ]; then
             for f in "${missing[@]}"; do

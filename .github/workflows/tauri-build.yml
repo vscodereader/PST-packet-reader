@@ -3,11 +3,23 @@ name: Tauri build
 on:
   # Multi-OS Tauri build is expensive — only run on PRs targeting the
   # default branch (skip stacked / intermediate PRs) and on pushes to
-  # the default branch itself.
+  # the default branch itself. Docs-only changes also skip.
   pull_request:
     branches: [master, main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
+      - ".editorconfig"
   push:
     branches: [master, main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
+      - ".editorconfig"
 
 jobs:
   build:

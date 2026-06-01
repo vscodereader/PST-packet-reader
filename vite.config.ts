@@ -3,7 +3,6 @@ import { fileURLToPath, URL } from "node:url";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
-// @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 // @ts-expect-error process is a nodejs global
 const tauriPlatform = process.env.TAURI_ENV_PLATFORM;
@@ -18,6 +17,23 @@ export default defineConfig(async () => ({
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
+    // Force a single instance of each Mantine/React package. A stale duplicate
+    // @mantine/core in the pnpm store let the dep-optimizer inline a second
+    // MantineContext into @mantine/notifications, so <Notifications> couldn't
+    // find the provider ("MantineProvider was not found in component tree").
+    dedupe: [
+      "react",
+      "react-dom",
+      "@mantine/core",
+      "@mantine/hooks",
+      "@mantine/notifications",
+    ],
+  },
+
+  // Co-optimize the Mantine packages so esbuild bundles them against one
+  // shared @mantine/core instead of duplicating it per chunk.
+  optimizeDeps: {
+    include: ["@mantine/core", "@mantine/hooks", "@mantine/notifications"],
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

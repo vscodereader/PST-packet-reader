@@ -13,6 +13,18 @@ dist-ssr
 coverage
 *.local
 
+# Brainstorming visual-companion mockups
+.superpowers/
+
+# Design handoff bundle (reference material, not source)
+Macro-handoff
+Macro-handoff.tar.gz
+# Tauri sidecar binaries (빌드 시 생성)
+src-tauri/binaries/
+
+# 사이드카 빌드 임시 디렉토리
+.sidecar-build/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -24,3 +36,6 @@ coverage
 *.njsproj
 *.sln
 *.sw?
+
+# Brainstorming visual-companion mockups
+.superpowers/
