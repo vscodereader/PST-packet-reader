@@ -145,7 +145,10 @@ pub fn seed() -> Vec<LibraryPost> {
             status: PostStatus::Published,
             excerpt: "소재주 중심으로 분위기를 띄우는 댓글 세트입니다.".into(),
             body: None,
-            comments: Some(vec!["소재주 흐름 좋네요".into(), "장기적으로 봅니다".into()]),
+            comments: Some(vec![
+                "소재주 흐름 좋네요".into(),
+                "장기적으로 봅니다".into(),
+            ]),
             comment_target: Some(CommentTarget::Popular),
             comment_url: None,
             comment_count: None,

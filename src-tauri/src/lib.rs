@@ -113,6 +113,8 @@ pub fn run() {
                 dir.join("bands.json"),
                 bands::seed(),
             ));
+            // Naver-login cookie-refresh queue state (empty until enqueued).
+            app.manage(auth::QueueState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -135,6 +137,11 @@ pub fn run() {
             log_batches::list_log_batches,
             cafes::list_cafes,
             bands::list_bands,
+            bootstrap_runtime,
+            save_accounts,
+            enqueue_cookie_refresh,
+            get_queue_status,
+            get_account_cookies,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

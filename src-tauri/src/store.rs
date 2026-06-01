@@ -69,9 +69,7 @@ mod tests {
     use super::*;
 
     fn tmp(name: &str) -> PathBuf {
-        std::env::temp_dir()
-            .join("pstmacro_store_test")
-            .join(name)
+        std::env::temp_dir().join("pstmacro_store_test").join(name)
     }
 
     #[test]

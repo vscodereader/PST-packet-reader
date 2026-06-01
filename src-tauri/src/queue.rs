@@ -65,10 +65,7 @@ pub fn apply_cancel_now(items: Vec<QueueNowItem>, id: &str) -> Vec<QueueNowItem>
     items.into_iter().filter(|i| i.id != id).collect()
 }
 
-pub fn apply_cancel_scheduled(
-    items: Vec<QueueScheduledItem>,
-    id: &str,
-) -> Vec<QueueScheduledItem> {
+pub fn apply_cancel_scheduled(items: Vec<QueueScheduledItem>, id: &str) -> Vec<QueueScheduledItem> {
     items.into_iter().filter(|i| i.id != id).collect()
 }
 

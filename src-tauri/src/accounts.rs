@@ -128,10 +128,7 @@ pub fn list_accounts(store: tauri::State<'_, JsonStore<Account>>) -> Vec<Account
 }
 
 #[tauri::command]
-pub fn add_account(
-    store: tauri::State<'_, JsonStore<Account>>,
-    account: Account,
-) -> Vec<Account> {
+pub fn add_account(store: tauri::State<'_, JsonStore<Account>>, account: Account) -> Vec<Account> {
     store.mutate(|accounts| apply_add(accounts, account))
 }
 
