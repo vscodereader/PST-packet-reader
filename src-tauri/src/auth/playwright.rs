@@ -83,3 +83,24 @@ async fn wait_for_valid_cookie_file(path: &Path) -> Result<(), OrchestratorError
         sleep(interval).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn wait_returns_immediately_for_valid_cookie_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cookies.json");
+        let cookie = serde_json::json!({
+            "cookies": [
+                {"name": "NID_AUT", "domain": ".naver.com", "expires": 9_999_999_999u64},
+                {"name": "NID_SES", "domain": ".naver.com", "expires": 9_999_999_999u64}
+            ]
+        });
+        fs::write(&path, cookie.to_string()).unwrap();
+
+        // 유효한 쿠키가 이미 있으면 첫 폴링에서 즉시 Ok.
+        wait_for_valid_cookie_file(&path).await.unwrap();
+    }
+}
