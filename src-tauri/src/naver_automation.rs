@@ -17,6 +17,7 @@ use std::io::ErrorKind;
 use std::net::TcpStream;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
+use tauri::Emitter;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{connect, Message, WebSocket};
 
@@ -136,8 +137,12 @@ pub fn run_naver_discussion_macro(
 }
 
 // 글쓰기 패킷 등록 후 방금 작성한 글 URL에 댓글 패킷을 이어서 전송하는 함수입니다.
+// sleep_after가 true이면 글 등록 직후 "batch-wait-start" 이벤트를 emit하고,
+// 댓글 작성이 끝난 뒤 1분 중 남은 시간을 기다립니다.
 pub fn run_naver_post_with_comment_macro(
     request: NaverPostWithCommentRequest,
+    app: &tauri::AppHandle,
+    sleep_after: bool,
 ) -> AutomationResult<Vec<AutomationReport>> {
     let title = request.title.trim();
     let body = request.body.trim();
@@ -185,6 +190,12 @@ pub fn run_naver_post_with_comment_macro(
         target: AutomationTarget::Post,
     };
 
+    // 글 등록+새로고침 직후: 타이머를 시작하고 댓글 작성에 걸린 시간을 기록합니다.
+    let post_done_at = Instant::now();
+    if sleep_after {
+        let _ = app.emit("batch-wait-start", serde_json::json!({ "seconds": 60u64 }));
+    }
+
     chrome.navigate(&post_url)?;
     chrome.wait_for_ready_state(Duration::from_secs(30))?;
     sleep(Duration::from_secs(2));
@@ -198,6 +209,15 @@ pub fn run_naver_post_with_comment_macro(
         selected,
         target: AutomationTarget::Comment,
     };
+
+    // 댓글 작성에 걸린 시간을 제외한 나머지 시간을 기다려 총 1분을 채웁니다.
+    if sleep_after {
+        let elapsed = post_done_at.elapsed();
+        let total_wait = Duration::from_secs(60);
+        if elapsed < total_wait {
+            sleep(total_wait - elapsed);
+        }
+    }
 
     Ok(vec![post_report, comment_report])
 }

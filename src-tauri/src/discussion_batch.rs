@@ -173,20 +173,26 @@ pub fn run_discussion_batch(
             let title = pick_text(&request.titles, &request.title_mode, index, "제목")?;
             let body = pick_text(&request.bodies, &request.body_mode, index, "내용")?;
             let comment = pick_text(&request.comments, &request.comment_mode, index, "댓글내용")?;
-            let pair_reports = run_naver_post_with_comment_macro(NaverPostWithCommentRequest {
-                title,
-                body,
-                comment,
-                host: request.host.clone(),
-                port: request.port,
-                stock: Some(stock),
-            })
+            // 마지막 회차가 아닐 때만 글 등록 직후 타이머를 emit하고 1분을 채웁니다.
+            let sleep_after = index + 1 < request.count;
+            let pair_reports = run_naver_post_with_comment_macro(
+                NaverPostWithCommentRequest {
+                    title,
+                    body,
+                    comment,
+                    host: request.host.clone(),
+                    port: request.port,
+                    stock: Some(stock),
+                },
+                &app,
+                sleep_after,
+            )
             .map_err(|error| error.to_string())?;
 
             for report in pair_reports {
                 reports.push(report);
                 completed_actions += 1;
-                sleep_between_actions(completed_actions, total_actions, &app);
+                // sleep은 run_naver_post_with_comment_macro 안에서 처리합니다.
             }
 
             continue;
