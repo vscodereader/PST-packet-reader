@@ -61,6 +61,31 @@ pub fn list_cafes(store: tauri::State<'_, JsonStore<Cafe>>) -> Vec<Cafe> {
     store.snapshot()
 }
 
+/// Insert `cafe`, or replace an existing one with the same `cafeId` in place.
+///
+/// `cafeId` is the cafe's resolved identity, so re-registering the same cafe
+/// (e.g. to refresh its boards) updates it rather than duplicating. New cafes
+/// are prepended so the most recently added shows first.
+pub fn apply_upsert(cafes: Vec<Cafe>, cafe: Cafe) -> Vec<Cafe> {
+    if cafes.iter().any(|c| c.cafe_id == cafe.cafe_id) {
+        cafes
+            .into_iter()
+            .map(|c| if c.cafe_id == cafe.cafe_id { cafe.clone() } else { c })
+            .collect()
+    } else {
+        let mut next = Vec::with_capacity(cafes.len() + 1);
+        next.push(cafe);
+        next.extend(cafes);
+        next
+    }
+}
+
+/// Persist a resolved cafe (from [`resolve_cafe`]); returns the updated list.
+#[tauri::command]
+pub fn upsert_cafe(store: tauri::State<'_, JsonStore<Cafe>>, cafe: Cafe) -> Vec<Cafe> {
+    store.mutate(|cafes| apply_upsert(cafes, cafe))
+}
+
 /// Error type for cafe resolution — the same envelope the discovery layer uses,
 /// so its errors propagate with `?`.
 type ResolveCafeError = ErrorEnvelope<NaverCafeCommonErrorData>;
@@ -192,6 +217,27 @@ mod tests {
         assert_eq!(cafe.cafe_ref, "cafe.naver.com/testcafe");
         assert_eq!(cafe.cafe_id, 31732304);
         assert_eq!(cafe.boards, boards_from_menus(&menus));
+    }
+
+    #[test]
+    fn upsert_prepends_a_new_cafe() {
+        let mut other = sample();
+        other.cafe_id = 999;
+        other.name = "다른 카페".into();
+        let next = apply_upsert(vec![sample()], other);
+        assert_eq!(next.len(), 2);
+        assert_eq!(next[0].cafe_id, 999);
+    }
+
+    #[test]
+    fn upsert_replaces_existing_by_cafe_id() {
+        let mut edited = sample();
+        edited.name = "이름 변경".into();
+        edited.boards = vec![];
+        let next = apply_upsert(vec![sample()], edited);
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].name, "이름 변경");
+        assert!(next[0].boards.is_empty());
     }
 
     fn sample() -> Cafe {
