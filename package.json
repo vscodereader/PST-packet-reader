@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "vite",
     "build": "pnpm build:sidecar && tsc && vite build",
-    "build:sidecar": "node --experimental-strip-types src-tauri/src/naver-login/bundle-login.ts",
+    "build:sidecar": "node src-tauri/src/naver-login/bundle-login.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "gen:bindings": "cargo test --manifest-path src-tauri/Cargo.toml export_bindings",

@@ -377,17 +377,21 @@ describe("buildLaunchArgs - incognito mode", () => {
 });
 
 describe("buildLaunchOptions - Chrome incognito launch", () => {
-  it("uses the branded Chrome channel and the configured Chrome executable", () => {
-    expect(
-      buildLaunchOptions({
-        chromePath: "/path/to/chrome.exe",
-        headless: false,
-      }),
-    ).toMatchObject({
-      channel: "chrome",
+  it("uses the configured Chrome executable (and the Chrome channel on Windows)", () => {
+    const options = buildLaunchOptions({
+      chromePath: "/path/to/chrome.exe",
+      headless: false,
+    });
+    expect(options).toMatchObject({
       executablePath: "/path/to/chrome.exe",
       headless: false,
     });
+    // Windows에서만 channel을 지정한다(Linux/WSL은 executablePath로 직접 실행).
+    if (process.platform === "win32") {
+      expect(options).toMatchObject({ channel: "chrome" });
+    } else {
+      expect(options.channel).toBeUndefined();
+    }
   });
 
   it("passes the incognito launch arg using normal ASCII hyphens", () => {
@@ -480,12 +484,15 @@ describe("run - incognito mode", () => {
     expect(launchArgs).toContain("--incognito");
   });
 
-  it("launches through the branded Chrome channel", async () => {
+  it("launches through the configured Chrome executable", async () => {
     await run("/tmp/input.json");
     expect(launchSpy.mock.calls[0]?.[0]).toMatchObject({
-      channel: "chrome",
       executablePath: validInput.chromePath,
     });
+    // Windows에서만 channel을 지정한다(Linux/WSL은 executablePath로 직접 실행).
+    if (process.platform === "win32") {
+      expect(launchSpy.mock.calls[0]?.[0]).toMatchObject({ channel: "chrome" });
+    }
   });
 
   it("calls browser.newContext() for OTR isolation", async () => {

@@ -152,17 +152,19 @@ export function buildLaunchArgs(): string[] {
 }
 
 export function buildLaunchOptions(input: Pick<LoginInput, "chromePath" | "headless">): {
-  channel: "chrome";
+  channel?: "chrome";
   executablePath: string;
   headless: boolean;
   args: string[];
 } {
-  return {
-    channel: "chrome",
+  // Windows에서는 Google Chrome 채널을 명시한다. Linux/WSL에서는 executablePath로
+  // 시스템에 설치된 Chrome을 직접 실행하므로 channel을 지정하지 않는다.
+  const base = {
     executablePath: input.chromePath,
     headless: input.headless,
     args: buildLaunchArgs(),
   };
+  return process.platform === "win32" ? { channel: "chrome", ...base } : base;
 }
 
 export async function run(inputPath: string): Promise<void> {
