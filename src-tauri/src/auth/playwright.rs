@@ -25,7 +25,7 @@ pub async fn run_playwright_login(
         .cookies_dir
         .join(format!("{}.json", safe_file_stem(&account.id)));
 
-    let chrome = config::chrome_path().map_err(|e| OrchestratorError::CommandFailed(e))?;
+    let chrome = config::chrome_path().map_err(OrchestratorError::CommandFailed)?;
 
     let input = serde_json::json!({
         "accountId": account.id,

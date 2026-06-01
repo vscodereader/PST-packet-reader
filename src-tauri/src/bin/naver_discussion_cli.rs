@@ -67,6 +67,7 @@ fn run() -> Result<(), String> {
         target,
         submit_after_fill: true,
         stock: None,
+        account_id: None,
     })
     .map_err(|error| error.to_string())?;
 

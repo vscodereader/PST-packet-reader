@@ -11,6 +11,10 @@ pub struct NaverDiscussionRequest {
     pub submit_after_fill: bool,
     #[serde(default)]
     pub stock: Option<DiscussionStock>,
+    // 로그인 자동화로 저장된 계정 ID. 지정되면 해당 계정의 쿠키를 Chrome에 주입합니다.
+    // None이면 기존처럼 Chrome에 이미 로그인된 세션의 쿠키를 사용합니다.
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +27,9 @@ pub struct NaverPostWithCommentRequest {
     pub port: u16,
     #[serde(default)]
     pub stock: Option<DiscussionStock>,
+    // 로그인 자동화로 저장된 계정 ID. 지정되면 해당 계정의 쿠키를 Chrome에 주입합니다.
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

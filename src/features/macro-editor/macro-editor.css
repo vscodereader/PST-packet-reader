@@ -230,6 +230,11 @@ body {
   align-items: end;
 }
 
+.macro-editor-account-row {
+  display: grid;
+  gap: 4px;
+}
+
 .macro-editor-timer {
   display: flex;
   flex-direction: column;

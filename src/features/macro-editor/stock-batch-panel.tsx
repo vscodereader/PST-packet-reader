@@ -40,6 +40,8 @@ type SavedBatchConfig = {
   count: 3 | 5;
   host: string;
   port: number;
+  // 로그인 자동화로 저장된 계정 ID(선택). 지정하면 그 계정의 쿠키로 글/댓글을 작성합니다.
+  accountId?: string;
 };
 
 // 실행 환경에 따라 Chrome DevTools 기본 접속값을 고르는 함수입니다.
@@ -275,6 +277,7 @@ export function StockBatchPanel() {
   const [runPost, setRunPost] = useState(false);
   const [runComment, setRunComment] = useState(false);
   const [count, setCount] = useState<3 | 5>(3);
+  const [accountId, setAccountId] = useState("");
   const [savedConfig, setSavedConfig] = useState<SavedBatchConfig | null>(null);
   const [chromeOpening, setChromeOpening] = useState(false);
   const [running, setRunning] = useState(false);
@@ -451,6 +454,8 @@ export function StockBatchPanel() {
       stocks: selectedStocks,
       titleMode,
       titles: selectedTitles,
+      // 계정 ID가 입력된 경우에만 포함합니다(미입력이면 기존 수동 로그인 방식 사용).
+      ...(accountId.trim() ? { accountId: accountId.trim() } : {}),
     };
   }
 
@@ -599,6 +604,20 @@ export function StockBatchPanel() {
               {stock.name} / {stock.code} / {stock.link}
             </Text>
           ))}
+        </div>
+
+        <div className="macro-editor-account-row">
+          <TextInput
+            label="로그인 계정 ID (선택)"
+            placeholder="비우면 Chrome에 직접 로그인한 세션을 사용합니다"
+            value={accountId}
+            onChange={(event) => setAccountId(event.currentTarget.value)}
+          />
+          <Text size="xs" c="dimmed" className="macro-editor-field-guide">
+            로그인 자동화로 저장한 계정 ID를 입력하면, 그 계정의 쿠키를 Chrome에
+            주입해 글·댓글을 작성합니다. 비워두면 시크릿 Chrome에서 직접
+            로그인한 세션을 사용합니다.
+          </Text>
         </div>
 
         <Group className={actionInvalid ? "macro-editor-action-invalid" : ""}>

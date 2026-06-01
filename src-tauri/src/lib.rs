@@ -35,6 +35,7 @@ fn run_naver_discussion(
         target: parse_automation_target(target)?,
         submit_after_fill: submit_after_fill.unwrap_or(false),
         stock: None,
+        account_id: None,
     })
     .map_err(|error| error.to_string())
 }
@@ -110,8 +111,9 @@ fn get_account_cookies(account_id: String) -> Result<Option<serde_json::Value>, 
 
 #[cfg(target_os = "windows")]
 fn launch_incognito_chrome() -> Result<String, String> {
-    let chrome_path = find_windows_chrome_path()
-        .ok_or_else(|| "Chrome 실행 파일을 찾지 못했습니다. Google Chrome 설치를 확인하세요.".to_owned())?;
+    let chrome_path = find_windows_chrome_path().ok_or_else(|| {
+        "Chrome 실행 파일을 찾지 못했습니다. Google Chrome 설치를 확인하세요.".to_owned()
+    })?;
     let profile_dir = std::env::temp_dir().join("pstmacro-chrome-incognito-debug");
     std::fs::create_dir_all(&profile_dir)
         .map_err(|error| format!("Chrome 임시 프로필 폴더 생성 실패: {error}"))?;

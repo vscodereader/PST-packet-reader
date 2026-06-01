@@ -52,6 +52,9 @@ pub struct DiscussionBatchRequest {
     pub body_mode: PickMode,
     pub comment_mode: PickMode,
     pub count: usize,
+    // 로그인 자동화로 저장된 계정 ID(선택). 지정되면 해당 계정 쿠키를 Chrome에 주입합니다.
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,6 +186,7 @@ pub fn run_discussion_batch(
                     host: request.host.clone(),
                     port: request.port,
                     stock: Some(stock),
+                    account_id: request.account_id.clone(),
                 },
                 &app,
                 sleep_after,
@@ -211,6 +215,7 @@ pub fn run_discussion_batch(
                     target: AutomationTarget::Post,
                     submit_after_fill: true,
                     stock: Some(stock.clone()),
+                    account_id: request.account_id.clone(),
                 })
                 .map_err(|error| error.to_string())?,
             );
@@ -230,6 +235,7 @@ pub fn run_discussion_batch(
                     target: AutomationTarget::Comment,
                     submit_after_fill: true,
                     stock: Some(stock),
+                    account_id: request.account_id.clone(),
                 })
                 .map_err(|error| error.to_string())?,
             );
@@ -246,11 +252,7 @@ pub fn run_discussion_batch(
 
 // 등록 또는 댓글 작성 한 건이 끝난 뒤 다음 실행 전 1분을 기다리는 함수입니다.
 // 대기 직전 프론트엔드로 "batch-wait-start" 이벤트를 보내 카운트다운 타이머를 표시합니다.
-fn sleep_between_actions(
-    completed_actions: usize,
-    total_actions: usize,
-    app: &tauri::AppHandle,
-) {
+fn sleep_between_actions(completed_actions: usize, total_actions: usize, app: &tauri::AppHandle) {
     if completed_actions < total_actions {
         let _ = app.emit("batch-wait-start", serde_json::json!({ "seconds": 60u64 }));
         sleep(Duration::from_secs(60));

@@ -1,4 +1,5 @@
 mod browser_flow;
+mod cookie_bridge;
 mod devtools_connection;
 mod discussion_room;
 mod packet_client;
@@ -84,6 +85,10 @@ pub fn run_naver_discussion_macro(
     let host = normalize_debug_host(&request.host);
     let mut chrome = CdpClient::connect_to_existing_chrome(&host, request.port)?;
     chrome.enable()?;
+    // 계정 ID가 지정되면 로그인 자동화가 저장한 쿠키를 Chrome에 주입합니다.
+    if let Some(account_id) = request.account_id.as_deref() {
+        chrome.inject_account_cookies(account_id)?;
+    }
     chrome.ensure_discussion_page()?;
 
     let packet_client = chrome.build_naver_packet_client()?;
@@ -163,6 +168,10 @@ pub fn run_naver_post_with_comment_macro(
     let host = normalize_debug_host(&request.host);
     let mut chrome = CdpClient::connect_to_existing_chrome(&host, request.port)?;
     chrome.enable()?;
+    // 계정 ID가 지정되면 로그인 자동화가 저장한 쿠키를 Chrome에 주입합니다.
+    if let Some(account_id) = request.account_id.as_deref() {
+        chrome.inject_account_cookies(account_id)?;
+    }
     chrome.ensure_discussion_page()?;
 
     let packet_client = chrome.build_naver_packet_client()?;
@@ -249,6 +258,39 @@ impl CdpClient {
             .map_err(|error| AutomationError::new(format!("Runtime.enable 실패: {error}")))?;
         self.call("Page.enable", json!({}))
             .map_err(|error| AutomationError::new(format!("Page.enable 실패: {error}")))?;
+        Ok(())
+    }
+
+    // 로그인 자동화가 저장한 계정 쿠키를 Chrome 세션에 주입하는 함수입니다.
+    // 이렇게 하면 사용자가 수동 로그인하지 않아도 Chrome이 로그인된 상태가 되고,
+    // 이후 기존 글쓰기/댓글 흐름이 그대로 동작합니다.
+    fn inject_account_cookies(&mut self, account_id: &str) -> AutomationResult<()> {
+        let saved = crate::auth::read_account_cookies(account_id)
+            .map_err(|error| {
+                AutomationError::new(format!("계정 쿠키 파일을 읽지 못했습니다: {error}"))
+            })?
+            .ok_or_else(|| {
+                AutomationError::new(format!(
+                    "계정 '{account_id}'의 유효한 로그인 쿠키가 없습니다. 먼저 로그인 자동화를 실행해 쿠키를 저장하세요."
+                ))
+            })?;
+
+        let params = cookie_bridge::cdp_params_from_saved_cookies(&saved);
+
+        if params.is_empty() {
+            return Err(AutomationError::new(format!(
+                "계정 '{account_id}'의 쿠키 파일에서 주입할 쿠키를 찾지 못했습니다."
+            )));
+        }
+
+        self.call("Network.enable", json!({}))
+            .map_err(|error| AutomationError::new(format!("Network.enable 실패: {error}")))?;
+
+        for param in params {
+            self.call("Network.setCookie", param)
+                .map_err(|error| AutomationError::new(format!("쿠키 주입 실패: {error}")))?;
+        }
+
         Ok(())
     }
 
