@@ -1,24 +1,95 @@
 name: CI
 
+# Staged pipeline so we never spend the expensive stage when a cheaper one
+# already failed:  PR rules  →  Test  →  Build.
+# GitHub can't share `needs` across workflows, so the whole chain lives here.
 on:
   push:
     branches: [master, main]
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "LICENSE"
-      - ".gitignore"
-      - ".editorconfig"
   pull_request:
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "LICENSE"
-      - ".gitignore"
-      - ".editorconfig"
+
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
+  # --------------------------------------------------------------------------
+  # Stage 1 — PR rules (pull-request only, seconds each). Branch protection
+  # still sees the same check names: branch-name / conventional-title /
+  # closes-ref. Dependabot is exempt.
+  # --------------------------------------------------------------------------
+  branch-name:
+    if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Branch name must match the trunk-based convention
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          feat_pattern='^feat/[0-9]+$'
+          slug_pattern='^(fix|chore|refactor|docs|test|build|ci|perf|style)/[a-z][a-z0-9-]*$'
+          if printf '%s' "$BRANCH" | grep -Eq "$feat_pattern"; then
+            echo "OK: feat branch '$BRANCH' uses an issue number."
+          elif printf '%s' "$BRANCH" | grep -Eq "$slug_pattern"; then
+            echo "OK: commit-level branch '$BRANCH' uses a slug."
+          else
+            echo "::error::Branch '$BRANCH' must be feat/<n> or <type>/<slug>; types: fix|chore|refactor|docs|test|build|ci|perf|style."
+            exit 1
+          fi
+
+  conventional-title:
+    if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            chore
+            refactor
+            docs
+            test
+            build
+            ci
+            perf
+            style
+          requireScope: false
+          subjectPattern: ^[^A-Z].+$
+          subjectPatternError: |
+            PR title subject must start with a lowercase letter.
+
+  closes-ref:
+    if: |
+      github.event_name == 'pull_request' &&
+      startsWith(github.event.pull_request.head.ref, 'feat/') &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: PR body must reference an issue with Closes/Fixes/Resolves #N
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if printf '%s' "$BODY" | grep -Eqi '(closes|fixes|resolves)[[:space:]]+#[0-9]+'; then
+            echo "OK: PR body references an issue."
+          else
+            echo "::error::feat/<n> PRs must contain 'Closes #<n>' (or Fixes/Resolves)."
+            exit 1
+          fi
+
+  # --------------------------------------------------------------------------
+  # Stage 2 — Test. Runs once the PR rules pass (or are skipped, e.g. on push
+  # or dependabot). A failed rule short-circuits the whole stage.
+  # --------------------------------------------------------------------------
   frontend:
+    needs: [branch-name, conventional-title, closes-ref]
+    if: >-
+      ${{ !cancelled()
+      && needs.branch-name.result != 'failure'
+      && needs.conventional-title.result != 'failure'
+      && needs.closes-ref.result != 'failure' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -36,6 +107,12 @@ jobs:
       - run: pnpm test
 
   rust:
+    needs: [branch-name, conventional-title, closes-ref]
+    if: >-
+      ${{ !cancelled()
+      && needs.branch-name.result != 'failure'
+      && needs.conventional-title.result != 'failure'
+      && needs.closes-ref.result != 'failure' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -70,3 +147,89 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --all-targets
+
+  test-required:
+    needs: [branch-name, conventional-title, closes-ref]
+    if: >-
+      ${{ !cancelled()
+      && github.event_name == 'pull_request'
+      && needs.branch-name.result != 'failure'
+      && needs.conventional-title.result != 'failure'
+      && needs.closes-ref.result != 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Every new src/**/*.{ts,tsx} needs a sibling test file
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          git fetch origin "$BASE" --depth=1
+          missing=()
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            dir=$(dirname "$f")
+            base=$(basename "$f")
+            stem="${base%.*}"
+            if [ -f "$dir/$stem.test.ts" ] || [ -f "$dir/$stem.test.tsx" ]; then
+              continue
+            fi
+            missing+=("$f")
+          done < <(
+            git diff --name-only --diff-filter=A "origin/$BASE...HEAD" \
+              | grep -E '^src/.*\.(ts|tsx)$' \
+              | grep -v -E '\.(test|spec)\.(ts|tsx)$' \
+              | grep -v -E '^src/test/' \
+              | grep -v -E '^src/shared/bindings/' \
+              | grep -v -E '^src/main\.tsx$' \
+              | grep -v -E '^src/vite-env\.d\.ts$' \
+              | grep -v -E '^src/shared/data/types\.ts$' || true
+          )
+          if [ ${#missing[@]} -ne 0 ]; then
+            for f in "${missing[@]}"; do
+              echo "::error file=$f::New source file requires an adjacent test (e.g. ${f%.*}.test.${f##*.})"
+            done
+            exit 1
+          fi
+          echo "OK: all new source files have tests."
+
+  # --------------------------------------------------------------------------
+  # Stage 3 — Build (the expensive multi-OS Tauri build). Only after every
+  # Test job is green, and only for the default branch (PRs into it / pushes).
+  # --------------------------------------------------------------------------
+  build:
+    needs: [frontend, rust, test-required]
+    if: >-
+      ${{ !cancelled()
+      && needs.frontend.result == 'success'
+      && needs.rust.result == 'success'
+      && (needs.test-required.result == 'success' || needs.test-required.result == 'skipped')
+      && (github.event_name == 'push' || github.base_ref == 'master' || github.base_ref == 'main') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-22.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            librsvg2-dev \
+            patchelf
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm tauri build
