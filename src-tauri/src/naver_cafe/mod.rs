@@ -1,9 +1,14 @@
+pub mod cafe_ref;
 pub mod error;
 pub mod menu;
 pub mod models;
 pub mod post;
 pub mod response;
 
+pub use cafe_ref::{
+    cafe_gate_info_path, parse_cafe_id, parse_cafe_ref, CafeGateClient, CafeGateInfoResponse,
+    CafeInfoView, CafeRef, CafeRefError, CAFE_API_HOST,
+};
 pub use error::{ErrorEnvelope, NaverCafeCommonErrorData, ValidationError};
 pub use menu::{general_writable_boards, menu_list_path, CafeMenuClient, Menu, MenuError, MENU_API_HOST};
 pub use models::CafeTarget;
