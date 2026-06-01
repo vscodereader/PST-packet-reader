@@ -16,8 +16,9 @@ pub mod discussion_batch;
 pub mod naver_automation;
 
 use discussion_batch::{
-    parse_discussion_template_csv, run_discussion_batch, search_naver_stocks,
-    DiscussionBatchReport, DiscussionBatchRequest, StockCandidate, TemplateColumns,
+    parse_discussion_template_csv, run_discussion_batch, run_forum_publish, search_naver_stocks,
+    DiscussionBatchReport, DiscussionBatchRequest, ForumPublishRequest, ForumPublishResult,
+    StockCandidate, TemplateColumns,
 };
 use naver_automation::{
     run_naver_discussion_macro, AutomationReport, AutomationTarget, NaverDiscussionRequest,
@@ -77,6 +78,17 @@ async fn run_naver_discussion_batch(
     tauri::async_runtime::spawn_blocking(move || run_discussion_batch(request, app))
         .await
         .map_err(|error| format!("배치 실행 스레드 오류: {error}"))?
+}
+
+// 사수 UI(publish-modal)의 "지금 바로 게시 + 종목토론방"이 호출하는 command입니다.
+#[tauri::command]
+async fn run_forum_publish_now(
+    app: tauri::AppHandle,
+    request: ForumPublishRequest,
+) -> Result<Vec<ForumPublishResult>, String> {
+    tauri::async_runtime::spawn_blocking(move || run_forum_publish(request, app))
+        .await
+        .map_err(|error| format!("게시 실행 스레드 오류: {error}"))
 }
 
 #[cfg(target_os = "windows")]
@@ -295,6 +307,7 @@ pub fn run() {
             search_stocks,
             open_incognito_chrome,
             run_naver_discussion_batch,
+            run_forum_publish_now,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

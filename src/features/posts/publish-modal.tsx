@@ -410,6 +410,18 @@ function newScheduledId(): string {
   return "qs" + Date.now();
 }
 
+/**
+ * Default Chrome DevTools endpoint for the packet engine (hidden from users).
+ * Windows distribution uses 127.0.0.1:9222; WSL dev reaches Windows Chrome at
+ * 172.24.32.1:9223.
+ */
+function defaultEndpoint(): { host: string; port: number } {
+  const isWindows = window.navigator.platform.toLowerCase().includes("win");
+  return isWindows
+    ? { host: "127.0.0.1", port: 9222 }
+    : { host: "172.24.32.1", port: 9223 };
+}
+
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
 /** Current date/time as the picker's `{ date, time }` strings (minute precision). */
@@ -561,22 +573,81 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     setFlow("running");
     const action =
       mode === "comment" ? "댓글" : mode === "both" ? "글+댓글" : "글";
-    window.setTimeout(() => {
-      setFlow(
-        jobs.map((j) => {
-          const ok = Math.random() > 0.1;
-          return {
-            ...j,
-            ok,
-            msg: ok
-              ? when === "schedule"
-                ? `${action} 예약 완료`
-                : `${action} 게시 완료`
-              : "게시 실패 — 잠시 후 재시도",
-          };
-        }),
-      );
-    }, 2000);
+
+    // 예약은 이미 큐에 추가됐으므로 엔진을 돌리지 않고 완료 표시만 한다.
+    if (when === "schedule") {
+      window.setTimeout(() => {
+        setFlow(
+          jobs.map((j) => ({ ...j, ok: true, msg: `${action} 예약 완료` })),
+        );
+      }, 1200);
+      return;
+    }
+
+    // 즉시 게시: 종목토론방(forum)은 패킷 게시 엔진을 호출한다. 네이버 카페/밴드는
+    // 아직 엔진 미구현이라 기존 표시 흐름을 유지한다(후속 작업).
+    const ep = defaultEndpoint();
+    const forumJobs = jobs.filter((j) => j.platform === "forum");
+    const otherJobs = jobs.filter((j) => j.platform !== "forum");
+    const firstComment = (doc.comments ?? []).find((c) => c.trim()) ?? "";
+
+    const byAccount = new Map<string, typeof forumJobs>();
+    forumJobs.forEach((j) => {
+      const list = byAccount.get(j.loginId) ?? [];
+      list.push(j);
+      byAccount.set(j.loginId, list);
+    });
+
+    const forumWork = Promise.all(
+      [...byAccount.entries()].map(([loginId, accJobs]) =>
+        ipc.forum
+          .publishNow({
+            host: ep.host,
+            port: ep.port,
+            // 계정 loginId로 저장된 로그인 쿠키를 사용한다.
+            accountId: loginId,
+            runPost: mode === "post" || mode === "both",
+            runComment: mode === "comment" || mode === "both",
+            title: doc.title,
+            body: doc.body ?? "",
+            comment: firstComment,
+            stocks: accJobs.map((j) => ({
+              name: j.targetName,
+              code: j.code ?? "",
+              link: "",
+            })),
+          })
+          .then((results) =>
+            accJobs.map((j) => {
+              const r = results.find((x) => x.code === (j.code ?? ""));
+              return {
+                ...j,
+                ok: r?.ok ?? false,
+                msg: r?.message ?? "결과 없음",
+              };
+            }),
+          )
+          .catch((err: unknown) =>
+            accJobs.map((j) => ({
+              ...j,
+              ok: false,
+              msg: err instanceof Error ? err.message : String(err),
+            })),
+          ),
+      ),
+    );
+
+    void forumWork.then((forumArr) => {
+      const otherResults = otherJobs.map((j) => {
+        const ok = Math.random() > 0.1;
+        return {
+          ...j,
+          ok,
+          msg: ok ? `${action} 게시 완료` : "게시 실패 — 잠시 후 재시도",
+        };
+      });
+      setFlow([...forumArr.flat(), ...otherResults]);
+    });
   };
 
   const doPublish = () => {

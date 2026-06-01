@@ -917,6 +917,32 @@ export const invoke = vi.fn(
         return clone(state.queueNow);
       }
 
+      // --- forum 즉시 게시 (엔진 호출 모킹) ---------------------------------
+      // 실제 백엔드는 패킷 게시를 수행한다. 테스트에서는 기존 목업과 동일하게
+      // Math.random으로 성공/실패를 정하고, "게시하는 중" 상태가 보이도록 약간 지연한다.
+      case "run_forum_publish_now": {
+        const req = args!.request as {
+          stocks: { code: string; name: string }[];
+        };
+        return new Promise((resolve) =>
+          setTimeout(
+            () =>
+              resolve(
+                req.stocks.map((s) => {
+                  const ok = Math.random() > 0.1;
+                  return {
+                    code: s.code,
+                    name: s.name,
+                    ok,
+                    message: ok ? "게시 완료" : "게시 실패 — 잠시 후 재시도",
+                  };
+                }),
+              ),
+            800,
+          ),
+        );
+      }
+
       default:
         throw new Error(`test ipc: unhandled command "${cmd}"`);
     }

@@ -24,6 +24,35 @@ export type {
   Stock,
 };
 
+/** A forum (종목토론방) target for the packet posting engine. */
+export interface ForumStock {
+  name: string;
+  code: string;
+  link: string;
+}
+
+/** "지금 바로 게시 + 종목토론방" request for the packet posting engine. */
+export interface ForumPublishRequest {
+  host: string;
+  port: number;
+  /** Account loginId; selects the saved login cookies (cookies/{loginId}.json). */
+  accountId: string;
+  runPost: boolean;
+  runComment: boolean;
+  title: string;
+  body: string;
+  comment: string;
+  stocks: ForumStock[];
+}
+
+/** Per-stock result of a forum publish. */
+export interface ForumPublishResult {
+  code: string;
+  name: string;
+  ok: boolean;
+  message: string;
+}
+
 /** Thin typed wrapper around a single Tauri command channel. */
 function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   return invoke<T>(cmd, args);
@@ -72,4 +101,9 @@ export const ipc = {
   logBatches: { list: () => call<LogBatch[]>("list_log_batches") },
   cafes: { list: () => call<Cafe[]>("list_cafes") },
   bands: { list: () => call<Band[]>("list_bands") },
+  // 종목토론방(forum) 즉시 게시 — 네이버 증권 토론방 패킷 게시 엔진 호출.
+  forum: {
+    publishNow: (request: ForumPublishRequest) =>
+      call<ForumPublishResult[]>("run_forum_publish_now", { request }),
+  },
 };

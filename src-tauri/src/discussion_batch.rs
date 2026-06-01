@@ -64,6 +64,116 @@ pub struct DiscussionBatchReport {
     pub reports: Vec<AutomationReport>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+// 사수 UI(publish-modal)의 "지금 바로 게시 + 종목토론방"에서 넘어오는 요청입니다.
+// 하나의 글(LibraryPost) 내용을 선택한 종목들에 게시합니다.
+#[serde(rename_all = "camelCase")]
+pub struct ForumPublishRequest {
+    pub host: String,
+    pub port: u16,
+    // 게시 계정의 loginId. 이 키로 저장된 로그인 쿠키(cookies/{loginId}.json)를 사용합니다.
+    pub account_id: String,
+    pub run_post: bool,
+    pub run_comment: bool,
+    pub title: String,
+    pub body: String,
+    pub comment: String,
+    pub stocks: Vec<DiscussionStock>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+// 종목 한 곳의 게시 결과입니다(사수 UI의 PublishResult로 매핑).
+#[serde(rename_all = "camelCase")]
+pub struct ForumPublishResult {
+    pub code: String,
+    pub name: String,
+    pub ok: bool,
+    pub message: String,
+}
+
+// 선택한 종목들에 글/댓글을 게시하고 종목별 성공/실패 결과를 돌려주는 함수입니다.
+// 한 종목이 실패해도 다음 종목을 계속 진행합니다. 종목 사이에는 1분 대기합니다.
+pub fn run_forum_publish(
+    request: ForumPublishRequest,
+    app: tauri::AppHandle,
+) -> Vec<ForumPublishResult> {
+    let title = request.title.trim();
+    let body = request.body.trim();
+    let comment = request.comment.trim();
+    let total = request.stocks.len();
+    let mut results = Vec::with_capacity(total);
+
+    for (index, stock) in request.stocks.iter().enumerate() {
+        let outcome = run_one_forum_stock(&request, stock, title, body, comment, &app);
+        let (ok, message) = match outcome {
+            Ok(()) => (true, "게시 완료".to_owned()),
+            Err(error) => (false, error),
+        };
+        results.push(ForumPublishResult {
+            code: stock.code.clone(),
+            name: stock.name.clone(),
+            ok,
+            message,
+        });
+
+        // 마지막 종목이 아니면 다음 게시 전 1분 대기(타이머 이벤트 emit).
+        if index + 1 < total {
+            let _ = app.emit("batch-wait-start", serde_json::json!({ "seconds": 60u64 }));
+            sleep(Duration::from_secs(60));
+        }
+    }
+
+    results
+}
+
+// 한 종목에 글/댓글을 게시하는 함수입니다(kind에 따라 엔진 함수를 고릅니다).
+fn run_one_forum_stock(
+    request: &ForumPublishRequest,
+    stock: &DiscussionStock,
+    title: &str,
+    body: &str,
+    comment: &str,
+    app: &tauri::AppHandle,
+) -> Result<(), String> {
+    if request.run_post && request.run_comment {
+        run_naver_post_with_comment_macro(
+            NaverPostWithCommentRequest {
+                title: title.to_owned(),
+                body: body.to_owned(),
+                comment: comment.to_owned(),
+                host: request.host.clone(),
+                port: request.port,
+                stock: Some(stock.clone()),
+                account_id: Some(request.account_id.clone()),
+            },
+            // 글+댓글 한 종목 안의 1분 대기는 종목 간 대기와 별개이므로 여기서는 끕니다.
+            app,
+            false,
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    } else {
+        let target = if request.run_comment {
+            AutomationTarget::Comment
+        } else {
+            AutomationTarget::Post
+        };
+        let macro_body = if request.run_comment { comment } else { body };
+        run_naver_discussion_macro(NaverDiscussionRequest {
+            title: title.to_owned(),
+            body: macro_body.to_owned(),
+            host: request.host.clone(),
+            port: request.port,
+            target,
+            submit_after_fill: true,
+            stock: Some(stock.clone()),
+            account_id: Some(request.account_id.clone()),
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    }
+}
+
 // CSV 템플릿 문자열에서 제목, 내용, 댓글내용 컬럼을 파싱하는 함수입니다.
 pub fn parse_discussion_template_csv(csv_text: String) -> Result<TemplateColumns, String> {
     let rows = parse_csv_rows(&csv_text)?;
