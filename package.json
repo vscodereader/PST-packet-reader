@@ -13,6 +13,7 @@
     "build:sidecar": "node --experimental-strip-types src-tauri/src/naver-login/bundle-login.ts",
     "preview": "vite preview",
     "tauri": "tauri",
+    "gen:bindings": "cargo test --manifest-path src-tauri/Cargo.toml export_bindings",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "lint:css": "stylelint --allow-empty-input \"src/**/*.css\"",
@@ -40,8 +41,11 @@
     ]
   },
   "dependencies": {
-    "@mantine/core": "^9.2.1",
-    "@mantine/hooks": "^9.2.1",
+    "@fontsource/pretendard": "^5.2.5",
+    "@mantine/core": "^9.2.2",
+    "@mantine/hooks": "^9.2.2",
+    "@mantine/notifications": "^9.2.2",
+    "@tabler/icons-react": "^3.44.0",
     "@tauri-apps/api": "^2",
     "playwright": "^1.60.0",
     "playwright-extra": "^4.3.6",

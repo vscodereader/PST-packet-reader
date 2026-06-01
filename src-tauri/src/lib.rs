@@ -1,3 +1,12 @@
+mod ipc;
+mod store;
+
+use tauri::Manager;
+
+use crate::ipc::{accounts, activity, bands, cafes, log_batches, posts, queue, stats, stocks};
+use crate::store::JsonStore;
+
+// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 pub mod auth;
 pub mod naver_cafe;
 
@@ -49,15 +58,76 @@ fn get_account_cookies(account_id: String) -> Result<Option<serde_json::Value>, 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
-        .manage(auth::QueueState::default())
+        .setup(|app| {
+            // All domain data is persisted as JSON files in the app data dir.
+            let dir = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&dir)?;
+            app.manage(JsonStore::load_or_seed(
+                dir.join("accounts.json"),
+                accounts::seed(),
+            ));
+            app.manage(JsonStore::load_or_seed(
+                dir.join("posts.json"),
+                posts::seed(),
+            ));
+            app.manage(JsonStore::load_or_seed(
+                dir.join("queue-now.json"),
+                queue::seed_now(),
+            ));
+            app.manage(JsonStore::load_or_seed(
+                dir.join("queue-scheduled.json"),
+                queue::seed_scheduled(),
+            ));
+            app.manage(JsonStore::load_or_seed(
+                dir.join("stocks.json"),
+                stocks::seed(),
+            ));
+            app.manage(JsonStore::load_or_seed(
+                dir.join("activity.json"),
+                activity::seed(),
+            ));
+            app.manage(JsonStore::load_or_seed(
+                dir.join("log-batches.json"),
+                log_batches::seed(),
+            ));
+            app.manage(JsonStore::load_or_seed(
+                dir.join("cafes.json"),
+                cafes::seed(),
+            ));
+            app.manage(JsonStore::load_or_seed(
+                dir.join("bands.json"),
+                bands::seed(),
+            ));
+            // Naver-login cookie-refresh queue state (empty until enqueued).
+            app.manage(auth::QueueState::default());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
+            accounts::list_accounts,
+            accounts::add_account,
+            accounts::update_account,
+            accounts::delete_accounts,
+            posts::list_posts,
+            posts::upsert_post,
+            posts::delete_post,
+            queue::list_queue_now,
+            queue::list_queue_scheduled,
+            queue::cancel_queue_now,
+            queue::cancel_queue_scheduled,
+            queue::add_queue_scheduled,
+            queue::promote_queue_scheduled,
+            stocks::list_stocks,
+            activity::list_activity,
+            stats::list_stats,
+            log_batches::list_log_batches,
+            cafes::list_cafes,
+            bands::list_bands,
             bootstrap_runtime,
             save_accounts,
             enqueue_cookie_refresh,
             get_queue_status,
-            get_account_cookies
+            get_account_cookies,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
