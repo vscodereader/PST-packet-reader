@@ -14,7 +14,8 @@ use ts_rs::TS;
 use crate::auth::read_account_cookies;
 use crate::naver_cafe::post::cookie_header_from_storage_state;
 use crate::naver_cafe::{
-    CafeOrchestrator, ErrorEnvelope, Menu, NaverCafeCommonErrorData, CODE_NO_COOKIES,
+    run_post_jobs as run_jobs, CafeOrchestrator, ErrorEnvelope, JobReport, Menu,
+    NaverCafeCommonErrorData, PostJob, CODE_NO_COOKIES,
 };
 use crate::store::JsonStore;
 
@@ -163,11 +164,118 @@ pub async fn resolve_cafe(input: String, account_id: String) -> Result<Cafe, Res
     Ok(assemble_cafe(input, cafe_id, info.cafe_name, &menus))
 }
 
+/// Slim per-job result returned to the UI — exactly what the publish modal
+/// renders. The rich internal `JobReport`/`PostError` stays backend-only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
+#[serde(rename_all = "camelCase")]
+pub struct PublishOutcome {
+    /// Account the job ran under.
+    pub account_id: String,
+    /// Original cafe reference the job targeted.
+    pub cafe: String,
+    /// Target board (menu) id.
+    #[ts(type = "number")]
+    pub menu_id: u64,
+    /// Whether the article was posted.
+    pub success: bool,
+    /// Registered article id, on success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub article_id: Option<u64>,
+    /// Error code, on failure (e.g. "INVALID_CAFE_INPUT", "NO_COOKIES").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error_code: Option<String>,
+    /// Human-readable error message, on failure. Never contains cookie values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error_message: Option<String>,
+}
+
+/// Map the internal [`JobReport`] to the slim UI-facing [`PublishOutcome`].
+fn outcome_from_report(report: &JobReport) -> PublishOutcome {
+    PublishOutcome {
+        account_id: report.account_id.clone(),
+        cafe: report.cafe.clone(),
+        menu_id: report.menu_id,
+        success: report.success,
+        article_id: report.result.as_ref().map(|r| r.article_id),
+        error_code: report.error.as_ref().map(|e| e.code.clone()),
+        error_message: report.error.as_ref().map(|e| e.message.clone()),
+    }
+}
+
+/// Run N publish jobs sequentially, returning a slim outcome per job.
+///
+/// Each job reads its account's session cookie internally; one job failing does
+/// not stop the rest. Cookie values never appear in any outcome.
+#[tauri::command]
+pub async fn run_post_jobs(jobs: Vec<PostJob>) -> Vec<PublishOutcome> {
+    run_jobs(&jobs).await.iter().map(outcome_from_report).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::naver_cafe::Menu;
+    use crate::naver_cafe::post::ArticleRegisterResult;
+    use crate::naver_cafe::{JobReport, Menu};
     use serde_json::json;
+
+    fn success_report() -> JobReport {
+        JobReport {
+            account_id: "acc1".into(),
+            cafe: "cafe.naver.com/x".into(),
+            menu_id: 1,
+            success: true,
+            result: Some(ArticleRegisterResult {
+                cafe_id: 100,
+                article_id: 55,
+                menu_id: 1,
+            }),
+            error: None,
+        }
+    }
+
+    fn failure_report() -> JobReport {
+        JobReport {
+            account_id: "acc2".into(),
+            cafe: "bad-input".into(),
+            menu_id: 2,
+            success: false,
+            result: None,
+            error: Some(ErrorEnvelope {
+                trace_id: String::new(),
+                code: "INVALID_CAFE_INPUT".into(),
+                message: "카페 식별자를 인식하지 못했습니다".into(),
+                error_data: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn outcome_from_success_report_carries_article_id() {
+        let o = outcome_from_report(&success_report());
+        assert!(o.success);
+        assert_eq!(o.account_id, "acc1");
+        assert_eq!(o.cafe, "cafe.naver.com/x");
+        assert_eq!(o.menu_id, 1);
+        assert_eq!(o.article_id, Some(55));
+        assert_eq!(o.error_code, None);
+        assert_eq!(o.error_message, None);
+    }
+
+    #[test]
+    fn outcome_from_failure_report_carries_error_code_and_message() {
+        let o = outcome_from_report(&failure_report());
+        assert!(!o.success);
+        assert_eq!(o.article_id, None);
+        assert_eq!(o.error_code.as_deref(), Some("INVALID_CAFE_INPUT"));
+        assert_eq!(
+            o.error_message.as_deref(),
+            Some("카페 식별자를 인식하지 못했습니다")
+        );
+    }
 
     fn menu(menu_id: u64, name: &str, board_type: &str) -> Menu {
         Menu {

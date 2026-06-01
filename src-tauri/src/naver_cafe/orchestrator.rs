@@ -23,6 +23,7 @@
 //! 쿠키 값은 로그·에러·`Debug` 출력에 절대 포함되지 않는다.
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::auth;
 use crate::naver_cafe::{
@@ -51,14 +52,16 @@ pub const CODE_NO_COOKIES: &str = "NO_COOKIES";
 // ---------------------------------------------------------------------------
 
 /// 글 작성 작업 1건 — `(계정, 카페, 게시판, 내용)` 조합.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "camelCase")]
 pub struct PostJob {
     /// 사용할 계정 ID (쿠키 파일 조회 키).
     pub account_id: String,
     /// 대상 카페 — URL, vanity 슬러그, 또는 숫자 cafeId 문자열 모두 허용.
     pub cafe: String,
-    /// 선택된 게시판(메뉴) ID.
+    /// 선택된 게시판(메뉴) ID. (JS `number` — [`crate::ipc::cafes::Board`] 참고)
+    #[ts(type = "number")]
     pub menu_id: u64,
     /// 선택된 게시판의 `boardType` (예: `"L"`) — 글쓰기 Referer 헤더에 사용.
     pub board_type: String,

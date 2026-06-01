@@ -124,6 +124,7 @@ pub fn run() {
             cafes::list_cafes,
             cafes::resolve_cafe,
             cafes::upsert_cafe,
+            cafes::run_post_jobs,
             bands::list_bands,
             bootstrap_runtime,
             save_accounts,
