@@ -3,7 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
-import { resetIpc } from "@/test/ipc";
+import { invoke as ipcBackend, resetIpc } from "@/test/ipc";
 import { pickOption } from "@/test/select";
 
 import { Accounts } from "./accounts";
@@ -224,5 +224,56 @@ describe("Accounts", () => {
     expect(
       screen.getByRole("heading", { name: "계정 관리" }),
     ).toBeInTheDocument();
+  });
+
+  it("runs naver login for the selected account", async () => {
+    await renderAccounts();
+    vi.mocked(ipcBackend).mockClear();
+
+    // checkbox[0] is the header select-all; [1] is the first data row (a1).
+    const checkboxes = screen.getAllByRole("checkbox");
+    await userEvent.click(checkboxes[1]!);
+    await userEvent.click(screen.getByRole("button", { name: /선택 로그인/ }));
+
+    // saves the auth account (keyed by loginId) and enqueues a cookie refresh.
+    await waitFor(() =>
+      expect(ipcBackend).toHaveBeenCalledWith("enqueue_cookie_refresh", {
+        accountIds: ["invest_king7"],
+        headless: false,
+        useAdb: false,
+      }),
+    );
+
+    // the 2s status poll fires and reconciles the result back to the account.
+    await waitFor(
+      () =>
+        expect(
+          vi
+            .mocked(ipcBackend)
+            .mock.calls.some((c) => c[0] === "update_account"),
+        ).toBe(true),
+      { timeout: 4000 },
+    );
+  });
+
+  it("warns when no selected account has an id and password", async () => {
+    await renderAccounts();
+    // Clear the first row's login id so it becomes an invalid login target.
+    await userEvent.click(screen.getByText("invest_king7"));
+    const idInput = screen.getByDisplayValue("invest_king7");
+    await userEvent.clear(idInput);
+    await userEvent.tab();
+
+    const checkboxes = screen.getAllByRole("checkbox");
+    await userEvent.click(checkboxes[1]!);
+    vi.mocked(ipcBackend).mockClear();
+    await userEvent.click(screen.getByRole("button", { name: /선택 로그인/ }));
+
+    // No id → nothing is enqueued.
+    expect(
+      vi
+        .mocked(ipcBackend)
+        .mock.calls.some((c) => c[0] === "enqueue_cookie_refresh"),
+    ).toBe(false);
   });
 });

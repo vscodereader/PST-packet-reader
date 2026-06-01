@@ -813,6 +813,8 @@ interface IpcState {
 }
 
 let state: IpcState;
+// 로그인 큐에 enqueue된 계정 id (get_queue_status가 같은 id로 잡을 돌려주도록 보관).
+let loginJobIds: string[] = [];
 
 /** Re-seed the in-memory backend to the pristine dataset. Call in `beforeEach`. */
 export function resetIpc(): void {
@@ -822,9 +824,23 @@ export function resetIpc(): void {
     queueNow: clone(SEED_QUEUE_NOW),
     queueScheduled: clone(SEED_QUEUE_SCHEDULED),
   };
+  loginJobIds = [];
 }
 
 resetIpc();
+
+/** Login-queue status mirroring the auth queue: every enqueued account succeeds. */
+function loginQueueStatus() {
+  return {
+    isRunning: false,
+    currentAccountId: null,
+    jobs: loginJobIds.map((accountId) => ({
+      accountId,
+      status: "success",
+      message: "success",
+    })),
+  };
+}
 
 /** Drop-in replacement for `@tauri-apps/api/core`'s `invoke`, backed by fixtures. */
 export const invoke = vi.fn(
@@ -942,6 +958,17 @@ export const invoke = vi.fn(
           ),
         );
       }
+
+      // --- 네이버 로그인 자동화 (모킹) -------------------------------------
+      case "bootstrap_runtime":
+        return {};
+      case "save_accounts":
+        return clone(args!.accounts);
+      case "enqueue_cookie_refresh":
+        loginJobIds = (args?.accountIds as string[] | undefined) ?? [];
+        return loginQueueStatus();
+      case "get_queue_status":
+        return loginQueueStatus();
 
       default:
         throw new Error(`test ipc: unhandled command "${cmd}"`);
