@@ -122,6 +122,7 @@ pub fn run() {
             stats::list_stats,
             log_batches::list_log_batches,
             cafes::list_cafes,
+            cafes::resolve_cafe,
             bands::list_bands,
             bootstrap_runtime,
             save_accounts,
