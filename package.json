@@ -26,7 +26,7 @@
     "test:ui": "vitest --ui",
     "test:coverage": "vitest run --coverage",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --workspace --all-targets",
-    "test:rust:coverage": "cargo llvm-cov --manifest-path src-tauri/Cargo.toml --workspace --summary-only --fail-under-lines 70 --fail-under-functions 63",
+    "test:rust:coverage": "cargo llvm-cov --manifest-path src-tauri/Cargo.toml --workspace --summary-only --fail-under-lines 83 --fail-under-functions 82",
     "test:rust:coverage:html": "cargo llvm-cov --manifest-path src-tauri/Cargo.toml --workspace --html --open",
     "prepare": "husky"
   },
