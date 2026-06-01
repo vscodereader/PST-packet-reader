@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod naver_cafe;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
