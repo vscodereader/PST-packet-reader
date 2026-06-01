@@ -17,16 +17,13 @@ import {
   Title,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import {
-  ACTIVE_PLATFORMS,
-  ACTIVITY,
-  batchStatus,
-  KIND,
-  LOG_BATCHES,
-} from "@/shared/data/mock";
+import { ACTIVE_PLATFORMS, KIND } from "@/shared/data/config";
+import { batchStatus } from "@/shared/data/helpers";
 import type { BatchItem, LogBatch, LogFilter } from "@/shared/data/types";
+import { listActivity } from "@/shared/ipc/activity";
+import { listLogBatches } from "@/shared/ipc/log-batches";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo } from "@/shared/ui/platform-logo";
 
@@ -231,14 +228,29 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>(
     filter?.batchId ? { [filter.batchId]: true } : {},
   );
+  const [logBatches, setLogBatches] = useState<LogBatch[]>([]);
+  const [activity, setActivity] = useState<SystemRow[]>([]);
 
-  const sysRows: SystemRow[] = ACTIVITY.map((a) => ({
-    id: a.id,
-    status:
-      a.type === "error" ? "fail" : a.type === "success" ? "success" : "info",
-    title: a.text,
-    time: a.time,
-  }));
+  useEffect(() => {
+    void listLogBatches().then(setLogBatches);
+    void listActivity().then((items) =>
+      setActivity(
+        items.map((a) => ({
+          id: a.id,
+          status:
+            a.type === "error"
+              ? "fail"
+              : a.type === "success"
+                ? "success"
+                : "info",
+          title: a.text,
+          time: a.time,
+        })),
+      ),
+    );
+  }, []);
+
+  const sysRows: SystemRow[] = activity;
 
   const matchBatch = (b: LogBatch) =>
     (status === "all" || batchStatus(b) === status) &&
@@ -260,7 +272,7 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
   const batches: Row[] =
     cat === "system"
       ? []
-      : LOG_BATCHES.filter(matchBatch).map((b) => ({
+      : logBatches.filter(matchBatch).map((b) => ({
           kind: "batch",
           b,
           time: b.time,
@@ -286,22 +298,20 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
   });
   groups.sort((a, b) => (dayOrder[a.day] ?? 9) - (dayOrder[b.day] ?? 9));
 
-  const okCount = LOG_BATCHES.filter(
-    (b) => batchStatus(b) === "success",
-  ).length;
-  const failCount = LOG_BATCHES.filter((b) =>
+  const okCount = logBatches.filter((b) => batchStatus(b) === "success").length;
+  const failCount = logBatches.filter((b) =>
     ["fail", "partial"].includes(batchStatus(b)),
   ).length;
 
   const catTabs = [
-    { value: "all", label: `전체 ${LOG_BATCHES.length + sysRows.length}` },
-    { value: "post", label: `게시·댓글 ${LOG_BATCHES.length}` },
+    { value: "all", label: `전체 ${logBatches.length + sysRows.length}` },
+    { value: "post", label: `게시·댓글 ${logBatches.length}` },
     { value: "system", label: `시스템 ${sysRows.length}` },
   ];
   const summary = [
     {
       t: "게시 배치",
-      v: LOG_BATCHES.length,
+      v: logBatches.length,
       color: "gray",
       ic: "layers" as const,
     },
@@ -321,6 +331,7 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
           </Text>
         </Box>
         <Button
+          size="sm"
           variant="default"
           leftSection={<Icon.download size={16} />}
           onClick={() =>

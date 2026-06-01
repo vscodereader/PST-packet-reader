@@ -8,20 +8,17 @@ import {
   ThemeIcon,
   UnstyledButton,
 } from "@mantine/core";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Accounts } from "@/features/accounts/accounts";
 import { Dashboard } from "@/features/dashboard/dashboard";
 import { Notifications } from "@/features/notifications/notifications";
 import { Posts } from "@/features/posts/posts";
 import { Queue } from "@/features/queue/queue";
-import {
-  ACCOUNTS,
-  LIBRARY,
-  QUEUE_NOW,
-  QUEUE_SCHEDULED,
-} from "@/shared/data/mock";
 import type { GoFn, LogFilter, ViewId } from "@/shared/data/types";
+import { listAccounts } from "@/shared/ipc/accounts";
+import { listPosts } from "@/shared/ipc/posts";
+import { listQueueNow, listQueueScheduled } from "@/shared/ipc/queue";
 import { Icon, type IconName } from "@/shared/ui/icons";
 
 const VIEWS: ViewId[] = ["dashboard", "posts", "queue", "log", "accounts"];
@@ -96,6 +93,23 @@ export function MacroApp() {
   const [logFilter, setLogFilter] = useState<LogFilter | null>(null);
   const [logNonce, setLogNonce] = useState(0);
 
+  // Nav badge counts, loaded once over IPC.
+  const [counts, setCounts] = useState({ posts: 0, queue: 0, accounts: 0 });
+  useEffect(() => {
+    void Promise.all([
+      listPosts(),
+      listQueueNow(),
+      listQueueScheduled(),
+      listAccounts(),
+    ]).then(([posts, now, sched, accounts]) =>
+      setCounts({
+        posts: posts.length,
+        queue: now.length + sched.length,
+        accounts: accounts.length,
+      }),
+    );
+  }, []);
+
   const go: GoFn = (v, opts) => {
     setView(v);
     localStorage.setItem("mc-view", v);
@@ -107,19 +121,19 @@ export function MacroApp() {
 
   const nav: NavEntry[] = [
     { id: "dashboard", icon: "dashboard", label: "대시보드" },
-    { id: "posts", icon: "pencil", label: "글 관리", badge: LIBRARY.length },
+    { id: "posts", icon: "pencil", label: "글 관리", badge: counts.posts },
     {
       id: "queue",
       icon: "layers",
       label: "게시 큐",
-      badge: QUEUE_NOW.length + QUEUE_SCHEDULED.length,
+      badge: counts.queue,
     },
     { id: "log", icon: "bell", label: "알림" },
     {
       id: "accounts",
       icon: "users",
       label: "계정 관리",
-      badge: ACCOUNTS.length,
+      badge: counts.accounts,
     },
   ];
 

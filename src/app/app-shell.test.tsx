@@ -1,9 +1,13 @@
 import { MantineProvider } from "@mantine/core";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, it, expect } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 
 import { MacroApp } from "./app-shell";
+
+vi.mock("@tauri-apps/api/core", async () => ({
+  invoke: (await import("@/test/ipc")).invoke,
+}));
 
 function renderApp() {
   render(
@@ -24,11 +28,11 @@ describe("MacroApp", () => {
     localStorage.clear();
   });
 
-  it("renders the dashboard view by default", () => {
+  it("renders the dashboard view by default", async () => {
     renderApp();
     expect(navButton("대시보드")).toBeInTheDocument();
-    // dashboard-only content (a stat card label)
-    expect(screen.getByText("운영 계정")).toBeInTheDocument();
+    // dashboard-only content (a stat card label) — loaded via async IPC.
+    expect(await screen.findByText("운영 계정")).toBeInTheDocument();
   });
 
   it("navigates to 글 관리 and persists the view", async () => {

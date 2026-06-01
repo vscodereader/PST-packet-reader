@@ -5,6 +5,10 @@ import { describe, it, expect, vi } from "vitest";
 
 import { Dashboard } from "./dashboard";
 
+vi.mock("@tauri-apps/api/core", async () => ({
+  invoke: (await import("@/test/ipc")).invoke,
+}));
+
 function renderDash(go = vi.fn()) {
   render(
     <MantineProvider>
@@ -15,10 +19,11 @@ function renderDash(go = vi.fn()) {
 }
 
 describe("Dashboard", () => {
-  it("renders the heading and stat labels", () => {
+  it("renders the heading and stat labels", async () => {
     renderDash();
     expect(screen.getByText("오늘은 무엇을 써볼까요?")).toBeInTheDocument();
-    expect(screen.getByText("운영 계정")).toBeInTheDocument();
+    // Stat tiles arrive from the async `listStats` IPC call.
+    expect(await screen.findByText("운영 계정")).toBeInTheDocument();
     expect(screen.getByText("게시 성공률")).toBeInTheDocument();
   });
 
@@ -36,7 +41,7 @@ describe("Dashboard", () => {
 
   it("navigates from a stat card to its target view", async () => {
     const go = renderDash();
-    await userEvent.click(screen.getByText("운영 계정"));
+    await userEvent.click(await screen.findByText("운영 계정"));
     expect(go).toHaveBeenCalledWith("accounts");
   });
 
@@ -55,7 +60,7 @@ describe("Dashboard", () => {
   it("opens the queue from a scheduled row", async () => {
     const go = renderDash();
     await userEvent.click(
-      screen.getByText("삼성전자 4분기 실적 기대 — 매수 관점 정리"),
+      await screen.findByText("삼성전자 4분기 실적 기대 — 매수 관점 정리"),
     );
     expect(go).toHaveBeenCalledWith("queue");
   });

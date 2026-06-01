@@ -5,6 +5,10 @@ import { describe, it, expect, vi } from "vitest";
 
 import { StockCrawlModal } from "./stock-crawl-modal";
 
+vi.mock("@tauri-apps/api/core", async () => ({
+  invoke: (await import("@/test/ipc")).invoke,
+}));
+
 function renderModal(
   over: Partial<Parameters<typeof StockCrawlModal>[0]> = {},
 ) {

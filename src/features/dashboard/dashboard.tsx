@@ -12,16 +12,19 @@ import {
   Timeline,
   Title,
 } from "@mantine/core";
+import { useEffect, useState } from "react";
 
-import {
-  ACCOUNTS,
-  ACTIVITY,
-  acctPlatforms,
-  PLATFORMS,
-  SCHEDULED,
-  STATS,
-} from "@/shared/data/mock";
+import type { Account } from "@/shared/bindings/Account";
+import type { ActivityItem } from "@/shared/bindings/ActivityItem";
+import type { DashStat } from "@/shared/bindings/DashStat";
+import type { Scheduled } from "@/shared/bindings/Scheduled";
+import { PLATFORMS } from "@/shared/data/config";
+import { acctPlatforms } from "@/shared/data/helpers";
 import type { GoFn, ViewId } from "@/shared/data/types";
+import { listAccounts } from "@/shared/ipc/accounts";
+import { listActivity } from "@/shared/ipc/activity";
+import { listScheduled } from "@/shared/ipc/scheduled";
+import { listStats } from "@/shared/ipc/stats";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo, PlatformPill } from "@/shared/ui/platform-logo";
 
@@ -33,6 +36,18 @@ const STAT_TARGET: Record<string, ViewId> = {
 };
 
 export function Dashboard({ go }: { go: GoFn }) {
+  const [stats, setStats] = useState<DashStat[]>([]);
+  const [scheduled, setScheduled] = useState<Scheduled[]>([]);
+  const [activity, setActivity] = useState<ActivityItem[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+
+  useEffect(() => {
+    void listStats().then(setStats);
+    void listScheduled().then(setScheduled);
+    void listActivity().then(setActivity);
+    void listAccounts().then(setAccounts);
+  }, []);
+
   return (
     <Container size={1080} py={32} px={36}>
       <Group justify="space-between" align="flex-end" mb={28} wrap="wrap">
@@ -40,6 +55,10 @@ export function Dashboard({ go }: { go: GoFn }) {
           <Title order={1} fz={27} fw={800}>
             오늘은 무엇을 써볼까요?
           </Title>
+          <Text size="sm" c="dimmed" mt={6}>
+            한눈에 보는 계정과 게시 현황, 그리고 최근 활동이에요. 관심 가는
+            부분을 눌러 더 자세히 살펴보세요.
+          </Text>
         </Box>
         <Button
           size="sm"
@@ -51,7 +70,7 @@ export function Dashboard({ go }: { go: GoFn }) {
       </Group>
 
       <SimpleGrid cols={{ base: 2, md: 4 }} spacing="md" mb={30}>
-        {STATS.map((s) => {
+        {stats.map((s) => {
           const I = Icon[s.icon as keyof typeof Icon];
           return (
             <Card
@@ -100,8 +119,8 @@ export function Dashboard({ go }: { go: GoFn }) {
               큐 전체
             </Button>
           </Group>
-          {SCHEDULED.slice(0, 4).map((s) => {
-            const plats = acctPlatforms(s.accounts);
+          {scheduled.slice(0, 4).map((s) => {
+            const plats = acctPlatforms(s.accounts, accounts);
             return (
               <Group
                 key={s.id}
@@ -145,12 +164,12 @@ export function Dashboard({ go }: { go: GoFn }) {
             최근 활동
           </Title>
           <Timeline
-            active={ACTIVITY.length}
+            active={activity.length}
             bulletSize={24}
             lineWidth={2}
             color="gray"
           >
-            {ACTIVITY.map((a) => {
+            {activity.map((a) => {
               const color =
                 a.type === "success"
                   ? "green"
@@ -207,7 +226,7 @@ export function Dashboard({ go }: { go: GoFn }) {
       </Group>
       <SimpleGrid cols={{ base: 2, md: 4 }} spacing="md">
         {PLATFORMS.map((p) => {
-          const list = ACCOUNTS.filter((a) => a.platform === p.id);
+          const list = accounts.filter((a) => a.platform === p.id);
           const errCount = list.filter((a) => a.status === "error").length;
           const activeCount = list.filter((a) => a.status === "active").length;
           return (

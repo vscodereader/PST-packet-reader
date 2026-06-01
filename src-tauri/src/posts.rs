@@ -1,15 +1,13 @@
-//! Posts (글 보관함) domain — mock → Tauri IPC, same pattern as `accounts`.
+//! Posts (글 보관함) domain — JSON-file-backed, wired over Tauri IPC.
 //!
 //! ts-rs generates the TS types into `src/shared/bindings/`. Optional fields use
-//! `#[ts(optional)]` so they emit `body?: T` (matching the existing frontend
-//! interface under exactOptionalPropertyTypes), and serde skips them when None.
-//!
-//! NOTE (PoC scope): in-memory store, resets on restart.
-
-use std::sync::Mutex;
+//! `#[ts(optional)]` so they emit `body?: T` (matching the frontend interface
+//! under exactOptionalPropertyTypes); serde skips them when None.
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
+
+use crate::store::JsonStore;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../src/shared/bindings/")]
@@ -71,8 +69,7 @@ pub struct LibraryPost {
 // Pure logic
 // --------------------------------------------------------------------------
 
-/// Replace the post with a matching id, or prepend it if new (mirrors the
-/// frontend `upsert`: newest drafts appear at the top).
+/// Replace the post with a matching id, or prepend it if new (newest first).
 pub fn apply_upsert(posts: Vec<LibraryPost>, post: LibraryPost) -> Vec<LibraryPost> {
     if posts.iter().any(|p| p.id == post.id) {
         posts
@@ -157,46 +154,28 @@ pub fn seed() -> Vec<LibraryPost> {
 }
 
 // --------------------------------------------------------------------------
-// Managed state + commands
+// Commands
 // --------------------------------------------------------------------------
 
-pub struct PostStore(pub Mutex<Vec<LibraryPost>>);
-
-impl Default for PostStore {
-    fn default() -> Self {
-        PostStore(Mutex::new(seed()))
-    }
-}
-
-impl PostStore {
-    fn snapshot(&self) -> Vec<LibraryPost> {
-        self.0.lock().expect("post store poisoned").clone()
-    }
-
-    fn replace_with<F>(&self, f: F) -> Vec<LibraryPost>
-    where
-        F: FnOnce(Vec<LibraryPost>) -> Vec<LibraryPost>,
-    {
-        let mut guard = self.0.lock().expect("post store poisoned");
-        let next = f(guard.clone());
-        *guard = next.clone();
-        next
-    }
-}
-
 #[tauri::command]
-pub fn list_posts(store: tauri::State<'_, PostStore>) -> Vec<LibraryPost> {
+pub fn list_posts(store: tauri::State<'_, JsonStore<LibraryPost>>) -> Vec<LibraryPost> {
     store.snapshot()
 }
 
 #[tauri::command]
-pub fn upsert_post(store: tauri::State<'_, PostStore>, post: LibraryPost) -> Vec<LibraryPost> {
-    store.replace_with(|posts| apply_upsert(posts, post))
+pub fn upsert_post(
+    store: tauri::State<'_, JsonStore<LibraryPost>>,
+    post: LibraryPost,
+) -> Vec<LibraryPost> {
+    store.mutate(|posts| apply_upsert(posts, post))
 }
 
 #[tauri::command]
-pub fn delete_post(store: tauri::State<'_, PostStore>, id: String) -> Vec<LibraryPost> {
-    store.replace_with(|posts| apply_delete(posts, &id))
+pub fn delete_post(
+    store: tauri::State<'_, JsonStore<LibraryPost>>,
+    id: String,
+) -> Vec<LibraryPost> {
+    store.mutate(|posts| apply_delete(posts, &id))
 }
 
 #[cfg(test)]
@@ -222,10 +201,9 @@ mod tests {
 
     #[test]
     fn upsert_prepends_a_new_post() {
-        let start = vec![post("l1", "one")];
-        let next = apply_upsert(start, post("l2", "two"));
+        let next = apply_upsert(vec![post("l1", "one")], post("l2", "two"));
         assert_eq!(next.len(), 2);
-        assert_eq!(next[0].id, "l2"); // newest first
+        assert_eq!(next[0].id, "l2");
     }
 
     #[test]
@@ -241,8 +219,7 @@ mod tests {
 
     #[test]
     fn delete_removes_by_id() {
-        let start = vec![post("l1", "one"), post("l2", "two")];
-        let next = apply_delete(start, "l1");
+        let next = apply_delete(vec![post("l1", "one"), post("l2", "two")], "l1");
         assert_eq!(next.len(), 1);
         assert_eq!(next[0].id, "l2");
     }
@@ -251,8 +228,8 @@ mod tests {
     fn seed_roundtrips_through_json() {
         let seeded = seed();
         assert!(!seeded.is_empty());
-        let json = serde_json::to_string(&seeded).unwrap();
-        let back: Vec<LibraryPost> = serde_json::from_str(&json).unwrap();
+        let back: Vec<LibraryPost> =
+            serde_json::from_str(&serde_json::to_string(&seeded).unwrap()).unwrap();
         assert_eq!(seeded, back);
     }
 
@@ -262,15 +239,5 @@ mod tests {
         assert!(!json.contains("body"));
         assert!(!json.contains("comments"));
         assert!(json.contains("\"kind\":\"post\""));
-    }
-
-    #[test]
-    fn store_mutations_persist() {
-        let store = PostStore::default();
-        let n = store.snapshot().len();
-        store.replace_with(|p| apply_upsert(p, post("new", "fresh")));
-        assert_eq!(store.snapshot().len(), n + 1);
-        store.replace_with(|p| apply_delete(p, "new"));
-        assert_eq!(store.snapshot().len(), n);
     }
 }

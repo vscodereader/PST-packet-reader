@@ -20,11 +20,7 @@ import {
 import { notifications } from "@mantine/notifications";
 import { useEffect, useMemo, useState } from "react";
 
-import {
-  STATUS_ACCOUNT,
-  STATUS_ACCOUNT_ORDER,
-  TAG_SUGGESTIONS,
-} from "@/shared/data/mock";
+import { STATUS_ACCOUNT, STATUS_ACCOUNT_ORDER } from "@/shared/data/config";
 import type {
   Account,
   AccountStatus,
@@ -312,7 +308,7 @@ export function Accounts({ go }: { go: GoFn }) {
   };
 
   const allTags = useMemo(
-    () => [...new Set([...TAG_SUGGESTIONS, ...rows.flatMap((r) => r.tags)])],
+    () => [...new Set([...rows.flatMap((r) => r.tags)])],
     [rows],
   );
   const view = rows.filter(

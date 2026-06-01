@@ -17,7 +17,7 @@ import {
 import { notifications } from "@mantine/notifications";
 import { useEffect, useState } from "react";
 
-import { KIND, KIND_ICON, STATUS_LABEL } from "@/shared/data/mock";
+import { KIND, KIND_ICON, STATUS_LABEL } from "@/shared/data/config";
 import type { GoFn, LibraryPost, ModeValue } from "@/shared/data/types";
 import { deletePost, listPosts, upsertPost } from "@/shared/ipc/posts";
 import { Icon } from "@/shared/ui/icons";
@@ -104,7 +104,7 @@ export function Posts({ go }: { go: GoFn }) {
           </Text>
         </Box>
         <Button
-          size="md"
+          size="sm"
           leftSection={<Icon.pencil size={18} />}
           onClick={openNew}
         >
@@ -213,6 +213,7 @@ export function Posts({ go }: { go: GoFn }) {
               <Menu position="bottom-end" width={150}>
                 <Menu.Target>
                   <Button
+                    size="xs"
                     variant="subtle"
                     color="gray"
                     px={8}
@@ -256,7 +257,11 @@ export function Posts({ go }: { go: GoFn }) {
               <Text size="sm" c="dimmed" mb={14}>
                 새 글을 작성해 목록에 추가해보세요.
               </Text>
-              <Button leftSection={<Icon.pencil size={16} />} onClick={openNew}>
+              <Button
+                size="sm"
+                leftSection={<Icon.pencil size={16} />}
+                onClick={openNew}
+              >
                 글쓰기
               </Button>
             </Stack>

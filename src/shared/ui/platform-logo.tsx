@@ -2,9 +2,10 @@ import { Box } from "@mantine/core";
 
 import bandLogo from "@/assets/logos/band.svg";
 import instagramLogo from "@/assets/logos/instagram.svg";
+import naverLogo from "@/assets/logos/naver.svg";
 import navercafeLogo from "@/assets/logos/navercafe.svg";
 import threadsLogo from "@/assets/logos/threads.svg";
-import { PLATFORM } from "@/shared/data/mock";
+import { PLATFORM } from "@/shared/data/config";
 import type { PlatformId } from "@/shared/data/types";
 
 const INITIAL: Record<PlatformId, string> = {
@@ -17,6 +18,7 @@ const INITIAL: Record<PlatformId, string> = {
 
 /** Real brand marks; platforms absent here fall back to the initial badge. */
 const LOGO: Partial<Record<PlatformId, string>> = {
+  forum: naverLogo,
   naver: navercafeLogo,
   band: bandLogo,
   instagram: instagramLogo,

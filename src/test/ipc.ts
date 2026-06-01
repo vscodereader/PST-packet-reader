@@ -1,3 +1,5 @@
+import { vi } from "vitest";
+
 import type {
   Account,
   ActivityItem,
@@ -6,199 +8,24 @@ import type {
   DashStat,
   LibraryPost,
   LogBatch,
-  Mode,
-  Platform,
-  PlatformId,
   QueueNowItem,
   QueueScheduledItem,
   Scheduled,
   Stock,
-} from "./types";
+} from "@/shared/data/types";
 
-export const PLATFORMS: Platform[] = [
-  {
-    id: "forum",
-    name: "종합토론방",
-    short: "토론방",
-    color: "forum",
-    soon: false,
-    targetLabel: "종목",
-  },
-  {
-    id: "naver",
-    name: "네이버 카페",
-    short: "카페",
-    color: "naver",
-    soon: false,
-    targetLabel: "카페",
-  },
-  {
-    id: "band",
-    name: "밴드",
-    short: "밴드",
-    color: "band",
-    soon: true,
-    targetLabel: "밴드",
-  },
-  {
-    id: "instagram",
-    name: "인스타그램",
-    short: "인스타",
-    color: "pink",
-    soon: true,
-    targetLabel: "계정",
-  },
-  {
-    id: "threads",
-    name: "스레드",
-    short: "스레드",
-    color: "dark",
-    soon: true,
-    targetLabel: "계정",
-  },
-];
+/**
+ * In-memory Tauri-IPC backend for tests.
+ *
+ * Production code no longer ships any mock/seed data — the IPC wrappers always
+ * `invoke`. In jsdom there is no Tauri runtime, so component and wrapper tests
+ * mock `@tauri-apps/api/core` with this module's {@link invoke}, which serves
+ * the fixtures below and emulates the Rust commands (including mutations that
+ * return the full updated list). Call {@link resetIpc} in `beforeEach` to start
+ * each test from the pristine dataset.
+ */
 
-export const PLATFORM: Record<string, Platform> = Object.fromEntries(
-  PLATFORMS.map((p) => [p.id, p]),
-);
-export const ACTIVE_PLATFORMS = PLATFORMS.filter((p) => !p.soon);
-
-export const TAG_SUGGESTIONS = [
-  "대형주",
-  "반도체",
-  "2차전지",
-  "분석방",
-  "모임",
-  "단타",
-  "장기투자",
-  "테마주",
-];
-
-export const MODES: Mode[] = [
-  { v: "post", t: "글 작성", s: "게시글을 새로 등록", icon: "fileText" },
-  {
-    v: "comment",
-    t: "댓글 작성",
-    s: "기존 게시글에 댓글 등록",
-    icon: "comment",
-  },
-  { v: "both", t: "글 + 댓글", s: "글 등록 후 댓글까지", icon: "layers" },
-];
-
-export const KIND: Record<string, { t: string; c: string }> = {
-  post: { t: "글", c: "blue" },
-  comment: { t: "댓글", c: "forum" },
-  both: { t: "글+댓글", c: "green" },
-};
-export const KIND_ICON: Record<string, string> = {
-  post: "fileText",
-  comment: "comment",
-  both: "layers",
-};
-
-export const STOCKS: Stock[] = [
-  {
-    code: "005930",
-    name: "삼성전자",
-    market: "KOSPI",
-    posts: "12,480",
-    price: "78,400",
-    chg: 1.2,
-  },
-  {
-    code: "000660",
-    name: "SK하이닉스",
-    market: "KOSPI",
-    posts: "8,210",
-    price: "189,500",
-    chg: 2.8,
-  },
-  {
-    code: "035720",
-    name: "카카오",
-    market: "KOSPI",
-    posts: "9,640",
-    price: "41,250",
-    chg: -0.6,
-  },
-  {
-    code: "035420",
-    name: "NAVER",
-    market: "KOSPI",
-    posts: "6,330",
-    price: "172,800",
-    chg: 0.4,
-  },
-  {
-    code: "086520",
-    name: "에코프로",
-    market: "KOSDAQ",
-    posts: "15,720",
-    price: "98,700",
-    chg: -3.1,
-  },
-  {
-    code: "247540",
-    name: "에코프로비엠",
-    market: "KOSDAQ",
-    posts: "11,090",
-    price: "172,300",
-    chg: -2.4,
-  },
-  {
-    code: "373220",
-    name: "LG에너지솔루션",
-    market: "KOSPI",
-    posts: "7,450",
-    price: "367,000",
-    chg: 1.7,
-  },
-  {
-    code: "005490",
-    name: "POSCO홀딩스",
-    market: "KOSPI",
-    posts: "10,210",
-    price: "412,500",
-    chg: 3.3,
-  },
-  {
-    code: "207940",
-    name: "삼성바이오로직스",
-    market: "KOSPI",
-    posts: "3,180",
-    price: "789,000",
-    chg: 0.9,
-  },
-  {
-    code: "068270",
-    name: "셀트리온",
-    market: "KOSPI",
-    posts: "5,940",
-    price: "182,400",
-    chg: -1.1,
-  },
-  {
-    code: "323410",
-    name: "카카오뱅크",
-    market: "KOSPI",
-    posts: "4,720",
-    price: "23,150",
-    chg: 0.2,
-  },
-  {
-    code: "042700",
-    name: "한미반도체",
-    market: "KOSPI",
-    posts: "6,880",
-    price: "118,900",
-    chg: 4.6,
-  },
-];
-export const STOCK: Record<string, Stock> = Object.fromEntries(
-  STOCKS.map((s) => [s.code, s]),
-);
-
-export const ACCOUNTS: Account[] = [
+const SEED_ACCOUNTS: Account[] = [
   {
     id: "a1",
     platform: "forum",
@@ -336,7 +163,106 @@ export const ACCOUNTS: Account[] = [
   },
 ];
 
-export const CAFES: Cafe[] = [
+const SEED_STOCKS: Stock[] = [
+  {
+    code: "005930",
+    name: "삼성전자",
+    market: "KOSPI",
+    posts: "12,480",
+    price: "78,400",
+    chg: 1.2,
+  },
+  {
+    code: "000660",
+    name: "SK하이닉스",
+    market: "KOSPI",
+    posts: "8,210",
+    price: "189,500",
+    chg: 2.8,
+  },
+  {
+    code: "035720",
+    name: "카카오",
+    market: "KOSPI",
+    posts: "9,640",
+    price: "41,250",
+    chg: -0.6,
+  },
+  {
+    code: "035420",
+    name: "NAVER",
+    market: "KOSPI",
+    posts: "6,330",
+    price: "172,800",
+    chg: 0.4,
+  },
+  {
+    code: "086520",
+    name: "에코프로",
+    market: "KOSDAQ",
+    posts: "15,720",
+    price: "98,700",
+    chg: -3.1,
+  },
+  {
+    code: "247540",
+    name: "에코프로비엠",
+    market: "KOSDAQ",
+    posts: "11,090",
+    price: "172,300",
+    chg: -2.4,
+  },
+  {
+    code: "373220",
+    name: "LG에너지솔루션",
+    market: "KOSPI",
+    posts: "7,450",
+    price: "367,000",
+    chg: 1.7,
+  },
+  {
+    code: "005490",
+    name: "POSCO홀딩스",
+    market: "KOSPI",
+    posts: "10,210",
+    price: "412,500",
+    chg: 3.3,
+  },
+  {
+    code: "207940",
+    name: "삼성바이오로직스",
+    market: "KOSPI",
+    posts: "3,180",
+    price: "789,000",
+    chg: 0.9,
+  },
+  {
+    code: "068270",
+    name: "셀트리온",
+    market: "KOSPI",
+    posts: "5,940",
+    price: "182,400",
+    chg: -1.1,
+  },
+  {
+    code: "323410",
+    name: "카카오뱅크",
+    market: "KOSPI",
+    posts: "4,720",
+    price: "23,150",
+    chg: 0.2,
+  },
+  {
+    code: "042700",
+    name: "한미반도체",
+    market: "KOSPI",
+    posts: "6,880",
+    price: "118,900",
+    chg: 4.6,
+  },
+];
+
+const SEED_CAFES: Cafe[] = [
   {
     name: "주식투자연구소 카페",
     boards: ["종목분석", "자유게시판", "질문/답변"],
@@ -344,65 +270,19 @@ export const CAFES: Cafe[] = [
   { name: "개미투자 카페", boards: ["자유게시판", "정보 공유", "종목추천"] },
   { name: "가치투자랩 카페", boards: ["공지사항", "종목토론", "자유게시판"] },
 ];
-export const BANDS: Band[] = [
+
+const SEED_BANDS: Band[] = [
   { name: "가치투자모임 BAND" },
   { name: "단타클럽 BAND" },
   { name: "주식스터디 BAND" },
 ];
 
-export const BOARDS: Record<string, string[]> = {
-  forum: ["종목토론방"],
-  naver: ["자유게시판", "종목분석", "질문/답변", "공지사항", "정보 공유"],
-  band: ["전체글", "공지", "사진첩", "일정"],
-};
-
-export const STATUS_ACCOUNT: Record<string, { t: string; c: string }> = {
-  new: { t: "사용전", c: "gray" },
-  active: { t: "활성", c: "green" },
-  error: { t: "에러", c: "red" },
-};
-export const STATUS_ACCOUNT_ORDER = ["new", "active", "error"];
-
-export function accountLog(a: Account): ActivityItem[] {
-  if (a.status === "new") return [];
-  return [
-    {
-      id: "1",
-      type: "success",
-      text: "‘시장 브리핑 정리’ 글을 게시했습니다",
-      time: "12분 전",
-    },
-    {
-      id: "2",
-      type: "success",
-      text: "인기글에 댓글 3개를 달았습니다",
-      time: "1시간 전",
-    },
-    {
-      id: "3",
-      type: "success",
-      text: "‘차트 관점 분석’ 글을 게시했습니다",
-      time: "3시간 전",
-    },
-    {
-      id: "4",
-      type: a.status === "error" ? "error" : "success",
-      text:
-        a.status === "error"
-          ? "게시 실패 — 로그인 세션 만료"
-          : "댓글 5개를 분산 게시했습니다",
-      time: "어제",
-    },
-    { id: "5", type: "info", text: "계정이 연결되었습니다", time: "3일 전" },
-  ];
-}
-
-export const STATS: DashStat[] = [
+const SEED_STATS: DashStat[] = [
   {
     key: "accounts",
     label: "운영 계정",
-    value: ACCOUNTS.filter((a) => a.status === "active").length,
-    sub: `전체 ${ACCOUNTS.length}개 · 오류 ${ACCOUNTS.filter((a) => a.status === "error").length}`,
+    value: 11,
+    sub: "전체 15개 · 오류 1",
     icon: "users",
     color: "blue",
   },
@@ -432,14 +312,163 @@ export const STATS: DashStat[] = [
   },
 ];
 
-export const STATUS_LABEL: Record<string, { t: string; c: string }> = {
-  draft: { t: "임시저장", c: "gray" },
-  ready: { t: "작성완료", c: "blue" },
-  scheduled: { t: "예약됨", c: "yellow" },
-  published: { t: "게시완료", c: "green" },
-};
+const SEED_SCHEDULED: Scheduled[] = [
+  {
+    id: "s1",
+    title: "삼성전자 4분기 실적 기대 — 매수 관점 정리",
+    accounts: ["a1"],
+    kind: "post",
+    when: "오늘 14:00",
+    rel: "1시간 후",
+  },
+  {
+    id: "s2",
+    title: "오늘 반도체 흐름 좋네요 / 저도 추가 매수했습니다 외",
+    accounts: ["a2", "a8"],
+    kind: "comment",
+    when: "오늘 18:30",
+    rel: "5시간 후",
+  },
+  {
+    id: "s3",
+    title: "에코프로 조정 구간 대응 전략",
+    accounts: ["a3"],
+    kind: "both",
+    when: "내일 09:00",
+    rel: "내일",
+  },
+  {
+    id: "s4",
+    title: "이번 주 시장 브리핑 정리",
+    accounts: ["a5", "a6"],
+    kind: "post",
+    when: "5/30 12:00",
+    rel: "내일",
+  },
+  {
+    id: "s5",
+    title: "POSCO 2차전지 소재 관련 코멘트 모음",
+    accounts: ["a4"],
+    kind: "comment",
+    when: "5/31 20:00",
+    rel: "모레",
+  },
+];
 
-export const LIBRARY: LibraryPost[] = [
+const SEED_ACTIVITY: ActivityItem[] = [
+  {
+    id: "ac1",
+    type: "success",
+    text: "‘삼성전자 4분기 실적 기대’ 글이 종목토론방에 게시되었습니다",
+    time: "12분 전",
+  },
+  {
+    id: "ac2",
+    type: "success",
+    text: "반도체 코멘트 10종이 2개 계정에 분산 게시되었습니다",
+    time: "1시간 전",
+  },
+  {
+    id: "ac3",
+    type: "error",
+    text: "한미반도체 토론방 계정 게시 실패 — 로그인 세션 만료",
+    time: "2시간 전",
+  },
+  {
+    id: "ac4",
+    type: "info",
+    text: "종목토론방 12개를 크롤링해 가져왔습니다",
+    time: "3시간 전",
+  },
+  {
+    id: "ac5",
+    type: "info",
+    text: "엑셀에서 계정 4건을 가져왔습니다",
+    time: "어제",
+  },
+];
+
+const SEED_QUEUE_NOW: QueueNowItem[] = [
+  {
+    id: "q1",
+    title: "삼성전자 4분기 실적 기대 — 매수 관점 정리",
+    kind: "post",
+    state: "running",
+    batchId: "b0",
+    progress: [2, 3],
+    locs: [
+      { p: "forum", name: "삼성전자", code: "005930" },
+      { p: "forum", name: "SK하이닉스", code: "000660" },
+      { p: "naver", name: "주식투자연구소 카페" },
+    ],
+  },
+  {
+    id: "q2",
+    title: "반도체 흐름 코멘트 10종",
+    kind: "comment",
+    state: "waiting",
+    locs: [
+      { p: "forum", name: "SK하이닉스", code: "000660" },
+      { p: "forum", name: "한미반도체", code: "042700" },
+    ],
+  },
+  {
+    id: "q3",
+    title: "오늘의 특징주 정리 — 장 마감 요약",
+    kind: "post",
+    state: "waiting",
+    locs: [
+      { p: "naver", name: "개미투자 카페" },
+      { p: "band", name: "가치투자모임 BAND" },
+    ],
+  },
+  {
+    id: "q4",
+    title: "2차전지 섹터 기대감 코멘트 세트",
+    kind: "comment",
+    state: "waiting",
+    locs: [{ p: "forum", name: "POSCO홀딩스", code: "005490" }],
+  },
+  {
+    id: "q5",
+    title: "카카오 반등 시그널 분석",
+    kind: "post",
+    state: "waiting",
+    locs: [{ p: "forum", name: "카카오", code: "035720" }],
+  },
+];
+
+const SEED_QUEUE_SCHEDULED: QueueScheduledItem[] = [
+  {
+    id: "qs1",
+    title: "에코프로 조정 구간 대응 전략",
+    kind: "both",
+    when: "오늘 18:30",
+    rel: "5시간 후",
+    locs: [{ p: "forum", name: "에코프로", code: "086520" }],
+  },
+  {
+    id: "qs2",
+    title: "이번 주 시장 브리핑 정리",
+    kind: "post",
+    when: "내일 09:00",
+    rel: "내일",
+    locs: [
+      { p: "naver", name: "주식투자연구소 카페" },
+      { p: "band", name: "가치투자모임 BAND" },
+    ],
+  },
+  {
+    id: "qs3",
+    title: "HBM 관련 기대 코멘트",
+    kind: "comment",
+    when: "5/31 20:00",
+    rel: "모레",
+    locs: [{ p: "forum", name: "한미반도체", code: "042700" }],
+  },
+];
+
+const SEED_LIBRARY: LibraryPost[] = [
   {
     id: "l1",
     title: "#{종목명} 4분기 실적 기대 — 매수 관점 정리",
@@ -620,162 +649,7 @@ export const LIBRARY: LibraryPost[] = [
   },
 ];
 
-export const SCHEDULED: Scheduled[] = [
-  {
-    id: "s1",
-    title: "삼성전자 4분기 실적 기대 — 매수 관점 정리",
-    accounts: ["a1"],
-    kind: "post",
-    when: "오늘 14:00",
-    rel: "1시간 후",
-  },
-  {
-    id: "s2",
-    title: "오늘 반도체 흐름 좋네요 / 저도 추가 매수했습니다 외",
-    accounts: ["a2", "a8"],
-    kind: "comment",
-    when: "오늘 18:30",
-    rel: "5시간 후",
-  },
-  {
-    id: "s3",
-    title: "에코프로 조정 구간 대응 전략",
-    accounts: ["a3"],
-    kind: "both",
-    when: "내일 09:00",
-    rel: "내일",
-  },
-  {
-    id: "s4",
-    title: "이번 주 시장 브리핑 정리",
-    accounts: ["a5", "a6"],
-    kind: "post",
-    when: "5/30 12:00",
-    rel: "내일",
-  },
-  {
-    id: "s5",
-    title: "POSCO 2차전지 소재 관련 코멘트 모음",
-    accounts: ["a4"],
-    kind: "comment",
-    when: "5/31 20:00",
-    rel: "모레",
-  },
-];
-
-export const ACTIVITY: ActivityItem[] = [
-  {
-    id: "ac1",
-    type: "success",
-    text: "‘삼성전자 4분기 실적 기대’ 글이 종목토론방에 게시되었습니다",
-    time: "12분 전",
-  },
-  {
-    id: "ac2",
-    type: "success",
-    text: "반도체 코멘트 10종이 2개 계정에 분산 게시되었습니다",
-    time: "1시간 전",
-  },
-  {
-    id: "ac3",
-    type: "error",
-    text: "한미반도체 토론방 계정 게시 실패 — 로그인 세션 만료",
-    time: "2시간 전",
-  },
-  {
-    id: "ac4",
-    type: "info",
-    text: "종목토론방 12개를 크롤링해 가져왔습니다",
-    time: "3시간 전",
-  },
-  {
-    id: "ac5",
-    type: "info",
-    text: "엑셀에서 계정 4건을 가져왔습니다",
-    time: "어제",
-  },
-];
-
-export const QUEUE_NOW: QueueNowItem[] = [
-  {
-    id: "q1",
-    title: "삼성전자 4분기 실적 기대 — 매수 관점 정리",
-    kind: "post",
-    state: "running",
-    batchId: "b0",
-    progress: [2, 3],
-    locs: [
-      { p: "forum", name: "삼성전자", code: "005930" },
-      { p: "forum", name: "SK하이닉스", code: "000660" },
-      { p: "naver", name: "주식투자연구소 카페" },
-    ],
-  },
-  {
-    id: "q2",
-    title: "반도체 흐름 코멘트 10종",
-    kind: "comment",
-    state: "waiting",
-    locs: [
-      { p: "forum", name: "SK하이닉스", code: "000660" },
-      { p: "forum", name: "한미반도체", code: "042700" },
-    ],
-  },
-  {
-    id: "q3",
-    title: "오늘의 특징주 정리 — 장 마감 요약",
-    kind: "post",
-    state: "waiting",
-    locs: [
-      { p: "naver", name: "개미투자 카페" },
-      { p: "band", name: "가치투자모임 BAND" },
-    ],
-  },
-  {
-    id: "q4",
-    title: "2차전지 섹터 기대감 코멘트 세트",
-    kind: "comment",
-    state: "waiting",
-    locs: [{ p: "forum", name: "POSCO홀딩스", code: "005490" }],
-  },
-  {
-    id: "q5",
-    title: "카카오 반등 시그널 분석",
-    kind: "post",
-    state: "waiting",
-    locs: [{ p: "forum", name: "카카오", code: "035720" }],
-  },
-];
-export const QUEUE_SCHEDULED: QueueScheduledItem[] = [
-  {
-    id: "qs1",
-    title: "에코프로 조정 구간 대응 전략",
-    kind: "both",
-    when: "오늘 18:30",
-    rel: "5시간 후",
-    locs: [{ p: "forum", name: "에코프로", code: "086520" }],
-  },
-  {
-    id: "qs2",
-    title: "이번 주 시장 브리핑 정리",
-    kind: "post",
-    when: "내일 09:00",
-    rel: "내일",
-    locs: [
-      { p: "naver", name: "주식투자연구소 카페" },
-      { p: "band", name: "가치투자모임 BAND" },
-    ],
-  },
-  {
-    id: "qs3",
-    title: "HBM 관련 기대 코멘트",
-    kind: "comment",
-    when: "5/31 20:00",
-    rel: "모레",
-    locs: [{ p: "forum", name: "한미반도체", code: "042700" }],
-  },
-];
-
-export const LOG_BATCHES: LogBatch[] = [
+const SEED_LOG_BATCHES: LogBatch[] = [
   {
     id: "b0",
     title: "삼성전자 4분기 실적 기대 — 매수 관점 정리",
@@ -973,66 +847,100 @@ export const LOG_BATCHES: LogBatch[] = [
   },
 ];
 
-export const BATCH: Record<string, LogBatch> = Object.fromEntries(
-  LOG_BATCHES.map((b) => [b.id, b]),
+const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
+
+interface IpcState {
+  accounts: Account[];
+  posts: LibraryPost[];
+  queueNow: QueueNowItem[];
+  queueScheduled: QueueScheduledItem[];
+}
+
+let state: IpcState;
+
+/** Re-seed the in-memory backend to the pristine dataset. Call in `beforeEach`. */
+export function resetIpc(): void {
+  state = {
+    accounts: clone(SEED_ACCOUNTS),
+    posts: clone(SEED_LIBRARY),
+    queueNow: clone(SEED_QUEUE_NOW),
+    queueScheduled: clone(SEED_QUEUE_SCHEDULED),
+  };
+}
+
+resetIpc();
+
+/** Drop-in replacement for `@tauri-apps/api/core`'s `invoke`, backed by fixtures. */
+export const invoke = vi.fn(
+  async (cmd: string, args?: Record<string, unknown>): Promise<unknown> => {
+    switch (cmd) {
+      // --- read-only domains -------------------------------------------------
+      case "list_stocks":
+        return clone(SEED_STOCKS);
+      case "list_activity":
+        return clone(SEED_ACTIVITY);
+      case "list_stats":
+        return clone(SEED_STATS);
+      case "list_scheduled":
+        return clone(SEED_SCHEDULED);
+      case "list_log_batches":
+        return clone(SEED_LOG_BATCHES);
+      case "list_cafes":
+        return clone(SEED_CAFES);
+      case "list_bands":
+        return clone(SEED_BANDS);
+
+      // --- accounts (stateful) ----------------------------------------------
+      case "list_accounts":
+        return clone(state.accounts);
+      case "add_account":
+        state.accounts = [...state.accounts, args!.account as Account];
+        return clone(state.accounts);
+      case "update_account": {
+        const acc = args!.account as Account;
+        state.accounts = state.accounts.map((a) => (a.id === acc.id ? acc : a));
+        return clone(state.accounts);
+      }
+      case "delete_accounts": {
+        const ids = args!.ids as string[];
+        state.accounts = state.accounts.filter((a) => !ids.includes(a.id));
+        return clone(state.accounts);
+      }
+
+      // --- posts (stateful) --------------------------------------------------
+      case "list_posts":
+        return clone(state.posts);
+      case "upsert_post": {
+        const post = args!.post as LibraryPost;
+        const i = state.posts.findIndex((p) => p.id === post.id);
+        state.posts =
+          i < 0
+            ? [post, ...state.posts]
+            : state.posts.map((p) => (p.id === post.id ? post : p));
+        return clone(state.posts);
+      }
+      case "delete_post":
+        state.posts = state.posts.filter((p) => p.id !== (args!.id as string));
+        return clone(state.posts);
+
+      // --- queue (stateful) --------------------------------------------------
+      case "list_queue_now":
+        return clone(state.queueNow);
+      case "list_queue_scheduled":
+        return clone(state.queueScheduled);
+      case "cancel_queue_now":
+        state.queueNow = state.queueNow.filter(
+          (q) => q.id !== (args!.id as string),
+        );
+        return clone(state.queueNow);
+      case "cancel_queue_scheduled":
+        state.queueScheduled = state.queueScheduled.filter(
+          (q) => q.id !== (args!.id as string),
+        );
+        return clone(state.queueScheduled);
+
+      default:
+        throw new Error(`test ipc: unhandled command "${cmd}"`);
+    }
+  },
 );
-
-export function jobLink(job: { code?: string; url?: string } | null): string {
-  if (job && job.code)
-    return `https://finance.naver.com/item/main.naver?code=${job.code}`;
-  return (job && job.url) || "";
-}
-
-export function resolveTemplate(
-  text: string,
-  job: { targetName?: string; code?: string; url?: string } | null,
-  linkOverride?: string,
-): string {
-  if (!text) return text;
-  const name = (job && job.targetName) || "";
-  const code = (job && job.code) || "";
-  const link = (linkOverride && linkOverride.trim()) || jobLink(job);
-  return text
-    .replace(/#\{\s*종목명\s*\}/g, name)
-    .replace(/#\{\s*종목코드\s*\}/g, code)
-    .replace(/#\{\s*링크\s*\}/g, link);
-}
-
-export function hasToken(
-  text: string,
-  kind?: "stock" | "code" | "link",
-): boolean {
-  if (!text) return false;
-  const re =
-    kind === "stock"
-      ? /#\{\s*종목명\s*\}/
-      : kind === "code"
-        ? /#\{\s*종목코드\s*\}/
-        : kind === "link"
-          ? /#\{\s*링크\s*\}/
-          : /#\{\s*(종목명|종목코드|링크)\s*\}/;
-  return re.test(text);
-}
-
-export function batchStatus(
-  b: LogBatch,
-): "running" | "success" | "fail" | "partial" {
-  if (
-    b.state === "running" ||
-    b.items.some((i) => i.status === "running" || i.status === "waiting")
-  )
-    return "running";
-  const fails = b.items.filter((i) => i.status === "fail").length;
-  if (fails === 0) return "success";
-  if (fails === b.items.length) return "fail";
-  return "partial";
-}
-
-export function acctPlatforms(ids: string[]): PlatformId[] {
-  const seen: PlatformId[] = [];
-  ids.forEach((id) => {
-    const a = ACCOUNTS.find((x) => x.id === id);
-    if (a && !seen.includes(a.platform)) seen.push(a.platform);
-  });
-  return seen;
-}

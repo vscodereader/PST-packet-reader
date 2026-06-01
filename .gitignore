@@ -13,6 +13,9 @@ dist-ssr
 coverage
 *.local
 
+# Brainstorming visual-companion mockups
+.superpowers/
+
 # Design handoff bundle (reference material, not source)
 Macro-handoff
 Macro-handoff.tar.gz

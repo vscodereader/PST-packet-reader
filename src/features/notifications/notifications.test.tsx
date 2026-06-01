@@ -1,12 +1,16 @@
 import { MantineProvider } from "@mantine/core";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
 import type { LogFilter } from "@/shared/data/types";
 import { pickOption } from "@/test/select";
 
 import { Notifications } from "./notifications";
+
+vi.mock("@tauri-apps/api/core", async () => ({
+  invoke: (await import("@/test/ipc")).invoke,
+}));
 
 function renderLog(filter: LogFilter | null = null) {
   render(
@@ -17,15 +21,18 @@ function renderLog(filter: LogFilter | null = null) {
 }
 
 describe("Notifications", () => {
-  it("renders the title and a batch entry", () => {
+  it("renders the title and a batch entry", async () => {
     renderLog();
     expect(screen.getByRole("heading", { name: "알림" })).toBeInTheDocument();
-    expect(screen.getByText("반도체 흐름 코멘트 10종")).toBeInTheDocument();
+    // Batches arrive from the async `listLogBatches` IPC call.
+    expect(
+      await screen.findByText("반도체 흐름 코멘트 10종"),
+    ).toBeInTheDocument();
   });
 
   it("expands a batch to reveal per-location sub-logs", async () => {
     renderLog();
-    await userEvent.click(screen.getByText("5월 이벤트 결과 발표"));
+    await userEvent.click(await screen.findByText("5월 이벤트 결과 발표"));
     // sub-log loginId text becomes visible once expanded
     expect(screen.getByText(/invest_king7/)).toBeInTheDocument();
   });
@@ -38,7 +45,7 @@ describe("Notifications", () => {
 
   it("toggles the error trace on a failed sub-log", async () => {
     renderLog();
-    await userEvent.click(screen.getByText("반도체 흐름 코멘트 10종"));
+    await userEvent.click(await screen.findByText("반도체 흐름 코멘트 10종"));
     await userEvent.click(
       await screen.findByRole("button", { name: /자세히 보기/ }),
     );

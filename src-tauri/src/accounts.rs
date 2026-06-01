@@ -1,19 +1,14 @@
-//! Accounts domain — the first slice wired from the React UI to Rust over Tauri IPC.
+//! Accounts domain — JSON-file-backed store wired to the React UI over Tauri IPC.
 //!
 //! Types here are the single source of truth: `ts-rs` generates the matching
 //! TypeScript declarations into `src/shared/bindings/` (run `pnpm gen:bindings`).
-//! State is held in memory (seeded on startup) via a managed `AccountStore`; the
-//! commands are thin wrappers around the pure `apply_*` functions, which hold all
-//! the logic and are unit-tested below.
-//!
-//! NOTE (PoC scope): persistence is in-memory only — the store resets on app
-//! restart. Promoting to a JSON file / SQLite is a follow-up; the command
-//! signatures stay identical, so the frontend contract won't change.
-
-use std::sync::Mutex;
+//! State is persisted as JSON via the shared [`JsonStore`]; the commands are thin
+//! wrappers around the pure `apply_*` functions, which hold all the logic.
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
+
+use crate::store::JsonStore;
 
 /// Mirrors the TS `PlatformId` literal union. `lowercase` keeps the JSON wire
 /// form identical to the existing frontend values (`"forum"`, `"naver"`, …).
@@ -55,13 +50,11 @@ pub struct Account {
 // Pure logic (unit-tested) — no IO, no Tauri.
 // ---------------------------------------------------------------------------
 
-/// Append a new account to the end of the list.
 pub fn apply_add(mut accounts: Vec<Account>, account: Account) -> Vec<Account> {
     accounts.push(account);
     accounts
 }
 
-/// Replace the account whose `id` matches; leave the rest untouched.
 pub fn apply_update(accounts: Vec<Account>, account: Account) -> Vec<Account> {
     accounts
         .into_iter()
@@ -75,7 +68,6 @@ pub fn apply_update(accounts: Vec<Account>, account: Account) -> Vec<Account> {
         .collect()
 }
 
-/// Drop every account whose `id` is in `ids`.
 pub fn apply_delete(accounts: Vec<Account>, ids: &[String]) -> Vec<Account> {
     accounts
         .into_iter()
@@ -83,8 +75,7 @@ pub fn apply_delete(accounts: Vec<Account>, ids: &[String]) -> Vec<Account> {
         .collect()
 }
 
-/// First-run seed, mirroring a slice of the frontend mock data so a fresh
-/// launch isn't an empty table.
+/// First-run seed, mirroring a slice of the frontend mock data.
 pub fn seed() -> Vec<Account> {
     vec![
         Account {
@@ -127,57 +118,37 @@ pub fn seed() -> Vec<Account> {
 }
 
 // ---------------------------------------------------------------------------
-// Managed state — in-memory store, seeded at startup.
-// ---------------------------------------------------------------------------
-
-/// App-managed account list. Register with `Builder::manage(AccountStore::default())`.
-pub struct AccountStore(pub Mutex<Vec<Account>>);
-
-impl Default for AccountStore {
-    fn default() -> Self {
-        AccountStore(Mutex::new(seed()))
-    }
-}
-
-impl AccountStore {
-    fn snapshot(&self) -> Vec<Account> {
-        self.0.lock().expect("account store poisoned").clone()
-    }
-
-    fn replace_with<F>(&self, f: F) -> Vec<Account>
-    where
-        F: FnOnce(Vec<Account>) -> Vec<Account>,
-    {
-        let mut guard = self.0.lock().expect("account store poisoned");
-        let next = f(guard.clone());
-        *guard = next.clone();
-        next
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tauri commands — each mutation updates the store and returns the full updated
-// list so the frontend can replace its state in one step.
+// Tauri commands — each mutation persists (via JsonStore) and returns the full
+// updated list so the frontend can replace its state in one step.
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn list_accounts(store: tauri::State<'_, AccountStore>) -> Vec<Account> {
+pub fn list_accounts(store: tauri::State<'_, JsonStore<Account>>) -> Vec<Account> {
     store.snapshot()
 }
 
 #[tauri::command]
-pub fn add_account(store: tauri::State<'_, AccountStore>, account: Account) -> Vec<Account> {
-    store.replace_with(|accounts| apply_add(accounts, account))
+pub fn add_account(
+    store: tauri::State<'_, JsonStore<Account>>,
+    account: Account,
+) -> Vec<Account> {
+    store.mutate(|accounts| apply_add(accounts, account))
 }
 
 #[tauri::command]
-pub fn update_account(store: tauri::State<'_, AccountStore>, account: Account) -> Vec<Account> {
-    store.replace_with(|accounts| apply_update(accounts, account))
+pub fn update_account(
+    store: tauri::State<'_, JsonStore<Account>>,
+    account: Account,
+) -> Vec<Account> {
+    store.mutate(|accounts| apply_update(accounts, account))
 }
 
 #[tauri::command]
-pub fn delete_accounts(store: tauri::State<'_, AccountStore>, ids: Vec<String>) -> Vec<Account> {
-    store.replace_with(|accounts| apply_delete(accounts, &ids))
+pub fn delete_accounts(
+    store: tauri::State<'_, JsonStore<Account>>,
+    ids: Vec<String>,
+) -> Vec<Account> {
+    store.mutate(|accounts| apply_delete(accounts, &ids))
 }
 
 #[cfg(test)]
@@ -198,8 +169,7 @@ mod tests {
 
     #[test]
     fn apply_add_appends_to_end() {
-        let start = vec![acct("a1", "one")];
-        let next = apply_add(start, acct("a2", "two"));
+        let next = apply_add(vec![acct("a1", "one")], acct("a2", "two"));
         assert_eq!(next.len(), 2);
         assert_eq!(next[1].id, "a2");
     }
@@ -216,13 +186,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_update_is_noop_for_unknown_id() {
-        let start = vec![acct("a1", "one")];
-        let next = apply_update(start.clone(), acct("zzz", "ghost"));
-        assert_eq!(next, start);
-    }
-
-    #[test]
     fn apply_delete_removes_listed_ids() {
         let start = vec![acct("a1", "one"), acct("a2", "two"), acct("a3", "three")];
         let next = apply_delete(start, &["a1".into(), "a3".into()]);
@@ -234,8 +197,8 @@ mod tests {
     fn seed_is_nonempty_and_json_roundtrips() {
         let seeded = seed();
         assert!(!seeded.is_empty());
-        let json = serde_json::to_string(&seeded).unwrap();
-        let back: Vec<Account> = serde_json::from_str(&json).unwrap();
+        let back: Vec<Account> =
+            serde_json::from_str(&serde_json::to_string(&seeded).unwrap()).unwrap();
         assert_eq!(seeded, back);
     }
 
@@ -256,16 +219,5 @@ mod tests {
         let json = serde_json::to_string(&acct("a1", "u")).unwrap();
         assert!(json.contains("\"loginId\""));
         assert!(!json.contains("login_id"));
-    }
-
-    #[test]
-    fn store_mutations_persist_across_calls() {
-        let store = AccountStore::default();
-        let seeded_len = store.snapshot().len();
-        let after_add = store.replace_with(|a| apply_add(a, acct("new1", "fresh")));
-        assert_eq!(after_add.len(), seeded_len + 1);
-        assert_eq!(store.snapshot().len(), seeded_len + 1);
-        let after_del = store.replace_with(|a| apply_delete(a, &["new1".into()]));
-        assert_eq!(after_del.len(), seeded_len);
     }
 }

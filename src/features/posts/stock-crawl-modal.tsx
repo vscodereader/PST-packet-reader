@@ -11,8 +11,8 @@ import {
 } from "@mantine/core";
 import { useEffect, useState } from "react";
 
-import { STOCK, STOCKS } from "@/shared/data/mock";
 import type { Stock } from "@/shared/data/types";
+import { listStocks } from "@/shared/ipc/stocks";
 import { Icon } from "@/shared/ui/icons";
 
 export interface StockCrawlModalProps {
@@ -33,23 +33,28 @@ function StockCrawlModalInner({
   const [sel, setSel] = useState<string[]>(preselected);
   const [found, setFound] = useState(0);
   const [nonce, setNonce] = useState(0);
+  const [stocks, setStocks] = useState<Stock[]>([]);
+
+  useEffect(() => {
+    void listStocks().then(setStocks);
+  }, []);
 
   useEffect(() => {
     let n = 0;
     const iv = window.setInterval(() => {
       n += Math.ceil(Math.random() * 3);
-      setFound(Math.min(n, STOCKS.length));
+      setFound(Math.min(n, stocks.length));
     }, 120);
     const to = window.setTimeout(() => {
       window.clearInterval(iv);
-      setFound(STOCKS.length);
+      setFound(stocks.length);
       setPhase("done");
     }, 1400);
     return () => {
       window.clearInterval(iv);
       window.clearTimeout(to);
     };
-  }, [nonce]);
+  }, [nonce, stocks.length]);
 
   const recrawl = () => {
     setPhase("crawling");
@@ -61,7 +66,7 @@ function StockCrawlModalInner({
       s.includes(code) ? s.filter((x) => x !== code) : [...s, code],
     );
 
-  const list = STOCKS.filter(
+  const list = stocks.filter(
     (s) => !q || s.name.includes(q) || s.code.includes(q),
   );
 
@@ -191,14 +196,19 @@ function StockCrawlModalInner({
           {sel.length}개 종목 선택됨
         </Text>
         <Box style={{ flex: 1 }} />
-        <Button variant="default" onClick={onClose}>
+        <Button size="sm" variant="default" onClick={onClose}>
           취소
         </Button>
         <Button
+          size="sm"
           disabled={!sel.length}
           leftSection={<Icon.check size={16} />}
           onClick={() =>
-            onConfirm(sel.map((c) => STOCK[c]).filter((s): s is Stock => !!s))
+            onConfirm(
+              sel
+                .map((c) => stocks.find((s) => s.code === c))
+                .filter((s): s is Stock => !!s),
+            )
           }
         >
           적용 ({sel.length})

@@ -11,6 +11,10 @@ import { describe, it, expect, vi } from "vitest";
 
 import { WriterModal } from "./writer-modal";
 
+vi.mock("@tauri-apps/api/core", async () => ({
+  invoke: (await import("@/test/ipc")).invoke,
+}));
+
 function renderWriter(over: Partial<Parameters<typeof WriterModal>[0]> = {}) {
   const onSave = vi.fn();
   render(
