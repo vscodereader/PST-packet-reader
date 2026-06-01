@@ -15,10 +15,11 @@ import {
   Title,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import { KIND, KIND_ICON, LIBRARY, STATUS_LABEL } from "@/shared/data/mock";
+import { KIND, KIND_ICON, STATUS_LABEL } from "@/shared/data/mock";
 import type { GoFn, LibraryPost, ModeValue } from "@/shared/data/types";
+import { deletePost, listPosts, upsertPost } from "@/shared/ipc/posts";
 import { Icon } from "@/shared/ui/icons";
 
 import { PublishModal } from "./publish-modal";
@@ -31,9 +32,11 @@ function toast(message: string, color = "blue") {
 }
 
 export function Posts({ go }: { go: GoFn }) {
-  const [posts, setPosts] = useState<LibraryPost[]>(() =>
-    LIBRARY.map((p) => ({ ...p })),
-  );
+  const [posts, setPosts] = useState<LibraryPost[]>([]);
+
+  useEffect(() => {
+    void listPosts().then(setPosts);
+  }, []);
   const [filter, setFilter] = useState<"all" | ModeValue>("all");
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
@@ -41,14 +44,9 @@ export function Posts({ go }: { go: GoFn }) {
   const [writerDoc, setWriterDoc] = useState<LibraryPost | null>(null);
   const [publishDoc, setPublishDoc] = useState<LibraryPost | null>(null);
 
-  const upsert = (doc: LibraryPost) =>
-    setPosts((ps) => {
-      const i = ps.findIndex((p) => p.id === doc.id);
-      if (i < 0) return [doc, ...ps];
-      const c = [...ps];
-      c[i] = { ...c[i], ...doc };
-      return c;
-    });
+  const upsert = (doc: LibraryPost) => {
+    void upsertPost(doc).then(setPosts);
+  };
   const openNew = () => {
     setWriterDoc(null);
     setWriterOpen(true);
@@ -68,7 +66,7 @@ export function Posts({ go }: { go: GoFn }) {
     toast("복제했어요", "green");
   };
   const del = (id: string) => {
-    setPosts((ps) => ps.filter((p) => p.id !== id));
+    void deletePost(id).then(setPosts);
     toast("삭제했어요");
   };
 
@@ -292,7 +290,7 @@ export function Posts({ go }: { go: GoFn }) {
         }}
         onSaveDraft={upsert}
         onDeleteDraft={(d) => {
-          setPosts((ps) => ps.filter((p) => p.id !== d.id));
+          void deletePost(d.id).then(setPosts);
           toast("임시저장을 삭제했어요");
         }}
       />

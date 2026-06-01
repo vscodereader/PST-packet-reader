@@ -1,22 +1,30 @@
 import { MantineProvider } from "@mantine/core";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
+
+import { resetPostsFallbackForTests } from "@/shared/ipc/posts";
 
 import { Posts } from "./posts";
 
-function renderPosts(go = vi.fn()) {
+async function renderPosts(go = vi.fn()) {
   render(
     <MantineProvider>
       <Posts go={go} />
     </MantineProvider>,
   );
+  // The list loads asynchronously over the IPC wrapper (mock fallback here).
+  await screen.findByText("이번 주 시장 브리핑 정리");
   return go;
 }
 
 describe("Posts", () => {
-  it("renders the title and the 글쓰기 action", () => {
-    renderPosts();
+  beforeEach(() => {
+    resetPostsFallbackForTests();
+  });
+
+  it("renders the title and the 글쓰기 action", async () => {
+    await renderPosts();
     expect(
       screen.getByRole("heading", { name: "글 관리" }),
     ).toBeInTheDocument();
@@ -24,7 +32,7 @@ describe("Posts", () => {
   });
 
   it("opens the writer modal from 글쓰기", async () => {
-    renderPosts();
+    await renderPosts();
     await userEvent.click(screen.getByRole("button", { name: /글쓰기/ }));
     expect(
       await screen.findByPlaceholderText("제목을 입력하세요"),
@@ -32,14 +40,14 @@ describe("Posts", () => {
   });
 
   it("opens the publish modal from a row's 게시하기", async () => {
-    renderPosts();
+    await renderPosts();
     const [firstPublish] = screen.getAllByRole("button", { name: /게시하기/ });
     await userEvent.click(firstPublish!);
     expect(await screen.findByRole("dialog")).toHaveTextContent("게시 설정");
   });
 
   it("filters posts by kind", async () => {
-    renderPosts();
+    await renderPosts();
     await userEvent.click(screen.getByRole("button", { name: /^댓글/ }));
     // a known comment-kind post is visible, a known post-kind one is not
     expect(
@@ -51,7 +59,7 @@ describe("Posts", () => {
   });
 
   it("filters posts by the search box", async () => {
-    renderPosts();
+    await renderPosts();
     await userEvent.type(screen.getByPlaceholderText("제목 검색"), "카카오");
     expect(screen.getByText("카카오 반등 시그널 분석")).toBeInTheDocument();
     expect(
@@ -60,7 +68,7 @@ describe("Posts", () => {
   });
 
   it("opens the writer to edit when a card is clicked", async () => {
-    renderPosts();
+    await renderPosts();
     await userEvent.click(screen.getByText("이번 주 시장 브리핑 정리"));
     expect(
       await screen.findByDisplayValue("이번 주 시장 브리핑 정리"),
@@ -68,7 +76,7 @@ describe("Posts", () => {
   });
 
   it("duplicates a post from the row menu", async () => {
-    renderPosts();
+    await renderPosts();
     const dots = screen
       .getAllByRole("button")
       .find((b) => b.textContent === "")!;
@@ -78,7 +86,7 @@ describe("Posts", () => {
   });
 
   it("deletes a post from the row menu", async () => {
-    renderPosts();
+    await renderPosts();
     const firstTitle = "#{종목명} 4분기 실적 기대 — 매수 관점 정리";
     expect(screen.getByText(firstTitle)).toBeInTheDocument();
     const dots = screen
@@ -86,11 +94,13 @@ describe("Posts", () => {
       .find((b) => b.textContent === "")!;
     await userEvent.click(dots);
     await userEvent.click(await screen.findByText("삭제"));
-    expect(screen.queryByText(firstTitle)).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByText(firstTitle)).not.toBeInTheDocument(),
+    );
   });
 
   it("updates an existing post when edited and saved", async () => {
-    renderPosts();
+    await renderPosts();
     await userEvent.click(screen.getByText("카카오 반등 시그널 분석"));
     const title = await screen.findByDisplayValue("카카오 반등 시그널 분석");
     await userEvent.clear(title);
@@ -100,7 +110,7 @@ describe("Posts", () => {
   });
 
   it("creates a new post from the writer", async () => {
-    renderPosts();
+    await renderPosts();
     await userEvent.click(screen.getByRole("button", { name: /글쓰기/ }));
     await userEvent.type(
       await screen.findByPlaceholderText("제목을 입력하세요"),
@@ -111,7 +121,7 @@ describe("Posts", () => {
   });
 
   it("saves a draft from the writer", async () => {
-    renderPosts();
+    await renderPosts();
     await userEvent.click(screen.getByRole("button", { name: /글쓰기/ }));
     await userEvent.type(
       await screen.findByPlaceholderText("제목을 입력하세요"),
@@ -123,7 +133,7 @@ describe("Posts", () => {
   });
 
   it("deletes a draft from the writer list", async () => {
-    renderPosts();
+    await renderPosts();
     await userEvent.click(screen.getByRole("button", { name: /글쓰기/ }));
     await userEvent.click(
       await screen.findByRole("button", { name: "임시저장" }),
