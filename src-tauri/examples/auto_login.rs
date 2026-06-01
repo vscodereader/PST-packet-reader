@@ -95,21 +95,29 @@ fn run_login(id: &str, password: &str, headless: bool) -> Result<String, String>
     let input_path = tmp.path().join("input.json");
     let cookies_path = tmp.path().join("cookies.json");
 
+    // chrome_path()는 Result이므로 문자열로 풀어서 넣는다(그대로 넣으면 {"Ok":...}로 직렬화됨).
+    let chrome_path = config::chrome_path()?;
     let input = serde_json::json!({
         "accountId": id,
         "id": id,
         "password": password,
         "cookiesPath": cookies_path,
         "headless": headless,
-        "chromePath": config::chrome_path(),
+        "chromePath": chrome_path,
     });
     fs::write(&input_path, serde_json::to_string_pretty(&input).unwrap())
         .map_err(|e| e.to_string())?;
 
-    let script = locate_login_script();
-    let status = Command::new("node")
-        .arg("--experimental-strip-types")
-        .arg(script)
+    // 빌드된 sidecar 바이너리를 실행한다(`pnpm build:sidecar`로 생성).
+    // TS 소스를 node로 직접 실행하지 않으므로 Node의 TypeScript 지원 여부와 무관하게 동작한다.
+    let binary = locate_login_binary();
+    if !binary.exists() {
+        return Err(format!(
+            "로그인 sidecar 바이너리가 없습니다: {}\n먼저 `pnpm build:sidecar`를 실행하세요.",
+            binary.display()
+        ));
+    }
+    let status = Command::new(&binary)
         .arg(&input_path)
         .status()
         .map_err(|e| e.to_string())?;
@@ -125,17 +133,18 @@ fn run_login(id: &str, password: &str, headless: bool) -> Result<String, String>
     Ok(json)
 }
 
-fn locate_login_script() -> PathBuf {
-    if let Ok(path) = env::var("PSTMACRO_LOGIN_SCRIPT") {
+fn locate_login_binary() -> PathBuf {
+    if let Ok(path) = env::var("PSTMACRO_LOGIN_BINARY") {
         return PathBuf::from(path);
     }
+    let name = if cfg!(target_os = "windows") {
+        "naver-login-x86_64-pc-windows-msvc.exe"
+    } else {
+        "naver-login-x86_64-unknown-linux-gnu"
+    };
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("src-tauri")
-        .join("src")
-        .join("naver-login")
-        .join("naver-login.ts")
+        .join("binaries")
+        .join(name)
 }
 
 fn value_after(args: &[String], flag: &str) -> Option<String> {

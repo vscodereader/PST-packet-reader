@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -34,14 +34,23 @@ execSync("npm ci", { cwd: buildDir, stdio: "inherit" });
 
 mkdirSync(path.join(root, "src-tauri/binaries"), { recursive: true });
 
-const linuxStub = path.join(root, "src-tauri/binaries/naver-login-x86_64-unknown-linux-gnu");
-writeFileSync(linuxStub, '#!/bin/sh\necho "naver-login sidecar: Linux stub only" >&2\nexit 1\n');
-chmodSync(linuxStub, 0o755);
+// Linux/WSL와 Windows 양쪽에서 로그인 sidecar가 실제로 동작하도록 두 타깃을 모두 빌드한다.
+// (이전에는 Linux를 동작하지 않는 더미 stub으로 두었으나, WSL에서도 로그인을 돌리기 위해
+//  실제 Linux 바이너리를 빌드한다. 시스템에 설치된 Chrome을 executablePath로 실행한다.)
+const targets = [
+  { pkgTarget: "node22-linux-x64", output: "naver-login-x86_64-unknown-linux-gnu" },
+  { pkgTarget: "node22-win-x64", output: "naver-login-x86_64-pc-windows-msvc" },
+];
 
-const outPath = path.join(root, "src-tauri/binaries/naver-login-x86_64-pc-windows-msvc");
-execSync(
-  `pnpm exec pkg "${compiledLoginScript}" --target node22-win-x64 --output "${outPath}" --no-bytecode --public --config "${path.join(buildDir, "package.json")}"`,
-  { cwd: root, stdio: "inherit" },
-);
+for (const { pkgTarget, output } of targets) {
+  const outPath = path.join(root, "src-tauri/binaries", output);
+  execSync(
+    `pnpm exec pkg "${compiledLoginScript}" --target ${pkgTarget} --output "${outPath}" --no-bytecode --public --config "${path.join(buildDir, "package.json")}"`,
+    { cwd: root, stdio: "inherit" },
+  );
+  if (pkgTarget.startsWith("node22-linux")) {
+    chmodSync(outPath, 0o755);
+  }
+}
 
 rmSync(buildDir, { recursive: true });

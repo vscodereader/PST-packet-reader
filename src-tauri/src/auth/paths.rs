@@ -3,9 +3,26 @@ use std::{env, fs, path::PathBuf};
 use super::{config, error::OrchestratorError, types::RuntimePaths};
 
 /// 애플리케이션 데이터 루트 디렉토리 경로를 가져온다.
+///
+/// Windows에서는 `%LOCALAPPDATA%`를 사용한다. WSL/Linux 등 `LOCALAPPDATA`가 없는
+/// 환경에서는 `XDG_DATA_HOME` 또는 `~/.local/share`로 대체한다.
 pub fn app_data_root() -> Result<PathBuf, OrchestratorError> {
-    let appdata = env::var_os("LOCALAPPDATA").ok_or(OrchestratorError::MissingLocalAppData)?;
-    Ok(PathBuf::from(appdata).join(config::APP_NAME))
+    if let Some(appdata) = env::var_os("LOCALAPPDATA") {
+        return Ok(PathBuf::from(appdata).join(config::APP_NAME));
+    }
+
+    if let Some(xdg) = env::var_os("XDG_DATA_HOME") {
+        return Ok(PathBuf::from(xdg).join(config::APP_NAME));
+    }
+
+    if let Some(home) = env::var_os("HOME") {
+        return Ok(PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join(config::APP_NAME));
+    }
+
+    Err(OrchestratorError::MissingLocalAppData)
 }
 
 /// 루트 경로로부터 실행 시간 경로들을 구성한다.
