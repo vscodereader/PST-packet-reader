@@ -1,22 +1,31 @@
 import { MantineProvider } from "@mantine/core";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
+
+import { resetQueueFallbackForTests } from "@/shared/ipc/queue";
 
 import { Queue } from "./queue";
 
-function renderQueue(go = vi.fn()) {
+async function renderQueue(go = vi.fn()) {
   render(
     <MantineProvider>
       <Queue go={go} />
     </MantineProvider>,
   );
+  // now + scheduled lists load asynchronously over the IPC wrapper (mock here)
+  await screen.findByText("삼성전자 4분기 실적 기대 — 매수 관점 정리");
+  await screen.findByText("에코프로 조정 구간 대응 전략");
   return go;
 }
 
 describe("Queue", () => {
-  it("renders the title and both queue sections", () => {
-    renderQueue();
+  beforeEach(() => {
+    resetQueueFallbackForTests();
+  });
+
+  it("renders the title and both queue sections", async () => {
+    await renderQueue();
     expect(
       screen.getByRole("heading", { name: "게시 큐" }),
     ).toBeInTheDocument();
@@ -25,7 +34,7 @@ describe("Queue", () => {
   });
 
   it("opens the running batch in 알림 when its row is clicked", async () => {
-    const go = renderQueue();
+    const go = await renderQueue();
     await userEvent.click(
       screen.getByText("삼성전자 4분기 실적 기대 — 매수 관점 정리"),
     );
@@ -35,21 +44,23 @@ describe("Queue", () => {
   });
 
   it("navigates to posts via '새 작업 추가'", async () => {
-    const go = renderQueue();
+    const go = await renderQueue();
     await userEvent.click(screen.getByRole("button", { name: /새 작업 추가/ }));
     expect(go).toHaveBeenCalledWith("posts");
   });
 
   it("cancels a waiting item", async () => {
-    renderQueue();
+    await renderQueue();
     const title = "반도체 흐름 코멘트 10종";
     expect(screen.getByText(title)).toBeInTheDocument();
     await userEvent.click(screen.getAllByTitle("취소")[0]!);
-    expect(screen.queryByText(title)).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByText(title)).not.toBeInTheDocument(),
+    );
   });
 
   it("reorders waiting items with the move-down control", async () => {
-    renderQueue();
+    await renderQueue();
     const q2 = "반도체 흐름 코멘트 10종";
     const q3 = "오늘의 특징주 정리 — 장 마감 요약";
     // boundary: moving the first waiting item up is a no-op
@@ -64,7 +75,7 @@ describe("Queue", () => {
   });
 
   it("exposes 즉시 처리 and 예약 취소 on scheduled rows", async () => {
-    renderQueue();
+    await renderQueue();
     await userEvent.click(
       screen.getAllByRole("button", { name: /즉시 처리/ })[0]!,
     );
@@ -72,8 +83,8 @@ describe("Queue", () => {
     expect(screen.getByText("예약 대기")).toBeInTheDocument();
   });
 
-  it("reorders waiting items via drag and drop", () => {
-    renderQueue();
+  it("reorders waiting items via drag and drop", async () => {
+    await renderQueue();
     const q2 = "반도체 흐름 코멘트 10종";
     const q3 = "오늘의 특징주 정리 — 장 마감 요약";
     const q2row = screen.getByText(q2).closest("[draggable]")!;

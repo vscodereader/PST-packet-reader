@@ -376,10 +376,11 @@ function PublishFlow({
               ))}
             </Stack>
             <Group gap={9} grow w="100%">
-              <Button variant="default" onClick={onClose}>
+              <Button size="sm" variant="default" onClick={onClose}>
                 계속 작성
               </Button>
               <Button
+                size="sm"
                 onClick={() => {
                   onClose();
                   go(when === "schedule" ? "queue" : "log");
@@ -820,6 +821,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         <PlatformPill ids={selPlatforms} size={16} />
         <Box style={{ flex: 1 }} />
         <Button
+          size="sm"
           variant="default"
           leftSection={<Icon.eye size={16} />}
           onClick={() => setShowPreview(true)}
@@ -827,6 +829,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
           미리보기
         </Button>
         <Button
+          size="sm"
           disabled={!canPublish}
           leftSection={
             when === "schedule" ? (

@@ -14,20 +14,21 @@ import {
   Title,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import {
-  KIND,
-  KIND_ICON,
-  QUEUE_NOW,
-  QUEUE_SCHEDULED,
-} from "@/shared/data/mock";
+import { KIND, KIND_ICON } from "@/shared/data/mock";
 import type {
   GoFn,
   PlatformId,
   QueueLocation,
   QueueNowItem,
+  QueueScheduledItem,
 } from "@/shared/data/types";
+import {
+  cancelQueueNow,
+  listQueueNow,
+  listQueueScheduled,
+} from "@/shared/ipc/queue";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformPill } from "@/shared/ui/platform-logo";
 
@@ -57,9 +58,14 @@ function LocSummary({
 }
 
 export function Queue({ go }: { go: GoFn }) {
-  const [now, setNow] = useState<QueueNowItem[]>(QUEUE_NOW);
+  const [now, setNow] = useState<QueueNowItem[]>([]);
+  const [sched, setSched] = useState<QueueScheduledItem[]>([]);
   const [dragId, setDragId] = useState<string | null>(null);
-  const sched = QUEUE_SCHEDULED;
+
+  useEffect(() => {
+    void listQueueNow().then(setNow);
+    void listQueueScheduled().then(setSched);
+  }, []);
 
   const reorder = (id: string, targetId: string) => {
     setNow((list) => {
@@ -88,7 +94,7 @@ export function Queue({ go }: { go: GoFn }) {
     });
   };
   const cancel = (id: string) => {
-    setNow((l) => l.filter((x) => x.id !== id));
+    void cancelQueueNow(id).then(setNow);
     notifications.show({ message: "대기 작업을 취소했어요", color: "blue" });
   };
 
@@ -107,7 +113,7 @@ export function Queue({ go }: { go: GoFn }) {
           </Text>
         </Box>
         <Button
-          size="md"
+          size="sm"
           leftSection={<Icon.pencil size={17} />}
           onClick={() => go("posts")}
         >
@@ -371,6 +377,23 @@ export function Queue({ go }: { go: GoFn }) {
             </Paper>
           );
         })}
+        {sched.length === 0 && (
+          <Paper
+            withBorder
+            radius="md"
+            style={{ borderStyle: "dashed" }}
+            py={44}
+          >
+            <Center>
+              <Stack align="center" gap={8}>
+                <Icon.check size={32} color="var(--mantine-color-gray-5)" />
+                <Text size="sm" fw={600} c="dimmed">
+                  예약 중인 작업이 없어요
+                </Text>
+              </Stack>
+            </Center>
+          </Paper>
+        )}
       </Stack>
     </Container>
   );

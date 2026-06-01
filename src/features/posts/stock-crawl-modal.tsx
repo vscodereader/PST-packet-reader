@@ -191,10 +191,11 @@ function StockCrawlModalInner({
           {sel.length}개 종목 선택됨
         </Text>
         <Box style={{ flex: 1 }} />
-        <Button variant="default" onClick={onClose}>
+        <Button size="sm" variant="default" onClick={onClose}>
           취소
         </Button>
         <Button
+          size="sm"
           disabled={!sel.length}
           leftSection={<Icon.check size={16} />}
           onClick={() =>

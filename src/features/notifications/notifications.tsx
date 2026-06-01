@@ -321,6 +321,7 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
           </Text>
         </Box>
         <Button
+          size="sm"
           variant="default"
           leftSection={<Icon.download size={16} />}
           onClick={() =>

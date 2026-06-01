@@ -40,6 +40,10 @@ export function Dashboard({ go }: { go: GoFn }) {
           <Title order={1} fz={27} fw={800}>
             오늘은 무엇을 써볼까요?
           </Title>
+          <Text size="sm" c="dimmed" mt={6}>
+            한눈에 보는 계정과 게시 현황, 그리고 최근 활동이에요. 관심 가는
+            부분을 눌러 더 자세히 살펴보세요.
+          </Text>
         </Box>
         <Button
           size="sm"

@@ -134,6 +134,7 @@ function CommentComposer({
           <Group gap={8} mb={10} grow>
             {targetOpts.map((o) => (
               <Button
+                size="sm"
                 key={o.v}
                 variant={target === o.v ? "light" : "default"}
                 color={target === o.v ? "blue" : "gray"}
@@ -472,6 +473,7 @@ function WriterModalInner({
         <Menu position="bottom-end" width={280} closeOnItemClick={false}>
           <Menu.Target>
             <Button
+              size="sm"
               variant="default"
               rightSection={<Icon.chevronDown size={15} />}
             >
@@ -533,6 +535,7 @@ function WriterModalInner({
           </Menu.Dropdown>
         </Menu>
         <Button
+          size="sm"
           leftSection={<Icon.check size={16} />}
           onClick={() => onSave(buildDoc("ready"))}
         >
@@ -805,6 +808,7 @@ function WriterModalInner({
         </Text>
         <Group gap={9} grow>
           <Button
+            size="sm"
             variant="default"
             onClick={() => {
               setConfirmClose(false);
@@ -814,6 +818,7 @@ function WriterModalInner({
             저장 안 함
           </Button>
           <Button
+            size="sm"
             leftSection={<Icon.save size={16} />}
             onClick={() => {
               onSaveDraft(buildDoc("draft"));
