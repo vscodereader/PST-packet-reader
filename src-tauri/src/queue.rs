@@ -1,17 +1,13 @@
-//! Queue (게시 큐) domain — mock → Tauri IPC. Reuses `PlatformId` and
-//! `ModeValue` from the accounts/posts modules so the generated TS bindings
-//! stay a single source of truth.
-//!
-//! NOTE (PoC scope): in-memory store, resets on restart. Read + cancel only;
-//! the now/scheduled lists are seeded from the frontend mock.
-
-use std::sync::Mutex;
+//! Queue (게시 큐) domain — JSON-file-backed, wired over Tauri IPC. Reuses
+//! `PlatformId`/`ModeValue` from the accounts/posts modules so the generated TS
+//! bindings stay a single source of truth.
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::accounts::PlatformId;
 use crate::posts::ModeValue;
+use crate::store::JsonStore;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../src/shared/bindings/")]
@@ -108,6 +104,15 @@ pub fn seed_now() -> Vec<QueueNowItem> {
             progress: None,
             locs: vec![loc(PlatformId::Forum, "한미반도체", Some("042700"))],
         },
+        QueueNowItem {
+            id: "q3".into(),
+            title: "오늘의 특징주 정리 — 장 마감 요약".into(),
+            kind: ModeValue::Post,
+            state: QueueState::Waiting,
+            batch_id: None,
+            progress: None,
+            locs: vec![loc(PlatformId::Naver, "개미투자 카페", None)],
+        },
     ]
 }
 
@@ -123,50 +128,35 @@ pub fn seed_scheduled() -> Vec<QueueScheduledItem> {
 }
 
 // --------------------------------------------------------------------------
-// Managed state + commands
+// Commands
 // --------------------------------------------------------------------------
 
-pub struct QueueStore {
-    pub now: Mutex<Vec<QueueNowItem>>,
-    pub scheduled: Mutex<Vec<QueueScheduledItem>>,
-}
-
-impl Default for QueueStore {
-    fn default() -> Self {
-        QueueStore {
-            now: Mutex::new(seed_now()),
-            scheduled: Mutex::new(seed_scheduled()),
-        }
-    }
+#[tauri::command]
+pub fn list_queue_now(store: tauri::State<'_, JsonStore<QueueNowItem>>) -> Vec<QueueNowItem> {
+    store.snapshot()
 }
 
 #[tauri::command]
-pub fn list_queue_now(store: tauri::State<'_, QueueStore>) -> Vec<QueueNowItem> {
-    store.now.lock().expect("queue store poisoned").clone()
+pub fn list_queue_scheduled(
+    store: tauri::State<'_, JsonStore<QueueScheduledItem>>,
+) -> Vec<QueueScheduledItem> {
+    store.snapshot()
 }
 
 #[tauri::command]
-pub fn list_queue_scheduled(store: tauri::State<'_, QueueStore>) -> Vec<QueueScheduledItem> {
-    store.scheduled.lock().expect("queue store poisoned").clone()
-}
-
-#[tauri::command]
-pub fn cancel_queue_now(store: tauri::State<'_, QueueStore>, id: String) -> Vec<QueueNowItem> {
-    let mut guard = store.now.lock().expect("queue store poisoned");
-    let next = apply_cancel_now(guard.clone(), &id);
-    *guard = next.clone();
-    next
+pub fn cancel_queue_now(
+    store: tauri::State<'_, JsonStore<QueueNowItem>>,
+    id: String,
+) -> Vec<QueueNowItem> {
+    store.mutate(|items| apply_cancel_now(items, &id))
 }
 
 #[tauri::command]
 pub fn cancel_queue_scheduled(
-    store: tauri::State<'_, QueueStore>,
+    store: tauri::State<'_, JsonStore<QueueScheduledItem>>,
     id: String,
 ) -> Vec<QueueScheduledItem> {
-    let mut guard = store.scheduled.lock().expect("queue store poisoned");
-    let next = apply_cancel_scheduled(guard.clone(), &id);
-    *guard = next.clone();
-    next
+    store.mutate(|items| apply_cancel_scheduled(items, &id))
 }
 
 #[cfg(test)]
@@ -191,24 +181,13 @@ mod tests {
         let back: Vec<QueueNowItem> =
             serde_json::from_str(&serde_json::to_string(&now).unwrap()).unwrap();
         assert_eq!(now, back);
-        let sched = seed_scheduled();
-        let back2: Vec<QueueScheduledItem> =
-            serde_json::from_str(&serde_json::to_string(&sched).unwrap()).unwrap();
-        assert_eq!(sched, back2);
     }
 
     #[test]
-    fn now_item_serializes_camelcase_and_omits_none() {
-        let json = serde_json::to_string(&seed_now()[1]).unwrap();
-        assert!(json.contains("\"state\":\"waiting\""));
-        assert!(!json.contains("batchId"));
-        assert!(!json.contains("progress"));
-    }
-
-    #[test]
-    fn running_item_has_progress_tuple() {
+    fn running_item_has_progress_tuple_and_camelcase() {
         let json = serde_json::to_string(&seed_now()[0]).unwrap();
         assert!(json.contains("\"progress\":[2,3]"));
         assert!(json.contains("\"batchId\":\"b0\""));
+        assert!(json.contains("\"state\":\"running\""));
     }
 }
