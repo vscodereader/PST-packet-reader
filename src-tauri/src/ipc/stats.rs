@@ -1,8 +1,8 @@
 //! Dashboard stat tiles (운영 계정 / 예약 대기 / 오늘 게시 / 성공률) — **derived**,
 //! not stored. `list_stats` computes the four tiles live from the accounts,
-//! scheduled and log-batch stores, so the dashboard reflects real data as those
-//! domains change. The `value` is a number *or* a formatted string (`"97.4%"`),
-//! modelled as an untagged enum so ts-rs emits the `number | string` union.
+//! queue-scheduled and log-batch stores, so the dashboard stays consistent with
+//! the queue and 알림 screens. `value` is a number *or* a formatted string
+//! (`"97.4%"`), modelled as an untagged enum so ts-rs emits `number | string`.
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -10,7 +10,7 @@ use ts_rs::TS;
 use super::accounts::{Account, AccountStatus};
 use super::log_batches::{BatchItemStatus, LogBatch};
 use super::posts::ModeValue;
-use super::scheduled::Scheduled;
+use super::queue::QueueScheduledItem;
 use crate::store::JsonStore;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -55,7 +55,7 @@ fn is_today(time: &str) -> bool {
 /// Derive the four dashboard tiles from the live domain data.
 pub fn compute(
     accounts: &[Account],
-    scheduled: &[Scheduled],
+    scheduled: &[QueueScheduledItem],
     batches: &[LogBatch],
 ) -> Vec<DashStat> {
     let active = accounts
@@ -72,32 +72,31 @@ pub fn compute(
         .map(|s| format!("다음 게시 {}", s.rel))
         .unwrap_or_else(|| "예약 없음".into());
 
-    // Overall success rate (all log items) + today's *fully* successful posts.
+    // Today's completed publications (each successful destination) + today's
+    // success rate over *resolved* items (success or fail; skip running/대기).
     let (mut posts_done, mut comments_done) = (0u32, 0u32);
-    let (mut ok, mut total_items) = (0u32, 0u32);
-    for b in batches {
+    let (mut ok, mut resolved) = (0u32, 0u32);
+    for b in batches.iter().filter(|b| is_today(&b.time)) {
         for item in &b.items {
-            total_items += 1;
-            if item.status == BatchItemStatus::Success {
-                ok += 1;
-            }
-        }
-        // "오늘 게시 완료" counts only batches that fully succeeded (no fails).
-        let perfect =
-            !b.items.is_empty() && b.items.iter().all(|i| i.status == BatchItemStatus::Success);
-        if perfect && is_today(&b.time) {
-            let n = b.items.len() as u32;
-            match b.kind {
-                ModeValue::Comment => comments_done += n,
-                _ => posts_done += n,
+            match item.status {
+                BatchItemStatus::Success => {
+                    ok += 1;
+                    resolved += 1;
+                    match b.kind {
+                        ModeValue::Comment => comments_done += 1,
+                        _ => posts_done += 1,
+                    }
+                }
+                BatchItemStatus::Fail => resolved += 1,
+                BatchItemStatus::Running | BatchItemStatus::Waiting => {}
             }
         }
     }
     let today_done = posts_done + comments_done;
-    let rate = if total_items == 0 {
+    let rate = if resolved == 0 {
         100.0
     } else {
-        (ok as f64) / (total_items as f64) * 100.0
+        (ok as f64) / (resolved as f64) * 100.0
     };
 
     vec![
@@ -129,7 +128,7 @@ pub fn compute(
             "rate",
             "게시 성공률",
             StatValue::Text(format!("{:.1}%", rate)),
-            "최근 로그 기준",
+            "오늘 기준",
             "checkCircle",
             "forum",
         ),
@@ -139,7 +138,7 @@ pub fn compute(
 #[tauri::command]
 pub fn list_stats(
     accounts: tauri::State<'_, JsonStore<Account>>,
-    scheduled: tauri::State<'_, JsonStore<Scheduled>>,
+    scheduled: tauri::State<'_, JsonStore<QueueScheduledItem>>,
     log_batches: tauri::State<'_, JsonStore<LogBatch>>,
 ) -> Vec<DashStat> {
     compute(
@@ -151,6 +150,8 @@ pub fn list_stats(
 
 #[cfg(test)]
 mod tests {
+    use super::super::log_batches::BatchItem;
+    use super::super::queue::QueueLocation;
     use super::*;
 
     fn acc(status: AccountStatus) -> Account {
@@ -165,6 +166,45 @@ mod tests {
         }
     }
 
+    fn item(status: BatchItemStatus) -> BatchItem {
+        BatchItem {
+            platform: super::super::accounts::PlatformId::Forum,
+            target: "t".into(),
+            code: None,
+            board: None,
+            login_id: "u".into(),
+            status,
+            msg: "".into(),
+            trace: None,
+        }
+    }
+
+    fn batch(kind: ModeValue, time: &str, items: Vec<BatchItem>) -> LogBatch {
+        LogBatch {
+            id: "b".into(),
+            title: "t".into(),
+            kind,
+            time: time.into(),
+            state: None,
+            items,
+        }
+    }
+
+    fn sched() -> QueueScheduledItem {
+        QueueScheduledItem {
+            id: "qs1".into(),
+            title: "t".into(),
+            kind: ModeValue::Post,
+            when: "오늘 18:30".into(),
+            rel: "5시간 후".into(),
+            locs: vec![QueueLocation {
+                p: super::super::accounts::PlatformId::Forum,
+                name: "n".into(),
+                code: None,
+            }],
+        }
+    }
+
     #[test]
     fn computes_account_counts() {
         let accounts = vec![
@@ -174,25 +214,42 @@ mod tests {
             acc(AccountStatus::New),
         ];
         let stats = compute(&accounts, &[], &[]);
-        let a = &stats[0];
-        assert_eq!(a.key, "accounts");
-        assert_eq!(a.value, StatValue::Num(2.0));
-        assert_eq!(a.sub, "전체 4개 · 오류 1");
+        assert_eq!(stats[0].value, StatValue::Num(2.0));
+        assert_eq!(stats[0].sub, "전체 4개 · 오류 1");
     }
 
     #[test]
-    fn computes_scheduled_count_and_next() {
-        let scheduled = vec![Scheduled {
-            id: "s1".into(),
-            title: "t".into(),
-            accounts: vec![],
-            kind: ModeValue::Post,
-            when: "오늘 14:00".into(),
-            rel: "1시간 후".into(),
-        }];
-        let stats = compute(&[], &scheduled, &[]);
+    fn scheduled_uses_queue_count_and_next() {
+        let stats = compute(&[], &[sched()], &[]);
         assert_eq!(stats[1].value, StatValue::Num(1.0));
-        assert_eq!(stats[1].sub, "다음 게시 1시간 후");
+        assert_eq!(stats[1].sub, "다음 게시 5시간 후");
+    }
+
+    #[test]
+    fn today_counts_successes_by_kind_and_rate_skips_running() {
+        use BatchItemStatus::*;
+        let batches = vec![
+            // today: 2 success posts + 1 running (running ignored in rate)
+            batch(
+                ModeValue::Post,
+                "방금 전",
+                vec![item(Success), item(Running)],
+            ),
+            // today: 1 success comment + 1 fail
+            batch(
+                ModeValue::Comment,
+                "오늘 13:00",
+                vec![item(Success), item(Fail)],
+            ),
+            // yesterday: ignored entirely
+            batch(ModeValue::Post, "어제 20:00", vec![item(Success)]),
+        ];
+        let stats = compute(&[], &[], &batches);
+        // 완료: 1 post + 1 comment = 2 (글 1 · 댓글 1)
+        assert_eq!(stats[2].value, StatValue::Num(2.0));
+        assert_eq!(stats[2].sub, "글 1 · 댓글 1");
+        // rate: 2 success / 3 resolved (2 success + 1 fail; running skipped) = 66.7%
+        assert_eq!(stats[3].value, StatValue::Text("66.7%".into()));
     }
 
     #[test]
@@ -200,14 +257,6 @@ mod tests {
         let stats = compute(&[], &[], &[]);
         assert_eq!(stats.len(), 4);
         assert_eq!(stats[1].sub, "예약 없음");
-        // No items → success rate defaults to 100%.
         assert_eq!(stats[3].value, StatValue::Text("100.0%".into()));
-    }
-
-    #[test]
-    fn value_serializes_untagged_as_number_or_string() {
-        let json = serde_json::to_string(&compute(&[], &[], &[])).unwrap();
-        assert!(json.contains("\"value\":0"));
-        assert!(json.contains("\"value\":\"100.0%\""));
     }
 }

@@ -15,10 +15,11 @@ import {
 import { useEffect, useState } from "react";
 
 import type { Account } from "@/shared/bindings/Account";
-import type { ActivityItem } from "@/shared/bindings/ActivityItem";
 import type { DashStat } from "@/shared/bindings/DashStat";
+import type { LogBatch } from "@/shared/bindings/LogBatch";
 import type { QueueScheduledItem } from "@/shared/bindings/QueueScheduledItem";
 import { PLATFORMS } from "@/shared/data/config";
+import { batchStatus } from "@/shared/data/helpers";
 import type { GoFn, PlatformId, ViewId } from "@/shared/data/types";
 import { ipc } from "@/shared/ipc";
 import { Icon } from "@/shared/ui/icons";
@@ -34,15 +35,31 @@ const STAT_TARGET: Record<string, ViewId> = {
 export function Dashboard({ go }: { go: GoFn }) {
   const [stats, setStats] = useState<DashStat[]>([]);
   const [scheduled, setScheduled] = useState<QueueScheduledItem[]>([]);
-  const [activity, setActivity] = useState<ActivityItem[]>([]);
+  const [recent, setRecent] = useState<LogBatch[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
 
   useEffect(() => {
     void ipc.stats.list().then(setStats);
     void ipc.queue.listScheduled().then(setScheduled);
-    void ipc.activity.list().then(setActivity);
+    void ipc.logBatches.list().then(setRecent);
     void ipc.accounts.list().then(setAccounts);
   }, []);
+
+  // 최근 활동 = the 5 most recent 알림(log) entries.
+  const recentActivity = recent.slice(0, 5).map((b) => {
+    const status = batchStatus(b);
+    return {
+      id: b.id,
+      type:
+        status === "success"
+          ? ("success" as const)
+          : status === "running"
+            ? ("info" as const)
+            : ("error" as const),
+      text: b.title,
+      time: b.time,
+    };
+  });
 
   return (
     <Container size={1080} py={32} px={36}>
@@ -170,12 +187,12 @@ export function Dashboard({ go }: { go: GoFn }) {
             </Button>
           </Group>
           <Timeline
-            active={activity.length}
+            active={recentActivity.length}
             bulletSize={24}
             lineWidth={2}
             color="gray"
           >
-            {activity.map((a) => {
+            {recentActivity.map((a) => {
               const color =
                 a.type === "success"
                   ? "green"
