@@ -13,7 +13,7 @@ use crate::store::JsonStore;
 /// Mirrors the TS `PlatformId` literal union. `lowercase` keeps the JSON wire
 /// form identical to the existing frontend values (`"forum"`, `"naver"`, …).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../src/shared/bindings/")]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "lowercase")]
 pub enum PlatformId {
     Forum,
@@ -24,7 +24,7 @@ pub enum PlatformId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../src/shared/bindings/")]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "lowercase")]
 pub enum AccountStatus {
     New,
@@ -34,7 +34,7 @@ pub enum AccountStatus {
 
 /// `camelCase` so field names match the frontend (`loginId`, not `login_id`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../src/shared/bindings/")]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub id: String,

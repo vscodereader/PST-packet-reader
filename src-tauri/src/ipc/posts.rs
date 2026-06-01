@@ -10,7 +10,7 @@ use ts_rs::TS;
 use crate::store::JsonStore;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../src/shared/bindings/")]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "lowercase")]
 pub enum ModeValue {
     Post,
@@ -19,7 +19,7 @@ pub enum ModeValue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../src/shared/bindings/")]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "lowercase")]
 pub enum PostStatus {
     Draft,
@@ -29,7 +29,7 @@ pub enum PostStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../src/shared/bindings/")]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "lowercase")]
 pub enum CommentTarget {
     Latest,
@@ -38,7 +38,7 @@ pub enum CommentTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../src/shared/bindings/")]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryPost {
     pub id: String,

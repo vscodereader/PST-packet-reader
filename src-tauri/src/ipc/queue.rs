@@ -5,12 +5,12 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::accounts::PlatformId;
-use crate::posts::ModeValue;
+use super::accounts::PlatformId;
+use super::posts::ModeValue;
 use crate::store::JsonStore;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../src/shared/bindings/")]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "lowercase")]
 pub enum QueueState {
     Running,
@@ -18,7 +18,7 @@ pub enum QueueState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../src/shared/bindings/")]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "camelCase")]
 pub struct QueueLocation {
     pub p: PlatformId,
@@ -29,7 +29,7 @@ pub struct QueueLocation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../src/shared/bindings/")]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "camelCase")]
 pub struct QueueNowItem {
     pub id: String,
@@ -46,7 +46,7 @@ pub struct QueueNowItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../src/shared/bindings/")]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "camelCase")]
 pub struct QueueScheduledItem {
     pub id: String,

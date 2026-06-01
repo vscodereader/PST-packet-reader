@@ -8,7 +8,7 @@ use ts_rs::TS;
 use crate::store::JsonStore;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../src/shared/bindings/")]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "lowercase")]
 pub enum ActivityType {
     Success,
@@ -17,7 +17,7 @@ pub enum ActivityType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../src/shared/bindings/")]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "camelCase")]
 pub struct ActivityItem {
     pub id: String,

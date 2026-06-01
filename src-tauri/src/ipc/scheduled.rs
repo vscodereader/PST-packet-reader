@@ -6,11 +6,11 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::posts::ModeValue;
+use super::posts::ModeValue;
 use crate::store::JsonStore;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../src/shared/bindings/")]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "camelCase")]
 pub struct Scheduled {
     pub id: String,

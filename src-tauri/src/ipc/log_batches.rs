@@ -6,12 +6,12 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::accounts::PlatformId;
-use crate::posts::ModeValue;
+use super::accounts::PlatformId;
+use super::posts::ModeValue;
 use crate::store::JsonStore;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../src/shared/bindings/")]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "lowercase")]
 pub enum BatchItemStatus {
     Success,
@@ -23,14 +23,14 @@ pub enum BatchItemStatus {
 /// Single-variant enum → ts-rs emits the `"running"` string-literal type the
 /// frontend's optional `state?: "running"` field expects.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../src/shared/bindings/")]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "lowercase")]
 pub enum BatchState {
     Running,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../src/shared/bindings/")]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "camelCase")]
 pub struct BatchItem {
     pub platform: PlatformId,
@@ -50,7 +50,7 @@ pub struct BatchItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../src/shared/bindings/")]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "camelCase")]
 pub struct LogBatch {
     pub id: String,

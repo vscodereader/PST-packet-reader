@@ -1,17 +1,11 @@
-mod accounts;
-mod activity;
-mod bands;
-mod cafes;
-mod log_batches;
-mod posts;
-mod queue;
-mod scheduled;
-mod stats;
-mod stocks;
+mod ipc;
 mod store;
 
 use tauri::Manager;
 
+use crate::ipc::{
+    accounts, activity, bands, cafes, log_batches, posts, queue, scheduled, stats, stocks,
+};
 use crate::store::JsonStore;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/

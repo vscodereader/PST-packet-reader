@@ -9,7 +9,7 @@ use ts_rs::TS;
 use crate::store::JsonStore;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../src/shared/bindings/")]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(untagged)]
 pub enum StatValue {
     Num(f64),
@@ -17,7 +17,7 @@ pub enum StatValue {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../src/shared/bindings/")]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "camelCase")]
 pub struct DashStat {
     pub key: String,
