@@ -51,6 +51,9 @@ describe("ipc facade", () => {
     expect(mockInvoke).toHaveBeenCalledWith("promote_queue_scheduled", {
       id: "qs1",
     });
+    const item = { id: "qs9" } as never;
+    await ipc.queue.addScheduled(item);
+    expect(mockInvoke).toHaveBeenCalledWith("add_queue_scheduled", { item });
   });
 
   it("read-only channels each invoke their list command", async () => {

@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
 
 import type { LibraryPost } from "@/shared/data/types";
+import { invoke as ipcBackend } from "@/test/ipc";
 import { pickOption } from "@/test/select";
 
 import { PublishModal } from "./publish-modal";
@@ -152,6 +153,18 @@ describe("PublishModal", () => {
     expect(
       await screen.findByRole("button", { name: /5월 29일.*18:00/ }),
     ).toBeInTheDocument();
+  });
+
+  it("adds the post to the scheduled queue when 예약 is confirmed", async () => {
+    renderPublish();
+    await userEvent.click(await screen.findByText("예약 게시"));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^예약 \(\d+\)/ }),
+    );
+    const scheduled = (await ipcBackend("list_queue_scheduled")) as {
+      title: string;
+    }[];
+    expect(scheduled.some((q) => q.title === postDoc.title)).toBe(true);
   });
 
   it("changes the cafe, board, and band destinations", async () => {

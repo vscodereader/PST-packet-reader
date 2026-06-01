@@ -32,6 +32,8 @@ import type {
   PlatformId,
   PublishJob,
   PublishResult,
+  QueueLocation,
+  QueueScheduledItem,
   Stock,
 } from "@/shared/data/types";
 import { ipc } from "@/shared/ipc";
@@ -402,6 +404,32 @@ function PublishFlow({
   );
 }
 
+/** Fresh id for a newly scheduled queue item (kept out of render per purity). */
+function newScheduledId(): string {
+  return "qs" + Date.now();
+}
+
+/** Turn the picked date/time into the queue's `{ when, rel }` display strings. */
+function scheduleMoment(
+  date: string,
+  time: string,
+): { label: string; when: string } {
+  const [y, m, d] = date.split("-").map(Number);
+  const target = new Date(y ?? 1970, (m ?? 1) - 1, d ?? 1);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const diff = Math.round((target.getTime() - today.getTime()) / 86400000);
+  const label =
+    diff <= 0
+      ? "오늘"
+      : diff === 1
+        ? "내일"
+        : diff === 2
+          ? "모레"
+          : `${m}/${d}`;
+  return { label, when: `${label} ${time}` };
+}
+
 function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [stocks, setStocks] = useState<Stock[]>([]);
@@ -511,6 +539,31 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const canPublish = selected.length > 0 && targetsOk && jobs.length > 0;
 
   const doPublish = () => {
+    if (when === "schedule") {
+      // Add the post to the scheduled queue so it shows up under 예약 대기.
+      const seen = new Set<string>();
+      const locs: QueueLocation[] = [];
+      jobs.forEach((j) => {
+        const key = `${j.platform}|${j.targetName}|${j.code ?? ""}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        locs.push({
+          p: j.platform,
+          name: j.targetName,
+          ...(j.code ? { code: j.code } : {}),
+        });
+      });
+      const moment = scheduleMoment(date, time);
+      const item: QueueScheduledItem = {
+        id: newScheduledId(),
+        title: doc.title,
+        kind: doc.kind,
+        when: moment.when,
+        rel: moment.label,
+        locs,
+      };
+      void ipc.queue.addScheduled(item);
+    }
     setFlow("running");
     const action =
       mode === "comment" ? "댓글" : mode === "both" ? "글+댓글" : "글";

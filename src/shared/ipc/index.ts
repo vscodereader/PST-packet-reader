@@ -56,6 +56,9 @@ export const ipc = {
     cancelNow: (id: string) => call<QueueNowItem[]>("cancel_queue_now", { id }),
     cancelScheduled: (id: string) =>
       call<QueueScheduledItem[]>("cancel_queue_scheduled", { id }),
+    /** Append a scheduled item (when a post is scheduled); returns the list. */
+    addScheduled: (item: QueueScheduledItem) =>
+      call<QueueScheduledItem[]>("add_queue_scheduled", { item }),
     /** Move a scheduled item into the immediate queue; returns the new now-list. */
     promote: (id: string) =>
       call<QueueNowItem[]>("promote_queue_scheduled", { id }),

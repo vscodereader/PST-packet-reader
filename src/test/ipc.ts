@@ -892,6 +892,12 @@ export const invoke = vi.fn(
           (q) => q.id !== (args!.id as string),
         );
         return clone(state.queueScheduled);
+      case "add_queue_scheduled":
+        state.queueScheduled = [
+          ...state.queueScheduled,
+          args!.item as QueueScheduledItem,
+        ];
+        return clone(state.queueScheduled);
       case "promote_queue_scheduled": {
         const id = args!.id as string;
         const item = state.queueScheduled.find((q) => q.id === id);

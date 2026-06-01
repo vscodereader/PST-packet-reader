@@ -169,6 +169,19 @@ pub fn cancel_queue_scheduled(
     store.mutate(|items| apply_cancel_scheduled(items, &id))
 }
 
+/// Append a new scheduled item (used when a post is scheduled from the publish
+/// modal), returning the updated scheduled list.
+#[tauri::command]
+pub fn add_queue_scheduled(
+    store: tauri::State<'_, JsonStore<QueueScheduledItem>>,
+    item: QueueScheduledItem,
+) -> Vec<QueueScheduledItem> {
+    store.mutate(|mut items| {
+        items.push(item);
+        items
+    })
+}
+
 /// Move a scheduled item into the immediate queue ("즉시 처리"): drop it from the
 /// scheduled store, append it to the now store, and return the updated now list.
 #[tauri::command]
