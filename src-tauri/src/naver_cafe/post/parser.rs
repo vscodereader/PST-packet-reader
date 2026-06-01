@@ -224,9 +224,9 @@ mod tests {
     // article_register_success.json — 패킷 캡처로 확인된 실제 형태
     const ARTICLE_REGISTER_SUCCESS: &str =
         include_str!("fixtures/article_register_success.json");
-    // article_register_failure_403.assumed.json — 미확인 스키마 기준 픽스처
-    const ARTICLE_REGISTER_FAILURE_403: &str =
-        include_str!("fixtures/article_register_failure_403.assumed.json");
+    // article_register_failure.json — 실측 캡처된 실제 실패 형태 (HTTP 500)
+    const ARTICLE_REGISTER_FAILURE: &str =
+        include_str!("fixtures/article_register_failure.json");
 
     // ------------------------------------------------------------------
     // parse_write_info — 성공 케이스 (미확인 스키마 기준 테스트)
@@ -341,30 +341,28 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // parse_article_register — 403 실패 케이스 (미확인 스키마 기준 테스트)
+    // parse_article_register — 실패 케이스 (실측 캡처 기준)
     //
-    // ⚠️ 미확인: 실제 실패 응답 봉투 형태가 패킷 캡처에 없다.
-    // article_register_failure_403.assumed.json 픽스처는 message/status 봉투를
-    // 가정하지만, parse_article_register는 확인된 ResultEnvelope만 파싱하므로
-    // 현재 이 픽스처는 PARSE_ERROR(Err)를 반환한다.
-    // 실제 실패 응답을 캡처한 뒤 파서 및 픽스처를 재구현할 것.
+    // 실측 캡처된 실패 응답은 {"error":{"errorCode","message","more":{"requestId"}}}
+    // 형태이며, ResultEnvelope의 `result` 키가 없으므로 parse_article_register는
+    // PARSE_ERROR(Err)를 반환한다. 실패 응답 처리(스키마 파싱)는 client.rs에서 수행.
     // ------------------------------------------------------------------
 
     #[test]
-    fn article_register_failure_403_returns_err() {
-        // 미확인 스키마 기준 테스트 — 실패 봉투 형태 미확인이므로 PARSE_ERROR 반환
-        let result = parse_article_register(ARTICLE_REGISTER_FAILURE_403);
-        assert!(result.is_err(), "미확인 실패 봉투 형태는 Err를 반환해야 함");
+    fn article_register_failure_returns_err() {
+        // 실측 캡처된 실패 봉투는 ResultEnvelope와 맞지 않으므로 PARSE_ERROR 반환
+        let result = parse_article_register(ARTICLE_REGISTER_FAILURE);
+        assert!(result.is_err(), "실패 봉투 형태는 Err를 반환해야 함");
     }
 
     #[test]
-    fn article_register_failure_403_parse_error_code() {
-        // 미확인 스키마 기준 테스트 — 실패 봉투 미확인이므로 PARSE_ERROR 발생
-        let err = parse_article_register(ARTICLE_REGISTER_FAILURE_403)
+    fn article_register_failure_parse_error_code() {
+        // 실측 캡처된 실패 봉투는 ResultEnvelope와 맞지 않으므로 PARSE_ERROR 발생
+        let err = parse_article_register(ARTICLE_REGISTER_FAILURE)
             .expect_err("Err를 기대함");
         assert_eq!(
             err.code, "PARSE_ERROR",
-            "실패 봉투 형태 미확인 → PARSE_ERROR 예상"
+            "실패 봉투 형태(error 키) → PARSE_ERROR 예상"
         );
     }
 

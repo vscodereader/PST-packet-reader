@@ -1,9 +1,0 @@
-{
-  "message": {
-    "status": "403",
-    "result": {
-      "errorCode": "NO_PERMISSION",
-      "errorMessage": "글쓰기 권한이 없습니다."
-    }
-  }
-}
