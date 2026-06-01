@@ -16,8 +16,9 @@ pub use request_builder::{
     build_article_write_body_with_content, ArticleWrite, ArticleWriteBody, API_HOST,
 };
 pub use client::{
-    cookie_header_from_storage_state, CafeHttpClient, CODE_HTTP_TRANSPORT_ERROR,
-    CODE_REGISTER_HTTP_ERROR, CODE_REGISTER_PARSE_ERROR, CODE_SESSION_INVALID,
+    cookie_header_from_storage_state, CafeHttpClient, BROWSER_USER_AGENT,
+    CODE_HTTP_TRANSPORT_ERROR, CODE_REGISTER_HTTP_ERROR, CODE_REGISTER_PARSE_ERROR,
+    CODE_SESSION_INVALID,
 };
 pub use service::{
     build_post_preview, execute_post, execute_post_live, PostExecutionMode, PostOutcome,

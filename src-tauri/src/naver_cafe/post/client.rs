@@ -18,6 +18,14 @@ use crate::naver_cafe::{
 };
 
 // ---------------------------------------------------------------------------
+// 브라우저 위장 User-Agent
+// ---------------------------------------------------------------------------
+
+/// 실제 브라우저처럼 보이게 하기 위한 User-Agent (진단/요청용).
+pub const BROWSER_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+// ---------------------------------------------------------------------------
 // 오류 코드 상수
 // ---------------------------------------------------------------------------
 
@@ -243,6 +251,9 @@ impl CafeHttpClient {
             req = req.header(&name, &value);
         }
 
+        // User-Agent 헤더 설정 — reqwest 기본값 대신 브라우저 UA를 사용한다
+        req = req.header("User-Agent", BROWSER_USER_AGENT);
+
         // Cookie 헤더 설정 — 값은 절대 로그에 기록하지 않는다
         if let Some(cookie) = cookie_header {
             req = req.header("Cookie", cookie);
@@ -419,11 +430,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_article_referer_contains_menus_0() {
+    async fn post_article_sends_browser_user_agent() {
+        let server = MockServer::start().await;
+
+        // User-Agent 헤더에 Chrome/ 문자열이 포함되어야 함을 검증
+        Mock::given(method("POST"))
+            .and(path(expected_path()))
+            .and(header_exists("User-Agent"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": { "cafeId": 31732304_u64, "articleId": 1_u64, "menuId": 1_u64 }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = CafeHttpClient::with_base_url(server.uri());
+        client
+            .post_article(cafe_id(), menu_id(), &dummy_body(), None)
+            .await
+            .expect("성공 응답이어야 함");
+
+        // User-Agent 상수가 Chrome/ 을 포함하는지 검증
+        assert!(
+            BROWSER_USER_AGENT.contains("Chrome/"),
+            "BROWSER_USER_AGENT 는 Chrome/ 을 포함해야 함: {}",
+            BROWSER_USER_AGENT
+        );
+    }
+
+    #[tokio::test]
+    async fn post_article_referer_uses_write_url_with_board_type_l() {
         let server = MockServer::start().await;
 
         let expected_referer = format!(
-            "https://cafe.naver.com/ca-fe/cafes/{}/menus/0/articles/write",
+            "https://cafe.naver.com/ca-fe/cafes/{}/articles/write?boardType=L",
             cafe_id()
         );
 

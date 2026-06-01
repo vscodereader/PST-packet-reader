@@ -23,6 +23,12 @@ pub const API_HOST: &str = "apis.cafe.naver.com";
 /// Origin 헤더 값 — 패킷 캡처에서 확인된 값.
 const ORIGIN: &str = "https://cafe.naver.com";
 
+/// `x-cafe-product` 헤더 값.
+///
+/// `apis.cafe.naver.com/editor/*` 에디터 서비스가 이 헤더를 요구하며,
+/// 없으면 errorCode 10404(Page Not Found) 또는 11001을 반환한다.
+pub const CAFE_PRODUCT_PC: &str = "pc";
+
 // ---------------------------------------------------------------------------
 // 요청 바디 모델
 // ---------------------------------------------------------------------------
@@ -147,20 +153,42 @@ pub fn article_post_path(cafe_id: &str, menu_id: u64) -> String {
 ///
 /// 포함 헤더:
 /// - `Content-Type: application/json`
+/// - `Accept: application/json, text/plain, */*`
 /// - `Origin: https://cafe.naver.com`
-/// - `Referer: https://cafe.naver.com/ca-fe/cafes/{cafeId}/menus/0/articles/write`
+/// - `Referer: https://cafe.naver.com/ca-fe/cafes/{cafeId}/articles/write?boardType=L`
+///   - boardType은 게시판 유형(L=리스트형)으로 현재 L 고정, 추후 게시판별로 달라질 수 있음.
+/// - `x-cafe-product: pc`  ← 에디터 서비스 필수 헤더 ([`CAFE_PRODUCT_PC`] 참조)
+/// - `sec-fetch-site: same-site`
+/// - `sec-fetch-mode: cors`
+/// - `sec-fetch-dest: empty`
+/// - `accept-language: ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7`
 ///
-/// ⚠️ Referer의 `menus/0`은 패킷 캡처에서 확인된 그대로다.
-/// 실제 대상 menuId가 아닌 리터럴 `0`을 사용한다.
+/// ℹ️ `accept-encoding`, `content-length`, 가상 헤더(`:method` 등), `User-Agent`는
+/// 포함하지 않는다 — reqwest 또는 상위 레이어가 처리한다.
 pub fn article_post_headers(cafe_id: &str) -> Vec<(String, String)> {
     vec![
         ("Content-Type".to_string(), "application/json".to_string()),
+        (
+            "Accept".to_string(),
+            "application/json, text/plain, */*".to_string(),
+        ),
         ("Origin".to_string(), ORIGIN.to_string()),
         (
             "Referer".to_string(),
             format!(
-                "https://cafe.naver.com/ca-fe/cafes/{cafe_id}/menus/0/articles/write"
+                "https://cafe.naver.com/ca-fe/cafes/{cafe_id}/articles/write?boardType=L"
             ),
+        ),
+        (
+            "x-cafe-product".to_string(),
+            CAFE_PRODUCT_PC.to_string(),
+        ),
+        ("sec-fetch-site".to_string(), "same-site".to_string()),
+        ("sec-fetch-mode".to_string(), "cors".to_string()),
+        ("sec-fetch-dest".to_string(), "empty".to_string()),
+        (
+            "accept-language".to_string(),
+            "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7".to_string(),
         ),
     ]
 }
@@ -335,7 +363,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn headers_referer_uses_literal_menus_0() {
+    fn headers_referer_uses_write_url_with_board_type_l() {
         let headers = article_post_headers("31732304");
         let referer = headers
             .iter()
@@ -344,8 +372,8 @@ mod tests {
             .expect("Referer 헤더가 없음");
         assert_eq!(
             referer,
-            "https://cafe.naver.com/ca-fe/cafes/31732304/menus/0/articles/write",
-            "Referer는 menus/0(리터럴)을 사용해야 함"
+            "https://cafe.naver.com/ca-fe/cafes/31732304/articles/write?boardType=L",
+            "Referer는 브라우저 캡처 값(boardType=L)을 사용해야 함"
         );
     }
 
@@ -369,6 +397,65 @@ mod tests {
             .map(|(_, val)| val.as_str())
             .expect("Content-Type 헤더가 없음");
         assert_eq!(ct, "application/json");
+    }
+
+    #[test]
+    fn headers_x_cafe_product_is_pc() {
+        let headers = article_post_headers("31732304");
+        let val = headers
+            .iter()
+            .find(|(name, _)| name == "x-cafe-product")
+            .map(|(_, val)| val.as_str())
+            .expect("x-cafe-product 헤더가 없음");
+        assert_eq!(val, "pc", "x-cafe-product 값은 pc여야 함");
+    }
+
+    #[test]
+    fn headers_accept_is_json() {
+        let headers = article_post_headers("31732304");
+        let val = headers
+            .iter()
+            .find(|(name, _)| name == "Accept")
+            .map(|(_, val)| val.as_str())
+            .expect("Accept 헤더가 없음");
+        assert_eq!(val, "application/json, text/plain, */*");
+    }
+
+    #[test]
+    fn headers_sec_fetch_headers_present() {
+        let headers = article_post_headers("31732304");
+        let find = |key: &str| {
+            headers
+                .iter()
+                .find(|(name, _)| name.as_str() == key)
+                .map(|(_, val)| val.clone())
+        };
+        assert_eq!(
+            find("sec-fetch-site").as_deref(),
+            Some("same-site"),
+            "sec-fetch-site 헤더 누락 또는 잘못된 값"
+        );
+        assert_eq!(
+            find("sec-fetch-mode").as_deref(),
+            Some("cors"),
+            "sec-fetch-mode 헤더 누락 또는 잘못된 값"
+        );
+        assert_eq!(
+            find("sec-fetch-dest").as_deref(),
+            Some("empty"),
+            "sec-fetch-dest 헤더 누락 또는 잘못된 값"
+        );
+    }
+
+    #[test]
+    fn headers_accept_language_is_set() {
+        let headers = article_post_headers("31732304");
+        let val = headers
+            .iter()
+            .find(|(name, _)| name == "accept-language")
+            .map(|(_, val)| val.as_str())
+            .expect("accept-language 헤더가 없음");
+        assert_eq!(val, "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7");
     }
 
     // ------------------------------------------------------------------

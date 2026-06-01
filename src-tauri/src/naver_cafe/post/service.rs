@@ -474,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_referer_header_contains_menus_0() {
+    fn preview_referer_header_uses_write_url_with_board_type_l() {
         let req = base_request();
         let mut ids = SequentialIdProvider::new();
         let preview = build_post_preview(&req, &mut ids).expect("미리보기 생성 실패");
@@ -487,8 +487,8 @@ mod tests {
             .expect("Referer 헤더가 없음");
 
         assert!(
-            referer.contains("menus/0"),
-            "Referer는 리터럴 menus/0을 포함해야 함: {}",
+            referer.contains("articles/write?boardType=L"),
+            "Referer는 articles/write?boardType=L을 포함해야 함: {}",
             referer
         );
     }
