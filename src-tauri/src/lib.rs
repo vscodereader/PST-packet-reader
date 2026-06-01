@@ -54,11 +54,15 @@ fn open_incognito_chrome() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn run_naver_discussion_batch(
+async fn run_naver_discussion_batch(
     app: tauri::AppHandle,
     request: DiscussionBatchRequest,
 ) -> Result<DiscussionBatchReport, String> {
-    run_discussion_batch(request, app)
+    // 동기 블로킹 작업을 스레드 풀에서 실행해 GTK 메인 루프를 막지 않습니다.
+    // 메인 루프가 자유로워야 Rust에서 emit한 이벤트가 프론트엔드에 전달됩니다.
+    tauri::async_runtime::spawn_blocking(move || run_discussion_batch(request, app))
+        .await
+        .map_err(|error| format!("배치 실행 스레드 오류: {error}"))?
 }
 
 #[cfg(target_os = "windows")]
