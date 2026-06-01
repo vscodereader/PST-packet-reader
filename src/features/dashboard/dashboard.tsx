@@ -12,16 +12,16 @@ import {
   Timeline,
   Title,
 } from "@mantine/core";
+import { useEffect, useState } from "react";
 
-import {
-  ACCOUNTS,
-  ACTIVITY,
-  acctPlatforms,
-  PLATFORMS,
-  SCHEDULED,
-  STATS,
-} from "@/shared/data/mock";
+import type { ActivityItem } from "@/shared/bindings/ActivityItem";
+import type { DashStat } from "@/shared/bindings/DashStat";
+import type { Scheduled } from "@/shared/bindings/Scheduled";
+import { ACCOUNTS, acctPlatforms, PLATFORMS } from "@/shared/data/mock";
 import type { GoFn, ViewId } from "@/shared/data/types";
+import { listActivity } from "@/shared/ipc/activity";
+import { listScheduled } from "@/shared/ipc/scheduled";
+import { listStats } from "@/shared/ipc/stats";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo, PlatformPill } from "@/shared/ui/platform-logo";
 
@@ -33,6 +33,16 @@ const STAT_TARGET: Record<string, ViewId> = {
 };
 
 export function Dashboard({ go }: { go: GoFn }) {
+  const [stats, setStats] = useState<DashStat[]>([]);
+  const [scheduled, setScheduled] = useState<Scheduled[]>([]);
+  const [activity, setActivity] = useState<ActivityItem[]>([]);
+
+  useEffect(() => {
+    void listStats().then(setStats);
+    void listScheduled().then(setScheduled);
+    void listActivity().then(setActivity);
+  }, []);
+
   return (
     <Container size={1080} py={32} px={36}>
       <Group justify="space-between" align="flex-end" mb={28} wrap="wrap">
@@ -55,7 +65,7 @@ export function Dashboard({ go }: { go: GoFn }) {
       </Group>
 
       <SimpleGrid cols={{ base: 2, md: 4 }} spacing="md" mb={30}>
-        {STATS.map((s) => {
+        {stats.map((s) => {
           const I = Icon[s.icon as keyof typeof Icon];
           return (
             <Card
@@ -104,7 +114,7 @@ export function Dashboard({ go }: { go: GoFn }) {
               큐 전체
             </Button>
           </Group>
-          {SCHEDULED.slice(0, 4).map((s) => {
+          {scheduled.slice(0, 4).map((s) => {
             const plats = acctPlatforms(s.accounts);
             return (
               <Group
@@ -149,12 +159,12 @@ export function Dashboard({ go }: { go: GoFn }) {
             최근 활동
           </Title>
           <Timeline
-            active={ACTIVITY.length}
+            active={activity.length}
             bulletSize={24}
             lineWidth={2}
             color="gray"
           >
-            {ACTIVITY.map((a) => {
+            {activity.map((a) => {
               const color =
                 a.type === "success"
                   ? "green"

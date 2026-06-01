@@ -1,6 +1,11 @@
 mod accounts;
+mod activity;
+mod log_batches;
 mod posts;
 mod queue;
+mod scheduled;
+mod stats;
+mod stocks;
 mod store;
 
 use tauri::Manager;
@@ -36,6 +41,26 @@ pub fn run() {
                 dir.join("queue-scheduled.json"),
                 queue::seed_scheduled(),
             ));
+            app.manage(JsonStore::load_or_seed(
+                dir.join("stocks.json"),
+                stocks::seed(),
+            ));
+            app.manage(JsonStore::load_or_seed(
+                dir.join("activity.json"),
+                activity::seed(),
+            ));
+            app.manage(JsonStore::load_or_seed(
+                dir.join("stats.json"),
+                stats::seed(),
+            ));
+            app.manage(JsonStore::load_or_seed(
+                dir.join("scheduled.json"),
+                scheduled::seed(),
+            ));
+            app.manage(JsonStore::load_or_seed(
+                dir.join("log-batches.json"),
+                log_batches::seed(),
+            ));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -51,6 +76,11 @@ pub fn run() {
             queue::list_queue_scheduled,
             queue::cancel_queue_now,
             queue::cancel_queue_scheduled,
+            stocks::list_stocks,
+            activity::list_activity,
+            stats::list_stats,
+            scheduled::list_scheduled,
+            log_batches::list_log_batches,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
