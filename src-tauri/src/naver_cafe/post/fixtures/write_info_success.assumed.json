@@ -1,0 +1,23 @@
+{
+  "message": {
+    "status": "200",
+    "result": {
+      "cafeId": 12345678,
+      "menuId": 10,
+      "menuName": "자유게시판",
+      "menuType": "B",
+      "writePermission": true,
+      "articleWriteForm": {
+        "subjectRequired": true,
+        "subjectMaxLength": 100,
+        "contentMaxLength": 50000,
+        "tagInputEnabled": true,
+        "tagMaxCount": 10
+      },
+      "headList": [
+        { "headId": 1, "headName": "공지", "useYn": true },
+        { "headId": 2, "headName": "질문", "useYn": true }
+      ]
+    }
+  }
+}
