@@ -230,9 +230,32 @@ body {
   align-items: end;
 }
 
+.macro-editor-login {
+  max-width: 1280px;
+  margin: 0 auto 16px;
+  padding: 16px;
+  border: 1px solid #d7dee8;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 10px 28px rgb(15 23 42 / 8%);
+}
+
+.macro-editor-login-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr) 120px;
+  gap: 12px;
+  align-items: end;
+}
+
 .macro-editor-account-row {
   display: grid;
   gap: 4px;
+}
+
+@media (width <= 860px) {
+  .macro-editor-login-row {
+    grid-template-columns: 1fr;
+  }
 }
 
 .macro-editor-timer {

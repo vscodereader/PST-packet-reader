@@ -252,7 +252,14 @@ function ModeSelector({
 }
 
 // CSV 가져오기, 종목 선택, batch 저장/실행을 담당하는 화면 컴포넌트입니다.
-export function StockBatchPanel() {
+// accountId는 로그인 패널과 공유하기 위해 상위(MacroEditorPage)에서 내려받습니다.
+export function StockBatchPanel({
+  accountId = "",
+  onAccountIdChange,
+}: {
+  accountId?: string;
+  onAccountIdChange?: (value: string) => void;
+} = {}) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const defaultEndpoint = useMemo(defaultDevtoolsEndpoint, []);
   const [stockQuery, setStockQuery] = useState("");
@@ -277,7 +284,6 @@ export function StockBatchPanel() {
   const [runPost, setRunPost] = useState(false);
   const [runComment, setRunComment] = useState(false);
   const [count, setCount] = useState<3 | 5>(3);
-  const [accountId, setAccountId] = useState("");
   const [savedConfig, setSavedConfig] = useState<SavedBatchConfig | null>(null);
   const [chromeOpening, setChromeOpening] = useState(false);
   const [running, setRunning] = useState(false);
@@ -611,7 +617,7 @@ export function StockBatchPanel() {
             label="로그인 계정 ID (선택)"
             placeholder="비우면 Chrome에 직접 로그인한 세션을 사용합니다"
             value={accountId}
-            onChange={(event) => setAccountId(event.currentTarget.value)}
+            onChange={(event) => onAccountIdChange?.(event.currentTarget.value)}
           />
           <Text size="xs" c="dimmed" className="macro-editor-field-guide">
             로그인 자동화로 저장한 계정 ID를 입력하면, 그 계정의 쿠키를 Chrome에
