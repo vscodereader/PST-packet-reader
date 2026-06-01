@@ -35,6 +35,7 @@ import type {
   Stock,
 } from "@/shared/data/types";
 import { ipc } from "@/shared/ipc";
+import { DateTimePicker } from "@/shared/ui/date-time-picker";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo, PlatformPill } from "@/shared/ui/platform-logo";
 
@@ -815,19 +816,16 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
           })}
         </Stack>
         {when === "schedule" && (
-          <Group gap={8} mt={10} grow>
-            <TextInput
-              type="date"
-              value={date}
-              onChange={(e) => setDate(e.currentTarget.value)}
+          <Box mt={10}>
+            <DateTimePicker
+              date={date}
+              time={time}
+              onChange={(v) => {
+                setDate(v.date);
+                setTime(v.time);
+              }}
             />
-            <TextInput
-              type="time"
-              value={time}
-              onChange={(e) => setTime(e.currentTarget.value)}
-              style={{ maxWidth: 120 }}
-            />
-          </Group>
+          </Box>
         )}
       </Box>
 

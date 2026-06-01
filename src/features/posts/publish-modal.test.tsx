@@ -1,5 +1,5 @@
 import { MantineProvider } from "@mantine/core";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
 
@@ -144,14 +144,14 @@ describe("PublishModal", () => {
     expect(screen.queryByText("삼성전자")).not.toBeInTheDocument();
   });
 
-  it("accepts a schedule date once 예약 게시 is chosen", async () => {
+  it("shows the custom date/time picker once 예약 게시 is chosen", async () => {
     renderPublish();
     await userEvent.click(await screen.findByText("예약 게시"));
-    const date = document.querySelector(
-      'input[type="date"]',
-    ) as HTMLInputElement;
-    fireEvent.change(date, { target: { value: "2026-06-01" } });
-    expect(date.value).toBe("2026-06-01");
+    // Native date/time inputs are replaced by the DateTimePicker trigger, which
+    // renders the scheduled moment as a friendly label.
+    expect(
+      await screen.findByRole("button", { name: /5월 29일.*18:00/ }),
+    ).toBeInTheDocument();
   });
 
   it("changes the cafe, board, and band destinations", async () => {
