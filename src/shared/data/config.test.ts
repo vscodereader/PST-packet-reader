@@ -25,9 +25,9 @@ describe("platform config", () => {
     expect(PLATFORM.naver?.color).toBe("naver");
   });
 
-  it("ACTIVE_PLATFORMS excludes 'soon' platforms", () => {
+  it("ACTIVE_PLATFORMS is exactly the non-'soon' platforms", () => {
     expect(ACTIVE_PLATFORMS.every((p) => !p.soon)).toBe(true);
-    expect(ACTIVE_PLATFORMS.map((p) => p.id)).toEqual(["forum", "naver"]);
+    expect(ACTIVE_PLATFORMS).toEqual(PLATFORMS.filter((p) => !p.soon));
   });
 });
 

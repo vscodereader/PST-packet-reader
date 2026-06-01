@@ -30,14 +30,6 @@ interface NavEntry {
   badge?: number;
 }
 
-const TITLES: Record<ViewId, string> = {
-  dashboard: "대시보드",
-  posts: "글 관리",
-  queue: "게시 큐",
-  log: "알림",
-  accounts: "계정 관리",
-};
-
 function NavButton({
   entry,
   active,
@@ -169,9 +161,6 @@ export function MacroApp() {
             size="sm"
             aria-label="사이드바 접기"
           />
-          <Text fw={700} size="md">
-            {TITLES[view]}
-          </Text>
           <Box style={{ flex: 1 }} />
           <Indicator color="red" size={8} offset={4}>
             <ThemeIcon

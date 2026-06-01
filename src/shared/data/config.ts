@@ -30,7 +30,7 @@ export const PLATFORMS: Platform[] = [
     name: "밴드",
     short: "밴드",
     color: "band",
-    soon: true,
+    soon: false,
     targetLabel: "밴드",
   },
   {
