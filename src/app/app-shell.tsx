@@ -2,12 +2,14 @@ import {
   AppShell,
   Badge,
   Box,
+  Burger,
   Group,
   Indicator,
   Text,
   ThemeIcon,
   UnstyledButton,
 } from "@mantine/core";
+import { useDisclosure } from "@mantine/hooks";
 import { useEffect, useState } from "react";
 
 import { Accounts } from "@/features/accounts/accounts";
@@ -91,6 +93,12 @@ export function MacroApp() {
   const [logFilter, setLogFilter] = useState<LogFilter | null>(null);
   const [logNonce, setLogNonce] = useState(0);
 
+  // Sidebar collapse: independent state for the mobile overlay and the desktop
+  // fold, per Mantine's responsive AppShell pattern.
+  const [mobileOpened, { toggle: toggleMobile, close: closeMobile }] =
+    useDisclosure(false);
+  const [desktopOpened, { toggle: toggleDesktop }] = useDisclosure(true);
+
   // Nav badge counts, loaded once over IPC.
   const [counts, setCounts] = useState({ posts: 0, queue: 0, accounts: 0 });
   useEffect(() => {
@@ -138,11 +146,29 @@ export function MacroApp() {
   return (
     <AppShell
       header={{ height: 62 }}
-      navbar={{ width: 248, breakpoint: "xs" }}
+      navbar={{
+        width: 248,
+        breakpoint: "sm",
+        collapsed: { mobile: !mobileOpened, desktop: !desktopOpened },
+      }}
       padding={0}
     >
       <AppShell.Header>
         <Group h="100%" px="md" gap="sm">
+          <Burger
+            opened={mobileOpened}
+            onClick={toggleMobile}
+            hiddenFrom="sm"
+            size="sm"
+            aria-label="메뉴 열기"
+          />
+          <Burger
+            opened={desktopOpened}
+            onClick={toggleDesktop}
+            visibleFrom="sm"
+            size="sm"
+            aria-label="사이드바 접기"
+          />
           <Text fw={700} size="md">
             {TITLES[view]}
           </Text>
@@ -190,7 +216,10 @@ export function MacroApp() {
               key={n.id}
               entry={n}
               active={view === n.id}
-              onClick={() => go(n.id)}
+              onClick={() => {
+                go(n.id);
+                closeMobile();
+              }}
             />
           ))}
         </Box>

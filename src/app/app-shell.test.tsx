@@ -85,4 +85,18 @@ describe("MacroApp", () => {
       screen.getByPlaceholderText("내용·종목·계정 검색"),
     ).toBeInTheDocument();
   });
+
+  it("toggles the desktop sidebar via the burger (collapse + expand)", async () => {
+    renderApp();
+    const burger = screen.getByLabelText("사이드바 접기");
+    await userEvent.click(burger); // collapse
+    await userEvent.click(burger); // expand
+    // Nav stays mounted and the burger remains usable after toggling.
+    expect(navButton("대시보드")).toBeInTheDocument();
+  });
+
+  it("exposes a mobile menu burger", () => {
+    renderApp();
+    expect(screen.getByLabelText("메뉴 열기")).toBeInTheDocument();
+  });
 });
