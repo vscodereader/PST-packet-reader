@@ -88,11 +88,11 @@ pub struct ArticleRegisterResult {
     pub menu_id: u64,
 }
 
-/// ⚠️ 미확인 스키마: 패킷 캡처에 실패 응답이 포착되지 않았다.
-/// `errorCode` + `errorMessage` 구조는 추정이며, 실제 실패 응답으로
-/// 반드시 검증 후 확정할 것.
+/// 글쓰기 화면(write-info) 실패 분기에서 사용하는 `result` 본문(추정).
 ///
-/// API 실패 응답의 `result` 본문 — 상태가 "200"이 아닐 때 사용.
+/// ⚠️ 미확인 스키마: write-info 응답 자체가 미확인이라 이 형태도 추정이다.
+/// 실측 확인된 카페 API 공통 실패 봉투는 `{"error":{...}}`(`NaverApiErrorBody`)이며
+/// client.rs에서 처리한다.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiFailure {
@@ -116,25 +116,19 @@ fn parse_status_code(status: &str) -> Option<u16> {
 ///
 /// - 5xx → `true` (서버 일시 오류, 재시도 권장)
 /// - 4xx 및 나머지 → `false` (클라이언트 오류, 재시도 무의미)
-///
-/// ⚠️ 미확인 스키마: `status` 필드 기반 재시도 판단 로직은 실패 응답
-/// 봉투가 미확인이므로 함께 검증이 필요하다.
 fn is_retryable(status: &str) -> bool {
     parse_status_code(status).map_or(false, |code| code >= 500)
 }
 
-/// ⚠️ 미확인 스키마: 실패 응답 봉투(`message`/`status`)가 패킷 캡처에 없으므로
-/// `ApiFailure` → `PostError` 변환 로직 전체가 추정이다.
-/// 실제 실패 응답을 캡처한 뒤 반드시 검증 후 확정할 것.
+/// `ApiFailure`(write-info 실패 분기, 추정)와 상태 코드를 `PostError`로 변환한다.
 ///
-/// API 실패 결과와 상태 코드를 `PostError`로 변환한다.
+/// ⚠️ write-info 응답이 미확인이라 이 변환 경로도 추정이다. 실측 확인된 공통
+/// 실패 봉투(`{"error":{...}}`)는 client.rs에서 `NaverApiErrorBody`로 처리한다.
 ///
-/// # trace_id 플레이스홀더
-/// 현재 네이버 API 응답에 `trace_id` 필드가 없으므로 빈 문자열("")을 사용한다.
-/// 추후 요청 ID를 주입할 수 있도록 공개 인터페이스는 `PostError`를 반환한다.
+/// # trace_id
+/// 이 경로의 입력에는 요청 ID가 없어 빈 문자열("")을 사용한다.
 fn failure_to_post_error(failure: ApiFailure, status: &str) -> PostError {
     ErrorEnvelope {
-        // 네이버 API 응답에 trace_id 필드 없음 — 빈 문자열 플레이스홀더 사용
         trace_id: String::new(),
         code: failure.error_code.clone(),
         message: failure.error_message.clone(),
@@ -176,19 +170,16 @@ fn json_error_to_post_error(err: serde_json::Error) -> PostError {
 /// 실패(그 외 상태 코드)이면 [`PostError`]를 반환한다.
 /// 역직렬화에 실패해도 패닉 없이 `Err(PostError)`를 반환한다.
 pub fn parse_write_info(raw: &str) -> Result<WriteInfo, PostError> {
-    // 먼저 봉투만 파싱해 status를 확인한다.
     let envelope: NaverApiEnvelope<serde_json::Value> =
         serde_json::from_str(raw).map_err(json_error_to_post_error)?;
 
     let status = envelope.message.status.as_str();
     if status != "200" {
-        // 실패 형태로 재파싱 시도
         let failure_envelope: NaverApiEnvelope<ApiFailure> =
             serde_json::from_str(raw).map_err(json_error_to_post_error)?;
         return Err(failure_to_post_error(failure_envelope.message.result, status));
     }
 
-    // 성공 result를 WriteInfo로 파싱
     let result: WriteInfo = serde_json::from_value(envelope.message.result)
         .map_err(json_error_to_post_error)?;
     Ok(result)
@@ -200,8 +191,8 @@ pub fn parse_write_info(raw: &str) -> Result<WriteInfo, PostError> {
 ///
 /// 성공이면 [`ArticleRegisterResult`]를 반환한다.
 ///
-/// ⚠️ 미확인: 실패 시 응답 봉투 형태(`message`/`status` 여부 포함)가 패킷
-/// 캡처에 없어 추정이다. 실제 실패 응답으로 반드시 검증 후 확정할 것.
+/// 성공 응답(`ResultEnvelope`)만 파싱한다. 실패 응답은 실측 확인된
+/// `{"error":{...}}` 봉투(`NaverApiErrorBody`)이며 client.rs에서 처리한다.
 /// 역직렬화에 실패해도 패닉 없이 `Err(PostError)`를 반환한다.
 pub fn parse_article_register(raw: &str) -> Result<ArticleRegisterResult, PostError> {
     let envelope: ResultEnvelope<ArticleRegisterResult> =
@@ -217,7 +208,6 @@ pub fn parse_article_register(raw: &str) -> Result<ArticleRegisterResult, PostEr
 mod tests {
     use super::*;
 
-    // 픽스처를 컴파일 타임에 바이너리에 포함한다.
     // write_info_success.assumed.json — 미확인 스키마 기준 픽스처
     const WRITE_INFO_SUCCESS: &str =
         include_str!("fixtures/write_info_success.assumed.json");
@@ -234,70 +224,60 @@ mod tests {
 
     #[test]
     fn write_info_success_parses_cafe_id() {
-        // 미확인 스키마 기준 테스트
         let info = parse_write_info(WRITE_INFO_SUCCESS).expect("파싱 실패");
         assert_eq!(info.cafe_id, 12345678);
     }
 
     #[test]
     fn write_info_success_parses_menu_id() {
-        // 미확인 스키마 기준 테스트
         let info = parse_write_info(WRITE_INFO_SUCCESS).expect("파싱 실패");
         assert_eq!(info.menu_id, 10);
     }
 
     #[test]
     fn write_info_success_parses_menu_name() {
-        // 미확인 스키마 기준 테스트
         let info = parse_write_info(WRITE_INFO_SUCCESS).expect("파싱 실패");
         assert_eq!(info.menu_name, "자유게시판");
     }
 
     #[test]
     fn write_info_success_parses_menu_type() {
-        // 미확인 스키마 기준 테스트
         let info = parse_write_info(WRITE_INFO_SUCCESS).expect("파싱 실패");
         assert_eq!(info.menu_type, "B");
     }
 
     #[test]
     fn write_info_success_write_permission_is_true() {
-        // 미확인 스키마 기준 테스트
         let info = parse_write_info(WRITE_INFO_SUCCESS).expect("파싱 실패");
         assert!(info.write_permission);
     }
 
     #[test]
     fn write_info_success_subject_max_length() {
-        // 미확인 스키마 기준 테스트
         let info = parse_write_info(WRITE_INFO_SUCCESS).expect("파싱 실패");
         assert_eq!(info.article_write_form.subject_max_length, 100);
     }
 
     #[test]
     fn write_info_success_content_max_length() {
-        // 미확인 스키마 기준 테스트
         let info = parse_write_info(WRITE_INFO_SUCCESS).expect("파싱 실패");
         assert_eq!(info.article_write_form.content_max_length, 50000);
     }
 
     #[test]
     fn write_info_success_tag_max_count() {
-        // 미확인 스키마 기준 테스트
         let info = parse_write_info(WRITE_INFO_SUCCESS).expect("파싱 실패");
         assert_eq!(info.article_write_form.tag_max_count, 10);
     }
 
     #[test]
     fn write_info_success_head_list_length() {
-        // 미확인 스키마 기준 테스트
         let info = parse_write_info(WRITE_INFO_SUCCESS).expect("파싱 실패");
         assert_eq!(info.head_list.len(), 2);
     }
 
     #[test]
     fn write_info_success_first_head_use_yn() {
-        // 미확인 스키마 기준 테스트
         let info = parse_write_info(WRITE_INFO_SUCCESS).expect("파싱 실패");
         let first = info.head_list.first().expect("headList가 비어 있음");
         assert_eq!(first.head_id, 1);
@@ -307,7 +287,6 @@ mod tests {
 
     #[test]
     fn write_info_success_second_head() {
-        // 미확인 스키마 기준 테스트
         let info = parse_write_info(WRITE_INFO_SUCCESS).expect("파싱 실패");
         let second = &info.head_list[1];
         assert_eq!(second.head_id, 2);
@@ -394,11 +373,10 @@ mod tests {
     // 엣지 케이스 — status 기반 분기 (미확인 스키마 기준 테스트)
     // ------------------------------------------------------------------
 
-    /// status가 "200"이지만 result가 실패 형태일 때 → WriteInfo 파싱 실패로 Err.
-    /// ⚠️ 미확인 스키마 기준 테스트 — 실제 실패 응답 확인 후 재검증 필요.
+    /// status가 "200"이지만 result가 WriteInfo 형태가 아닐 때 → 파싱 실패로 Err.
+    /// (write-info 응답 자체가 미확인 추정 스키마 기준.)
     #[test]
     fn parse_write_info_status_200_but_failure_shaped_result_returns_err() {
-        // 미확인 스키마 기준 테스트
         let raw = r#"{
             "message": {
                 "status": "200",
@@ -418,10 +396,8 @@ mod tests {
 
     /// parse_article_register는 ResultEnvelope를 사용하므로 message/status
     /// 봉투 형태 입력은 `result` 키가 없어 PARSE_ERROR(Err)를 반환한다.
-    /// ⚠️ 미확인 스키마 기준 테스트 — 실제 실패 응답 확인 후 재검증 필요.
     #[test]
     fn parse_article_register_non_result_envelope_returns_err() {
-        // 미확인 스키마 기준 테스트 — 실패 봉투 형태 미확인
         // message/status 봉투는 ResultEnvelope와 맞지 않으므로 PARSE_ERROR
         let raw = r#"{
             "message": {
@@ -436,12 +412,10 @@ mod tests {
         assert!(result.is_err(), "ResultEnvelope가 아닌 봉투 형태는 Err여야 함");
     }
 
-    /// ⚠️ 미확인 스키마 기준 테스트: 실패 응답 봉투 형태가 확인되지 않았으므로
-    /// 5xx retryable 로직은 현재 write_info 파싱 경로를 통해서만 검증 가능.
-    /// 실제 실패 응답을 캡처한 뒤 parse_article_register 실패 경로를 재구현할 것.
+    /// write_info(추정) 파싱 경로로 5xx retryable 규칙을 검증한다.
+    /// 실측 확인된 공통 실패 봉투는 client.rs(NaverApiErrorBody)에서 처리·검증한다.
     #[test]
     fn parse_write_info_500_is_retryable() {
-        // 미확인 스키마 기준 테스트
         let raw = r#"{
             "message": {
                 "status": "500",

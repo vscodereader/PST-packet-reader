@@ -14,13 +14,11 @@ pub struct ResultEnvelope<T> {
     pub result: T,
 }
 
-/// ⚠️ 미확인 스키마: 패킷 캡처에 `message`/`status` 봉투가 실제로 사용되는
-/// 응답이 포착되지 않았다. 유일하게 확인된 최상위 봉투는 `{"result":{...}}`
-/// 형태([`ResultEnvelope`])이다. 이 구조체는 write-info 및 실패 응답에
-/// 쓰일 것으로 추정하지만, 실제 응답으로 반드시 검증 후 확정할 것.
+/// `message` 오브젝트 — 최상위 봉투는 [`NaverApiEnvelope`] 참조.
 ///
-/// `message` 오브젝트 자체를 나타낸다.
-/// 최상위 봉투는 [`NaverApiEnvelope`]를 참조하라.
+/// ⚠️ 미확인 스키마: 이 `message`/`status` 봉투가 실제로 쓰이는 응답은 캡처되지
+/// 않았다. 확인된 최상위 봉투는 `{"result":{...}}`([`ResultEnvelope`]) 뿐이며,
+/// write-info·실패 응답에 쓰일 것으로 추정한다. 실제 응답으로 검증 후 확정할 것.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NaverApiMessage<T> {
@@ -30,13 +28,11 @@ pub struct NaverApiMessage<T> {
     pub result: T,
 }
 
-/// ⚠️ 미확인 스키마: 패킷 캡처에서 이 `{"message":{"status":...,"result":...}}`
-/// 봉투 형태가 실제로 사용되는 응답은 포착되지 않았다. 확인된 봉투는
-/// `{"result":{...}}`([`ResultEnvelope`]) 뿐이다. write-info 및 실패
-/// 응답에 이 봉투가 쓰일 것으로 추정하나, 실제 응답으로 반드시 검증 후 확정할 것.
+/// `{"message":{"status":...,"result":...}}` 봉투. `T`에 구체적 result 타입을
+/// 넣는다 (예: `NaverApiEnvelope<WriteInfo>`).
 ///
-/// 성공/실패 공통으로 사용되며, `T`에 구체적인 result 타입을 넣는다.
-/// 예: `NaverApiEnvelope<WriteInfo>`, `NaverApiEnvelope<ApiFailure>`.
+/// ⚠️ 미확인 스키마: [`NaverApiMessage`]와 동일하게, 이 봉투가 실제로 쓰이는
+/// 응답은 캡처되지 않았다(추정). 실제 응답으로 검증 후 확정할 것.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NaverApiEnvelope<T> {

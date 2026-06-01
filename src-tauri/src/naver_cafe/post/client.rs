@@ -245,21 +245,19 @@ impl CafeHttpClient {
         let path = article_post_path(cafe_id, menu_id);
         let url = format!("{}{}", self.base_url, path);
 
-        // 헤더 설정 — Origin / Referer / Content-Type
         let mut req = self.http.post(&url);
         for (name, value) in article_post_headers(cafe_id) {
             req = req.header(&name, &value);
         }
 
-        // User-Agent 헤더 설정 — reqwest 기본값 대신 브라우저 UA를 사용한다
+        // reqwest 기본값 대신 브라우저 User-Agent를 사용한다.
         req = req.header("User-Agent", BROWSER_USER_AGENT);
 
-        // Cookie 헤더 설정 — 값은 절대 로그에 기록하지 않는다
+        // 보안: Cookie 헤더 값은 로그에 기록하지 않는다.
         if let Some(cookie) = cookie_header {
             req = req.header("Cookie", cookie);
         }
 
-        // JSON 바디 전송
         let response = req.json(body).send().await.map_err(|e| {
             let retryable = e.is_timeout() || e.is_connect();
             ErrorEnvelope {
@@ -284,11 +282,9 @@ impl CafeHttpClient {
         let status = response.status();
         let status_code = status.as_u16();
 
-        // 응답 바디 읽기
         let raw_body = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            // non-2xx: 실측 캡처된 스키마로 파싱 시도, 실패 시 원본 바디 폴백
             let retryable = status_code >= 500;
             return Err(make_non_2xx_error(
                 CODE_REGISTER_HTTP_ERROR,
@@ -300,9 +296,7 @@ impl CafeHttpClient {
             ));
         }
 
-        // 2xx: 성공 형태로 파싱 시도
         parse_article_register(&raw_body).map_err(|_| {
-            // 2xx이지만 파싱 실패: 원본 바디를 보존해 실제 스키마 확인에 사용
             make_parse_error(
                 CODE_REGISTER_PARSE_ERROR,
                 "게시글 등록 응답을 파싱하지 못했습니다. 실제 응답 형태는 errorData.cafe.apiErrorMessage를 확인하세요."

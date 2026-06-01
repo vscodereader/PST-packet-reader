@@ -64,13 +64,9 @@ impl IdProvider for SequentialIdProvider {
 /// 스마트에디터 문서 정보(Document Info) 내 개별 옵션 항목.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Dia {
-    /// ⚠️ 미확인 의미.
     pub t: u32,
-    /// ⚠️ 미확인 의미.
     pub p: u32,
-    /// ⚠️ 미확인 의미.
     pub st: u32,
-    /// ⚠️ 미확인 의미.
     pub sk: u32,
 }
 
@@ -79,9 +75,7 @@ pub struct Dia {
 /// 스마트에디터 문서 정보(Document Info) 내 각 옵션 항목.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DocumentInfoOption {
-    /// ⚠️ 미확인 의미.
     pub dis: String,
-    /// ⚠️ 미확인 의미.
     pub dia: Dia,
 }
 
@@ -90,9 +84,7 @@ pub struct DocumentInfoOption {
 /// 스마트에디터 문서 정보(Document Info).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DocumentInfo {
-    /// ⚠️ 미확인 의미.
     pub dif: bool,
-    /// ⚠️ 미확인 의미.
     pub dio: Vec<DocumentInfoOption>,
 }
 

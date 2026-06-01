@@ -181,20 +181,17 @@ pub fn build_post_preview(
     request: &PostRequest,
     ids: &mut impl IdProvider,
 ) -> Result<PostPreview, PostError> {
-    // Step 3 + Step 4: contentJson 생성 → ArticleWriteBody 조립
     let body =
         build_article_write_body_with_content(request, ids)
             .map_err(|e| serde_err_to_post_error(request, e))?;
 
     let article = &body.article;
 
-    // 페이로드 길이 — 직렬화 자체를 검증하기도 함
     let content_json_length = article.content_json.len();
     let request_body_json =
         serde_json::to_string(&body).map_err(|e| serde_err_to_post_error(request, e))?;
     let request_body_length = request_body_json.len();
 
-    // 요청 메타데이터
     let path = article_post_path(&request.cafe_id, request.menu_id);
     let headers = article_post_headers(&request.cafe_id);
 
@@ -296,11 +293,9 @@ pub async fn execute_post_live(
     account_id: &str,
     ids: &mut impl IdProvider,
 ) -> Result<ArticleRegisterResult, PostError> {
-    // Step 1: contentJson + ArticleWriteBody 조립
     let body = build_article_write_body_with_content(request, ids)
         .map_err(|e| serde_err_to_post_error(request, e))?;
 
-    // Step 2: 쿠키 읽기
     let cookies_value = auth::read_account_cookies(account_id)
         .map_err(|e| ErrorEnvelope {
             trace_id: String::new(),
@@ -349,10 +344,9 @@ pub async fn execute_post_live(
             }),
         })?;
 
-    // Step 3: Cookie 헤더 생성 (보안: 헤더 값을 절대 로그/에러에 노출하지 않음)
+    // 보안: Cookie 헤더 값을 로그/에러에 노출하지 않는다.
     let cookie_header = cookie_header_from_storage_state(&cookies_value);
 
-    // Step 4: 실제 전송
     let client = CafeHttpClient::new();
     client
         .post_article(
