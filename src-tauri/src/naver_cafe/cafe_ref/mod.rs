@@ -11,14 +11,15 @@
 //! # Vanity URL 처리
 //!
 //! `cafe.naver.com/<name>` 형태의 vanity URL은 [`parser::CafeRef::Vanity`]로
-//! 반환된다. vanity 이름 → 숫자 id 변환에 필요한 API 엔드포인트(`?cafeUrl=<name>` 등)는
-//! 아직 실측 캡처되지 않았으므로 네트워크 해석을 지원하지 않는다. 향후 확인된 엔드포인트로
-//! 구현해야 한다.
+//! 반환된다. vanity 이름 → 숫자 id 변환은 [`home::CafeHomeClient::resolve_slug`]가
+//! 카페 홈 페이지 HTML(`var g_sClubId = "..."` / `clubid=...`)을 파싱해 해석한다.
 
 pub mod client;
+pub mod home;
 pub mod models;
 pub mod parser;
 
 pub use client::{cafe_gate_info_path, CafeGateClient, CAFE_API_HOST};
+pub use home::{cafe_home_path, parse_club_id_from_html, CafeHomeClient, CAFE_HOME_HOST};
 pub use models::{CafeGateInfoResponse, CafeGateMessage, CafeGateResult, CafeInfoView, CafeRefError};
 pub use parser::{parse_cafe_id, parse_cafe_ref, CafeRef};

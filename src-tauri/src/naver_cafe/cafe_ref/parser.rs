@@ -28,10 +28,9 @@ pub enum CafeRef {
     Id(u64),
     /// 숫자 id 없이 vanity 이름만 있는 경우 (예: `cafe.naver.com/<name>`).
     ///
-    /// ⚠️ 미확인 엔드포인트: vanity 이름 → 숫자 id 변환에 필요한 API
-    /// (`?cafeUrl=<name>` 형태 등)는 아직 실측 캡처되지 않았다.
-    /// 이 변형을 해석하려면 별도 네트워크 요청이 필요하며, 향후 확인된
-    /// 엔드포인트로 구현해야 한다.
+    /// 숫자 id 해석은 별도 네트워크 요청이 필요하다 —
+    /// [`super::home::CafeHomeClient::resolve_slug`]가 카페 홈 HTML을 받아
+    /// `g_sClubId`/`clubid`에서 숫자 cafeId를 파싱한다.
     Vanity(String),
 }
 
