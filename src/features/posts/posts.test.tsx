@@ -17,8 +17,9 @@ async function renderPosts(go = vi.fn()) {
       <Posts go={go} />
     </MantineProvider>,
   );
-  // The list loads asynchronously over the IPC wrapper (mock fallback here).
-  await screen.findByText("이번 주 시장 브리핑 정리");
+  // The list loads asynchronously over the IPC wrapper (mock backend here).
+  // Use a non-draft title — drafts are excluded from this library list.
+  await screen.findByText("카카오 반등 시그널 분석");
   return go;
 }
 
@@ -58,7 +59,7 @@ describe("Posts", () => {
       screen.getByText("반도체 흐름 코멘트 모음 (10종)"),
     ).toBeInTheDocument();
     expect(
-      screen.queryByText("이번 주 시장 브리핑 정리"),
+      screen.queryByText("카카오 반등 시그널 분석"),
     ).not.toBeInTheDocument();
   });
 
@@ -73,9 +74,9 @@ describe("Posts", () => {
 
   it("opens the writer to edit when a card is clicked", async () => {
     await renderPosts();
-    await userEvent.click(screen.getByText("이번 주 시장 브리핑 정리"));
+    await userEvent.click(screen.getByText("카카오 반등 시그널 분석"));
     expect(
-      await screen.findByDisplayValue("이번 주 시장 브리핑 정리"),
+      await screen.findByDisplayValue("카카오 반등 시그널 분석"),
     ).toBeInTheDocument();
   });
 

@@ -120,6 +120,7 @@ pub fn run() {
             queue::list_queue_scheduled,
             queue::cancel_queue_now,
             queue::cancel_queue_scheduled,
+            queue::promote_queue_scheduled,
             stocks::list_stocks,
             activity::list_activity,
             stats::list_stats,

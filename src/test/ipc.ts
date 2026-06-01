@@ -938,6 +938,24 @@ export const invoke = vi.fn(
           (q) => q.id !== (args!.id as string),
         );
         return clone(state.queueScheduled);
+      case "promote_queue_scheduled": {
+        const id = args!.id as string;
+        const item = state.queueScheduled.find((q) => q.id === id);
+        state.queueScheduled = state.queueScheduled.filter((q) => q.id !== id);
+        if (item) {
+          state.queueNow = [
+            ...state.queueNow,
+            {
+              id: item.id,
+              title: item.title,
+              kind: item.kind,
+              state: "waiting",
+              locs: item.locs,
+            },
+          ];
+        }
+        return clone(state.queueNow);
+      }
 
       default:
         throw new Error(`test ipc: unhandled command "${cmd}"`);

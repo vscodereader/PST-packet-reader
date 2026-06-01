@@ -72,7 +72,7 @@ pub fn compute(
         .map(|s| format!("다음 게시 {}", s.rel))
         .unwrap_or_else(|| "예약 없음".into());
 
-    // Today's completed posts/comments + overall success rate from the log.
+    // Overall success rate (all log items) + today's *fully* successful posts.
     let (mut posts_done, mut comments_done) = (0u32, 0u32);
     let (mut ok, mut total_items) = (0u32, 0u32);
     for b in batches {
@@ -80,12 +80,16 @@ pub fn compute(
             total_items += 1;
             if item.status == BatchItemStatus::Success {
                 ok += 1;
-                if is_today(&b.time) {
-                    match b.kind {
-                        ModeValue::Comment => comments_done += 1,
-                        _ => posts_done += 1,
-                    }
-                }
+            }
+        }
+        // "오늘 게시 완료" counts only batches that fully succeeded (no fails).
+        let perfect =
+            !b.items.is_empty() && b.items.iter().all(|i| i.status == BatchItemStatus::Success);
+        if perfect && is_today(&b.time) {
+            let n = b.items.len() as u32;
+            match b.kind {
+                ModeValue::Comment => comments_done += n,
+                _ => posts_done += n,
             }
         }
     }

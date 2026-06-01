@@ -93,6 +93,20 @@ export function Queue({ go }: { go: GoFn }) {
     void ipc.queue.cancelNow(id).then(setNow);
     notifications.show({ message: "대기 작업을 취소했어요", color: "blue" });
   };
+  const promote = (id: string) => {
+    void ipc.queue.promote(id).then((next) => {
+      setNow(next);
+      void ipc.queue.listScheduled().then(setSched);
+    });
+    notifications.show({
+      message: "예약을 즉시 대기열로 옮겼어요",
+      color: "green",
+    });
+  };
+  const cancelScheduled = (id: string) => {
+    void ipc.queue.cancelScheduled(id).then(setSched);
+    notifications.show({ message: "예약을 취소했어요", color: "blue" });
+  };
 
   const waiting = now.filter((q) => q.state !== "running");
 
@@ -347,12 +361,7 @@ export function Queue({ go }: { go: GoFn }) {
                 size="sm"
                 variant="default"
                 leftSection={<Icon.bolt size={14} />}
-                onClick={() =>
-                  notifications.show({
-                    message: "예약을 즉시 대기열로 옮겼어요",
-                    color: "green",
-                  })
-                }
+                onClick={() => promote(q.id)}
               >
                 즉시 처리
               </Button>
@@ -361,12 +370,7 @@ export function Queue({ go }: { go: GoFn }) {
                 variant="subtle"
                 color="gray"
                 title="예약 취소"
-                onClick={() =>
-                  notifications.show({
-                    message: "예약을 취소했어요",
-                    color: "blue",
-                  })
-                }
+                onClick={() => cancelScheduled(q.id)}
               >
                 <Icon.x size={17} />
               </ActionIcon>

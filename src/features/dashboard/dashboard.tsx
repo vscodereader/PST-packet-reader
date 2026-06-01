@@ -17,10 +17,9 @@ import { useEffect, useState } from "react";
 import type { Account } from "@/shared/bindings/Account";
 import type { ActivityItem } from "@/shared/bindings/ActivityItem";
 import type { DashStat } from "@/shared/bindings/DashStat";
-import type { Scheduled } from "@/shared/bindings/Scheduled";
+import type { QueueScheduledItem } from "@/shared/bindings/QueueScheduledItem";
 import { PLATFORMS } from "@/shared/data/config";
-import { acctPlatforms } from "@/shared/data/helpers";
-import type { GoFn, ViewId } from "@/shared/data/types";
+import type { GoFn, PlatformId, ViewId } from "@/shared/data/types";
 import { ipc } from "@/shared/ipc";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo, PlatformPill } from "@/shared/ui/platform-logo";
@@ -34,13 +33,13 @@ const STAT_TARGET: Record<string, ViewId> = {
 
 export function Dashboard({ go }: { go: GoFn }) {
   const [stats, setStats] = useState<DashStat[]>([]);
-  const [scheduled, setScheduled] = useState<Scheduled[]>([]);
+  const [scheduled, setScheduled] = useState<QueueScheduledItem[]>([]);
   const [activity, setActivity] = useState<ActivityItem[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
 
   useEffect(() => {
     void ipc.stats.list().then(setStats);
-    void ipc.scheduled.list().then(setScheduled);
+    void ipc.queue.listScheduled().then(setScheduled);
     void ipc.activity.list().then(setActivity);
     void ipc.accounts.list().then(setAccounts);
   }, []);
@@ -117,7 +116,7 @@ export function Dashboard({ go }: { go: GoFn }) {
             </Button>
           </Group>
           {scheduled.slice(0, 4).map((s) => {
-            const plats = acctPlatforms(s.accounts, accounts);
+            const plats = [...new Set(s.locs.map((l) => l.p))] as PlatformId[];
             return (
               <Group
                 key={s.id}
@@ -147,7 +146,7 @@ export function Dashboard({ go }: { go: GoFn }) {
                   <Group gap={8} mt={5}>
                     <PlatformPill ids={plats} size={18} />
                     <Text fz={12} c="dimmed">
-                      {s.accounts.length}개 계정
+                      {s.locs.length}곳
                     </Text>
                   </Group>
                 </Box>
@@ -157,9 +156,19 @@ export function Dashboard({ go }: { go: GoFn }) {
         </Card>
 
         <Card withBorder padding="lg" radius="md">
-          <Title order={2} fz={16.5} fw={700} mb="md">
-            최근 활동
-          </Title>
+          <Group justify="space-between" mb="md">
+            <Title order={2} fz={16.5} fw={700}>
+              최근 활동
+            </Title>
+            <Button
+              variant="subtle"
+              size="xs"
+              rightSection={<Icon.chevronRight size={15} />}
+              onClick={() => go("log")}
+            >
+              더보기
+            </Button>
+          </Group>
           <Timeline
             active={activity.length}
             bulletSize={24}

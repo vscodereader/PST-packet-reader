@@ -69,6 +69,19 @@ pub fn apply_cancel_scheduled(items: Vec<QueueScheduledItem>, id: &str) -> Vec<Q
     items.into_iter().filter(|i| i.id != id).collect()
 }
 
+/// Convert a scheduled item into a waiting immediate-queue item (for "즉시 처리").
+pub fn to_now_item(s: QueueScheduledItem) -> QueueNowItem {
+    QueueNowItem {
+        id: s.id,
+        title: s.title,
+        kind: s.kind,
+        state: QueueState::Waiting,
+        batch_id: None,
+        progress: None,
+        locs: s.locs,
+    }
+}
+
 fn loc(p: PlatformId, name: &str, code: Option<&str>) -> QueueLocation {
     QueueLocation {
         p,
@@ -156,6 +169,27 @@ pub fn cancel_queue_scheduled(
     store.mutate(|items| apply_cancel_scheduled(items, &id))
 }
 
+/// Move a scheduled item into the immediate queue ("즉시 처리"): drop it from the
+/// scheduled store, append it to the now store, and return the updated now list.
+#[tauri::command]
+pub fn promote_queue_scheduled(
+    now: tauri::State<'_, JsonStore<QueueNowItem>>,
+    scheduled: tauri::State<'_, JsonStore<QueueScheduledItem>>,
+    id: String,
+) -> Vec<QueueNowItem> {
+    let found = scheduled.snapshot().into_iter().find(|s| s.id == id);
+    match found {
+        Some(s) => {
+            scheduled.mutate(|items| apply_cancel_scheduled(items, &id));
+            now.mutate(|mut items| {
+                items.push(to_now_item(s));
+                items
+            })
+        }
+        None => now.snapshot(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +198,19 @@ mod tests {
     fn cancel_now_removes_by_id() {
         let next = apply_cancel_now(seed_now(), "q1");
         assert!(next.iter().all(|i| i.id != "q1"));
+    }
+
+    #[test]
+    fn promote_maps_scheduled_to_a_waiting_now_item() {
+        let s = seed_scheduled().remove(0);
+        let id = s.id.clone();
+        let (title, locs_len) = (s.title.clone(), s.locs.len());
+        let now = to_now_item(s);
+        assert_eq!(now.id, id);
+        assert_eq!(now.title, title);
+        assert_eq!(now.state, QueueState::Waiting);
+        assert!(now.batch_id.is_none() && now.progress.is_none());
+        assert_eq!(now.locs.len(), locs_len);
     }
 
     #[test]

@@ -59,9 +59,18 @@ describe("Dashboard", () => {
 
   it("opens the queue from a scheduled row", async () => {
     const go = renderDash();
+    // 게시 대기열 now shows the queue's scheduled items (by title).
     await userEvent.click(
-      await screen.findByText("삼성전자 4분기 실적 기대 — 매수 관점 정리"),
+      await screen.findByText("에코프로 조정 구간 대응 전략"),
     );
     expect(go).toHaveBeenCalledWith("queue");
+  });
+
+  it("opens the log from the 최근 활동 더보기 link", async () => {
+    const go = renderDash();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "더보기" }),
+    );
+    expect(go).toHaveBeenCalledWith("log");
   });
 });

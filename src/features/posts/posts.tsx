@@ -60,7 +60,8 @@ export function Posts({ go }: { go: GoFn }) {
       ...d,
       id: "p" + Date.now(),
       title: d.title + " (복사본)",
-      status: "draft",
+      // Keep the copy out of the drafts-only flow so it stays in the library.
+      status: "ready",
       updated: "방금 전",
     });
     toast("복제했어요", "green");
@@ -70,21 +71,23 @@ export function Posts({ go }: { go: GoFn }) {
     toast("삭제했어요");
   };
 
+  // Drafts are managed only in the writer's 임시저장 panel, not this library list.
+  const visible = posts.filter((p) => p.status !== "draft");
   const tabs: { v: "all" | ModeValue; t: string; n: number }[] = [
-    { v: "all", t: "전체", n: posts.length },
-    { v: "post", t: "글", n: posts.filter((p) => p.kind === "post").length },
+    { v: "all", t: "전체", n: visible.length },
+    { v: "post", t: "글", n: visible.filter((p) => p.kind === "post").length },
     {
       v: "comment",
       t: "댓글",
-      n: posts.filter((p) => p.kind === "comment").length,
+      n: visible.filter((p) => p.kind === "comment").length,
     },
     {
       v: "both",
       t: "글+댓글",
-      n: posts.filter((p) => p.kind === "both").length,
+      n: visible.filter((p) => p.kind === "both").length,
     },
   ];
-  const filtered = posts.filter(
+  const filtered = visible.filter(
     (p) =>
       (filter === "all" || p.kind === filter) && (!q || p.title.includes(q)),
   );
