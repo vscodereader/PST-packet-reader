@@ -5,7 +5,7 @@ import instagramLogo from "@/assets/logos/instagram.svg";
 import naverLogo from "@/assets/logos/naver.svg";
 import navercafeLogo from "@/assets/logos/navercafe.svg";
 import threadsLogo from "@/assets/logos/threads.svg";
-import { PLATFORM } from "@/shared/data/mock";
+import { PLATFORM } from "@/shared/data/config";
 import type { PlatformId } from "@/shared/data/types";
 
 const INITIAL: Record<PlatformId, string> = {

@@ -19,7 +19,8 @@ import {
 import { notifications } from "@mantine/notifications";
 import { useEffect, useState } from "react";
 
-import { ACTIVE_PLATFORMS, batchStatus, KIND } from "@/shared/data/mock";
+import { ACTIVE_PLATFORMS, KIND } from "@/shared/data/config";
+import { batchStatus } from "@/shared/data/helpers";
 import type { BatchItem, LogBatch, LogFilter } from "@/shared/data/types";
 import { listActivity } from "@/shared/ipc/activity";
 import { listLogBatches } from "@/shared/ipc/log-batches";

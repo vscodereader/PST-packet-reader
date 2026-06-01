@@ -1,36 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { listScheduled, resetScheduledFallbackForTests } from "./scheduled";
+import { listScheduled } from "./scheduled";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
-
 const mockInvoke = vi.mocked(invoke);
 
-function setTauri(on: boolean) {
-  const w = window as unknown as Record<string, unknown>;
-  if (on) w.__TAURI_INTERNALS__ = {};
-  else delete w.__TAURI_INTERNALS__;
-}
-
 describe("scheduled ipc wrapper", () => {
-  beforeEach(() => {
-    mockInvoke.mockReset();
-    resetScheduledFallbackForTests();
-  });
-  afterEach(() => setTauri(false));
+  beforeEach(() => mockInvoke.mockReset());
 
-  it("invokes list_scheduled inside Tauri", async () => {
-    setTauri(true);
-    mockInvoke.mockResolvedValue([]);
-    await listScheduled();
+  it("invokes list_scheduled and returns the result", async () => {
+    const data = [{ id: "s1", title: "t", accounts: ["a1"], kind: "post" }];
+    mockInvoke.mockResolvedValue(data);
+    await expect(listScheduled()).resolves.toBe(data);
     expect(mockInvoke).toHaveBeenCalledWith("list_scheduled");
-  });
-
-  it("returns mock data without invoking outside Tauri", async () => {
-    const items = await listScheduled();
-    expect(mockInvoke).not.toHaveBeenCalled();
-    expect(items.length).toBeGreaterThan(0);
-    expect(items.some((s) => s.accounts.length > 1)).toBe(true);
   });
 });

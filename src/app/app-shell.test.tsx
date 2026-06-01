@@ -1,9 +1,13 @@
 import { MantineProvider } from "@mantine/core";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, it, expect } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 
 import { MacroApp } from "./app-shell";
+
+vi.mock("@tauri-apps/api/core", async () => ({
+  invoke: (await import("@/test/ipc")).invoke,
+}));
 
 function renderApp() {
   render(

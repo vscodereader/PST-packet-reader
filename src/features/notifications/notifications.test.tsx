@@ -1,12 +1,16 @@
 import { MantineProvider } from "@mantine/core";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
 import type { LogFilter } from "@/shared/data/types";
 import { pickOption } from "@/test/select";
 
 import { Notifications } from "./notifications";
+
+vi.mock("@tauri-apps/api/core", async () => ({
+  invoke: (await import("@/test/ipc")).invoke,
+}));
 
 function renderLog(filter: LogFilter | null = null) {
   render(

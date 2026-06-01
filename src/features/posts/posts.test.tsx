@@ -3,9 +3,13 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
-import { resetPostsFallbackForTests } from "@/shared/ipc/posts";
+import { resetIpc } from "@/test/ipc";
 
 import { Posts } from "./posts";
+
+vi.mock("@tauri-apps/api/core", async () => ({
+  invoke: (await import("@/test/ipc")).invoke,
+}));
 
 async function renderPosts(go = vi.fn()) {
   render(
@@ -20,7 +24,7 @@ async function renderPosts(go = vi.fn()) {
 
 describe("Posts", () => {
   beforeEach(() => {
-    resetPostsFallbackForTests();
+    resetIpc();
   });
 
   it("renders the title and the 글쓰기 action", async () => {

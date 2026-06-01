@@ -3,9 +3,13 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
-import { resetQueueFallbackForTests } from "@/shared/ipc/queue";
+import { resetIpc } from "@/test/ipc";
 
 import { Queue } from "./queue";
+
+vi.mock("@tauri-apps/api/core", async () => ({
+  invoke: (await import("@/test/ipc")).invoke,
+}));
 
 async function renderQueue(go = vi.fn()) {
   render(
@@ -21,7 +25,7 @@ async function renderQueue(go = vi.fn()) {
 
 describe("Queue", () => {
   beforeEach(() => {
-    resetQueueFallbackForTests();
+    resetIpc();
   });
 
   it("renders the title and both queue sections", async () => {

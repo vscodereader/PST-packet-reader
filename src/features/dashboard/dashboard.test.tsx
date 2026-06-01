@@ -5,6 +5,10 @@ import { describe, it, expect, vi } from "vitest";
 
 import { Dashboard } from "./dashboard";
 
+vi.mock("@tauri-apps/api/core", async () => ({
+  invoke: (await import("@/test/ipc")).invoke,
+}));
+
 function renderDash(go = vi.fn()) {
   render(
     <MantineProvider>

@@ -16,7 +16,7 @@ import {
 import { notifications } from "@mantine/notifications";
 import { useEffect, useState } from "react";
 
-import { KIND, KIND_ICON } from "@/shared/data/mock";
+import { KIND, KIND_ICON } from "@/shared/data/config";
 import type {
   GoFn,
   PlatformId,

@@ -1,13 +1,12 @@
 import { describe, it, expect } from "vitest";
 
 import {
-  accountLog,
   acctPlatforms,
   batchStatus,
   hasToken,
   jobLink,
   resolveTemplate,
-} from "./mock";
+} from "./helpers";
 import type { Account, LogBatch } from "./types";
 
 describe("jobLink", () => {
@@ -145,38 +144,29 @@ describe("batchStatus", () => {
 });
 
 describe("acctPlatforms", () => {
+  const mk = (id: string, platform: Account["platform"]): Account => ({
+    id,
+    platform,
+    loginId: id,
+    pw: "p",
+    status: "active",
+    last: "—",
+    tags: [],
+  });
+  const accounts: Account[] = [
+    mk("a1", "forum"),
+    mk("a2", "forum"),
+    mk("a5", "naver"),
+  ];
+
   it("returns distinct platforms for the given account ids", () => {
-    expect(acctPlatforms(["a1", "a2", "a5"])).toEqual(["forum", "naver"]);
+    expect(acctPlatforms(["a1", "a2", "a5"], accounts)).toEqual([
+      "forum",
+      "naver",
+    ]);
   });
 
   it("ignores unknown ids", () => {
-    expect(acctPlatforms(["nope"])).toEqual([]);
-  });
-});
-
-describe("accountLog", () => {
-  const base: Account = {
-    id: "x",
-    platform: "forum",
-    loginId: "u",
-    pw: "p",
-    status: "new",
-    last: "—",
-    tags: [],
-  };
-
-  it("returns no entries for a brand-new account", () => {
-    expect(accountLog(base)).toEqual([]);
-  });
-
-  it("returns activity entries for an active account", () => {
-    const log = accountLog({ ...base, status: "active" });
-    expect(log.length).toBeGreaterThan(0);
-    expect(log.every((e) => e.type !== "error")).toBe(true);
-  });
-
-  it("includes an error entry for an errored account", () => {
-    const log = accountLog({ ...base, status: "error" });
-    expect(log.some((e) => e.type === "error")).toBe(true);
+    expect(acctPlatforms(["nope"], accounts)).toEqual([]);
   });
 });

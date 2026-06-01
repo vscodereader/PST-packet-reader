@@ -3,10 +3,14 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
-import { resetFallbackForTests } from "@/shared/ipc/accounts";
+import { resetIpc } from "@/test/ipc";
 import { pickOption } from "@/test/select";
 
 import { Accounts } from "./accounts";
+
+vi.mock("@tauri-apps/api/core", async () => ({
+  invoke: (await import("@/test/ipc")).invoke,
+}));
 
 async function renderAccounts(go = vi.fn()) {
   render(
@@ -20,11 +24,11 @@ async function renderAccounts(go = vi.fn()) {
 }
 
 describe("Accounts", () => {
-  // The component loads its rows asynchronously over the IPC wrapper; outside
-  // Tauri that resolves from the in-memory mock fallback. Reset between tests so
-  // each starts from the pristine 15-account dataset.
+  // The component loads its rows asynchronously over the IPC wrapper, mocked
+  // here by the in-memory backend. Reset between tests so each starts from the
+  // pristine 15-account dataset.
   beforeEach(() => {
-    resetFallbackForTests();
+    resetIpc();
   });
 
   it("renders the title and first page of accounts (10 rows)", async () => {

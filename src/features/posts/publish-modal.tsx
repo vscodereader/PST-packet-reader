@@ -15,27 +15,29 @@ import {
   TextInput,
   ThemeIcon,
 } from "@mantine/core";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
+import { KIND, STATUS_ACCOUNT } from "@/shared/data/config";
 import {
-  ACCOUNTS,
-  BANDS,
-  CAFES,
-  KIND,
-  STATUS_ACCOUNT,
-  STOCK,
   acctPlatforms,
   hasToken,
   resolveTemplate,
-} from "@/shared/data/mock";
+} from "@/shared/data/helpers";
 import type {
   Account,
+  Band,
+  Cafe,
   GoFn,
   LibraryPost,
   PlatformId,
   PublishJob,
   PublishResult,
+  Stock,
 } from "@/shared/data/types";
+import { listAccounts } from "@/shared/ipc/accounts";
+import { listBands } from "@/shared/ipc/bands";
+import { listCafes } from "@/shared/ipc/cafes";
+import { listStocks } from "@/shared/ipc/stocks";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo, PlatformPill } from "@/shared/ui/platform-logo";
 
@@ -112,6 +114,9 @@ function DestinationPicker({
   setCafeBoard,
   band,
   setBand,
+  cafes,
+  bands,
+  stocks,
 }: {
   selPlatforms: PlatformId[];
   stockCodes: string[];
@@ -123,8 +128,11 @@ function DestinationPicker({
   setCafeBoard: (v: string) => void;
   band: string;
   setBand: (v: string) => void;
+  cafes: Cafe[];
+  bands: Band[];
+  stocks: Stock[];
 }) {
-  const cafeObj = CAFES.find((c) => c.name === cafe) ?? CAFES[0];
+  const cafeObj = cafes.find((c) => c.name === cafe) ?? cafes[0];
   const card = {
     border: "1px solid var(--mantine-color-gray-2)",
     borderRadius: "var(--mantine-radius-md)",
@@ -175,7 +183,7 @@ function DestinationPicker({
                     }}
                   >
                     <Text fz={12} fw={700} c="forum">
-                      {STOCK[code]?.name ?? code}
+                      {stocks.find((s) => s.code === code)?.name ?? code}
                     </Text>
                     <ActionIcon
                       size={17}
@@ -204,11 +212,11 @@ function DestinationPicker({
           <Group gap={8} p={10} grow>
             <Select
               value={cafe}
-              data={CAFES.map((c) => c.name)}
+              data={cafes.map((c) => c.name)}
               onChange={(v) => {
                 if (!v) return;
                 setCafe(v);
-                const c = CAFES.find((x) => x.name === v);
+                const c = cafes.find((x) => x.name === v);
                 setCafeBoard(c?.boards[0] ?? "");
               }}
             />
@@ -232,7 +240,7 @@ function DestinationPicker({
           <Box p={10}>
             <Select
               value={band}
-              data={BANDS.map((b) => b.name)}
+              data={bands.map((b) => b.name)}
               onChange={(v) => setBand(v ?? "")}
             />
           </Box>
@@ -397,15 +405,16 @@ function PublishFlow({
 }
 
 function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
-  const usable = ACCOUNTS.filter((a) => a.status !== "error");
-  const [selected, setSelected] = useState<string[]>(
-    usable[0] ? [usable[0].id] : [],
-  );
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [stocks, setStocks] = useState<Stock[]>([]);
+  const [cafes, setCafes] = useState<Cafe[]>([]);
+  const [bands, setBands] = useState<Band[]>([]);
+  const [selected, setSelected] = useState<string[]>([]);
   const [stockCodes, setStockCodes] = useState<string[]>(["005930"]);
   const [stockModal, setStockModal] = useState(false);
-  const [cafe, setCafe] = useState(CAFES[0]?.name ?? "");
-  const [cafeBoard, setCafeBoard] = useState(CAFES[0]?.boards[0] ?? "");
-  const [band, setBand] = useState(BANDS[0]?.name ?? "");
+  const [cafe, setCafe] = useState("");
+  const [cafeBoard, setCafeBoard] = useState("");
+  const [band, setBand] = useState("");
   const [when, setWhen] = useState<"now" | "schedule">("now");
   const [date, setDate] = useState("2026-05-29");
   const [time, setTime] = useState("18:00");
@@ -413,6 +422,24 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [linkOverride, setLinkOverride] = useState("");
   const [showPreview, setShowPreview] = useState(false);
   const [flow, setFlow] = useState<null | "running" | PublishResult[]>(null);
+
+  useEffect(() => {
+    void listAccounts().then((a) => {
+      setAccounts(a);
+      const firstUsable = a.find((x) => x.status !== "error");
+      setSelected((s) => (s.length || !firstUsable ? s : [firstUsable.id]));
+    });
+    void listStocks().then(setStocks);
+    void listCafes().then((c) => {
+      setCafes(c);
+      setCafe((cur) => cur || (c[0]?.name ?? ""));
+      setCafeBoard((cur) => cur || (c[0]?.boards[0] ?? ""));
+    });
+    void listBands().then((b) => {
+      setBands(b);
+      setBand((cur) => cur || (b[0]?.name ?? ""));
+    });
+  }, []);
 
   if (!doc) {
     return <Modal opened={false} onClose={onClose} />;
@@ -423,7 +450,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     setSelected((s) =>
       s.includes(id) ? s.filter((x) => x !== id) : [...s, id],
     );
-  const selPlatforms = acctPlatforms(selected);
+  const selPlatforms = acctPlatforms(selected, accounts);
 
   const acctFilters = [
     { value: "all", label: "전체" },
@@ -431,7 +458,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     { value: "naver", label: "네이버 카페" },
     { value: "band", label: "밴드" },
   ];
-  const visibleAccts = ACCOUNTS.filter(
+  const visibleAccts = accounts.filter(
     (a) => acctFilter === "all" || a.platform === acctFilter,
   );
   const visUsable = visibleAccts
@@ -448,7 +475,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
 
   const jobs: PublishJob[] = [];
   selected.forEach((aid) => {
-    const a = ACCOUNTS.find((x) => x.id === aid);
+    const a = accounts.find((x) => x.id === aid);
     if (!a) return;
     if (a.platform === "forum") {
       stockCodes.forEach((code) =>
@@ -456,7 +483,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
           key: aid + "-" + code,
           platform: "forum",
           loginId: a.loginId,
-          targetName: STOCK[code]?.name ?? code,
+          targetName: stocks.find((x) => x.code === code)?.name ?? code,
           code,
           board: "종목토론방",
           status: a.status,
@@ -671,6 +698,9 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
               setCafeBoard={setCafeBoard}
               band={band}
               setBand={setBand}
+              cafes={cafes}
+              bands={bands}
+              stocks={stocks}
             />
           </>
         )}

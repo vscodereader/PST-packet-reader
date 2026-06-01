@@ -13,14 +13,16 @@ import {
   ThemeIcon,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import { KIND, MODES, STOCK } from "@/shared/data/mock";
+import { KIND, MODES } from "@/shared/data/config";
 import type {
   CommentTarget,
   LibraryPost,
   ModeValue,
+  Stock,
 } from "@/shared/data/types";
+import { listStocks } from "@/shared/ipc/stocks";
 import { Icon } from "@/shared/ui/icons";
 
 export interface WriterModalProps {
@@ -53,9 +55,9 @@ function exec(cmd: string, body: HTMLElement | null) {
 }
 
 // URL → plain text (mock crawl). Stock board links become a price line.
-function crawlToText(u: string): string {
+function crawlToText(u: string, stocks: Stock[]): string {
   const m = u.match(/code=(\d{6})/) ?? u.match(/(\d{6})/);
-  const s = m?.[1] ? STOCK[m[1]] : undefined;
+  const s = m?.[1] ? stocks.find((x) => x.code === m[1]) : undefined;
   if (s) {
     const arrow = s.chg > 0 ? "▲" : s.chg < 0 ? "▼" : "·";
     return `${s.name}(${s.code}) · ${s.market} 현재가 ${s.price} (${arrow}${Math.abs(s.chg)}%)`;
@@ -306,6 +308,11 @@ function WriterModalInner({
     stripHtml(initialBody).replace(/\s/g, "").length,
   );
   const [newId] = useState(() => "p" + Date.now());
+  const [stocks, setStocks] = useState<Stock[]>([]);
+
+  useEffect(() => {
+    void listStocks().then(setStocks);
+  }, []);
 
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const titleRef = useRef<HTMLInputElement | null>(null);
@@ -335,7 +342,7 @@ function WriterModalInner({
     if (!raw) return;
     const hadUrl = /(https?:\/\/\S+|www\.\S+)/i.test(raw);
     const converted = raw.replace(/(https?:\/\/\S+|www\.\S+)/gi, (u) =>
-      crawlToText(u),
+      crawlToText(u, stocks),
     );
     try {
       document.execCommand("insertText", false, converted);

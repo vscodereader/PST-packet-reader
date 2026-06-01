@@ -1,5 +1,7 @@
 mod accounts;
 mod activity;
+mod bands;
+mod cafes;
 mod log_batches;
 mod posts;
 mod queue;
@@ -61,6 +63,14 @@ pub fn run() {
                 dir.join("log-batches.json"),
                 log_batches::seed(),
             ));
+            app.manage(JsonStore::load_or_seed(
+                dir.join("cafes.json"),
+                cafes::seed(),
+            ));
+            app.manage(JsonStore::load_or_seed(
+                dir.join("bands.json"),
+                bands::seed(),
+            ));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -81,6 +91,8 @@ pub fn run() {
             stats::list_stats,
             scheduled::list_scheduled,
             log_batches::list_log_batches,
+            cafes::list_cafes,
+            bands::list_bands,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

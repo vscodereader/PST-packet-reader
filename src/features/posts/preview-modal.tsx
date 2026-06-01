@@ -1,7 +1,8 @@
 import { Avatar, Box, Group, Modal, Text } from "@mantine/core";
 import { useState } from "react";
 
-import { PLATFORM, resolveTemplate } from "@/shared/data/mock";
+import { PLATFORM } from "@/shared/data/config";
+import { resolveTemplate } from "@/shared/data/helpers";
 import type { CommentTarget, ModeValue, PublishJob } from "@/shared/data/types";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo } from "@/shared/ui/platform-logo";

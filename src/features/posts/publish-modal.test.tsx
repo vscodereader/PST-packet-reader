@@ -8,6 +8,10 @@ import { pickOption } from "@/test/select";
 
 import { PublishModal } from "./publish-modal";
 
+vi.mock("@tauri-apps/api/core", async () => ({
+  invoke: (await import("@/test/ipc")).invoke,
+}));
+
 const postDoc: LibraryPost = {
   id: "l1",
   title: "#{종목명} 4분기 실적 기대",

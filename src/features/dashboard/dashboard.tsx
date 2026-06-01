@@ -14,11 +14,14 @@ import {
 } from "@mantine/core";
 import { useEffect, useState } from "react";
 
+import type { Account } from "@/shared/bindings/Account";
 import type { ActivityItem } from "@/shared/bindings/ActivityItem";
 import type { DashStat } from "@/shared/bindings/DashStat";
 import type { Scheduled } from "@/shared/bindings/Scheduled";
-import { ACCOUNTS, acctPlatforms, PLATFORMS } from "@/shared/data/mock";
+import { PLATFORMS } from "@/shared/data/config";
+import { acctPlatforms } from "@/shared/data/helpers";
 import type { GoFn, ViewId } from "@/shared/data/types";
+import { listAccounts } from "@/shared/ipc/accounts";
 import { listActivity } from "@/shared/ipc/activity";
 import { listScheduled } from "@/shared/ipc/scheduled";
 import { listStats } from "@/shared/ipc/stats";
@@ -36,11 +39,13 @@ export function Dashboard({ go }: { go: GoFn }) {
   const [stats, setStats] = useState<DashStat[]>([]);
   const [scheduled, setScheduled] = useState<Scheduled[]>([]);
   const [activity, setActivity] = useState<ActivityItem[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>([]);
 
   useEffect(() => {
     void listStats().then(setStats);
     void listScheduled().then(setScheduled);
     void listActivity().then(setActivity);
+    void listAccounts().then(setAccounts);
   }, []);
 
   return (
@@ -115,7 +120,7 @@ export function Dashboard({ go }: { go: GoFn }) {
             </Button>
           </Group>
           {scheduled.slice(0, 4).map((s) => {
-            const plats = acctPlatforms(s.accounts);
+            const plats = acctPlatforms(s.accounts, accounts);
             return (
               <Group
                 key={s.id}
@@ -221,7 +226,7 @@ export function Dashboard({ go }: { go: GoFn }) {
       </Group>
       <SimpleGrid cols={{ base: 2, md: 4 }} spacing="md">
         {PLATFORMS.map((p) => {
-          const list = ACCOUNTS.filter((a) => a.platform === p.id);
+          const list = accounts.filter((a) => a.platform === p.id);
           const errCount = list.filter((a) => a.status === "error").length;
           const activeCount = list.filter((a) => a.status === "active").length;
           return (

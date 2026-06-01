@@ -17,7 +17,7 @@ import {
 import { notifications } from "@mantine/notifications";
 import { useEffect, useState } from "react";
 
-import { KIND, KIND_ICON, STATUS_LABEL } from "@/shared/data/mock";
+import { KIND, KIND_ICON, STATUS_LABEL } from "@/shared/data/config";
 import type { GoFn, LibraryPost, ModeValue } from "@/shared/data/types";
 import { deletePost, listPosts, upsertPost } from "@/shared/ipc/posts";
 import { Icon } from "@/shared/ui/icons";
