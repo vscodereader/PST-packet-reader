@@ -8,6 +8,11 @@ pub struct PostRequest {
     pub cafe_id: String,
     /// 게시판(메뉴) ID.
     pub menu_id: u64,
+    /// 선택된 게시판의 `boardType` (예: `"L"`).
+    ///
+    /// 본문 페이로드에는 포함되지 않으며, 글쓰기 Referer 헤더
+    /// (`.../articles/write?boardType={board_type}`)에만 사용된다.
+    pub board_type: String,
     /// 게시글 제목.
     pub subject: String,
     /// 게시글 본문 텍스트.
@@ -36,6 +41,7 @@ mod tests {
         PostRequest {
             cafe_id: "12345".to_string(),
             menu_id: 99,
+            board_type: "L".to_string(),
             subject: "테스트 제목".to_string(),
             body_text: "본문 내용".to_string(),
             tag_list: vec!["태그1".to_string(), "태그2".to_string()],
@@ -81,6 +87,7 @@ mod tests {
         let req = PostRequest {
             cafe_id: "1".to_string(),
             menu_id: 1,
+            board_type: "L".to_string(),
             subject: "제목".to_string(),
             body_text: "본문".to_string(),
             tag_list: vec![],
@@ -101,6 +108,7 @@ mod tests {
         let req = PostRequest {
             cafe_id: "1".to_string(),
             menu_id: 1,
+            board_type: "L".to_string(),
             subject: "제목".to_string(),
             body_text: "본문".to_string(),
             tag_list: vec![],

@@ -239,6 +239,7 @@ impl CafeHttpClient {
         &self,
         cafe_id: &str,
         menu_id: u64,
+        board_type: &str,
         body: &ArticleWriteBody,
         cookie_header: Option<&str>,
     ) -> Result<ArticleRegisterResult, PostError> {
@@ -246,7 +247,7 @@ impl CafeHttpClient {
         let url = format!("{}{}", self.base_url, path);
 
         let mut req = self.http.post(&url);
-        for (name, value) in article_post_headers(cafe_id) {
+        for (name, value) in article_post_headers(cafe_id, board_type) {
             req = req.header(&name, &value);
         }
 
@@ -339,6 +340,10 @@ mod tests {
         1
     }
 
+    fn board_type() -> &'static str {
+        "L"
+    }
+
     fn dummy_body() -> ArticleWriteBody {
         use crate::naver_cafe::post::{
             models::PostRequest, request_builder::build_article_write_body_with_content,
@@ -347,6 +352,7 @@ mod tests {
         let req = PostRequest {
             cafe_id: cafe_id().to_string(),
             menu_id: menu_id(),
+            board_type: board_type().to_string(),
             subject: "테스트".to_string(),
             body_text: "본문".to_string(),
             tag_list: vec![],
@@ -387,7 +393,7 @@ mod tests {
 
         let client = CafeHttpClient::with_base_url(server.uri());
         let result = client
-            .post_article(cafe_id(), menu_id(), &dummy_body(), None)
+            .post_article(cafe_id(), menu_id(), board_type(), &dummy_body(), None)
             .await
             .expect("성공 응답이어야 함");
 
@@ -416,7 +422,7 @@ mod tests {
 
         let client = CafeHttpClient::with_base_url(server.uri());
         client
-            .post_article(cafe_id(), menu_id(), &dummy_body(), None)
+            .post_article(cafe_id(), menu_id(), board_type(), &dummy_body(), None)
             .await
             .expect("성공 응답이어야 함");
 
@@ -439,7 +445,7 @@ mod tests {
 
         let client = CafeHttpClient::with_base_url(server.uri());
         client
-            .post_article(cafe_id(), menu_id(), &dummy_body(), None)
+            .post_article(cafe_id(), menu_id(), board_type(), &dummy_body(), None)
             .await
             .expect("성공 응답이어야 함");
 
@@ -471,7 +477,7 @@ mod tests {
 
         let client = CafeHttpClient::with_base_url(server.uri());
         client
-            .post_article(cafe_id(), menu_id(), &dummy_body(), None)
+            .post_article(cafe_id(), menu_id(), board_type(), &dummy_body(), None)
             .await
             .expect("성공 응답이어야 함");
     }
@@ -494,7 +500,7 @@ mod tests {
 
         let client = CafeHttpClient::with_base_url(server.uri());
         client
-            .post_article(cafe_id(), menu_id(), &dummy_body(), Some(fake_cookie))
+            .post_article(cafe_id(), menu_id(), board_type(), &dummy_body(), Some(fake_cookie))
             .await
             .expect("성공 응답이어야 함");
     }
@@ -517,7 +523,7 @@ mod tests {
 
         let client = CafeHttpClient::with_base_url(server.uri());
         client
-            .post_article(cafe_id(), menu_id(), &dummy_body(), Some(fake_cookie))
+            .post_article(cafe_id(), menu_id(), board_type(), &dummy_body(), Some(fake_cookie))
             .await
             .expect("성공 응답이어야 함");
     }
@@ -540,7 +546,7 @@ mod tests {
 
         let client = CafeHttpClient::with_base_url(server.uri());
         let err = client
-            .post_article(cafe_id(), menu_id(), &dummy_body(), None)
+            .post_article(cafe_id(), menu_id(), board_type(), &dummy_body(), None)
             .await
             .expect_err("500은 Err여야 함");
 
@@ -585,7 +591,7 @@ mod tests {
 
         let client = CafeHttpClient::with_base_url(server.uri());
         let err = client
-            .post_article(cafe_id(), menu_id(), &dummy_body(), None)
+            .post_article(cafe_id(), menu_id(), board_type(), &dummy_body(), None)
             .await
             .expect_err("403은 Err여야 함");
 
@@ -627,7 +633,7 @@ mod tests {
 
         let client = CafeHttpClient::with_base_url(server.uri());
         let err = client
-            .post_article(cafe_id(), menu_id(), &dummy_body(), None)
+            .post_article(cafe_id(), menu_id(), board_type(), &dummy_body(), None)
             .await
             .expect_err("403은 Err여야 함");
 
@@ -653,7 +659,7 @@ mod tests {
 
         let client = CafeHttpClient::with_base_url(server.uri());
         let err = client
-            .post_article(cafe_id(), menu_id(), &dummy_body(), None)
+            .post_article(cafe_id(), menu_id(), board_type(), &dummy_body(), None)
             .await
             .expect_err("500은 Err여야 함");
 
@@ -680,7 +686,7 @@ mod tests {
 
         let client = CafeHttpClient::with_base_url(server.uri());
         let err = client
-            .post_article(cafe_id(), menu_id(), &dummy_body(), None)
+            .post_article(cafe_id(), menu_id(), board_type(), &dummy_body(), None)
             .await
             .expect_err("파싱 불가 응답은 Err여야 함");
 

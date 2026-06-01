@@ -193,7 +193,7 @@ pub fn build_post_preview(
     let request_body_length = request_body_json.len();
 
     let path = article_post_path(&request.cafe_id, request.menu_id);
-    let headers = article_post_headers(&request.cafe_id);
+    let headers = article_post_headers(&request.cafe_id, &request.board_type);
 
     // 본문 줄 수 — lines() 는 빈 마지막 개행을 제외하므로 split('\n')을 사용
     let body_line_count = if request.body_text.is_empty() {
@@ -352,6 +352,7 @@ pub async fn execute_post_live(
         .post_article(
             &request.cafe_id,
             request.menu_id,
+            &request.board_type,
             &body,
             cookie_header.as_deref(),
         )
@@ -374,6 +375,7 @@ mod tests {
         PostRequest {
             cafe_id: "31732304".to_string(),
             menu_id: 1,
+            board_type: "L".to_string(),
             subject: "rust".to_string(),
             body_text: "rust 본문".to_string(),
             tag_list: vec!["RUST".to_string(), "C".to_string()],
@@ -641,6 +643,8 @@ mod tests {
         let subject =
             std::env::var("PSTMACRO_LIVE_SUBJECT").unwrap_or_else(|_| "test".to_string());
         let body = std::env::var("PSTMACRO_LIVE_BODY").unwrap_or_else(|_| "test body".to_string());
+        let board_type =
+            std::env::var("PSTMACRO_LIVE_BOARD_TYPE").unwrap_or_else(|_| "L".to_string());
 
         // --- 쿠키 상태 확인 (유효성 검증 포함 경로) ---
         // 보안: 쿠키 값 자체는 출력하지 않고 유효/만료 여부만 출력한다.
@@ -678,6 +682,7 @@ mod tests {
         let request = PostRequest {
             cafe_id: cafe_id.clone(),
             menu_id,
+            board_type: board_type.clone(),
             subject,
             body_text: body,
             tag_list: vec![],
@@ -701,7 +706,7 @@ mod tests {
         // --- 실제 전송 ---
         let client = CafeHttpClient::new();
         let result = client
-            .post_article(&cafe_id, menu_id, &body, cookie_header.as_deref())
+            .post_article(&cafe_id, menu_id, &board_type, &body, cookie_header.as_deref())
             .await;
 
         // --- 결과 출력 (성공/실패 모두 허용, assert 없음) ---

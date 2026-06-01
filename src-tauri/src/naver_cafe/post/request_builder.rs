@@ -155,8 +155,9 @@ pub fn article_post_path(cafe_id: &str, menu_id: u64) -> String {
 /// - `Content-Type: application/json`
 /// - `Accept: application/json, text/plain, */*`
 /// - `Origin: https://cafe.naver.com`
-/// - `Referer: https://cafe.naver.com/ca-fe/cafes/{cafeId}/articles/write?boardType=L`
-///   - boardType은 게시판 유형(L=리스트형)으로 현재 L 고정, 추후 게시판별로 달라질 수 있음.
+/// - `Referer: https://cafe.naver.com/ca-fe/cafes/{cafeId}/articles/write?boardType={boardType}`
+///   - `board_type`은 선택된 게시판의 레이아웃 유형([`Menu::board_type`](crate::naver_cafe::menu::Menu))이다.
+///     일반 게시판은 보통 `"L"`(리스트형)이지만 게시판마다 다를 수 있다.
 /// - `x-cafe-product: pc`  ← 에디터 서비스 필수 헤더 ([`CAFE_PRODUCT_PC`] 참조)
 /// - `sec-fetch-site: same-site`
 /// - `sec-fetch-mode: cors`
@@ -165,7 +166,7 @@ pub fn article_post_path(cafe_id: &str, menu_id: u64) -> String {
 ///
 /// ℹ️ `accept-encoding`, `content-length`, 가상 헤더(`:method` 등), `User-Agent`는
 /// 포함하지 않는다 — reqwest 또는 상위 레이어가 처리한다.
-pub fn article_post_headers(cafe_id: &str) -> Vec<(String, String)> {
+pub fn article_post_headers(cafe_id: &str, board_type: &str) -> Vec<(String, String)> {
     vec![
         ("Content-Type".to_string(), "application/json".to_string()),
         (
@@ -176,7 +177,7 @@ pub fn article_post_headers(cafe_id: &str) -> Vec<(String, String)> {
         (
             "Referer".to_string(),
             format!(
-                "https://cafe.naver.com/ca-fe/cafes/{cafe_id}/articles/write?boardType=L"
+                "https://cafe.naver.com/ca-fe/cafes/{cafe_id}/articles/write?boardType={board_type}"
             ),
         ),
         (
@@ -214,6 +215,7 @@ mod tests {
         PostRequest {
             cafe_id: "31732304".to_string(),
             menu_id: 1,
+            board_type: "L".to_string(),
             subject: "rust".to_string(),
             body_text: "rust 본문".to_string(),
             tag_list: vec![
@@ -364,7 +366,7 @@ mod tests {
 
     #[test]
     fn headers_referer_uses_write_url_with_board_type_l() {
-        let headers = article_post_headers("31732304");
+        let headers = article_post_headers("31732304", "L");
         let referer = headers
             .iter()
             .find(|(name, _)| name == "Referer")
@@ -378,8 +380,24 @@ mod tests {
     }
 
     #[test]
+    fn headers_referer_uses_provided_board_type() {
+        // L이 아닌 게시판 유형도 Referer에 그대로 반영되어야 함
+        let headers = article_post_headers("31732304", "M");
+        let referer = headers
+            .iter()
+            .find(|(name, _)| name == "Referer")
+            .map(|(_, val)| val.as_str())
+            .expect("Referer 헤더가 없음");
+        assert_eq!(
+            referer,
+            "https://cafe.naver.com/ca-fe/cafes/31732304/articles/write?boardType=M",
+            "Referer는 전달된 board_type을 사용해야 함"
+        );
+    }
+
+    #[test]
     fn headers_origin_is_correct() {
-        let headers = article_post_headers("31732304");
+        let headers = article_post_headers("31732304", "L");
         let origin = headers
             .iter()
             .find(|(name, _)| name == "Origin")
@@ -390,7 +408,7 @@ mod tests {
 
     #[test]
     fn headers_content_type_is_json() {
-        let headers = article_post_headers("31732304");
+        let headers = article_post_headers("31732304", "L");
         let ct = headers
             .iter()
             .find(|(name, _)| name == "Content-Type")
@@ -401,7 +419,7 @@ mod tests {
 
     #[test]
     fn headers_x_cafe_product_is_pc() {
-        let headers = article_post_headers("31732304");
+        let headers = article_post_headers("31732304", "L");
         let val = headers
             .iter()
             .find(|(name, _)| name == "x-cafe-product")
@@ -412,7 +430,7 @@ mod tests {
 
     #[test]
     fn headers_accept_is_json() {
-        let headers = article_post_headers("31732304");
+        let headers = article_post_headers("31732304", "L");
         let val = headers
             .iter()
             .find(|(name, _)| name == "Accept")
@@ -423,7 +441,7 @@ mod tests {
 
     #[test]
     fn headers_sec_fetch_headers_present() {
-        let headers = article_post_headers("31732304");
+        let headers = article_post_headers("31732304", "L");
         let find = |key: &str| {
             headers
                 .iter()
@@ -449,7 +467,7 @@ mod tests {
 
     #[test]
     fn headers_accept_language_is_set() {
-        let headers = article_post_headers("31732304");
+        let headers = article_post_headers("31732304", "L");
         let val = headers
             .iter()
             .find(|(name, _)| name == "accept-language")
@@ -467,6 +485,7 @@ mod tests {
         let req = PostRequest {
             cafe_id: "31732304".to_string(),
             menu_id: 1,
+            board_type: "L".to_string(),
             subject: "rust".to_string(),
             body_text: "rust 본문".to_string(),
             tag_list: vec!["RUST".to_string()],
@@ -491,6 +510,7 @@ mod tests {
         let req = PostRequest {
             cafe_id: "31732304".to_string(),
             menu_id: 1,
+            board_type: "L".to_string(),
             subject: "rust".to_string(),
             body_text: "rust 본문".to_string(),
             tag_list: vec!["RUST".to_string()],

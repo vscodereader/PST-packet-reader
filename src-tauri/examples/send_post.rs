@@ -54,6 +54,8 @@ async fn main() {
         pick(&args, "--subject", "PSTMACRO_LIVE_SUBJECT").unwrap_or_else(|| "테스트 제목".to_string());
     let body =
         pick(&args, "--body", "PSTMACRO_LIVE_BODY").unwrap_or_else(|| "테스트 본문".to_string());
+    let board_type =
+        pick(&args, "--board-type", "PSTMACRO_LIVE_BOARD_TYPE").unwrap_or_else(|| "L".to_string());
 
     // 쿠키 확보: (1) 파일 경로 직접 지정 우선, (2) account_id 로 저장된 쿠키 조회
     let cookies_value = match resolve_cookies(&args) {
@@ -75,6 +77,7 @@ async fn main() {
     let request = PostRequest {
         cafe_id: cafe_id.clone(),
         menu_id,
+        board_type: board_type.clone(),
         subject,
         body_text: body,
         tag_list: vec![],
@@ -97,7 +100,7 @@ async fn main() {
 
     let client = CafeHttpClient::new();
     match client
-        .post_article(&cafe_id, menu_id, &body, Some(cookie_header.as_str()))
+        .post_article(&cafe_id, menu_id, &board_type, &body, Some(cookie_header.as_str()))
         .await
     {
         Ok(result) => {
