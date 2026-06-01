@@ -15,8 +15,17 @@ while read -r _local_ref _local_sha remote_ref _remote_sha; do
   fi
 done
 
-# Run the test suite before push — fail fast on broken tests
-if ! ./node_modules/.bin/vitest run --silent; then
+# Run tests related to changed files vs origin/master — much faster
+# than a full vitest run as the test suite grows. Falls back to the
+# full run if origin/master isn't fetched (e.g. first push from a
+# fresh clone).
+if git rev-parse --verify origin/master >/dev/null 2>&1; then
+  test_cmd="./node_modules/.bin/vitest run --silent --changed origin/master"
+else
+  test_cmd="./node_modules/.bin/vitest run --silent"
+fi
+
+if ! $test_cmd; then
   echo ""
   echo "  ✖ Tests failed. Fix the failing tests before pushing." >&2
   echo "    Run 'pnpm test' locally to see the details." >&2
