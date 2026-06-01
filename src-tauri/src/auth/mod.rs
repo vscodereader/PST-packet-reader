@@ -8,7 +8,7 @@ mod queue;
 mod types;
 mod util;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Runtime};
 
 pub use accounts::{read_account_cookies, save_accounts_file};
 pub use error::OrchestratorError;
@@ -28,8 +28,8 @@ pub async fn bootstrap_runtime() -> Result<RuntimePaths, OrchestratorError> {
     Ok(paths)
 }
 
-async fn process_account(
-    app: &AppHandle,
+async fn process_account<R: Runtime>(
+    app: &AppHandle<R>,
     account_id: &str,
     headless: bool,
     use_adb: bool,

@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Runtime};
 
 use super::{
     accounts::{account_cookie_status_for_app_data, CookieStatus},
@@ -29,9 +29,9 @@ pub struct QueueState {
 }
 
 /// 계정들을 처리 큐에 추가하고 필요시 처리를 시작한다.
-pub fn enqueue_accounts(
+pub fn enqueue_accounts<R: Runtime>(
     state: &QueueState,
-    app: AppHandle,
+    app: AppHandle<R>,
     account_ids: Vec<String>,
     headless: bool,
     use_adb: bool,
@@ -84,7 +84,7 @@ pub fn get_queue_status(state: &QueueState) -> Result<QueueStatus, OrchestratorE
     })
 }
 
-async fn worker_loop(state: QueueState, app: AppHandle) {
+async fn worker_loop<R: Runtime>(state: QueueState, app: AppHandle<R>) {
     loop {
         let job = {
             let Ok(mut inner) = state.inner.lock() else {

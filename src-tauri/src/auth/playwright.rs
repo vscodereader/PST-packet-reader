@@ -1,6 +1,6 @@
 use std::{fs, path::Path, time::Duration};
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Runtime};
 use tauri_plugin_shell::ShellExt;
 use tokio::time::{sleep, Instant};
 
@@ -12,8 +12,8 @@ use super::{
     util::safe_file_stem,
 };
 
-pub async fn run_playwright_login(
-    app: &AppHandle,
+pub async fn run_playwright_login<R: Runtime>(
+    app: &AppHandle<R>,
     paths: &RuntimePaths,
     account: &Account,
     headless: bool,
