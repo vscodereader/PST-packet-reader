@@ -364,6 +364,7 @@ export function Accounts({ go }: { go: GoFn }) {
         </Box>
         <Group gap="xs">
           <Button
+            size="sm"
             variant="default"
             leftSection={<Icon.inbox size={16} />}
             onClick={() =>
@@ -373,6 +374,7 @@ export function Accounts({ go }: { go: GoFn }) {
             엑셀 가져오기
           </Button>
           <Button
+            size="sm"
             variant="default"
             leftSection={<Icon.download size={16} />}
             onClick={() => toast("현재 계정 목록을 엑셀로 내보냈어요", "green")}
@@ -380,7 +382,7 @@ export function Accounts({ go }: { go: GoFn }) {
             내보내기
           </Button>
           <Button
-            size="md"
+            size="sm"
             leftSection={<Icon.plus size={17} />}
             onClick={addRow}
           >

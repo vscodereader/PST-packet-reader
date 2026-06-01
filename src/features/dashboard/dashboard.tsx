@@ -42,7 +42,7 @@ export function Dashboard({ go }: { go: GoFn }) {
           </Title>
         </Box>
         <Button
-          size="md"
+          size="sm"
           leftSection={<Icon.pencil size={18} />}
           onClick={() => go("posts")}
         >
