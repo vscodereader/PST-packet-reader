@@ -88,10 +88,6 @@ pub fn run() {
                 activity::seed(),
             ));
             app.manage(JsonStore::load_or_seed(
-                dir.join("stats.json"),
-                stats::seed(),
-            ));
-            app.manage(JsonStore::load_or_seed(
                 dir.join("scheduled.json"),
                 scheduled::seed(),
             ));
