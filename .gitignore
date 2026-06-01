@@ -33,3 +33,6 @@ src-tauri/binaries/
 *.njsproj
 *.sln
 *.sw?
+
+# Brainstorming visual-companion mockups
+.superpowers/

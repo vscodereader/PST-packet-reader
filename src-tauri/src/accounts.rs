@@ -65,7 +65,13 @@ pub fn apply_add(mut accounts: Vec<Account>, account: Account) -> Vec<Account> {
 pub fn apply_update(accounts: Vec<Account>, account: Account) -> Vec<Account> {
     accounts
         .into_iter()
-        .map(|a| if a.id == account.id { account.clone() } else { a })
+        .map(|a| {
+            if a.id == account.id {
+                account.clone()
+            } else {
+                a
+            }
+        })
         .collect()
 }
 
@@ -235,7 +241,10 @@ mod tests {
 
     #[test]
     fn enums_serialize_as_lowercase_strings() {
-        assert_eq!(serde_json::to_string(&PlatformId::Forum).unwrap(), "\"forum\"");
+        assert_eq!(
+            serde_json::to_string(&PlatformId::Forum).unwrap(),
+            "\"forum\""
+        );
         assert_eq!(
             serde_json::to_string(&AccountStatus::Active).unwrap(),
             "\"active\""

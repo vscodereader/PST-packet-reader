@@ -2696,11 +2696,11 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
- "ts-rs",
  "tauri-plugin-shell",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "ts-rs",
 ]
 
 [[package]]
