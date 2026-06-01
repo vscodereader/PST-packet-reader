@@ -1,9 +1,11 @@
 mod accounts;
 mod adb;
+mod chrome;
 pub mod config;
 mod error;
+mod login;
+mod login_flow;
 mod paths;
-mod playwright;
 mod queue;
 mod types;
 mod util;
@@ -19,7 +21,6 @@ pub use types::{Account, QueueJob, QueueJobStatus, QueueStatus, RuntimePaths};
 use accounts::{has_valid_account_cookies, load_accounts_file};
 use adb::{assert_adb_device, toggle_airplane_mode};
 use paths::ensure_runtime_dirs;
-use playwright::run_playwright_login;
 
 /// 런타임 환경을 초기화하고 필요한 디렉토리와 도구들을 준비한다.
 pub async fn bootstrap_runtime() -> Result<RuntimePaths, OrchestratorError> {
@@ -28,8 +29,10 @@ pub async fn bootstrap_runtime() -> Result<RuntimePaths, OrchestratorError> {
     Ok(paths)
 }
 
+// `_app`은 sidecar 시절 shell 실행에 쓰였으나, CDP 로그인으로 전환하며 더는 쓰이지 않는다.
+// 호출부(queue worker) 변경을 최소화하기 위해 시그니처는 유지한다.
 async fn process_account(
-    app: &AppHandle,
+    _app: &AppHandle,
     account_id: &str,
     headless: bool,
     use_adb: bool,
@@ -56,5 +59,9 @@ async fn process_account(
         assert_adb_device().await?;
         toggle_airplane_mode().await?;
     }
-    run_playwright_login(app, &paths, &account, headless).await
+
+    // CDP 로그인은 Chrome을 띄워 동기적으로 동작하므로 blocking 스레드에서 실행한다.
+    tauri::async_runtime::spawn_blocking(move || login::login(&paths, &account, headless))
+        .await
+        .map_err(|error| OrchestratorError::CommandFailed(format!("로그인 스레드 오류: {error}")))?
 }

@@ -55,18 +55,6 @@ jobs:
             libwebkit2gtk-4.1-dev \
             librsvg2-dev \
             patchelf
-      # The Tauri build script validates `externalBin` (naver-login sidecar),
-      # so the stub binary must exist before cargo compiles the crate.
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: pnpm
-      - name: Build naver-login sidecar
-        working-directory: ${{ github.workspace }}
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm build:sidecar
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --all-targets

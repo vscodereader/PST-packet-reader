@@ -231,14 +231,14 @@ pub fn run_naver_post_with_comment_macro(
     Ok(vec![post_report, comment_report])
 }
 
-struct CdpClient {
+pub(crate) struct CdpClient {
     socket: WebSocket<MaybeTlsStream<TcpStream>>,
     next_id: u64,
 }
 
 impl CdpClient {
     // 이미 실행 중인 Chrome DevTools 탭에 WebSocket으로 연결하는 함수입니다.
-    fn connect_to_existing_chrome(host: &str, port: u16) -> AutomationResult<Self> {
+    pub(crate) fn connect_to_existing_chrome(host: &str, port: u16) -> AutomationResult<Self> {
         let target = select_or_create_target(host, port).map_err(|error| {
             AutomationError::new(format!("Chrome DevTools 대상 탭 선택 실패: {error}"))
         })?;
@@ -253,7 +253,7 @@ impl CdpClient {
     }
 
     // Chrome DevTools의 Runtime/Page 도메인을 활성화하는 함수입니다.
-    fn enable(&mut self) -> AutomationResult<()> {
+    pub(crate) fn enable(&mut self) -> AutomationResult<()> {
         self.call("Runtime.enable", json!({}))
             .map_err(|error| AutomationError::new(format!("Runtime.enable 실패: {error}")))?;
         self.call("Page.enable", json!({}))
@@ -295,7 +295,7 @@ impl CdpClient {
     }
 
     // Chrome DevTools Protocol 메서드를 호출하고 응답을 기다리는 함수입니다.
-    fn call(&mut self, method: &str, params: Value) -> AutomationResult<Value> {
+    pub(crate) fn call(&mut self, method: &str, params: Value) -> AutomationResult<Value> {
         self.next_id += 1;
         let id = self.next_id;
         let payload = json!({
@@ -381,7 +381,7 @@ impl CdpClient {
     }
 
     // 연결된 Chrome 탭 안에서 JavaScript 표현식을 실행하는 함수입니다.
-    fn evaluate(&mut self, expression: &str) -> AutomationResult<Value> {
+    pub(crate) fn evaluate(&mut self, expression: &str) -> AutomationResult<Value> {
         let result = self.call(
             "Runtime.evaluate",
             json!({
@@ -406,12 +406,12 @@ impl CdpClient {
     }
 
     // JavaScript 실행 결과를 bool 값으로 읽는 함수입니다.
-    fn evaluate_bool(&mut self, expression: &str) -> AutomationResult<bool> {
+    pub(crate) fn evaluate_bool(&mut self, expression: &str) -> AutomationResult<bool> {
         Ok(self.evaluate(expression)?.as_bool().unwrap_or(false))
     }
 
     // JavaScript 실행 결과를 문자열로 읽는 함수입니다.
-    fn evaluate_string(&mut self, expression: &str) -> AutomationResult<String> {
+    pub(crate) fn evaluate_string(&mut self, expression: &str) -> AutomationResult<String> {
         Ok(self
             .evaluate(expression)?
             .as_str()
@@ -420,18 +420,18 @@ impl CdpClient {
     }
 
     // 현재 Chrome 탭의 URL을 읽는 함수입니다.
-    fn current_url(&mut self) -> AutomationResult<String> {
+    pub(crate) fn current_url(&mut self) -> AutomationResult<String> {
         self.evaluate_string("location.href")
     }
 
     // Chrome 탭을 지정한 URL로 이동시키는 함수입니다.
-    fn navigate(&mut self, url: &str) -> AutomationResult<()> {
+    pub(crate) fn navigate(&mut self, url: &str) -> AutomationResult<()> {
         self.call("Page.navigate", json!({ "url": url }))?;
         self.wait_for_ready_state(DEFAULT_TIMEOUT)
     }
 
     // 페이지가 interactive 또는 complete 상태가 될 때까지 기다리는 함수입니다.
-    fn wait_for_ready_state(&mut self, timeout: Duration) -> AutomationResult<()> {
+    pub(crate) fn wait_for_ready_state(&mut self, timeout: Duration) -> AutomationResult<()> {
         let end = Instant::now() + timeout;
 
         while Instant::now() < end {
