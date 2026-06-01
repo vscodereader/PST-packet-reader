@@ -22,7 +22,7 @@ import type {
   ModeValue,
   Stock,
 } from "@/shared/data/types";
-import { listStocks } from "@/shared/ipc/stocks";
+import { ipc } from "@/shared/ipc";
 import { Icon } from "@/shared/ui/icons";
 
 export interface WriterModalProps {
@@ -311,7 +311,7 @@ function WriterModalInner({
   const [stocks, setStocks] = useState<Stock[]>([]);
 
   useEffect(() => {
-    void listStocks().then(setStocks);
+    void ipc.stocks.list().then(setStocks);
   }, []);
 
   const bodyRef = useRef<HTMLDivElement | null>(null);

@@ -34,10 +34,7 @@ import type {
   PublishResult,
   Stock,
 } from "@/shared/data/types";
-import { listAccounts } from "@/shared/ipc/accounts";
-import { listBands } from "@/shared/ipc/bands";
-import { listCafes } from "@/shared/ipc/cafes";
-import { listStocks } from "@/shared/ipc/stocks";
+import { ipc } from "@/shared/ipc";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo, PlatformPill } from "@/shared/ui/platform-logo";
 
@@ -424,18 +421,18 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [flow, setFlow] = useState<null | "running" | PublishResult[]>(null);
 
   useEffect(() => {
-    void listAccounts().then((a) => {
+    void ipc.accounts.list().then((a) => {
       setAccounts(a);
       const firstUsable = a.find((x) => x.status !== "error");
       setSelected((s) => (s.length || !firstUsable ? s : [firstUsable.id]));
     });
-    void listStocks().then(setStocks);
-    void listCafes().then((c) => {
+    void ipc.stocks.list().then(setStocks);
+    void ipc.cafes.list().then((c) => {
       setCafes(c);
       setCafe((cur) => cur || (c[0]?.name ?? ""));
       setCafeBoard((cur) => cur || (c[0]?.boards[0] ?? ""));
     });
-    void listBands().then((b) => {
+    void ipc.bands.list().then((b) => {
       setBands(b);
       setBand((cur) => cur || (b[0]?.name ?? ""));
     });

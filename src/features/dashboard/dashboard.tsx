@@ -21,10 +21,7 @@ import type { Scheduled } from "@/shared/bindings/Scheduled";
 import { PLATFORMS } from "@/shared/data/config";
 import { acctPlatforms } from "@/shared/data/helpers";
 import type { GoFn, ViewId } from "@/shared/data/types";
-import { listAccounts } from "@/shared/ipc/accounts";
-import { listActivity } from "@/shared/ipc/activity";
-import { listScheduled } from "@/shared/ipc/scheduled";
-import { listStats } from "@/shared/ipc/stats";
+import { ipc } from "@/shared/ipc";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo, PlatformPill } from "@/shared/ui/platform-logo";
 
@@ -42,10 +39,10 @@ export function Dashboard({ go }: { go: GoFn }) {
   const [accounts, setAccounts] = useState<Account[]>([]);
 
   useEffect(() => {
-    void listStats().then(setStats);
-    void listScheduled().then(setScheduled);
-    void listActivity().then(setActivity);
-    void listAccounts().then(setAccounts);
+    void ipc.stats.list().then(setStats);
+    void ipc.scheduled.list().then(setScheduled);
+    void ipc.activity.list().then(setActivity);
+    void ipc.accounts.list().then(setAccounts);
   }, []);
 
   return (

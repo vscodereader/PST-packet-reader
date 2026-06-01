@@ -16,9 +16,7 @@ import { Notifications } from "@/features/notifications/notifications";
 import { Posts } from "@/features/posts/posts";
 import { Queue } from "@/features/queue/queue";
 import type { GoFn, LogFilter, ViewId } from "@/shared/data/types";
-import { listAccounts } from "@/shared/ipc/accounts";
-import { listPosts } from "@/shared/ipc/posts";
-import { listQueueNow, listQueueScheduled } from "@/shared/ipc/queue";
+import { ipc } from "@/shared/ipc";
 import { Icon, type IconName } from "@/shared/ui/icons";
 
 const VIEWS: ViewId[] = ["dashboard", "posts", "queue", "log", "accounts"];
@@ -97,10 +95,10 @@ export function MacroApp() {
   const [counts, setCounts] = useState({ posts: 0, queue: 0, accounts: 0 });
   useEffect(() => {
     void Promise.all([
-      listPosts(),
-      listQueueNow(),
-      listQueueScheduled(),
-      listAccounts(),
+      ipc.posts.list(),
+      ipc.queue.listNow(),
+      ipc.queue.listScheduled(),
+      ipc.accounts.list(),
     ]).then(([posts, now, sched, accounts]) =>
       setCounts({
         posts: posts.length,

@@ -12,7 +12,7 @@ import {
 import { useEffect, useState } from "react";
 
 import type { Stock } from "@/shared/data/types";
-import { listStocks } from "@/shared/ipc/stocks";
+import { ipc } from "@/shared/ipc";
 import { Icon } from "@/shared/ui/icons";
 
 export interface StockCrawlModalProps {
@@ -36,7 +36,7 @@ function StockCrawlModalInner({
   const [stocks, setStocks] = useState<Stock[]>([]);
 
   useEffect(() => {
-    void listStocks().then(setStocks);
+    void ipc.stocks.list().then(setStocks);
   }, []);
 
   useEffect(() => {

@@ -19,7 +19,7 @@ import { useEffect, useState } from "react";
 
 import { KIND, KIND_ICON, STATUS_LABEL } from "@/shared/data/config";
 import type { GoFn, LibraryPost, ModeValue } from "@/shared/data/types";
-import { deletePost, listPosts, upsertPost } from "@/shared/ipc/posts";
+import { ipc } from "@/shared/ipc";
 import { Icon } from "@/shared/ui/icons";
 
 import { PublishModal } from "./publish-modal";
@@ -35,7 +35,7 @@ export function Posts({ go }: { go: GoFn }) {
   const [posts, setPosts] = useState<LibraryPost[]>([]);
 
   useEffect(() => {
-    void listPosts().then(setPosts);
+    void ipc.posts.list().then(setPosts);
   }, []);
   const [filter, setFilter] = useState<"all" | ModeValue>("all");
   const [q, setQ] = useState("");
@@ -45,7 +45,7 @@ export function Posts({ go }: { go: GoFn }) {
   const [publishDoc, setPublishDoc] = useState<LibraryPost | null>(null);
 
   const upsert = (doc: LibraryPost) => {
-    void upsertPost(doc).then(setPosts);
+    void ipc.posts.upsert(doc).then(setPosts);
   };
   const openNew = () => {
     setWriterDoc(null);
@@ -66,7 +66,7 @@ export function Posts({ go }: { go: GoFn }) {
     toast("복제했어요", "green");
   };
   const del = (id: string) => {
-    void deletePost(id).then(setPosts);
+    void ipc.posts.remove(id).then(setPosts);
     toast("삭제했어요");
   };
 
@@ -295,7 +295,7 @@ export function Posts({ go }: { go: GoFn }) {
         }}
         onSaveDraft={upsert}
         onDeleteDraft={(d) => {
-          void deletePost(d.id).then(setPosts);
+          void ipc.posts.remove(d.id).then(setPosts);
           toast("임시저장을 삭제했어요");
         }}
       />

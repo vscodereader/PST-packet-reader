@@ -15,12 +15,7 @@ export default defineConfig({
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
     pool: "threads",
-    poolOptions: {
-      threads: {
-        maxThreads: 4,
-        minThreads: 1,
-      },
-    },
+    maxWorkers: 4,
     coverage: {
       provider: "v8",
       reporter: ["text", "json-summary", "html"],

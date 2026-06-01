@@ -22,8 +22,7 @@ import { useEffect, useState } from "react";
 import { ACTIVE_PLATFORMS, KIND } from "@/shared/data/config";
 import { batchStatus } from "@/shared/data/helpers";
 import type { BatchItem, LogBatch, LogFilter } from "@/shared/data/types";
-import { listActivity } from "@/shared/ipc/activity";
-import { listLogBatches } from "@/shared/ipc/log-batches";
+import { ipc } from "@/shared/ipc";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo } from "@/shared/ui/platform-logo";
 
@@ -232,8 +231,8 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
   const [activity, setActivity] = useState<SystemRow[]>([]);
 
   useEffect(() => {
-    void listLogBatches().then(setLogBatches);
-    void listActivity().then((items) =>
+    void ipc.logBatches.list().then(setLogBatches);
+    void ipc.activity.list().then((items) =>
       setActivity(
         items.map((a) => ({
           id: a.id,

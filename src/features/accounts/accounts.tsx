@@ -27,12 +27,7 @@ import type {
   GoFn,
   PlatformId,
 } from "@/shared/data/types";
-import {
-  addAccount,
-  deleteAccounts,
-  listAccounts,
-  updateAccount,
-} from "@/shared/ipc/accounts";
+import { ipc } from "@/shared/ipc";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo } from "@/shared/ui/platform-logo";
 
@@ -272,7 +267,7 @@ export function Accounts({ go }: { go: GoFn }) {
   const [rows, setRows] = useState<Account[]>([]);
 
   useEffect(() => {
-    void listAccounts().then(setRows);
+    void ipc.accounts.list().then(setRows);
   }, []);
   const [filter, setFilter] = useState<"all" | PlatformId>("all");
   const [tagFilter, setTagFilter] = useState<string | null>(null);
@@ -285,7 +280,7 @@ export function Accounts({ go }: { go: GoFn }) {
   const update = (id: string, patch: Partial<Account>) => {
     const cur = rows.find((r) => r.id === id);
     setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
-    if (cur) void updateAccount({ ...cur, ...patch }).then(setRows);
+    if (cur) void ipc.accounts.update({ ...cur, ...patch }).then(setRows);
   };
 
   const addRow = () => {
@@ -298,11 +293,11 @@ export function Accounts({ go }: { go: GoFn }) {
       last: "—",
       tags: [],
     };
-    void addAccount(account).then(setRows);
+    void ipc.accounts.add(account).then(setRows);
     toast("새 계정 행을 추가했어요", "green");
   };
   const removeSel = () => {
-    void deleteAccounts(sel).then(setRows);
+    void ipc.accounts.remove(sel).then(setRows);
     toast(`${sel.length}개 계정을 삭제했어요`);
     setSel([]);
   };
@@ -597,7 +592,7 @@ export function Accounts({ go }: { go: GoFn }) {
                     size="sm"
                     title="삭제"
                     onClick={() => {
-                      void deleteAccounts([r.id]).then(setRows);
+                      void ipc.accounts.remove([r.id]).then(setRows);
                       toast("계정을 삭제했어요");
                     }}
                   >

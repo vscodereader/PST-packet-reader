@@ -24,11 +24,7 @@ import type {
   QueueNowItem,
   QueueScheduledItem,
 } from "@/shared/data/types";
-import {
-  cancelQueueNow,
-  listQueueNow,
-  listQueueScheduled,
-} from "@/shared/ipc/queue";
+import { ipc } from "@/shared/ipc";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformPill } from "@/shared/ui/platform-logo";
 
@@ -63,8 +59,8 @@ export function Queue({ go }: { go: GoFn }) {
   const [dragId, setDragId] = useState<string | null>(null);
 
   useEffect(() => {
-    void listQueueNow().then(setNow);
-    void listQueueScheduled().then(setSched);
+    void ipc.queue.listNow().then(setNow);
+    void ipc.queue.listScheduled().then(setSched);
   }, []);
 
   const reorder = (id: string, targetId: string) => {
@@ -94,7 +90,7 @@ export function Queue({ go }: { go: GoFn }) {
     });
   };
   const cancel = (id: string) => {
-    void cancelQueueNow(id).then(setNow);
+    void ipc.queue.cancelNow(id).then(setNow);
     notifications.show({ message: "대기 작업을 취소했어요", color: "blue" });
   };
 
