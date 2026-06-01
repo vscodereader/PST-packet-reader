@@ -20,8 +20,17 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 글쓰기/댓글 패킷 자동화(naver_automation)에서 사용
 tungstenite = "0.21"
 url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+# 네이버 로그인 자동화(auth)에서 사용
+tokio = { version = "1", features = ["full"] }
+thiserror = "1"
+adb_client = { version = "3.2.1", features = ["usb"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -13,6 +13,12 @@ dist-ssr
 coverage
 *.local
 
+# Tauri sidecar binaries (빌드 시 생성)
+src-tauri/binaries/
+
+# 사이드카 빌드 임시 디렉토리
+.sidecar-build/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

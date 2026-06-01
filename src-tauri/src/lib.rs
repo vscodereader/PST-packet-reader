@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod discussion_batch;
 pub mod naver_automation;
 
@@ -63,6 +64,48 @@ async fn run_naver_discussion_batch(
     tauri::async_runtime::spawn_blocking(move || run_discussion_batch(request, app))
         .await
         .map_err(|error| format!("배치 실행 스레드 오류: {error}"))?
+}
+
+// === 네이버 로그인 자동화 command (feat/41, PR #49에서 master로 병합됨) ===
+
+#[tauri::command]
+async fn bootstrap_runtime() -> Result<auth::RuntimePaths, String> {
+    auth::bootstrap_runtime().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_accounts(accounts: Vec<auth::Account>) -> Result<Vec<auth::Account>, String> {
+    auth::save_accounts_file(&accounts).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn enqueue_cookie_refresh(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, auth::QueueState>,
+    account_ids: Vec<String>,
+    headless: Option<bool>,
+    use_adb: Option<bool>,
+) -> Result<auth::QueueStatus, String> {
+    auth::enqueue_accounts(
+        &state,
+        app,
+        account_ids,
+        headless.unwrap_or(false),
+        use_adb.unwrap_or(false),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_queue_status(
+    state: tauri::State<'_, auth::QueueState>,
+) -> Result<auth::QueueStatus, String> {
+    auth::get_queue_status(&state).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_account_cookies(account_id: String) -> Result<Option<serde_json::Value>, String> {
+    auth::read_account_cookies(&account_id).map_err(|e| e.to_string())
 }
 
 #[cfg(target_os = "windows")]
@@ -183,14 +226,46 @@ fn parse_automation_target(target: Option<String>) -> Result<AutomationTarget, S
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .manage(auth::QueueState::default())
         .invoke_handler(tauri::generate_handler![
             greet,
             run_naver_discussion,
             parse_template_csv,
             search_stocks,
             open_incognito_chrome,
-            run_naver_discussion_batch
+            run_naver_discussion_batch,
+            bootstrap_runtime,
+            save_accounts,
+            enqueue_cookie_refresh,
+            get_queue_status,
+            get_account_cookies
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn greet_includes_name() {
+        let out = greet("Pallas");
+        assert!(out.contains("Pallas"), "greet output missing name: {out}");
+    }
+
+    #[test]
+    fn greet_uses_friendly_template() {
+        assert_eq!(
+            greet("world"),
+            "Hello, world! You've been greeted from Rust!"
+        );
+    }
+
+    #[test]
+    fn greet_handles_empty_name() {
+        // Empty input shouldn't panic — it's accepted into the template.
+        assert_eq!(greet(""), "Hello, ! You've been greeted from Rust!");
+    }
 }
