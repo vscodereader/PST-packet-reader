@@ -1,0 +1,21 @@
+{
+  "article": {
+    "cafeId": "31732304",
+    "contentJson": "<contentJson>",
+    "from": "pc",
+    "menuId": 1,
+    "subject": "rust",
+    "tagList": ["RUST", "C", "JavaScript"],
+    "editorVersion": 4,
+    "parentId": 0,
+    "open": false,
+    "naverOpen": true,
+    "externalOpen": true,
+    "enableComment": true,
+    "enableScrap": false,
+    "enableCopy": false,
+    "useAutoSource": false,
+    "cclTypes": [],
+    "useCcl": false
+  }
+}
