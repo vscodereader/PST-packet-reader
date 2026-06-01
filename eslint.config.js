@@ -12,7 +12,14 @@ import prettier from "eslint-config-prettier";
 
 export default tseslint.config(
   {
-    ignores: ["dist", "src-tauri", "coverage", "node_modules", "Macro-handoff"],
+    ignores: [
+      "dist",
+      "src-tauri",
+      "coverage",
+      "node_modules",
+      "Macro-handoff",
+      "src/shared/bindings",
+    ],
   },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],

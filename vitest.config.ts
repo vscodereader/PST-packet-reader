@@ -23,6 +23,7 @@ export default defineConfig({
         "**/main.tsx",
         "**/vite-env.d.ts",
         "**/*.test.{ts,tsx}",
+        "src/shared/bindings/**",
       ],
       thresholds: {
         lines: 93,

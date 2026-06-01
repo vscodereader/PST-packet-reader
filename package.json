@@ -12,6 +12,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "gen:bindings": "cargo test --manifest-path src-tauri/Cargo.toml export_bindings",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "lint:css": "stylelint --allow-empty-input \"src/**/*.css\"",

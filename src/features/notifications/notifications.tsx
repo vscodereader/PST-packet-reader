@@ -185,7 +185,7 @@ function BatchRow({
           <Text fz={11.5} c="dimmed" mt={2}>
             {batch.items.length}곳 · 성공 {okN}
             {failN > 0 && (
-              <Text component="span" c="red">
+              <Text fz={11.5} component="span" c="red">
                 {" "}
                 · 실패 {failN}
               </Text>

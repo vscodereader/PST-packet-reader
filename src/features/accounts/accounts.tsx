@@ -18,10 +18,9 @@ import {
   UnstyledButton,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
-  ACCOUNTS,
   STATUS_ACCOUNT,
   STATUS_ACCOUNT_ORDER,
   TAG_SUGGESTIONS,
@@ -32,6 +31,12 @@ import type {
   GoFn,
   PlatformId,
 } from "@/shared/data/types";
+import {
+  addAccount,
+  deleteAccounts,
+  listAccounts,
+  updateAccount,
+} from "@/shared/ipc/accounts";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo } from "@/shared/ui/platform-logo";
 
@@ -268,35 +273,40 @@ function TagCell({
 }
 
 export function Accounts({ go }: { go: GoFn }) {
-  const [rows, setRows] = useState<Account[]>(() =>
-    ACCOUNTS.map((a) => ({ ...a })),
-  );
+  const [rows, setRows] = useState<Account[]>([]);
+
+  useEffect(() => {
+    void listAccounts().then(setRows);
+  }, []);
   const [filter, setFilter] = useState<"all" | PlatformId>("all");
   const [tagFilter, setTagFilter] = useState<string | null>(null);
   const [q, setQ] = useState("");
   const [sel, setSel] = useState<string[]>([]);
   const [page, setPage] = useState(1);
 
-  const update = (id: string, patch: Partial<Account>) =>
+  // Optimistically patch the row for snappy editing, then persist over IPC and
+  // reconcile with the authoritative list the backend returns.
+  const update = (id: string, patch: Partial<Account>) => {
+    const cur = rows.find((r) => r.id === id);
     setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+    if (cur) void updateAccount({ ...cur, ...patch }).then(setRows);
+  };
 
   const addRow = () => {
-    setRows((rs) => [
-      ...rs,
-      {
-        id: "n" + Date.now(),
-        platform: "forum",
-        loginId: "",
-        pw: "",
-        status: "new",
-        last: "—",
-        tags: [],
-      },
-    ]);
+    const account: Account = {
+      id: "n" + Date.now(),
+      platform: "forum",
+      loginId: "",
+      pw: "",
+      status: "new",
+      last: "—",
+      tags: [],
+    };
+    void addAccount(account).then(setRows);
     toast("새 계정 행을 추가했어요", "green");
   };
   const removeSel = () => {
-    setRows((rs) => rs.filter((r) => !sel.includes(r.id)));
+    void deleteAccounts(sel).then(setRows);
     toast(`${sel.length}개 계정을 삭제했어요`);
     setSel([]);
   };
@@ -589,7 +599,7 @@ export function Accounts({ go }: { go: GoFn }) {
                     size="sm"
                     title="삭제"
                     onClick={() => {
-                      setRows((rs) => rs.filter((x) => x.id !== r.id));
+                      void deleteAccounts([r.id]).then(setRows);
                       toast("계정을 삭제했어요");
                     }}
                   >

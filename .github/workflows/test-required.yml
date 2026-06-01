@@ -36,6 +36,7 @@ jobs:
               | grep -E '^src/.*\.(ts|tsx)$' \
               | grep -v -E '\.(test|spec)\.(ts|tsx)$' \
               | grep -v -E '^src/test/' \
+              | grep -v -E '^src/shared/bindings/' \
               | grep -v -E '^src/main\.tsx$' \
               | grep -v -E '^src/vite-env\.d\.ts$' || true
           )

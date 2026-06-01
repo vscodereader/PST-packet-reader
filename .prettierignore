@@ -5,3 +5,4 @@ pnpm-lock.yaml
 src-tauri
 Macro-handoff
 Macro-handoff.tar.gz
+src/shared/bindings
