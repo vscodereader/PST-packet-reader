@@ -55,9 +55,10 @@ fn open_incognito_chrome() -> Result<String, String> {
 
 #[tauri::command]
 fn run_naver_discussion_batch(
+    app: tauri::AppHandle,
     request: DiscussionBatchRequest,
 ) -> Result<DiscussionBatchReport, String> {
-    run_discussion_batch(request)
+    run_discussion_batch(request, app)
 }
 
 #[cfg(target_os = "windows")]

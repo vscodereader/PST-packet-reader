@@ -230,6 +230,22 @@ body {
   align-items: end;
 }
 
+.macro-editor-timer {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 0 2px;
+  text-align: center;
+}
+
+.macro-editor-timer-value {
+  font-size: 2rem;
+  font-variant-numeric: tabular-nums;
+  color: #1971c2;
+  letter-spacing: 0.06em;
+  line-height: 1.15;
+}
+
 .macro-editor-layout {
   display: grid;
   grid-template-columns: minmax(300px, 0.95fr) minmax(420px, 1.35fr);

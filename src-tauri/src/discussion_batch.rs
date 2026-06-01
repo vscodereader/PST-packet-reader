@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tauri::Emitter;
 
 use crate::naver_automation::{
     run_naver_discussion_macro, run_naver_post_with_comment_macro, AutomationReport,
@@ -156,6 +157,7 @@ pub fn search_naver_stocks(query: Option<String>) -> Result<Vec<StockCandidate>,
 // UI 설정에 따라 글쓰기/댓글쓰기를 여러 번 실행하는 함수입니다.
 pub fn run_discussion_batch(
     request: DiscussionBatchRequest,
+    app: tauri::AppHandle,
 ) -> Result<DiscussionBatchReport, String> {
     validate_batch_request(&request)?;
 
@@ -184,7 +186,7 @@ pub fn run_discussion_batch(
             for report in pair_reports {
                 reports.push(report);
                 completed_actions += 1;
-                sleep_between_actions(completed_actions, total_actions);
+                sleep_between_actions(completed_actions, total_actions, &app);
             }
 
             continue;
@@ -207,7 +209,7 @@ pub fn run_discussion_batch(
                 .map_err(|error| error.to_string())?,
             );
             completed_actions += 1;
-            sleep_between_actions(completed_actions, total_actions);
+            sleep_between_actions(completed_actions, total_actions, &app);
         }
 
         if request.run_comment {
@@ -226,7 +228,7 @@ pub fn run_discussion_batch(
                 .map_err(|error| error.to_string())?,
             );
             completed_actions += 1;
-            sleep_between_actions(completed_actions, total_actions);
+            sleep_between_actions(completed_actions, total_actions, &app);
         }
     }
 
@@ -237,8 +239,14 @@ pub fn run_discussion_batch(
 }
 
 // 등록 또는 댓글 작성 한 건이 끝난 뒤 다음 실행 전 1분을 기다리는 함수입니다.
-fn sleep_between_actions(completed_actions: usize, total_actions: usize) {
+// 대기 직전 프론트엔드로 "batch-wait-start" 이벤트를 보내 카운트다운 타이머를 표시합니다.
+fn sleep_between_actions(
+    completed_actions: usize,
+    total_actions: usize,
+    app: &tauri::AppHandle,
+) {
     if completed_actions < total_actions {
+        let _ = app.emit("batch-wait-start", serde_json::json!({ "seconds": 60u64 }));
         sleep(Duration::from_secs(60));
     }
 }

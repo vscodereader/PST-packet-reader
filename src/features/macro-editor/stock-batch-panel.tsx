@@ -10,6 +10,7 @@ import {
   TextInput,
 } from "@mantine/core";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type PickMode = "random" | "sequential" | "single";
@@ -277,6 +278,7 @@ export function StockBatchPanel() {
   const [savedConfig, setSavedConfig] = useState<SavedBatchConfig | null>(null);
   const [chromeOpening, setChromeOpening] = useState(false);
   const [running, setRunning] = useState(false);
+  const [waitSecondsLeft, setWaitSecondsLeft] = useState<number | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
@@ -304,6 +306,34 @@ export function StockBatchPanel() {
 
     return () => window.clearTimeout(timer);
   }, [stockQuery]);
+
+  // Rust가 sleep 직전 emit한 "batch-wait-start" 이벤트를 수신해 카운트다운 타이머를 시작합니다.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+
+    void listen<{ seconds: number }>("batch-wait-start", (event) => {
+      setWaitSecondsLeft(event.payload.seconds);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  // waitSecondsLeft가 양수인 동안 매초 1씩 감소시켜 카운트다운합니다.
+  useEffect(() => {
+    if (waitSecondsLeft === null || waitSecondsLeft <= 0) return;
+
+    const timer = window.setTimeout(() => {
+      setWaitSecondsLeft((current) =>
+        current !== null && current > 1 ? current - 1 : null,
+      );
+    }, 1000);
+
+    return () => window.clearTimeout(timer);
+  }, [waitSecondsLeft]);
 
   // 네이버 증권 API 후보를 Rust command로 검색해서 종목 목록에 반영하는 함수입니다.
   async function loadStocks(query: string) {
@@ -442,6 +472,7 @@ export function StockBatchPanel() {
   async function executeConfig() {
     setError("");
     setMessage("");
+    setWaitSecondsLeft(null);
     const config = savedConfig ?? buildConfig();
 
     if (!config) return;
@@ -463,6 +494,7 @@ export function StockBatchPanel() {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setRunning(false);
+      setWaitSecondsLeft(null);
     }
   }
 
@@ -686,6 +718,18 @@ export function StockBatchPanel() {
             실행
           </Button>
         </div>
+
+        {waitSecondsLeft !== null ? (
+          <div className="macro-editor-timer" data-testid="batch-timer">
+            <Text size="sm" c="dimmed" ta="center">
+              다음 실행 대기 중
+            </Text>
+            <Text fw={800} ta="center" className="macro-editor-timer-value">
+              {String(Math.floor(waitSecondsLeft / 60)).padStart(2, "0")}:
+              {String(waitSecondsLeft % 60).padStart(2, "0")}
+            </Text>
+          </div>
+        ) : null}
 
         {error ? (
           <Alert color="red" title="확인 필요">

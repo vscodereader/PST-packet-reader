@@ -10,6 +10,10 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async () => () => {}),
+}));
+
 function renderMacroEditor() {
   render(
     <MantineProvider>
@@ -47,26 +51,42 @@ describe("MacroEditorPage", () => {
   it("renders the batch UI without the legacy picker panels", () => {
     renderMacroEditor();
 
-    expect(screen.getByText("패킷 기반 종목/글/댓글 실행 설정")).toBeInTheDocument();
+    expect(
+      screen.getByText("패킷 기반 종목/글/댓글 실행 설정"),
+    ).toBeInTheDocument();
     expect(screen.queryByText("토론방 자동 입력")).not.toBeInTheDocument();
     expect(screen.queryByText("제목을 선택하세요")).not.toBeInTheDocument();
+  });
+
+  it("does not show the countdown timer before execution starts", () => {
+    renderMacroEditor();
+
+    expect(screen.queryByTestId("batch-timer")).not.toBeInTheDocument();
+    expect(screen.queryByText("다음 실행 대기 중")).not.toBeInTheDocument();
   });
 
   it("imports CSV values into editable textareas", async () => {
     const user = userEvent.setup();
     renderMacroEditor();
 
-    const file = new File(["제목,내용,댓글내용\n제목1,내용1,댓글1"], "template.csv", {
-      type: "text/csv",
-    });
-    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]');
+    const file = new File(
+      ["제목,내용,댓글내용\n제목1,내용1,댓글1"],
+      "template.csv",
+      {
+        type: "text/csv",
+      },
+    );
+    const fileInput =
+      document.querySelector<HTMLInputElement>('input[type="file"]');
 
     expect(fileInput).not.toBeNull();
 
     await user.upload(fileInput!, file);
 
     expect(
-      await screen.findByText("template.csv에서 제목 2개, 내용 1개, 댓글내용 1개를 가져왔습니다."),
+      await screen.findByText(
+        "template.csv에서 제목 2개, 내용 1개, 댓글내용 1개를 가져왔습니다.",
+      ),
     ).toBeInTheDocument();
     expect(screen.getByText("template.csv")).toBeInTheDocument();
   });
