@@ -5,6 +5,7 @@ import { describe, it, expect } from "vitest";
 import bandLogo from "@/assets/logos/band.svg";
 import naverLogo from "@/assets/logos/naver.svg";
 import navercafeLogo from "@/assets/logos/navercafe.svg";
+import threadsLogo from "@/assets/logos/threads.svg";
 
 import { PlatformLogo } from "./platform-logo";
 
@@ -30,10 +31,18 @@ describe("PlatformLogo", () => {
     expect(img.getAttribute("src")).not.toBe(naverLogo);
   });
 
-  it("falls back to the colored initial badge when there is no brand logo", () => {
+  it("renders the brand image for the forum platform", () => {
     renderLogo({ id: "forum" });
-    expect(screen.queryByRole("img")).toBeNull();
-    expect(screen.getByText("토")).toBeInTheDocument();
+    const img = screen.getByRole("img", { name: "종합토론방" });
+    expect(img).toHaveAttribute("src", naverLogo);
+  });
+
+  it("renders the threads brand image", () => {
+    renderLogo({ id: "threads" });
+    expect(screen.getByRole("img", { name: "스레드" })).toHaveAttribute(
+      "src",
+      threadsLogo,
+    );
   });
 
   it("dims the logo when dim is set", () => {
