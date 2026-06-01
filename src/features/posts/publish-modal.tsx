@@ -15,6 +15,7 @@ import {
   TextInput,
   ThemeIcon,
 } from "@mantine/core";
+import { notifications } from "@mantine/notifications";
 import { useEffect, useState } from "react";
 
 import { KIND, STATUS_ACCOUNT } from "@/shared/data/config";
@@ -409,6 +410,24 @@ function newScheduledId(): string {
   return "qs" + Date.now();
 }
 
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+/** Current date/time as the picker's `{ date, time }` strings (minute precision). */
+function nowParts(): { date: string; time: string } {
+  const n = new Date();
+  return {
+    date: `${n.getFullYear()}-${pad2(n.getMonth() + 1)}-${pad2(n.getDate())}`,
+    time: `${pad2(n.getHours())}:${pad2(n.getMinutes())}`,
+  };
+}
+
+/** Local epoch-ms for a `YYYY-MM-DD` + `HH:MM` pair (for the IPC time guard). */
+function toEpochMs(date: string, time: string): number {
+  const [y, m, d] = date.split("-").map(Number);
+  const [h, mi] = time.split(":").map(Number);
+  return new Date(y ?? 1970, (m ?? 1) - 1, d ?? 1, h ?? 0, mi ?? 0).getTime();
+}
+
 /** Turn the picked date/time into the queue's `{ when, rel }` display strings. */
 function scheduleMoment(
   date: string,
@@ -442,8 +461,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [cafeBoard, setCafeBoard] = useState("");
   const [band, setBand] = useState("");
   const [when, setWhen] = useState<"now" | "schedule">("now");
-  const [date, setDate] = useState("2026-05-29");
-  const [time, setTime] = useState("18:00");
+  const [date, setDate] = useState(() => nowParts().date);
+  const [time, setTime] = useState(() => nowParts().time);
   const [acctFilter, setAcctFilter] = useState<"all" | PlatformId>("all");
   const [linkOverride, setLinkOverride] = useState("");
   const [showPreview, setShowPreview] = useState(false);
@@ -538,32 +557,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const targetsOk = !selPlatforms.includes("forum") || stockCodes.length > 0;
   const canPublish = selected.length > 0 && targetsOk && jobs.length > 0;
 
-  const doPublish = () => {
-    if (when === "schedule") {
-      // Add the post to the scheduled queue so it shows up under 예약 대기.
-      const seen = new Set<string>();
-      const locs: QueueLocation[] = [];
-      jobs.forEach((j) => {
-        const key = `${j.platform}|${j.targetName}|${j.code ?? ""}`;
-        if (seen.has(key)) return;
-        seen.add(key);
-        locs.push({
-          p: j.platform,
-          name: j.targetName,
-          ...(j.code ? { code: j.code } : {}),
-        });
-      });
-      const moment = scheduleMoment(date, time);
-      const item: QueueScheduledItem = {
-        id: newScheduledId(),
-        title: doc.title,
-        kind: doc.kind,
-        when: moment.when,
-        rel: moment.label,
-        locs,
-      };
-      void ipc.queue.addScheduled(item);
-    }
+  const runFlow = () => {
     setFlow("running");
     const action =
       mode === "comment" ? "댓글" : mode === "both" ? "글+댓글" : "글";
@@ -583,6 +577,46 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         }),
       );
     }, 2000);
+  };
+
+  const doPublish = () => {
+    if (when !== "schedule") {
+      runFlow();
+      return;
+    }
+    // Add the post to the scheduled queue so it shows up under 예약 대기.
+    const seen = new Set<string>();
+    const locs: QueueLocation[] = [];
+    jobs.forEach((j) => {
+      const key = `${j.platform}|${j.targetName}|${j.code ?? ""}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      locs.push({
+        p: j.platform,
+        name: j.targetName,
+        ...(j.code ? { code: j.code } : {}),
+      });
+    });
+    const moment = scheduleMoment(date, time);
+    const item: QueueScheduledItem = {
+      id: newScheduledId(),
+      title: doc.title,
+      kind: doc.kind,
+      when: moment.when,
+      rel: moment.label,
+      locs,
+    };
+    // Defense-in-depth: the backend rejects a past time even though the picker
+    // already prevents it.
+    ipc.queue
+      .addScheduled(item, toEpochMs(date, time))
+      .then(runFlow)
+      .catch(() =>
+        notifications.show({
+          message: "예약 시각이 현재보다 과거예요. 시간을 다시 선택하세요.",
+          color: "red",
+        }),
+      );
   };
 
   const kd = KIND[mode] ?? { t: mode, c: "gray" };

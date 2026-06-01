@@ -149,9 +149,9 @@ describe("PublishModal", () => {
     renderPublish();
     await userEvent.click(await screen.findByText("예약 게시"));
     // Native date/time inputs are replaced by the DateTimePicker trigger, which
-    // renders the scheduled moment as a friendly label.
+    // renders the scheduled moment (defaulting to now) as a friendly label.
     expect(
-      await screen.findByRole("button", { name: /5월 29일.*18:00/ }),
+      await screen.findByRole("button", { name: /\d+월 \d+일.*\d\d:\d\d/ }),
     ).toBeInTheDocument();
   });
 

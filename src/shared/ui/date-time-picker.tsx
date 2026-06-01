@@ -31,6 +31,36 @@ function parseTime(s: string): { h: number; m: number } {
 }
 const toHHMM = (h: number, m: number) => `${pad(h)}:${pad(m)}`;
 
+/** Drop seconds so "now" stays selectable at minute precision. */
+const floorToMinute = (x: Date) => {
+  const c = new Date(x);
+  c.setSeconds(0, 0);
+  return c;
+};
+
+/**
+ * Combine a chosen day + h/m and force it to be at least `min`: a past day/time
+ * snaps up to the minimum (the earliest selectable hour, then minute).
+ */
+function clampToMin(
+  day: Date,
+  h: number,
+  m: number,
+  min: Date,
+): { date: string; time: string } {
+  const cand = new Date(
+    day.getFullYear(),
+    day.getMonth(),
+    day.getDate(),
+    h,
+    m,
+    0,
+    0,
+  );
+  const eff = cand.getTime() < min.getTime() ? min : cand;
+  return { date: toISO(eff), time: toHHMM(eff.getHours(), eff.getMinutes()) };
+}
+
 /**
  * Trigger + popover that picks a date (month grid) and time (stepper + direct
  * entry), keeping the `date`/`time` string contract the caller already uses.
@@ -44,7 +74,7 @@ export function DateTimePicker({
   const [opened, setOpened] = useState(false);
   const d = parseDate(date);
   const t = parseTime(time);
-  const min = minDate ?? new Date();
+  const min = floorToMinute(minDate ?? new Date());
   const label = `${d.getMonth() + 1}월 ${d.getDate()}일 (${WEEKDAYS[d.getDay()]}) ${toHHMM(t.h, t.m)}`;
 
   return (
@@ -73,7 +103,7 @@ export function DateTimePicker({
             <MonthCalendar
               value={d}
               minDate={min}
-              onChange={(next) => onChange({ date: toISO(next), time })}
+              onChange={(next) => onChange(clampToMin(next, t.h, t.m, min))}
             />
           </Box>
           <Divider orientation="vertical" />
@@ -83,7 +113,7 @@ export function DateTimePicker({
             </Text>
             <TimeStepper
               value={t}
-              onChange={(nt) => onChange({ date, time: toHHMM(nt.h, nt.m) })}
+              onChange={(nt) => onChange(clampToMin(d, nt.h, nt.m, min))}
             />
           </Box>
         </Group>

@@ -50,4 +50,19 @@ describe("DateTimePicker", () => {
       time: "19:00",
     });
   });
+
+  it("snaps to the minimum when the min day is picked with an earlier time", async () => {
+    const onChange = renderPicker({
+      date: "2026-05-30",
+      time: "08:00",
+      minDate: new Date(2026, 4, 29, 15, 30),
+    });
+    await userEvent.click(screen.getByRole("button", { name: /5월 30일/ }));
+    // 5/29 is the min day; 08:00 is before 15:30 → snaps up to the minimum.
+    await userEvent.click(await screen.findByLabelText("2026-5-29"));
+    expect(onChange).toHaveBeenCalledWith({
+      date: "2026-05-29",
+      time: "15:30",
+    });
+  });
 });

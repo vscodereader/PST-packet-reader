@@ -2,6 +2,8 @@
 //! `PlatformId`/`ModeValue` from the accounts/posts modules so the generated TS
 //! bindings stay a single source of truth.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -169,17 +171,34 @@ pub fn cancel_queue_scheduled(
     store.mutate(|items| apply_cancel_scheduled(items, &id))
 }
 
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// True if `at` is no earlier than the start of the current minute. Minute
+/// precision keeps "now" (the picker default) schedulable despite seconds drift.
+pub fn is_future_enough(at: i64, now: i64) -> bool {
+    at >= now - now.rem_euclid(60_000)
+}
+
 /// Append a new scheduled item (used when a post is scheduled from the publish
-/// modal), returning the updated scheduled list.
+/// modal). Rejects a past time — defense-in-depth behind the picker's own guard.
 #[tauri::command]
 pub fn add_queue_scheduled(
     store: tauri::State<'_, JsonStore<QueueScheduledItem>>,
     item: QueueScheduledItem,
-) -> Vec<QueueScheduledItem> {
-    store.mutate(|mut items| {
+    at: i64,
+) -> Result<Vec<QueueScheduledItem>, String> {
+    if !is_future_enough(at, now_ms()) {
+        return Err("예약 시각이 현재보다 과거입니다".into());
+    }
+    Ok(store.mutate(|mut items| {
         items.push(item);
         items
-    })
+    }))
 }
 
 /// Move a scheduled item into the immediate queue ("즉시 처리"): drop it from the
@@ -224,6 +243,15 @@ mod tests {
         assert_eq!(now.state, QueueState::Waiting);
         assert!(now.batch_id.is_none() && now.progress.is_none());
         assert_eq!(now.locs.len(), locs_len);
+    }
+
+    #[test]
+    fn future_guard_uses_minute_precision() {
+        let now: i64 = 1_700_000_045_000; // ...:45s within a minute
+        let minute_start = now - now.rem_euclid(60_000);
+        assert!(is_future_enough(minute_start, now)); // current minute allowed
+        assert!(is_future_enough(now + 60_000, now)); // future allowed
+        assert!(!is_future_enough(minute_start - 1, now)); // earlier rejected
     }
 
     #[test]
