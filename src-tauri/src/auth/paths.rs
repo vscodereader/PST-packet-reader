@@ -75,8 +75,8 @@ mod tests {
         env::set_var("LOCALAPPDATA", temp.path());
         assert_eq!(app_data_root().unwrap(), temp.path().join(config::APP_NAME));
 
-        // 로그인 자동화가 WSL/Linux에서도 동작하므로, LOCALAPPDATA가 없으면
-        // XDG_DATA_HOME으로 대체한다.
+        // CDP 로그인 전환 이후 로그인은 WSL/Linux 네이티브로도 동작하므로,
+        // LOCALAPPDATA가 없으면 XDG_DATA_HOME으로 대체한다.
         env::remove_var("LOCALAPPDATA");
         let xdg = tempfile::tempdir().unwrap();
         env::set_var("XDG_DATA_HOME", xdg.path());

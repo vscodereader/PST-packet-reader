@@ -18,7 +18,7 @@ import {
   UnstyledButton,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { STATUS_ACCOUNT, STATUS_ACCOUNT_ORDER } from "@/shared/data/config";
 import type {
@@ -274,6 +274,22 @@ export function Accounts({ go }: { go: GoFn }) {
   const [q, setQ] = useState("");
   const [sel, setSel] = useState<string[]>([]);
   const [page, setPage] = useState(1);
+  const [loggingIn, setLoggingIn] = useState(false);
+  const loginPollRef = useRef<number | null>(null);
+  // 로그인 폴링은 한 번 만들어진 인터벌 클로저에서 돈다. 그 안에서 "현재" 행을 보려면
+  // 클로저에 갇힌 rows 대신 이 ref를 참조한다(아래 effect가 최신 rows로 동기화).
+  const rowsRef = useRef(rows);
+  useEffect(() => {
+    rowsRef.current = rows;
+  }, [rows]);
+
+  // 화면을 떠날 때 로그인 상태 폴링 타이머를 정리한다.
+  useEffect(() => {
+    return () => {
+      if (loginPollRef.current !== null)
+        window.clearInterval(loginPollRef.current);
+    };
+  }, []);
 
   // Optimistically patch the row for snappy editing, then persist over IPC and
   // reconcile with the authoritative list the backend returns.
@@ -300,6 +316,98 @@ export function Accounts({ go }: { go: GoFn }) {
     void ipc.accounts.remove(sel).then(setRows);
     toast(`${sel.length}개 계정을 삭제했어요`);
     setSel([]);
+  };
+
+  // 선택한 계정으로 네이버 로그인 자동화를 실행한다(쿠키 키 = loginId).
+  // 성공/실패는 각 계정의 status(active/error)로 표시한다.
+  const runLogin = async () => {
+    const targets = rows.filter(
+      (r) => sel.includes(r.id) && r.loginId.trim() && r.pw,
+    );
+    if (targets.length === 0) {
+      toast("로그인할 계정을 선택하고 아이디·비밀번호를 채워주세요", "red");
+      return;
+    }
+    setLoggingIn(true);
+    try {
+      await ipc.auth.bootstrap();
+      await ipc.auth.saveAccounts(
+        targets.map((t) => ({
+          id: t.loginId,
+          password: t.pw,
+          label: t.loginId,
+        })),
+      );
+      await ipc.auth.enqueueLogin(targets.map((t) => t.loginId));
+      pollLogin(targets);
+    } catch (err) {
+      setLoggingIn(false);
+      toast(err instanceof Error ? err.message : String(err), "red");
+    }
+  };
+
+  // get_queue_status를 2초마다 확인해 각 계정의 로그인 결과를 반영한다.
+  const pollLogin = (targets: Account[]) => {
+    if (loginPollRef.current !== null)
+      window.clearInterval(loginPollRef.current);
+    // 행 추적은 고유키 id로 한다(loginId는 유니크가 보장되지 않아 같은 loginId의 두 행이
+    // 하나로 합쳐지면 한쪽만 반영된다).
+    const remaining = new Set(targets.map((t) => t.id));
+
+    loginPollRef.current = window.setInterval(() => {
+      void ipc.auth
+        .queueStatus()
+        .then((status) => {
+          targets.forEach((t) => {
+            if (!remaining.has(t.id)) return;
+            // 백엔드 잡은 loginId(=쿠키 키)로 식별된다. 같은 loginId를 쓰는 행들은
+            // 같은 잡 결과를 각자(id별로) 반영한다.
+            const job = [...status.jobs]
+              .reverse()
+              .find((j) => j.accountId === t.loginId);
+            if (!job || job.status === "pending" || job.status === "running")
+              return;
+
+            remaining.delete(t.id);
+            const ok = job.status === "success" || job.status === "expired";
+            const nextStatus = ok ? "active" : "error";
+            // 폴링(수 초~분) 중 사용자가 같은 행을 편집했을 수 있으므로, 클릭 시점 스냅샷(t)이
+            // 아니라 "현재" 행에 status만 머지하고 권위 리스트로 reconcile한다(다른 핸들러와 동일).
+            const cur = rowsRef.current.find((r) => r.id === t.id);
+            setRows((rs) =>
+              rs.map((r) => (r.id === t.id ? { ...r, status: nextStatus } : r)),
+            );
+            if (cur)
+              void ipc.accounts
+                .update({ ...cur, status: nextStatus })
+                .then(setRows);
+            toast(
+              `${t.loginId}: ${ok ? "로그인 성공" : "로그인 실패 — " + job.message}`,
+              ok ? "green" : "red",
+            );
+          });
+
+          if (remaining.size === 0) {
+            if (loginPollRef.current !== null) {
+              window.clearInterval(loginPollRef.current);
+              loginPollRef.current = null;
+            }
+            setLoggingIn(false);
+          }
+        })
+        .catch((err) => {
+          if (loginPollRef.current !== null) {
+            window.clearInterval(loginPollRef.current);
+            loginPollRef.current = null;
+          }
+          setLoggingIn(false);
+          toast(
+            "로그인 상태 확인 중 오류가 발생했어요 — " +
+              (err instanceof Error ? err.message : String(err)),
+            "red",
+          );
+        });
+    }, 2000);
   };
 
   const allTags = useMemo(
@@ -354,6 +462,17 @@ export function Accounts({ go }: { go: GoFn }) {
           </Text>
         </Box>
         <Group gap="xs">
+          <Button
+            size="sm"
+            variant="light"
+            color="green"
+            loading={loggingIn}
+            disabled={sel.length === 0}
+            leftSection={<Icon.bolt size={16} />}
+            onClick={() => void runLogin()}
+          >
+            선택 로그인 ({sel.length})
+          </Button>
           <Button
             size="sm"
             variant="default"

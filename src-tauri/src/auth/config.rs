@@ -2,8 +2,8 @@
 #[cfg(target_os = "windows")]
 pub const CHROME_PATH_WINDOWS: &str = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 
-// Linux/WSL에서 Playwright가 실행할 시스템 Chrome/Chromium 후보 경로들입니다.
-// (Playwright는 Linux에서 Windows용 chrome.exe를 실행할 수 없으므로 Linux 브라우저가 필요합니다.)
+// Linux/WSL에서 CDP 로그인이 띄울 시스템 Chrome/Chromium 후보 경로들입니다.
+// (Linux 빌드는 Windows용 chrome.exe를 실행할 수 없으므로 네이티브 Linux 브라우저가 필요합니다.)
 #[cfg(not(target_os = "windows"))]
 pub const CHROME_PATHS_LINUX: &[&str] = &[
     "/usr/bin/google-chrome",
@@ -88,9 +88,9 @@ mod tests {
         let err = chrome_path().unwrap_err();
         assert!(err.contains("파일이 없습니다"), "unexpected error: {err}");
 
-        // 미설정이면 플랫폼 기본 후보들을 탐색해 폴백한다. Linux/WSL 빌드는 시스템
-        // Chrome(`/usr/bin/google-chrome` 등)을 찾으므로, 결과는 호스트에 Chrome이
-        // 설치돼 있는지에 따라 달라진다(CI 러너엔 설치돼 있음). 따라서 호스트에
+        // 미설정이면 플랫폼 기본 후보들을 탐색해 폴백한다. CDP 로그인 전환 이후
+        // Linux/WSL 빌드는 시스템 Chrome(`/usr/bin/google-chrome` 등)을 찾으므로,
+        // 결과는 호스트에 Chrome이 설치돼 있는지에 따라 달라진다. 따라서 호스트에
         // 의존하지 않는 불변식만 검증한다: 성공하면 그 경로는 실제로 존재하고,
         // 실패하면 탐색한 후보들을 안내하는 오류 메시지를 낸다.
         std::env::remove_var("CHROME_PATH");

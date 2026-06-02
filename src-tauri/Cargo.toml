@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
+# 토론방 CLI(naver_discussion_cli) 바이너리가 추가되며 바이너리가 둘이 되었다.
+# `tauri dev`(= cargo run)가 앱 본체를 실행하도록 기본 바이너리를 지정한다.
+default-run = "pstmacro"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -19,7 +22,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ts-rs = "12"

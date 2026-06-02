@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-// 로그인 자동화(Playwright)가 저장한 쿠키 하나를 Chrome DevTools Protocol의
+// 로그인 자동화(CDP)가 저장한 쿠키 하나를 Chrome DevTools Protocol의
 // Network.setCookie 파라미터로 변환하는 순수 함수입니다.
 // name/value가 없으면 주입할 수 없으므로 None을 반환합니다.
 pub(super) fn cookie_to_cdp_param(cookie: &Value) -> Option<Value> {
@@ -38,7 +38,7 @@ pub(super) fn cookie_to_cdp_param(cookie: &Value) -> Option<Value> {
         }
     }
 
-    // Playwright는 세션 쿠키를 expires = -1 로 표시합니다. 양수일 때만 만료시간을 넣습니다.
+    // 세션 쿠키는 expires = -1 로 표시됩니다. 양수일 때만 만료시간을 넣습니다.
     if let Some(expires) = cookie.get("expires").and_then(Value::as_f64) {
         if expires > 0.0 {
             params.insert("expires".to_owned(), json!(expires));

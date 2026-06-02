@@ -53,6 +53,32 @@ export interface ForumPublishResult {
   message: string;
 }
 
+/** A naver-login account (auth module): keyed by loginId so cookies land at cookies/{loginId}.json. */
+export interface AuthAccount {
+  id: string;
+  password: string;
+  label: string;
+}
+
+export type LoginJobStatus =
+  | "pending"
+  | "expired"
+  | "running"
+  | "success"
+  | "failed";
+
+export interface LoginJob {
+  accountId: string;
+  status: LoginJobStatus;
+  message: string;
+}
+
+export interface LoginQueueStatus {
+  isRunning: boolean;
+  currentAccountId: string | null;
+  jobs: LoginJob[];
+}
+
 /** Thin typed wrapper around a single Tauri command channel. */
 function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   return invoke<T>(cmd, args);
@@ -105,5 +131,18 @@ export const ipc = {
   forum: {
     publishNow: (request: ForumPublishRequest) =>
       call<ForumPublishResult[]>("run_forum_publish_now", { request }),
+  },
+  // 네이버 로그인 자동화(CDP). 계정 ID/PW로 로그인해 쿠키를 저장한다.
+  auth: {
+    bootstrap: () => call<unknown>("bootstrap_runtime"),
+    saveAccounts: (accounts: AuthAccount[]) =>
+      call<AuthAccount[]>("save_accounts", { accounts }),
+    enqueueLogin: (accountIds: string[], headless = false) =>
+      call<LoginQueueStatus>("enqueue_cookie_refresh", {
+        accountIds,
+        headless,
+        useAdb: false,
+      }),
+    queueStatus: () => call<LoginQueueStatus>("get_queue_status"),
   },
 };
