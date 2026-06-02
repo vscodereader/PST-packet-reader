@@ -45,6 +45,12 @@ import { DateTimePicker } from "@/shared/ui/date-time-picker";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo, PlatformPill } from "@/shared/ui/platform-logo";
 
+import {
+  buildBothCommentJobs,
+  buildUrlCommentJobs,
+  commentSummary,
+  parseCafeArticleUrl,
+} from "./comment-jobs";
 import { PreviewModal } from "./preview-modal";
 import { StockCrawlModal } from "./stock-crawl-modal";
 
@@ -651,6 +657,13 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   }
 
   const mode = doc.kind;
+  const comments = (doc.comments ?? []).filter(Boolean);
+  const commentTargetMode = doc.commentTarget ?? "latest";
+  // Phase 1 wires two comment targets: the just-posted article (`both`) and a
+  // pasted article URL (`comment` + url). latest/popular need a board-listing
+  // backend (Phase 2) and are not posted yet.
+  const urlTarget =
+    commentTargetMode === "url" ? parseCafeArticleUrl(doc.commentUrl) : null;
   const toggle = (id: string) =>
     setSelected((s) =>
       s.includes(id) ? s.filter((x) => x !== id) : [...s, id],
@@ -770,17 +783,38 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         }),
       );
     } else if (a.platform === "naver") {
-      const pick = naverPicks[aid];
-      // Skip accounts whose cafe/board isn't fully chosen yet.
-      if (!pick || !pick.boardName) return;
-      jobs.push({
-        key: aid,
-        platform: "naver",
-        loginId: a.loginId,
-        targetName: pick.cafeName,
-        board: pick.boardName,
-        status: a.status,
-      });
+      if (mode === "comment") {
+        // Comment-only: the target is the URL / latest / popular, not a board
+        // pick. One job per selected account.
+        const targetName =
+          commentTargetMode === "url"
+            ? urlTarget
+              ? `게시글 #${urlTarget.articleId}`
+              : "URL 미설정"
+            : commentTargetMode === "popular"
+              ? "인기글"
+              : "최신글";
+        jobs.push({
+          key: aid,
+          platform: "naver",
+          loginId: a.loginId,
+          targetName,
+          board: "댓글",
+          status: a.status,
+        });
+      } else {
+        const pick = naverPicks[aid];
+        // Skip accounts whose cafe/board isn't fully chosen yet.
+        if (!pick || !pick.boardName) return;
+        jobs.push({
+          key: aid,
+          platform: "naver",
+          loginId: a.loginId,
+          targetName: pick.cafeName,
+          board: pick.boardName,
+          status: a.status,
+        });
+      }
     } else if (a.platform === "band") {
       jobs.push({
         key: aid,
@@ -793,7 +827,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     }
   });
   const targetsOk = !selPlatforms.includes("forum") || stockCodes.length > 0;
-  const canPublish = selected.length > 0 && targetsOk && jobs.length > 0;
+  // Comment-only mode needs comments and a resolved target. Phase 1 only resolves
+  // the `url` target; latest/popular are Phase 2, so they can't publish yet.
+  const commentReady =
+    mode !== "comment" || (comments.length > 0 && urlTarget !== null);
+  const canPublish =
+    selected.length > 0 && targetsOk && commentReady && jobs.length > 0;
 
   const action =
     mode === "comment" ? "댓글" : mode === "both" ? "글+댓글" : "글";
@@ -813,29 +852,90 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     };
   };
 
-  // Publish now: naver jobs hit the real backend (article posting); forum/band
+  // post / both: post each naver article. For `both`, then comment on every
+  // successfully-posted article and fold a "댓글 N/M건" summary into its row.
+  const runNaverPosts = async (
+    naverJobs: PublishJob[],
+  ): Promise<PublishResult[]> => {
+    if (!naverJobs.length) return [];
+    const outs = await ipc.cafes
+      .runPostJobs(naverJobs.map(toPostJob))
+      .catch((): null => null);
+    if (!outs) {
+      return naverJobs.map((j) => ({
+        ...j,
+        ok: false,
+        msg: "게시 실패 — 잠시 후 재시도",
+      }));
+    }
+    const postResults = naverJobs.map((j, i) =>
+      outcomeToResult(j, outs[i], action),
+    );
+    if (mode !== "both" || comments.length === 0) return postResults;
+
+    // Comment on each post that actually landed, reusing its returned articleId.
+    const posted = naverJobs
+      .map((j, i) => ({ j, out: outs[i] }))
+      .filter(
+        (x): x is { j: PublishJob; out: PublishOutcome } =>
+          !!x.out && x.out.success && x.out.articleId != null,
+      )
+      .map((x) => ({
+        accountId: x.j.key,
+        cafeId: naverPicks[x.j.key]?.cafeId ?? 0,
+        articleId: x.out.articleId as number,
+      }));
+    const commentJobs = buildBothCommentJobs(posted, comments);
+    if (!commentJobs.length) return postResults;
+    const couts = await ipc.cafes
+      .runCommentJobs(commentJobs)
+      .catch((): null => null);
+    return postResults.map((r) =>
+      r.ok ? { ...r, msg: `${r.msg} · ${commentSummary(couts, r.key)}` } : r,
+    );
+  };
+
+  // comment-only (url target): comment on the parsed article with each account.
+  const runNaverComments = async (
+    naverJobs: PublishJob[],
+  ): Promise<PublishResult[]> => {
+    if (!naverJobs.length) return [];
+    if (!urlTarget || comments.length === 0) {
+      return naverJobs.map((j) => ({
+        ...j,
+        ok: false,
+        msg: "댓글 대상 URL 또는 댓글 내용이 없어요",
+      }));
+    }
+    const commentJobs = buildUrlCommentJobs(
+      naverJobs.map((j) => j.key),
+      urlTarget,
+      comments,
+    );
+    const couts = await ipc.cafes
+      .runCommentJobs(commentJobs)
+      .catch((): null => null);
+    return naverJobs.map((j) => ({
+      ...j,
+      ok:
+        couts != null && couts.some((o) => o.accountId === j.key && o.success),
+      msg: commentSummary(couts, j.key),
+    }));
+  };
+
+  // Publish now: naver jobs hit the real backend (post / comment); forum/band
   // stay mocked until their backends land.
   const runNow = () => {
     setFlow("running");
     const naverJobs = jobs.filter((j) => j.platform === "naver");
     const otherJobs = jobs.filter((j) => j.platform !== "naver");
 
-    // Naver posts for real. Forum/band have no backend yet, so they stay
+    // Naver runs for real. Forum/band have no backend yet, so they stay
     // simulated — with a short delay so the progress UI is visible.
-    const real: Promise<PublishResult[]> = naverJobs.length
-      ? ipc.cafes
-          .runPostJobs(naverJobs.map(toPostJob))
-          .then((outs) =>
-            naverJobs.map((j, i) => outcomeToResult(j, outs[i], action)),
-          )
-          .catch(() =>
-            naverJobs.map((j) => ({
-              ...j,
-              ok: false,
-              msg: "게시 실패 — 잠시 후 재시도",
-            })),
-          )
-      : Promise.resolve([]);
+    const real: Promise<PublishResult[]> =
+      mode === "comment"
+        ? runNaverComments(naverJobs)
+        : runNaverPosts(naverJobs);
     const mockOthers = new Promise<PublishResult[]>((resolve) => {
       window.setTimeout(
         () =>

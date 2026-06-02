@@ -214,6 +214,94 @@ describe("PublishModal", () => {
     expect(scheduled.some((q) => q.title === postDoc.title)).toBe(true);
   });
 
+  it("comments on the just-posted article in 'both' mode", async () => {
+    const bothDoc: LibraryPost = {
+      id: "lb",
+      title: "실적 점검 + 댓글",
+      kind: "both",
+      updated: "방금 전",
+      words: 100,
+      status: "ready",
+      excerpt: "요약",
+      body: "<p>본문</p>",
+      comments: ["좋네요"],
+    };
+    renderPublish({ doc: bothDoc });
+    await userEvent.click(await screen.findByText("invest_king7")); // drop forum
+    await userEvent.click(screen.getByText("money_lab")); // a5 naver
+    await screen.findByPlaceholderText("가입 카페 선택");
+    await pickOption(0, "주식투자연구소 카페");
+    await userEvent.click(
+      await screen.findByRole(
+        "button",
+        { name: /^게시 \(1\)/ },
+        { timeout: 3000 },
+      ),
+    );
+    // post lands first…
+    expect(ipcBackend).toHaveBeenCalledWith("run_post_jobs", expect.anything());
+    // …then a comment on that article (articleId 1000 from the mock, cafeId from
+    // the picked joined cafe) is posted.
+    expect(ipcBackend).toHaveBeenCalledWith(
+      "run_comment_jobs",
+      expect.objectContaining({
+        jobs: [
+          expect.objectContaining({
+            accountId: "a5",
+            cafeId: 11111111,
+            articleId: 1000,
+            content: "좋네요",
+          }),
+        ],
+      }),
+    );
+  });
+
+  it("comments on a pasted article URL in 'comment' mode", async () => {
+    const commentDoc: LibraryPost = {
+      id: "lc",
+      title: "URL 댓글 세트",
+      kind: "comment",
+      updated: "방금 전",
+      words: 30,
+      status: "ready",
+      excerpt: "요약",
+      commentTarget: "url",
+      commentUrl: "https://cafe.naver.com/ca-fe/cafes/31732304/articles/9",
+      comments: ["댓글1", "댓글2"],
+    };
+    renderPublish({ doc: commentDoc });
+    await userEvent.click(await screen.findByText("invest_king7")); // drop forum
+    await userEvent.click(screen.getByText("money_lab")); // a5 naver
+    // No board pick needed in comment mode — the job is the account itself.
+    await userEvent.click(
+      await screen.findByRole(
+        "button",
+        { name: /^게시 \(1\)/ },
+        { timeout: 3000 },
+      ),
+    );
+    expect(ipcBackend).toHaveBeenCalledWith(
+      "run_comment_jobs",
+      expect.objectContaining({
+        jobs: [
+          expect.objectContaining({
+            accountId: "a5",
+            cafeId: 31732304,
+            articleId: 9,
+            content: "댓글1",
+          }),
+          expect.objectContaining({
+            accountId: "a5",
+            cafeId: 31732304,
+            articleId: 9,
+            content: "댓글2",
+          }),
+        ],
+      }),
+    );
+  });
+
   it("picks a per-account cafe/board and the band destination", async () => {
     renderPublish();
     // Add a naver and a band account alongside the default forum one.
