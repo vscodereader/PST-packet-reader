@@ -1,4 +1,5 @@
 mod ipc;
+mod logging;
 mod store;
 
 use std::path::Path;
@@ -85,6 +86,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         cafes::resolve_cafe,
         cafes::upsert_cafe,
         cafes::run_post_jobs,
+        cafes::list_joined_cafes,
         bands::list_bands,
         bootstrap_runtime,
         save_accounts,
@@ -148,6 +150,12 @@ pub fn run() {
     register_handlers(tauri::Builder::default())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
+            // 로그는 도메인 데이터와 같은 앱 데이터 디렉터리(<app_data>/logs)에 남긴다.
+            logging::init_file_logging(&dir.join("logs"));
+            tracing::info!(
+                version = env!("CARGO_PKG_VERSION"),
+                "pstmacro backend starting"
+            );
             manage_stores(app.handle(), &dir)?;
             Ok(())
         })
