@@ -815,6 +815,19 @@ interface IpcState {
 let state: IpcState;
 // 로그인 큐에 enqueue된 계정 id (get_queue_status가 같은 id로 잡을 돌려주도록 보관).
 let loginJobIds: string[] = [];
+// 테스트에서 특정 계정의 로그인 결과를 실패 등으로 시뮬레이션하기 위한 오버라이드.
+// accountId → { status, message }. 미지정 계정은 success로 본다.
+let loginOutcomes: Record<string, { status: string; message: string }> = {};
+
+/**
+ * Override login-queue outcomes for specific accounts (e.g. simulate a failure).
+ * Unset accounts keep the default `success`. Cleared by `resetIpc`.
+ */
+export function setLoginOutcomes(
+  outcomes: Record<string, { status: string; message: string }>,
+): void {
+  loginOutcomes = outcomes;
+}
 
 /** Re-seed the in-memory backend to the pristine dataset. Call in `beforeEach`. */
 export function resetIpc(): void {
@@ -825,20 +838,24 @@ export function resetIpc(): void {
     queueScheduled: clone(SEED_QUEUE_SCHEDULED),
   };
   loginJobIds = [];
+  loginOutcomes = {};
 }
 
 resetIpc();
 
-/** Login-queue status mirroring the auth queue: every enqueued account succeeds. */
+/** Login-queue status mirroring the auth queue: every enqueued account succeeds by default. */
 function loginQueueStatus() {
   return {
     isRunning: false,
     currentAccountId: null,
-    jobs: loginJobIds.map((accountId) => ({
-      accountId,
-      status: "success",
-      message: "success",
-    })),
+    jobs: loginJobIds.map((accountId) => {
+      const outcome = loginOutcomes[accountId];
+      return {
+        accountId,
+        status: outcome?.status ?? "success",
+        message: outcome?.message ?? "success",
+      };
+    }),
   };
 }
 

@@ -108,8 +108,16 @@ fn run_inner(
         ));
     }
 
-    type_into(client, "#id", id)?;
-    type_into(client, "#pw", pw)?;
+    // 자격증명을 실제 키 이벤트로 채운다. 3회 재시도 후에도 필드가 비어 있으면(일시적
+    // 렌더/타이밍 문제) type_into가 false를 돌려준다. 이때 빈/부분 자격증명으로 로그인
+    // 버튼을 누르면 결과가 #err_common/타임아웃으로 분류돼 일시적 타이핑 실패가 영구
+    // BadCredentials/Error로 둔갑한다. 그래서 클릭하지 않고 명확한 입력 실패로 중단한다.
+    if !type_into(client, "#id", id)? || !type_into(client, "#pw", pw)? {
+        return Ok(LoginOutcome::Error(
+            "로그인 폼 자동 입력에 실패했습니다(필드가 비어 로그인을 중단). 잠시 후 다시 시도하세요."
+                .to_owned(),
+        ));
+    }
 
     // 로그인 버튼 클릭(값 주입이 아니라 클릭이므로 evaluate 사용 가능).
     client.evaluate(
@@ -186,7 +194,8 @@ fn wait_for_login_form(client: &mut CdpClient) -> bool {
 
 // 선택자에 포커스한 뒤 한 글자씩 실제 키 이벤트로 입력한다(keydown 후킹 암호화 대응).
 // 입력 후 필드 값 길이를 확인해, 비어 있으면(타이밍/렌더 문제로 헛친 경우) 최대 3회 재시도한다.
-fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<(), AutomationError> {
+// 채워졌으면 `Ok(true)`, 3회 후에도 비어 있으면 `Ok(false)`를 반환해 호출자가 판단하게 한다.
+fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<bool, AutomationError> {
     let expected = text.chars().count();
 
     for _ in 0..3 {
@@ -217,12 +226,12 @@ fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<(), A
             .as_u64()
             .unwrap_or(0) as usize;
         if got >= expected {
-            return Ok(());
+            return Ok(true);
         }
         sleep(Duration::from_millis(500));
     }
-    // 3회 후에도 비면 그대로 진행한다(headed면 사용자가 직접 입력해 마무리할 수 있다).
-    Ok(())
+    // 3회 후에도 채우지 못함 — 호출자가 빈 자격증명으로 진행하지 않도록 false를 알린다.
+    Ok(false)
 }
 
 // 셀렉터에 해당하는 "화면에 보이는" 요소가 있는지 확인한다. `offsetParent`가 null이면

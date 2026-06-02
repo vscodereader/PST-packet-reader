@@ -2,8 +2,8 @@
 #[cfg(target_os = "windows")]
 pub const CHROME_PATH_WINDOWS: &str = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 
-// Linux/WSL에서 Playwright가 실행할 시스템 Chrome/Chromium 후보 경로들입니다.
-// (Playwright는 Linux에서 Windows용 chrome.exe를 실행할 수 없으므로 Linux 브라우저가 필요합니다.)
+// Linux/WSL에서 CDP 로그인이 띄울 시스템 Chrome/Chromium 후보 경로들입니다.
+// (Linux 빌드는 Windows용 chrome.exe를 실행할 수 없으므로 네이티브 Linux 브라우저가 필요합니다.)
 #[cfg(not(target_os = "windows"))]
 pub const CHROME_PATHS_LINUX: &[&str] = &[
     "/usr/bin/google-chrome",

@@ -276,6 +276,12 @@ export function Accounts({ go }: { go: GoFn }) {
   const [page, setPage] = useState(1);
   const [loggingIn, setLoggingIn] = useState(false);
   const loginPollRef = useRef<number | null>(null);
+  // 로그인 폴링은 한 번 만들어진 인터벌 클로저에서 돈다. 그 안에서 "현재" 행을 보려면
+  // 클로저에 갇힌 rows 대신 이 ref를 참조한다(아래 effect가 최신 rows로 동기화).
+  const rowsRef = useRef(rows);
+  useEffect(() => {
+    rowsRef.current = rows;
+  }, [rows]);
 
   // 화면을 떠날 때 로그인 상태 폴링 타이머를 정리한다.
   useEffect(() => {
@@ -344,25 +350,37 @@ export function Accounts({ go }: { go: GoFn }) {
   const pollLogin = (targets: Account[]) => {
     if (loginPollRef.current !== null)
       window.clearInterval(loginPollRef.current);
-    const remaining = new Set(targets.map((t) => t.loginId));
+    // 행 추적은 고유키 id로 한다(loginId는 유니크가 보장되지 않아 같은 loginId의 두 행이
+    // 하나로 합쳐지면 한쪽만 반영된다).
+    const remaining = new Set(targets.map((t) => t.id));
 
     loginPollRef.current = window.setInterval(() => {
       void ipc.auth
         .queueStatus()
         .then((status) => {
           targets.forEach((t) => {
-            if (!remaining.has(t.loginId)) return;
+            if (!remaining.has(t.id)) return;
+            // 백엔드 잡은 loginId(=쿠키 키)로 식별된다. 같은 loginId를 쓰는 행들은
+            // 같은 잡 결과를 각자(id별로) 반영한다.
             const job = [...status.jobs]
               .reverse()
               .find((j) => j.accountId === t.loginId);
             if (!job || job.status === "pending" || job.status === "running")
               return;
 
-            remaining.delete(t.loginId);
+            remaining.delete(t.id);
             const ok = job.status === "success" || job.status === "expired";
-            const next: Account = { ...t, status: ok ? "active" : "error" };
-            setRows((rs) => rs.map((r) => (r.id === t.id ? next : r)));
-            void ipc.accounts.update(next);
+            const nextStatus = ok ? "active" : "error";
+            // 폴링(수 초~분) 중 사용자가 같은 행을 편집했을 수 있으므로, 클릭 시점 스냅샷(t)이
+            // 아니라 "현재" 행에 status만 머지하고 권위 리스트로 reconcile한다(다른 핸들러와 동일).
+            const cur = rowsRef.current.find((r) => r.id === t.id);
+            setRows((rs) =>
+              rs.map((r) => (r.id === t.id ? { ...r, status: nextStatus } : r)),
+            );
+            if (cur)
+              void ipc.accounts
+                .update({ ...cur, status: nextStatus })
+                .then(setRows);
             toast(
               `${t.loginId}: ${ok ? "로그인 성공" : "로그인 실패 — " + job.message}`,
               ok ? "green" : "red",
@@ -377,12 +395,17 @@ export function Accounts({ go }: { go: GoFn }) {
             setLoggingIn(false);
           }
         })
-        .catch(() => {
+        .catch((err) => {
           if (loginPollRef.current !== null) {
             window.clearInterval(loginPollRef.current);
             loginPollRef.current = null;
           }
           setLoggingIn(false);
+          toast(
+            "로그인 상태 확인 중 오류가 발생했어요 — " +
+              (err instanceof Error ? err.message : String(err)),
+            "red",
+          );
         });
     }, 2000);
   };

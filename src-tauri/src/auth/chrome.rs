@@ -35,6 +35,13 @@ pub(crate) fn launch(headless: bool) -> Result<ChromeHandle, OrchestratorError> 
     let chrome = config::chrome_path().map_err(OrchestratorError::CommandFailed)?;
     let user_data_dir = std::env::temp_dir().join(format!("pstmacro-login-{}", unique_suffix()));
     std::fs::create_dir_all(&user_data_dir)?;
+    // 로그인 성공 시 인증된 네이버 세션(NID_AUT/NID_SES)이 이 프로필에 남으므로,
+    // 멀티유저 호스트에서 타 사용자가 읽지 못하도록 소유자 전용(0700)으로 제한한다.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&user_data_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
 
     let profile_arg = format!("--user-data-dir={}", user_data_dir.display());
     let mut args = vec![
