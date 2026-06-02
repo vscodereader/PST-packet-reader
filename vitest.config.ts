@@ -16,8 +16,9 @@ export default defineConfig({
     setupFiles: ["./src/test/setup.ts"],
     pool: "threads",
     maxWorkers: 4,
-    // Heavy Mantine + login-polling suites need real async-query headroom under
-    // the slower coverage instrumentation in CI (mirrors the master-side fix).
+    // Heavy Mantine component + login-polling suites need real async-query
+    // headroom on slow/CI machines, so a cold render + async IPC load doesn't
+    // trip the default 5s per-test budget.
     testTimeout: 15000,
     hookTimeout: 15000,
     coverage: {
