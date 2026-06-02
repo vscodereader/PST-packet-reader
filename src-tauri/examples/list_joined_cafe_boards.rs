@@ -2,21 +2,27 @@ use std::{env, fs};
 
 use pstmacro_lib::auth::{read_account_cookies, read_account_cookies_unchecked};
 use pstmacro_lib::naver_cafe::post::cookie_header_from_storage_state;
-use pstmacro_lib::naver_cafe::JoinedCafesClient;
+use pstmacro_lib::naver_cafe::CafeOrchestrator;
 use serde_json::Value;
 use tracing_subscriber::EnvFilter;
 
-// 실행방법 (send_post.rs 와 동일한 쿠키 확보 방식)
+// 가입한 카페 목록 + 각 카페의 "작성 가능한 게시판"을 함께 조회한다.
+// (list_joined_cafes.rs 는 카페 목록만 조회 — 이 예제는 카페마다 게시판까지 더 본다.)
 //
-//   [production] cookies 폴더에 저장된 각 계정의 쿠키 json 을 account_id 로 조회:
-//     PSTMACRO_LIVE_ACCOUNT_ID='id' cargo run --example list_joined_cafes
-//   (위치: %LOCALAPPDATA%\pstmacro\cookies\<account_id>.json)
+// 실행방법 (list_joined_cafes.rs 와 동일한 쿠키 확보 방식):
 //
-//   [로컬 테스트] 쿠키 json 파일을 직접 가리켜 사용 (appdata 불필요):
-//     PSTMACRO_LIVE_COOKIES_PATH='/tmp/hyeonjun1968.json' cargo run --example list_joined_cafes
+//   [production] cookies 폴더의 account_id 쿠키 사용:
+//     PSTMACRO_LIVE_ACCOUNT_ID='id' cargo run --example list_joined_cafe_boards
 //
-//   플래그로도 지정 가능: --account <id> | --cookies <path>
-//   로그 레벨: PSTMACRO_LOG=debug 로 페이지별 조회 로그까지 볼 수 있습니다.
+//   [로컬 테스트] 쿠키 json 파일을 직접 지정:
+//     PSTMACRO_LIVE_COOKIES_PATH='/tmp/hyeonjun1968.json' cargo run --example list_joined_cafe_boards
+//
+//   플래그: --account <id> | --cookies <path>
+//   카페 수 제한(많을 때 일부만): --limit <N> 또는 PSTMACRO_LIMIT
+//   로그: PSTMACRO_LOG=debug 로 페이지/요청별 로그 표시
+//
+// 주의: 카페마다 게시판 API를 1회씩 호출하므로(N+1 요청) 가입 카페가 많으면
+//       요청이 많아진다. 테스트 시 --limit 으로 줄여서 보는 것을 권장.
 //
 // 읽기 전용입니다 — 카페에 아무것도 작성하지 않습니다.
 // 보안: 쿠키 값/헤더는 절대 출력하지 않습니다.
@@ -25,7 +31,9 @@ use tracing_subscriber::EnvFilter;
 async fn main() {
     // 진단용 stdout 로깅(앱의 파일 로깅과 별개). PSTMACRO_LOG 로 레벨 제어.
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_env("PSTMACRO_LOG").unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_env("PSTMACRO_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_target(false)
         .try_init();
 
@@ -49,39 +57,58 @@ async fn main() {
         eprintln!("쿠키에서 네이버 세션 쿠키를 찾지 못했습니다. (로그인 상태를 확인하세요)");
         std::process::exit(1);
     };
+    let cookie = Some(cookie_header.as_str());
 
-    let client = JoinedCafesClient::new();
-    match client.fetch_joined_cafes(Some(cookie_header.as_str())).await {
-        Ok(cafes) => {
-            println!("\n가입 카페 {}개:\n", cafes.len());
-            println!(
-                "{:>10}  {:<32}  {:<20}  {:<12}  {:>4}  {:>4}",
-                "cafeId", "카페명", "슬러그", "등급", "관리", "휴면"
-            );
-            println!("{}", "-".repeat(92));
-            for c in &cafes {
-                println!(
-                    "{:>10}  {:<32}  {:<20}  {:<12}  {:>4}  {:>4}",
-                    c.cafe_id,
-                    truncate(&c.cafe_name, 32),
-                    truncate(&c.cafe_url, 20),
-                    truncate(&c.member_levelname, 12),
-                    if c.managing_cafe { "O" } else { "-" },
-                    if c.dormant_cafe { "O" } else { "-" },
-                );
-            }
-            println!();
-        }
+    let limit = pick(&args, "--limit", "PSTMACRO_LIMIT").and_then(|s| s.parse::<usize>().ok());
+
+    let orchestrator = CafeOrchestrator::new();
+
+    // 1) 가입 카페 목록
+    let cafes = match orchestrator.list_joined_cafes(cookie).await {
+        Ok(cafes) => cafes,
         Err(err) => {
-            eprintln!("실패 응답:");
-            // 오류 봉투에는 http_status/서버 원문(api_error_message)이 담김. 쿠키는 없음.
+            eprintln!("가입 카페 목록 조회 실패:");
             eprintln!("{}", serde_json::to_string_pretty(&err).unwrap());
             std::process::exit(1);
         }
+    };
+
+    let total = cafes.len();
+    let shown: Vec<_> = match limit {
+        Some(n) => cafes.iter().take(n).collect(),
+        None => cafes.iter().collect(),
+    };
+    println!(
+        "\n가입 카페 {total}개{}:\n",
+        match limit {
+            Some(n) if n < total => format!(" (그중 {n}개만 표시)"),
+            _ => String::new(),
+        }
+    );
+
+    // 2) 카페마다 작성 가능 게시판 조회 후 출력
+    for c in shown {
+        println!("■ {} (cafeId={})", c.cafe_name, c.cafe_id);
+        match orchestrator.list_boards(c.cafe_id, cookie).await {
+            Ok(boards) if boards.is_empty() => {
+                println!("    (작성 가능한 게시판 없음)");
+            }
+            Ok(boards) => {
+                for b in &boards {
+                    println!("    - {:<28} (menuId={})", truncate(&b.menu_name, 28), b.menu_id);
+                }
+            }
+            Err(err) => {
+                // 한 카페 실패해도 나머지는 계속 본다(휴면/권한 등).
+                let code = &err.code;
+                println!("    ! 게시판 조회 실패 (code={code})");
+            }
+        }
+        println!();
     }
 }
 
-/// 쿠키 값을 확보한다(send_post.rs 와 동일한 우선순위).
+/// 쿠키 값을 확보한다(list_joined_cafes.rs 와 동일한 우선순위).
 fn resolve_cookies(args: &[String]) -> Result<Value, String> {
     if let Some(path) = pick(args, "--cookies", "PSTMACRO_LIVE_COOKIES_PATH") {
         println!("쿠키 파일 직접 사용(로컬 테스트): {path}");
@@ -130,10 +157,13 @@ fn truncate(s: &str, max: usize) -> String {
 
 fn print_usage() {
     eprintln!("usage:");
-    eprintln!("  production: PSTMACRO_LIVE_ACCOUNT_ID=id cargo run --example list_joined_cafes");
-    eprintln!("  로컬 테스트: PSTMACRO_LIVE_COOKIES_PATH=/tmp/<id>.json cargo run --example list_joined_cafes");
-    eprintln!("  플래그: --account <id> | --cookies <path>");
-    eprintln!("  로그: PSTMACRO_LOG=debug 로 페이지별 조회 로그 표시");
+    eprintln!("  production: PSTMACRO_LIVE_ACCOUNT_ID=id cargo run --example list_joined_cafe_boards");
+    eprintln!(
+        "  로컬 테스트: PSTMACRO_LIVE_COOKIES_PATH=/tmp/<id>.json cargo run --example list_joined_cafe_boards"
+    );
+    eprintln!("  플래그: --account <id> | --cookies <path> | --limit <N>");
+    eprintln!("  로그: PSTMACRO_LOG=debug 로 페이지/요청별 로그 표시");
     eprintln!();
+    eprintln!("가입 카페 + 각 카페의 작성 가능 게시판(menuId/menu명)을 조회합니다.");
     eprintln!("읽기 전용 — 카페에 아무것도 작성하지 않습니다.");
 }
