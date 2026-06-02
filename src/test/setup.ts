@@ -1,5 +1,13 @@
 import "@testing-library/jest-dom";
 
+import { configure } from "@testing-library/react";
+
+// Heavy Mantine views (e.g. the Accounts table) can take well over a second to
+// mount + run their async IPC load on a cold/slow CI runner. Testing Library's
+// default `findBy*` / `waitFor` budget is only 1000ms, so the load races the
+// timeout and fails flakily. Give async queries real headroom.
+configure({ asyncUtilTimeout: 5000 });
+
 // jsdom lacks ResizeObserver; Mantine ScrollArea / Popover rely on it.
 if (typeof globalThis.ResizeObserver === "undefined") {
   globalThis.ResizeObserver = class {
