@@ -77,8 +77,21 @@ mod tests {
         let err = chrome_path().unwrap_err();
         assert!(err.contains("파일이 없습니다"), "unexpected error: {err}");
 
-        // 미설정이면 플랫폼 기본값으로 폴백 — 테스트 호스트(Linux)엔 없으므로 오류.
+        // 미설정이면 플랫폼 기본값으로 폴백. 기본 경로의 실제 존재 여부에 따라
+        // 결과가 갈리므로(WSL 호스트는 /mnt/c의 Windows Chrome이 존재할 수 있다)
+        // 호스트에 의존하지 않도록 "기본 경로 존재 == Ok" 계약만 검증한다.
         std::env::remove_var("CHROME_PATH");
-        assert!(chrome_path().is_err());
+        let is_wsl = std::fs::read_to_string("/proc/version")
+            .map(|v| v.to_lowercase().contains("microsoft"))
+            .unwrap_or(false);
+        let default_path = if is_wsl {
+            CHROME_PATH_WSL
+        } else {
+            CHROME_PATH_WINDOWS
+        };
+        assert_eq!(
+            chrome_path().is_ok(),
+            std::path::Path::new(default_path).exists()
+        );
     }
 }
