@@ -14,8 +14,8 @@ pub use cafe_ref::{
     CAFE_API_HOST, CAFE_HOME_HOST,
 };
 pub use orchestrator::{
-    run_post_jobs, CafeOrchestrator, JobReport, PostJob, CODE_INVALID_CAFE_INPUT,
-    CODE_NO_COOKIES,
+    run_comment_jobs, run_post_jobs, CafeOrchestrator, CommentJob, CommentJobReport, JobReport,
+    PostJob, CODE_INVALID_CAFE_INPUT, CODE_NO_COOKIES,
 };
 pub use comment::{
     build_comment_preview, build_reply_preview, execute_comment, execute_reply,

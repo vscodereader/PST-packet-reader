@@ -86,6 +86,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         cafes::resolve_cafe,
         cafes::upsert_cafe,
         cafes::run_post_jobs,
+        cafes::run_comment_jobs,
         cafes::list_joined_cafes,
         bands::list_bands,
         bootstrap_runtime,

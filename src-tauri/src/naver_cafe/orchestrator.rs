@@ -28,6 +28,7 @@ use ts_rs::TS;
 use crate::auth;
 use crate::naver_cafe::{
     cafe_ref::{parse_cafe_ref, CafeGateClient, CafeHomeClient, CafeInfoView, CafeRef, CafeRefError},
+    comment::{CafeCommentClient, CommentError, CommentErrorData, CommentRequest, CommentResult},
     error::{ErrorEnvelope, NaverCafeCommonErrorData},
     joined_cafes::{JoinedCafe, JoinedCafesClient, JoinedCafesError},
     menu::{CafeMenuClient, Menu, MenuError},
@@ -117,6 +118,72 @@ impl JobReport {
     }
 }
 
+/// 댓글 작성 작업 1건 — `(계정, 카페, 게시글, 내용)` 조합.
+///
+/// [`PostJob`]과 달리 카페/게시글을 **숫자 ID로 이미 확정한 상태**로 받는다.
+/// (글 작성 직후의 `articleId` 재사용, 또는 URL 파싱 결과를 UI가 채운다.)
+/// 이 단계(척추)는 카페 해석·글목록 조회를 일절 하지 않는다.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
+#[serde(rename_all = "camelCase")]
+pub struct CommentJob {
+    /// 사용할 계정 ID (쿠키 파일 조회 키).
+    pub account_id: String,
+    /// 대상 카페의 숫자 ID. (JS `number` — [`PostJob::menu_id`] 참고)
+    #[ts(type = "number")]
+    pub cafe_id: u64,
+    /// 댓글을 달 대상 게시글의 숫자 ID.
+    #[ts(type = "number")]
+    pub article_id: u64,
+    /// 댓글 본문.
+    pub content: String,
+}
+
+/// 댓글 작업 1건의 실행 결과 보고(내부용).
+///
+/// IPC 경계는 슬림한 `CommentPublishOutcome`([`crate::ipc::cafes`])가 담당하며,
+/// 풍부한 [`CommentResult`]/[`CommentError`]는 백엔드에만 머문다.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentJobReport {
+    /// 작업에 사용된 계정 ID.
+    pub account_id: String,
+    /// 대상 카페 ID.
+    pub cafe_id: u64,
+    /// 대상 게시글 ID.
+    pub article_id: u64,
+    /// 성공 여부.
+    pub success: bool,
+    /// 성공 시 등록 결과 (실패 시 `None`).
+    pub result: Option<CommentResult>,
+    /// 실패 시 오류 (성공 시 `None`).
+    pub error: Option<CommentError>,
+}
+
+impl CommentJobReport {
+    fn success(job: &CommentJob, result: CommentResult) -> Self {
+        Self {
+            account_id: job.account_id.clone(),
+            cafe_id: job.cafe_id,
+            article_id: job.article_id,
+            success: true,
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    fn failure(job: &CommentJob, error: CommentError) -> Self {
+        Self {
+            account_id: job.account_id.clone(),
+            cafe_id: job.cafe_id,
+            article_id: job.article_id,
+            success: false,
+            result: None,
+            error: Some(error),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 오류 변환 헬퍼
 // ---------------------------------------------------------------------------
@@ -167,6 +234,29 @@ fn no_cookies_error(account_id: &str, detail: Option<String>) -> PostError {
             cafe: empty_common_error(),
             menu_id: None,
             subject: None,
+            validation_errors: vec![],
+        }),
+    }
+}
+
+/// 댓글 작업용 NO_COOKIES 오류를 만든다([`no_cookies_error`]의 [`CommentError`] 버전).
+/// 쿠키 값은 절대 포함하지 않는다.
+fn no_cookies_comment_error(account_id: &str, detail: Option<String>) -> CommentError {
+    let message = match detail {
+        Some(d) => format!("계정 '{}'의 쿠키를 읽지 못했습니다: {}", account_id, d),
+        None => format!(
+            "계정 '{}'의 세션 쿠키가 없거나 만료되었습니다. 다시 로그인하세요.",
+            account_id
+        ),
+    };
+    ErrorEnvelope {
+        trace_id: String::new(),
+        code: CODE_NO_COOKIES.to_string(),
+        message,
+        error_data: Some(CommentErrorData {
+            cafe: empty_common_error(),
+            article_id: None,
+            ref_comment_id: None,
             validation_errors: vec![],
         }),
     }
@@ -364,6 +454,54 @@ async fn run_single_job(orchestrator: &CafeOrchestrator, job: &PostJob) -> JobRe
     match orchestrator.post_one(job, cookie_header.as_deref()).await {
         Ok(result) => JobReport::success(job, result),
         Err(err) => JobReport::failure(job, err),
+    }
+}
+
+/// N건의 댓글 작업을 순차 실행하고 각 건의 결과를 [`CommentJobReport`]로 보고한다.
+///
+/// [`run_post_jobs`]의 댓글 버전이다. 각 작업마다 계정 쿠키를 읽어
+/// ([`auth::read_account_cookies`]) 댓글 등록에 사용하며, **한 건이 실패해도
+/// 중단하지 않고 다음 작업으로 넘어간다**. 쿠키 값은 어떤 보고/로그에도 노출되지 않는다.
+pub async fn run_comment_jobs(jobs: &[CommentJob]) -> Vec<CommentJobReport> {
+    let client = CafeCommentClient::new();
+    let mut reports = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        reports.push(run_single_comment_job(&client, job).await);
+    }
+    reports
+}
+
+async fn run_single_comment_job(client: &CafeCommentClient, job: &CommentJob) -> CommentJobReport {
+    // 계정 쿠키 읽기 (만료 검증 포함). 없거나 오류면 건너뛴다.
+    let cookie_value = match auth::read_account_cookies(&job.account_id) {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            return CommentJobReport::failure(job, no_cookies_comment_error(&job.account_id, None))
+        }
+        Err(e) => {
+            return CommentJobReport::failure(
+                job,
+                no_cookies_comment_error(&job.account_id, Some(e.to_string())),
+            )
+        }
+    };
+
+    // 보안: cookie_header 값은 로그/보고에 노출하지 않는다.
+    let cookie_header = cookie_header_from_storage_state(&cookie_value);
+    if cookie_header.is_none() {
+        return CommentJobReport::failure(job, no_cookies_comment_error(&job.account_id, None));
+    }
+
+    let request = CommentRequest {
+        cafe_id: job.cafe_id.to_string(),
+        article_id: job.article_id.to_string(),
+        content: job.content.clone(),
+        sticker_id: None,
+    };
+
+    match client.post_comment(&request, cookie_header.as_deref()).await {
+        Ok(result) => CommentJobReport::success(job, result),
+        Err(err) => CommentJobReport::failure(job, err),
     }
 }
 
@@ -668,5 +806,72 @@ mod tests {
         assert_eq!(job.account_id, "tester");
         assert_eq!(job.board_type, "L");
         assert_eq!(job.tag_list, vec!["태그1"]);
+    }
+
+    // ------------------------------------------------------------------
+    // run_comment_jobs — 쿠키 없는 계정은 건너뛰고 보고 (네트워크 없음)
+    // ------------------------------------------------------------------
+
+    fn sample_comment_job(account_id: &str) -> CommentJob {
+        CommentJob {
+            account_id: account_id.to_string(),
+            cafe_id: 31732304,
+            article_id: 9,
+            content: "안녕하세요".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_comment_jobs_reports_failure_for_each_job_without_cookies() {
+        // 존재하지 않는 계정 → 쿠키 없음 → 실패 보고. 댓글 등록 단계까지 가지 않으므로
+        // 네트워크 요청이 발생하지 않는다.
+        let jobs = vec![
+            sample_comment_job("no-such-account-1"),
+            sample_comment_job("no-such-account-2"),
+        ];
+
+        let reports = run_comment_jobs(&jobs).await;
+
+        assert_eq!(reports.len(), 2, "작업 수만큼 보고가 나와야 함");
+        for report in &reports {
+            assert!(!report.success, "쿠키 없는 계정은 실패여야 함");
+            assert_eq!(
+                report.error.as_ref().map(|e| e.code.as_str()),
+                Some(CODE_NO_COOKIES),
+                "쿠키 없음 코드여야 함"
+            );
+            assert!(report.result.is_none(), "실패 보고에는 result가 없어야 함");
+        }
+    }
+
+    #[test]
+    fn comment_job_deserializes_camel_case() {
+        let raw = json!({
+            "accountId": "tester",
+            "cafeId": 31732304_u64,
+            "articleId": 9_u64,
+            "content": "댓글 본문"
+        });
+        let job: CommentJob = serde_json::from_value(raw).expect("역직렬화 실패");
+        assert_eq!(job.account_id, "tester");
+        assert_eq!(job.cafe_id, 31732304);
+        assert_eq!(job.article_id, 9);
+        assert_eq!(job.content, "댓글 본문");
+    }
+
+    #[test]
+    fn comment_job_report_round_trips() {
+        let job = sample_comment_job("tester");
+        let report = CommentJobReport::success(
+            &job,
+            CommentResult {
+                comment_id: 62628988,
+                ref_comment_id: 62628988,
+            },
+        );
+        let serialized = serde_json::to_string(&report).expect("직렬화 실패");
+        let restored: CommentJobReport =
+            serde_json::from_str(&serialized).expect("역직렬화 실패");
+        assert_eq!(report, restored);
     }
 }

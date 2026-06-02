@@ -71,6 +71,15 @@ describe("ipc facade", () => {
     const jobs = [{ accountId: "a1" }] as never;
     await ipc.cafes.runPostJobs(jobs);
     expect(mockInvoke).toHaveBeenCalledWith("run_post_jobs", { jobs });
+    const commentJobs = [{ accountId: "a1", cafeId: 1, articleId: 2 }] as never;
+    await ipc.cafes.runCommentJobs(commentJobs);
+    expect(mockInvoke).toHaveBeenCalledWith("run_comment_jobs", {
+      jobs: commentJobs,
+    });
+    await ipc.cafes.listJoined("acc1");
+    expect(mockInvoke).toHaveBeenCalledWith("list_joined_cafes", {
+      accountId: "acc1",
+    });
   });
 
   it("read-only channels each invoke their list command", async () => {

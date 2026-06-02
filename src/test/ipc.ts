@@ -1,5 +1,7 @@
 import { vi } from "vitest";
 
+import type { CommentJob } from "@/shared/bindings/CommentJob";
+import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutcome";
 import type { JoinedCafe } from "@/shared/bindings/JoinedCafe";
 import type { PostJob } from "@/shared/bindings/PostJob";
 import type { PublishOutcome } from "@/shared/bindings/PublishOutcome";
@@ -922,6 +924,17 @@ export const invoke = vi.fn(
           menuId: j.menuId,
           success: true,
           articleId: 1000 + i,
+        }));
+        return clone(outcomes);
+      }
+      case "run_comment_jobs": {
+        const jobs = args!.jobs as CommentJob[];
+        const outcomes: CommentPublishOutcome[] = jobs.map((j, i) => ({
+          accountId: j.accountId,
+          cafeId: j.cafeId,
+          articleId: j.articleId,
+          success: true,
+          commentId: 2000 + i,
         }));
         return clone(outcomes);
       }

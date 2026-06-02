@@ -4,6 +4,8 @@ import type { Account } from "@/shared/bindings/Account";
 import type { ActivityItem } from "@/shared/bindings/ActivityItem";
 import type { Band } from "@/shared/bindings/Band";
 import type { Cafe } from "@/shared/bindings/Cafe";
+import type { CommentJob } from "@/shared/bindings/CommentJob";
+import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutcome";
 import type { DashStat } from "@/shared/bindings/DashStat";
 import type { JoinedCafe } from "@/shared/bindings/JoinedCafe";
 import type { LibraryPost } from "@/shared/bindings/LibraryPost";
@@ -19,6 +21,8 @@ export type {
   ActivityItem,
   Band,
   Cafe,
+  CommentJob,
+  CommentPublishOutcome,
   DashStat,
   JoinedCafe,
   LibraryPost,
@@ -90,6 +94,13 @@ export const ipc = {
     /** Run publish jobs sequentially; returns one slim outcome per job. */
     runPostJobs: (jobs: PostJob[]) =>
       call<PublishOutcome[]>("run_post_jobs", { jobs }),
+    /**
+     * Run comment jobs sequentially; returns one slim outcome per job. Each job
+     * targets a numeric `cafeId`/`articleId` (from a just-posted article or a
+     * parsed URL); one job failing does not stop the rest.
+     */
+    runCommentJobs: (jobs: CommentJob[]) =>
+      call<CommentPublishOutcome[]>("run_comment_jobs", { jobs }),
     /**
      * List every cafe `accountId` has joined (crawled across all pages),
      * using its session cookie. Rejects with the backend's error envelope

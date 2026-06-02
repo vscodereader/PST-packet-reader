@@ -14,7 +14,8 @@ use ts_rs::TS;
 use crate::auth::read_account_cookies;
 use crate::naver_cafe::post::cookie_header_from_storage_state;
 use crate::naver_cafe::{
-    run_post_jobs as run_jobs, CafeOrchestrator, ErrorEnvelope, JobReport, JoinedCafe, Menu,
+    run_comment_jobs as run_comment_jobs_internal, run_post_jobs as run_jobs, CafeOrchestrator,
+    CommentJob, CommentJobReport, ErrorEnvelope, JobReport, JoinedCafe, Menu,
     NaverCafeCommonErrorData, PostJob, CODE_NO_COOKIES,
 };
 use crate::store::JsonStore;
@@ -239,6 +240,63 @@ pub async fn run_post_jobs(jobs: Vec<PostJob>) -> Vec<PublishOutcome> {
     run_jobs(&jobs).await.iter().map(outcome_from_report).collect()
 }
 
+/// Slim per-job comment result returned to the UI. The rich internal
+/// `CommentJobReport`/`CommentError` stays backend-only — mirrors
+/// [`PublishOutcome`] for the post path.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
+#[serde(rename_all = "camelCase")]
+pub struct CommentPublishOutcome {
+    /// Account the job ran under.
+    pub account_id: String,
+    /// Target cafe id.
+    #[ts(type = "number")]
+    pub cafe_id: u64,
+    /// Target article id the comment was posted to.
+    #[ts(type = "number")]
+    pub article_id: u64,
+    /// Whether the comment was posted.
+    pub success: bool,
+    /// Registered comment id, on success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub comment_id: Option<u64>,
+    /// Error code, on failure (e.g. "NO_COOKIES", "COMMENT_HTTP_ERROR").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error_code: Option<String>,
+    /// Human-readable error message, on failure. Never contains cookie values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error_message: Option<String>,
+}
+
+/// Map the internal [`CommentJobReport`] to the slim UI-facing outcome.
+fn comment_outcome_from_report(report: &CommentJobReport) -> CommentPublishOutcome {
+    CommentPublishOutcome {
+        account_id: report.account_id.clone(),
+        cafe_id: report.cafe_id,
+        article_id: report.article_id,
+        success: report.success,
+        comment_id: report.result.as_ref().map(|r| r.comment_id),
+        error_code: report.error.as_ref().map(|e| e.code.clone()),
+        error_message: report.error.as_ref().map(|e| e.message.clone()),
+    }
+}
+
+/// Run N comment jobs sequentially, returning a slim outcome per job.
+///
+/// Each job reads its account's session cookie internally; one job failing does
+/// not stop the rest. Cookie values never appear in any outcome.
+#[tauri::command]
+pub async fn run_comment_jobs(jobs: Vec<CommentJob>) -> Vec<CommentPublishOutcome> {
+    run_comment_jobs_internal(&jobs)
+        .await
+        .iter()
+        .map(comment_outcome_from_report)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +365,60 @@ mod tests {
         assert_eq!(
             o.error_message.as_deref(),
             Some("카페 식별자를 인식하지 못했습니다")
+        );
+    }
+
+    fn comment_success_report() -> CommentJobReport {
+        CommentJobReport {
+            account_id: "acc1".into(),
+            cafe_id: 31732304,
+            article_id: 9,
+            success: true,
+            result: Some(crate::naver_cafe::CommentResult {
+                comment_id: 62628988,
+                ref_comment_id: 62628988,
+            }),
+            error: None,
+        }
+    }
+
+    fn comment_failure_report() -> CommentJobReport {
+        CommentJobReport {
+            account_id: "acc2".into(),
+            cafe_id: 31732304,
+            article_id: 9,
+            success: false,
+            result: None,
+            error: Some(ErrorEnvelope {
+                trace_id: String::new(),
+                code: "COMMENT_HTTP_ERROR".into(),
+                message: "댓글 등록 요청이 실패했습니다.".into(),
+                error_data: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn comment_outcome_from_success_report_carries_comment_id() {
+        let o = comment_outcome_from_report(&comment_success_report());
+        assert!(o.success);
+        assert_eq!(o.account_id, "acc1");
+        assert_eq!(o.cafe_id, 31732304);
+        assert_eq!(o.article_id, 9);
+        assert_eq!(o.comment_id, Some(62628988));
+        assert_eq!(o.error_code, None);
+        assert_eq!(o.error_message, None);
+    }
+
+    #[test]
+    fn comment_outcome_from_failure_report_carries_error_code_and_message() {
+        let o = comment_outcome_from_report(&comment_failure_report());
+        assert!(!o.success);
+        assert_eq!(o.comment_id, None);
+        assert_eq!(o.error_code.as_deref(), Some("COMMENT_HTTP_ERROR"));
+        assert_eq!(
+            o.error_message.as_deref(),
+            Some("댓글 등록 요청이 실패했습니다.")
         );
     }
 
