@@ -100,6 +100,13 @@ fn run_inner(
     wait_for_human: bool,
 ) -> Result<LoginOutcome, AutomationError> {
     client.navigate(LOGIN_URL)?;
+    // navigate가 readyState까지 기다려도, 로그인 폼이 렌더되고 네이버의 keydown 암호화
+    // 핸들러가 붙기 전에 타이핑하면 글자가 필드에 들어가지 않는다. 폼이 준비될 때까지 기다린다.
+    if !wait_for_login_form(client) {
+        return Ok(LoginOutcome::Error(
+            "로그인 폼(#id/#pw)을 찾지 못했습니다.".to_owned(),
+        ));
+    }
 
     type_into(client, "#id", id)?;
     type_into(client, "#pw", pw)?;
@@ -158,24 +165,63 @@ fn run_inner(
     }
 }
 
-// 선택자에 포커스한 뒤 한 글자씩 실제 키 이벤트로 입력한다(keydown 후킹 암호화 대응).
-fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<(), AutomationError> {
-    let focus = format!(
-        "(()=>{{const el=document.querySelector('{selector}');if(el){{el.focus();return true;}}return false;}})()"
-    );
-    client.evaluate(&focus)?;
-
-    for ch in text.chars() {
-        let s = ch.to_string();
-        client.call(
-            "Input.dispatchKeyEvent",
-            json!({ "type": "keyDown", "text": s, "key": s }),
-        )?;
-        client.call(
-            "Input.dispatchKeyEvent",
-            json!({ "type": "keyUp", "key": s }),
-        )?;
+// 로그인 폼(#id/#pw)이 나타나고 입력 가능해질 때까지 기다린 뒤, 폼 스크립트가 자리잡도록
+// 잠깐 안정화 시간을 준다. 이 대기 없이 곧장 타이핑하면 자동 입력이 빈 화면에 헛쳐진다.
+fn wait_for_login_form(client: &mut CdpClient) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let ready = client
+            .evaluate_bool("!!document.querySelector('#id') && !!document.querySelector('#pw')")
+            .unwrap_or(false);
+        if ready {
+            sleep(Duration::from_millis(1500));
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        sleep(Duration::from_millis(250));
     }
+}
+
+// 선택자에 포커스한 뒤 한 글자씩 실제 키 이벤트로 입력한다(keydown 후킹 암호화 대응).
+// 입력 후 필드 값 길이를 확인해, 비어 있으면(타이밍/렌더 문제로 헛친 경우) 최대 3회 재시도한다.
+fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<(), AutomationError> {
+    let expected = text.chars().count();
+
+    for _ in 0..3 {
+        // 기존 값 비우고 포커스(재시도 시 중복 입력 방지). 셀렉터는 고정 안전 문자열(#id/#pw).
+        let focus = format!(
+            "(()=>{{const el=document.querySelector('{selector}');\
+             if(el){{el.value='';el.focus();return true;}}return false;}})()"
+        );
+        client.evaluate(&focus)?;
+
+        for ch in text.chars() {
+            let s = ch.to_string();
+            client.call(
+                "Input.dispatchKeyEvent",
+                json!({ "type": "keyDown", "text": s, "key": s }),
+            )?;
+            client.call(
+                "Input.dispatchKeyEvent",
+                json!({ "type": "keyUp", "key": s }),
+            )?;
+        }
+
+        let got = client
+            .evaluate(&format!(
+                "(()=>{{const el=document.querySelector('{selector}');\
+                 return el&&el.value?el.value.length:0;}})()"
+            ))?
+            .as_u64()
+            .unwrap_or(0) as usize;
+        if got >= expected {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(500));
+    }
+    // 3회 후에도 비면 그대로 진행한다(headed면 사용자가 직접 입력해 마무리할 수 있다).
     Ok(())
 }
 
