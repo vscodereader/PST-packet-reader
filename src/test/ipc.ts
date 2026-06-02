@@ -1,9 +1,12 @@
 import { vi } from "vitest";
 
+import type { PostJob } from "@/shared/bindings/PostJob";
+import type { PublishOutcome } from "@/shared/bindings/PublishOutcome";
 import type {
   Account,
   ActivityItem,
   Band,
+  Board,
   Cafe,
   DashStat,
   LibraryPost,
@@ -261,13 +264,33 @@ const SEED_STOCKS: Stock[] = [
   },
 ];
 
+const board = (name: string, menuId: number, boardType = "L"): Board => ({
+  name,
+  menuId,
+  boardType,
+});
+
 const SEED_CAFES: Cafe[] = [
   {
     name: "주식투자연구소 카페",
-    boards: ["종목분석", "자유게시판", "질문/답변"],
+    cafeRef: "cafe.naver.com/stocklab",
+    cafeId: 11111111,
+    boards: [
+      board("종목분석", 1),
+      board("자유게시판", 2),
+      board("질문/답변", 3),
+    ],
   },
-  { name: "개미투자 카페", boards: ["자유게시판", "정보 공유", "종목추천"] },
-  { name: "가치투자랩 카페", boards: ["공지사항", "종목토론", "자유게시판"] },
+  {
+    name: "개미투자 카페",
+    cafeRef: "cafe.naver.com/antinvest",
+    cafeId: 22222222,
+    boards: [
+      board("자유게시판", 1),
+      board("정보 공유", 2),
+      board("종목추천", 3),
+    ],
+  },
 ];
 
 const SEED_BANDS: Band[] = [
@@ -810,6 +833,7 @@ interface IpcState {
   posts: LibraryPost[];
   queueNow: QueueNowItem[];
   queueScheduled: QueueScheduledItem[];
+  cafes: Cafe[];
 }
 
 let state: IpcState;
@@ -821,6 +845,7 @@ export function resetIpc(): void {
     posts: clone(SEED_LIBRARY),
     queueNow: clone(SEED_QUEUE_NOW),
     queueScheduled: clone(SEED_QUEUE_SCHEDULED),
+    cafes: clone(SEED_CAFES),
   };
 }
 
@@ -840,7 +865,35 @@ export const invoke = vi.fn(
       case "list_log_batches":
         return clone(SEED_LOG_BATCHES);
       case "list_cafes":
-        return clone(SEED_CAFES);
+        return clone(state.cafes);
+      case "resolve_cafe": {
+        const input = args!.input as string;
+        const resolved: Cafe = {
+          name: `해석된 카페 (${input})`,
+          cafeRef: input,
+          cafeId: 31732304,
+          boards: [board("자유게시판", 1), board("공지사항", 2)],
+        };
+        return clone(resolved);
+      }
+      case "upsert_cafe": {
+        const cafe = args!.cafe as Cafe;
+        const i = state.cafes.findIndex((c) => c.cafeId === cafe.cafeId);
+        if (i >= 0) state.cafes[i] = cafe;
+        else state.cafes = [cafe, ...state.cafes];
+        return clone(state.cafes);
+      }
+      case "run_post_jobs": {
+        const jobs = args!.jobs as PostJob[];
+        const outcomes: PublishOutcome[] = jobs.map((j, i) => ({
+          accountId: j.accountId,
+          cafe: j.cafe,
+          menuId: j.menuId,
+          success: true,
+          articleId: 1000 + i,
+        }));
+        return clone(outcomes);
+      }
       case "list_bands":
         return clone(SEED_BANDS);
 

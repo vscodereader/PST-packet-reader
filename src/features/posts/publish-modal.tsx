@@ -42,6 +42,7 @@ import { DateTimePicker } from "@/shared/ui/date-time-picker";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo, PlatformPill } from "@/shared/ui/platform-logo";
 
+import { AddCafeModal } from "./add-cafe-modal";
 import { PreviewModal } from "./preview-modal";
 import { StockCrawlModal } from "./stock-crawl-modal";
 
@@ -108,6 +109,7 @@ function DestinationPicker({
   selPlatforms,
   stockCodes,
   openStockModal,
+  openAddCafe,
   removeStock,
   cafe,
   setCafe,
@@ -122,6 +124,7 @@ function DestinationPicker({
   selPlatforms: PlatformId[];
   stockCodes: string[];
   openStockModal: () => void;
+  openAddCafe: () => void;
   removeStock: (code: string) => void;
   cafe: string;
   setCafe: (v: string) => void;
@@ -204,11 +207,21 @@ function DestinationPicker({
       )}
       {selPlatforms.includes("naver") && (
         <Box style={card}>
-          <Group gap={9} px={11} py={9} style={head}>
+          <Group gap={9} px={11} py={9} wrap="nowrap" style={head}>
             <PlatformLogo id="naver" size={22} />
-            <Text fz={13} fw={700}>
+            <Text fz={13} fw={700} style={{ flex: 1 }}>
               네이버 카페
             </Text>
+            <Button
+              size="compact-xs"
+              radius="xl"
+              variant="light"
+              color="naver"
+              leftSection={<Icon.plus size={13} />}
+              onClick={openAddCafe}
+            >
+              카페 추가
+            </Button>
           </Group>
           <Group gap={8} p={10} grow>
             <Select
@@ -218,12 +231,12 @@ function DestinationPicker({
                 if (!v) return;
                 setCafe(v);
                 const c = cafes.find((x) => x.name === v);
-                setCafeBoard(c?.boards[0] ?? "");
+                setCafeBoard(c?.boards[0]?.name ?? "");
               }}
             />
             <Select
               value={cafeBoard}
-              data={cafeObj?.boards ?? []}
+              data={(cafeObj?.boards ?? []).map((b) => b.name)}
               onChange={(v) => setCafeBoard(v ?? "")}
               style={{ maxWidth: 130 }}
             />
@@ -457,6 +470,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [selected, setSelected] = useState<string[]>([]);
   const [stockCodes, setStockCodes] = useState<string[]>(["005930"]);
   const [stockModal, setStockModal] = useState(false);
+  const [addCafeOpen, setAddCafeOpen] = useState(false);
   const [cafe, setCafe] = useState("");
   const [cafeBoard, setCafeBoard] = useState("");
   const [band, setBand] = useState("");
@@ -478,7 +492,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     void ipc.cafes.list().then((c) => {
       setCafes(c);
       setCafe((cur) => cur || (c[0]?.name ?? ""));
-      setCafeBoard((cur) => cur || (c[0]?.boards[0] ?? ""));
+      setCafeBoard((cur) => cur || (c[0]?.boards[0]?.name ?? ""));
     });
     void ipc.bands.list().then((b) => {
       setBands(b);
@@ -774,6 +788,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
               selPlatforms={selPlatforms}
               stockCodes={stockCodes}
               openStockModal={() => setStockModal(true)}
+              openAddCafe={() => setAddCafeOpen(true)}
               removeStock={(c) =>
                 setStockCodes((s) => s.filter((x) => x !== c))
               }
@@ -965,6 +980,21 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         onConfirm={(stocks) => {
           setStockCodes(stocks.map((s) => s.code));
           setStockModal(false);
+        }}
+      />
+      <AddCafeModal
+        open={addCafeOpen}
+        accounts={accounts}
+        onClose={() => setAddCafeOpen(false)}
+        onAdded={(c) => {
+          setCafes((cs) => {
+            const i = cs.findIndex((x) => x.cafeId === c.cafeId);
+            return i >= 0
+              ? cs.map((x) => (x.cafeId === c.cafeId ? c : x))
+              : [c, ...cs];
+          });
+          setCafe(c.name);
+          setCafeBoard(c.boards[0]?.name ?? "");
         }}
       />
       <PreviewModal

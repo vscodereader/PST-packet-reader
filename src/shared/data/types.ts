@@ -55,10 +55,11 @@ export interface Account {
   tags: string[];
 }
 
-export interface Cafe {
-  name: string;
-  boards: string[];
-}
+// Cafe/Board are generated from Rust (ts-rs) — re-exported here so UI code can
+// keep importing domain types from one place. A cafe's boards are now rich
+// objects ({ name, menuId, boardType }), not plain strings.
+export type { Board } from "@/shared/bindings/Board";
+export type { Cafe } from "@/shared/bindings/Cafe";
 
 export interface Band {
   name: string;
