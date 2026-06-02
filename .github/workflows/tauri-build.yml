@@ -1,17 +1,10 @@
 name: Tauri build
 
 on:
-  # Multi-OS Tauri build is expensive — only run on PRs targeting the
-  # default branch (skip stacked / intermediate PRs) and on pushes to
-  # the default branch itself. Docs-only changes also skip.
-  pull_request:
-    branches: [master, main]
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "LICENSE"
-      - ".gitignore"
-      - ".editorconfig"
+  # Multi-OS Tauri build is expensive (3 OSes, ~12 min each), so it no longer
+  # runs on every PR push. It validates each commit that lands on the default
+  # branch, plus on demand via the Actions "Run workflow" button when a branch
+  # needs pre-merge cross-platform validation. Docs-only changes skip.
   push:
     branches: [master, main]
     paths-ignore:
@@ -20,6 +13,13 @@ on:
       - "LICENSE"
       - ".gitignore"
       - ".editorconfig"
+  workflow_dispatch:
+
+# Don't cancel in-flight builds — each landed commit (or manual run) keeps its
+# own cross-platform result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
