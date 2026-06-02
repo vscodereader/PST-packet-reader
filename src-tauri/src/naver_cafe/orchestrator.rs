@@ -29,6 +29,7 @@ use crate::auth;
 use crate::naver_cafe::{
     cafe_ref::{parse_cafe_ref, CafeGateClient, CafeHomeClient, CafeInfoView, CafeRef, CafeRefError},
     error::{ErrorEnvelope, NaverCafeCommonErrorData},
+    joined_cafes::{JoinedCafe, JoinedCafesClient, JoinedCafesError},
     menu::{CafeMenuClient, Menu, MenuError},
     post::{
         build_article_write_body_with_content, cookie_header_from_storage_state,
@@ -194,6 +195,7 @@ pub struct CafeOrchestrator {
     gate: CafeGateClient,
     menu: CafeMenuClient,
     post: CafeHttpClient,
+    joined: JoinedCafesClient,
 }
 
 impl CafeOrchestrator {
@@ -204,6 +206,7 @@ impl CafeOrchestrator {
             gate: CafeGateClient::new(),
             menu: CafeMenuClient::new(),
             post: CafeHttpClient::new(),
+            joined: JoinedCafesClient::new(),
         }
     }
 
@@ -214,7 +217,8 @@ impl CafeOrchestrator {
             home: CafeHomeClient::with_base_url(base.clone()),
             gate: CafeGateClient::with_base_url(base.clone()),
             menu: CafeMenuClient::with_base_url(base.clone()),
-            post: CafeHttpClient::with_base_url(base),
+            post: CafeHttpClient::with_base_url(base.clone()),
+            joined: JoinedCafesClient::with_base_url(base),
         }
     }
 
@@ -260,6 +264,14 @@ impl CafeOrchestrator {
         self.menu
             .fetch_general_writable_boards(&cafe_id.to_string(), cookie_header)
             .await
+    }
+
+    /// 현재 로그인 계정이 가입한 카페 목록을 조회한다(모든 페이지).
+    pub async fn list_joined_cafes(
+        &self,
+        cookie_header: Option<&str>,
+    ) -> Result<Vec<JoinedCafe>, JoinedCafesError> {
+        self.joined.fetch_joined_cafes(cookie_header).await
     }
 
     // ---- 실행 ----
@@ -395,6 +407,26 @@ mod tests {
             .await
             .expect("숫자 cafeId 해석 성공해야 함");
         assert_eq!(id, 31732304);
+    }
+
+    #[tokio::test]
+    async fn list_joined_cafes_delegates_to_joined_client() {
+        const FIXTURE: &str =
+            include_str!("joined_cafes/fixtures/join_cafes_groups_success.json");
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/cafe-home-web/cafe-home/v1/config/join-cafes/groups/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(FIXTURE))
+            .mount(&server)
+            .await;
+
+        let orch = CafeOrchestrator::with_base_url(server.uri());
+        let cafes = orch
+            .list_joined_cafes(None)
+            .await
+            .expect("가입 카페 조회 성공해야 함");
+        assert_eq!(cafes.len(), 3);
+        assert_eq!(cafes[0].cafe_id, 31732304);
     }
 
     #[tokio::test]

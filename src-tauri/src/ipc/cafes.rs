@@ -14,7 +14,7 @@ use ts_rs::TS;
 use crate::auth::read_account_cookies;
 use crate::naver_cafe::post::cookie_header_from_storage_state;
 use crate::naver_cafe::{
-    run_post_jobs as run_jobs, CafeOrchestrator, ErrorEnvelope, JobReport, Menu,
+    run_post_jobs as run_jobs, CafeOrchestrator, ErrorEnvelope, JobReport, JoinedCafe, Menu,
     NaverCafeCommonErrorData, PostJob, CODE_NO_COOKIES,
 };
 use crate::store::JsonStore;
@@ -164,6 +164,30 @@ pub async fn resolve_cafe(input: String, account_id: String) -> Result<Cafe, Res
     Ok(assemble_cafe(input, cafe_id, info.cafe_name, &menus))
 }
 
+/// List every cafe the account has joined (crawled across all pages).
+///
+/// Reads `account_id`'s stored session cookie and queries the "내 카페 관리 >
+/// 가입 카페" API. Backs an account-driven "가입 카페 자동 로드" flow so the user
+/// doesn't paste cafe URLs by hand. Cookie values never appear in the returned
+/// error.
+#[tauri::command]
+pub async fn list_joined_cafes(
+    account_id: String,
+) -> Result<Vec<JoinedCafe>, ErrorEnvelope<NaverCafeCommonErrorData>> {
+    let cookie_value = match read_account_cookies(&account_id) {
+        Ok(Some(value)) => value,
+        Ok(None) => return Err(no_cookies_error(&account_id, None)),
+        Err(e) => return Err(no_cookies_error(&account_id, Some(e.to_string()))),
+    };
+    let cookie_header = cookie_header_from_storage_state(&cookie_value)
+        .ok_or_else(|| no_cookies_error(&account_id, None))?;
+
+    let orchestrator = CafeOrchestrator::new();
+    orchestrator
+        .list_joined_cafes(Some(cookie_header.as_str()))
+        .await
+}
+
 /// Slim per-job result returned to the UI — exactly what the publish modal
 /// renders. The rich internal `JobReport`/`PostError` stays backend-only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -251,6 +275,15 @@ mod tests {
                 error_data: None,
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn list_joined_cafes_without_session_returns_no_cookies() {
+        // 존재하지 않는 계정 → 쿠키 없음/읽기 실패 → NO_COOKIES (네트워크 미발생).
+        let err = list_joined_cafes("no-such-account-xyz".to_string())
+            .await
+            .expect_err("쿠키 없는 계정은 Err여야 함");
+        assert_eq!(err.code, CODE_NO_COOKIES);
     }
 
     #[test]

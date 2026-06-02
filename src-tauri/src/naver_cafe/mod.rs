@@ -1,5 +1,6 @@
 pub mod cafe_ref;
 pub mod error;
+pub mod joined_cafes;
 pub mod menu;
 pub mod models;
 pub mod orchestrator;
@@ -16,6 +17,7 @@ pub use orchestrator::{
     CODE_NO_COOKIES,
 };
 pub use error::{ErrorEnvelope, NaverCafeCommonErrorData, ValidationError};
+pub use joined_cafes::{join_cafes_path, JoinedCafe, JoinedCafesClient, JoinedCafesError, JOINED_CAFES_HOST};
 pub use menu::{general_writable_boards, menu_list_path, CafeMenuClient, Menu, MenuError, MENU_API_HOST};
 pub use models::CafeTarget;
 pub use post::{PostError, PostErrorData, PostRequest};

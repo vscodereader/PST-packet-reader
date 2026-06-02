@@ -5,6 +5,7 @@ import type { ActivityItem } from "@/shared/bindings/ActivityItem";
 import type { Band } from "@/shared/bindings/Band";
 import type { Cafe } from "@/shared/bindings/Cafe";
 import type { DashStat } from "@/shared/bindings/DashStat";
+import type { JoinedCafe } from "@/shared/bindings/JoinedCafe";
 import type { LibraryPost } from "@/shared/bindings/LibraryPost";
 import type { LogBatch } from "@/shared/bindings/LogBatch";
 import type { PostJob } from "@/shared/bindings/PostJob";
@@ -19,6 +20,7 @@ export type {
   Band,
   Cafe,
   DashStat,
+  JoinedCafe,
   LibraryPost,
   LogBatch,
   PostJob,
@@ -88,6 +90,13 @@ export const ipc = {
     /** Run publish jobs sequentially; returns one slim outcome per job. */
     runPostJobs: (jobs: PostJob[]) =>
       call<PublishOutcome[]>("run_post_jobs", { jobs }),
+    /**
+     * List every cafe `accountId` has joined (crawled across all pages),
+     * using its session cookie. Rejects with the backend's error envelope
+     * on failure. Backs an account-driven "가입 카페 자동 로드" flow.
+     */
+    listJoined: (accountId: string) =>
+      call<JoinedCafe[]>("list_joined_cafes", { accountId }),
   },
   bands: { list: () => call<Band[]>("list_bands") },
 };
