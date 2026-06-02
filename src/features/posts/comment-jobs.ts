@@ -10,29 +10,52 @@ export interface CommentArticleTarget {
 /**
  * Parse a naver cafe article URL into numeric `cafeId`/`articleId`.
  *
- * Handles the SPA form (`…/cafes/{cafeId}/articles/{articleId}`, optionally
- * under `/ca-fe`, `/f-e`, or mobile hosts) and the legacy query form
- * (`ArticleRead.nhn?clubid={cafeId}&articleid={articleId}`). Returns `null`
- * when neither shape (with positive ids) is present.
+ * The real-world input is what a user gets by copying a cafe post URL: the
+ * article ref (`ArticleRead.nhn?clubid={cafeId}&articleid={articleId}`) sits
+ * URL-encoded — often *doubly* — inside an `iframe_url_utf8` query param, e.g.
+ * `…/bluegrayoc3uc?iframe_url_utf8=%2FArticleRead.nhn%253Fclubid%3D31732304…`.
+ * So we progressively `decodeURIComponent` the string and match each level for
+ * `clubid`/`articleid`. The bare SPA form (`cafes/{id}/articles/{id}`, seen in
+ * packet captures) is kept as a fallback. Returns `null` when no shape with
+ * positive ids is found.
  */
 export function parseCafeArticleUrl(
   url: string | undefined,
 ): CommentArticleTarget | null {
   if (!url) return null;
 
-  const spa = url.match(/cafes\/(\d+)\/articles\/(\d+)/);
-  if (spa) {
-    const cafeId = Number(spa[1]);
-    const articleId = Number(spa[2]);
-    if (cafeId > 0 && articleId > 0) return { cafeId, articleId };
+  // Build the raw string plus progressively-decoded versions (capped to guard
+  // against pathological input). Decoding stops once it stabilizes or throws.
+  const candidates: string[] = [url];
+  let cur = url;
+  for (let i = 0; i < 3; i++) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(cur);
+    } catch {
+      break;
+    }
+    if (decoded === cur) break;
+    candidates.push(decoded);
+    cur = decoded;
   }
 
-  const club = url.match(/clubid=(\d+)/i);
-  const art = url.match(/articleid=(\d+)/i);
-  if (club && art) {
-    const cafeId = Number(club[1]);
-    const articleId = Number(art[1]);
-    if (cafeId > 0 && articleId > 0) return { cafeId, articleId };
+  for (const c of candidates) {
+    // Copied-URL form (primary): clubid/articleid, once `=` is decoded.
+    const club = c.match(/clubid=(\d+)/i);
+    const art = c.match(/articleid=(\d+)/i);
+    if (club && art) {
+      const cafeId = Number(club[1]);
+      const articleId = Number(art[1]);
+      if (cafeId > 0 && articleId > 0) return { cafeId, articleId };
+    }
+    // SPA form (fallback): cafes/{id}/articles/{id}.
+    const spa = c.match(/cafes\/(\d+)\/articles\/(\d+)/);
+    if (spa) {
+      const cafeId = Number(spa[1]);
+      const articleId = Number(spa[2]);
+      if (cafeId > 0 && articleId > 0) return { cafeId, articleId };
+    }
   }
 
   return null;

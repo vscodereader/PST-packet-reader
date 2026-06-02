@@ -26,6 +26,16 @@ describe("parseCafeArticleUrl", () => {
     ).toEqual({ cafeId: 31732304, articleId: 12345 });
   });
 
+  it("parses the real copied URL with a double-encoded iframe_url_utf8 param", () => {
+    // What a user actually gets when copying a cafe post URL: the article ref is
+    // URL-encoded (here doubly) inside iframe_url_utf8.
+    expect(
+      parseCafeArticleUrl(
+        "https://cafe.naver.com/bluegrayoc3uc?iframe_url_utf8=%2FArticleRead.nhn%253Fclubid%3D31732304%2526articleid%3D9%2526referrerAllArticles%3Dtrue",
+      ),
+    ).toEqual({ cafeId: 31732304, articleId: 9 });
+  });
+
   it("returns null for non-article or empty input", () => {
     expect(
       parseCafeArticleUrl("https://cafe.naver.com/bluegrayoc3uc"),
