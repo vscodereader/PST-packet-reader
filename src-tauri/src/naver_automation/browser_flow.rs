@@ -58,7 +58,11 @@ impl CdpClient {
     }
 
     // 네이버 로그인 후 기기 등록 안내가 나오면 "등록안함"을 클릭하는 함수입니다.
-    fn click_device_dontsave_if_present(&mut self, timeout: Duration) -> AutomationResult<bool> {
+    // 로그인 흐름(auth::login_flow)에서도 재사용하므로 crate 범위로 공개한다.
+    pub(crate) fn click_device_dontsave_if_present(
+        &mut self,
+        timeout: Duration,
+    ) -> AutomationResult<bool> {
         let end = Instant::now() + timeout;
 
         while Instant::now() < end {

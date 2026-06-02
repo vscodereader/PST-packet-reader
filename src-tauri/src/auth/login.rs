@@ -42,7 +42,8 @@ fn attempt(id: &str, pw: &str, headless: bool) -> Result<LoginOutcome, Orchestra
         .enable()
         .map_err(|error| OrchestratorError::CommandFailed(error.to_string()))?;
 
-    let outcome = login_flow::run(&mut client, id, pw);
+    // headed(=!headless)면 사용자가 캡차/2차 인증을 직접 풀 동안 기다린다.
+    let outcome = login_flow::run(&mut client, id, pw, !headless);
 
     drop(client);
     drop(handle); // ChromeHandle Drop이 프로세스/임시 프로필을 정리한다.

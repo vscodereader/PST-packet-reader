@@ -12,7 +12,11 @@ use serde_json::{json, Value};
 use crate::naver_automation::{AutomationError, CdpClient};
 
 const LOGIN_URL: &str = "https://nid.naver.com/nidlogin.login?mode=form&url=https://www.naver.com/";
-const LOGIN_TIMEOUT: Duration = Duration::from_secs(40);
+// headless: 챌린지가 보이면 곧장 headed로 승격해야 하므로 짧게 기다린다.
+const HEADLESS_TIMEOUT: Duration = Duration::from_secs(40);
+// headed: 사용자가 캡차/2차 인증을 직접 푸는 동안(사수 요구: 창 띄우고 시간 지나면
+// 타임아웃) 성공 또는 타임아웃까지 기다린다.
+const HEADED_TIMEOUT: Duration = Duration::from_secs(180);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// 챌린지(추가 인증) 종류.
@@ -72,14 +76,29 @@ pub(crate) fn classify(signals: &PageSignals) -> Signal {
 }
 
 /// 로그인을 수행하고 결과를 분류해 반환한다.
-pub(crate) fn run(client: &mut CdpClient, id: &str, pw: &str) -> LoginOutcome {
-    match run_inner(client, id, pw) {
+///
+/// `wait_for_human`이 true이면(headed) 캡차/2차 인증이 떠도 즉시 포기하지 않고,
+/// 사용자가 열린 Chrome 창에서 직접 푸는 동안 성공(쿠키) 또는 타임아웃까지 기다린다.
+/// false이면(headless) 챌린지를 만나는 즉시 `ChallengeRequired`로 반환해 호출자가
+/// headed로 승격하도록 한다.
+pub(crate) fn run(
+    client: &mut CdpClient,
+    id: &str,
+    pw: &str,
+    wait_for_human: bool,
+) -> LoginOutcome {
+    match run_inner(client, id, pw, wait_for_human) {
         Ok(outcome) => outcome,
         Err(error) => LoginOutcome::Error(error.to_string()),
     }
 }
 
-fn run_inner(client: &mut CdpClient, id: &str, pw: &str) -> Result<LoginOutcome, AutomationError> {
+fn run_inner(
+    client: &mut CdpClient,
+    id: &str,
+    pw: &str,
+    wait_for_human: bool,
+) -> Result<LoginOutcome, AutomationError> {
     client.navigate(LOGIN_URL)?;
 
     type_into(client, "#id", id)?;
@@ -91,28 +110,49 @@ fn run_inner(client: &mut CdpClient, id: &str, pw: &str) -> Result<LoginOutcome,
          document.querySelector('button[type=submit]');if(b){b.click();return true;}return false;})()",
     )?;
 
-    let deadline = Instant::now() + LOGIN_TIMEOUT;
+    let timeout = if wait_for_human {
+        HEADED_TIMEOUT
+    } else {
+        HEADLESS_TIMEOUT
+    };
+    let deadline = Instant::now() + timeout;
     loop {
+        // 인증 성공 직후 뜨는 "새 기기 등록" 페이지면 "등록 안함"을 눌러 마무리한다
+        // (설계 5단계: browser_flow의 기존 로직 재사용). 없으면 무시한다.
+        let _ = client.click_device_dontsave_if_present(Duration::from_millis(300));
+
         let signals = read_signals(client)?;
         match classify(&signals) {
             Signal::Success => {
                 let cookies = collect_naver_cookies(client)?;
                 return Ok(LoginOutcome::Ok { cookies });
             }
-            Signal::Challenge(kind) => return Ok(LoginOutcome::ChallengeRequired { kind }),
+            Signal::Challenge(kind) => {
+                // headed: 사용자가 직접 푸는 중이므로 성공/타임아웃까지 계속 기다린다.
+                // headless: 즉시 반환해 호출자가 headed로 승격하게 한다.
+                if !wait_for_human {
+                    return Ok(LoginOutcome::ChallengeRequired { kind });
+                }
+            }
             Signal::BadCredentials => return Ok(LoginOutcome::BadCredentials),
             Signal::Blocked => {
-                return Ok(LoginOutcome::Error(
-                    "로그인 접근이 차단되었습니다.".to_owned(),
-                ))
+                // headless에서만 즉시 차단으로 본다. headed에서는 기기등록/인증 중간 페이지를
+                // 차단으로 오판하지 않도록, 사람이 진행하는 동안 타임아웃까지 기다린다.
+                if !wait_for_human {
+                    return Ok(LoginOutcome::Error(
+                        "로그인 접근이 차단되었습니다.".to_owned(),
+                    ));
+                }
             }
             Signal::Pending => {}
         }
 
         if Instant::now() >= deadline {
-            return Ok(LoginOutcome::Error(
-                "로그인 시간이 초과되었습니다. 캡차/2차 인증이 필요할 수 있습니다.".to_owned(),
-            ));
+            // headed에서 시간 내 인증을 끝내지 못한 경우를 포함한다(사수 요구: 타임아웃).
+            let url = client.current_url().unwrap_or_default();
+            return Ok(LoginOutcome::Error(format!(
+                "로그인 시간이 초과되었습니다(캡차/2차 인증 미완료). 마지막 페이지: {url}"
+            )));
         }
         sleep(POLL_INTERVAL);
     }
@@ -139,23 +179,34 @@ fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<(), A
     Ok(())
 }
 
+// 셀렉터에 해당하는 "화면에 보이는" 요소가 있는지 확인한다. `offsetParent`가 null이면
+// 숨겨진 요소이므로(예: 항상 DOM에 존재하는 Caps Lock 경고) false로 본다.
+fn visible_exists(client: &mut CdpClient, selector: &str) -> bool {
+    let expr = format!(
+        "(()=>{{const e=document.querySelector('{selector}');\
+         return !!(e&&e.offsetParent!==null);}})()"
+    );
+    client.evaluate_bool(&expr).unwrap_or(false)
+}
+
 // 현재 페이지에서 로그인 성공/챌린지/실패 신호를 읽는다.
 fn read_signals(client: &mut CdpClient) -> Result<PageSignals, AutomationError> {
     let cookies = collect_naver_cookies(client)?;
     let logged_in = has_session_cookies(&cookies);
 
-    let captcha = client
-        .evaluate_bool("!!document.querySelector('#captchaDiv, #captcha, img#captchaimg')")
-        .unwrap_or(false);
-    let otp = client
-        .evaluate_bool("!!document.querySelector('#otp, input[name=otp], #cellphoneCertify')")
-        .unwrap_or(false);
+    let captcha = visible_exists(client, "#captchaDiv, #captcha, img#captchaimg");
+    let otp = visible_exists(client, "#otp, input[name=otp], #cellphoneCertify");
     let current_url = client.current_url().unwrap_or_default();
     // 낯선 기기 추가 인증 페이지(기기 등록 확인). 성공 후의 "등록안함" 다이얼로그와 달리
     // 쿠키가 아직 없는 상태에서 사용자 조작을 요구한다.
     let device = current_url.contains("deviceConfirm") || current_url.contains("deviceCheck");
+    // 실제 로그인 오류는 `#err_common`이 "보이는" 상태로 텍스트를 가진다. `.error_message`는
+    // "Caps Lock is on." 경고가 항상 숨은 채 DOM에 존재하므로 단순 존재 검사는 오판한다.
     let bad_credentials = client
-        .evaluate_bool("!!document.querySelector('#err_common, .error_message')")
+        .evaluate_bool(
+            "(()=>{const e=document.querySelector('#err_common');\
+             return !!(e&&e.offsetParent!==null&&(e.textContent||'').trim().length>0);})()",
+        )
         .unwrap_or(false);
     let blocked = {
         let on_login = current_url.contains("nid.naver.com");
