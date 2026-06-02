@@ -27,6 +27,9 @@ tokio = { version = "1", features = ["full"] }
 thiserror = "1"
 adb_client = { version = "3.2.1", features = ["usb"] }
 reqwest = { version = "0.12", features = ["json", "gzip"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
