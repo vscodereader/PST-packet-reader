@@ -48,7 +48,7 @@ describe("AddCafeModal", () => {
       screen.getByPlaceholderText(/cafe\.naver\.com/),
       "cafe.naver.com/x",
     );
-    await userEvent.click(screen.getByRole("button", { name: "해석" }));
+    await userEvent.click(screen.getByRole("button", { name: "조회" }));
     expect(
       await screen.findByText("해석된 카페 (cafe.naver.com/x)"),
     ).toBeInTheDocument();
@@ -61,7 +61,7 @@ describe("AddCafeModal", () => {
       screen.getByPlaceholderText(/cafe\.naver\.com/),
       "cafe.naver.com/x",
     );
-    await userEvent.click(screen.getByRole("button", { name: "해석" }));
+    await userEvent.click(screen.getByRole("button", { name: "조회" }));
     await screen.findByText("해석된 카페 (cafe.naver.com/x)");
     await userEvent.click(screen.getByRole("button", { name: "저장" }));
     expect(onAdded).toHaveBeenCalledWith(

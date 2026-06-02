@@ -29,7 +29,7 @@ function errorMessage(e: unknown): string {
   if (e && typeof e === "object" && "message" in e) {
     return String((e as { message: unknown }).message);
   }
-  return typeof e === "string" ? e : "카페를 해석하지 못했습니다.";
+  return typeof e === "string" ? e : "카페를 조회하지 못했습니다.";
 }
 
 /**
@@ -118,7 +118,7 @@ export function AddCafeModal({
       ) : (
         <Stack gap={12}>
           <Select
-            label="해석에 사용할 계정"
+            label="카페 조회에 사용할 계정"
             data={naverAccounts.map((a) => ({ value: a.id, label: a.loginId }))}
             value={effectiveAccountId}
             onChange={(v) => setAccountId(v ?? "")}
@@ -141,7 +141,7 @@ export function AddCafeModal({
               disabled={!effectiveAccountId || !input.trim()}
               leftSection={<Icon.search size={15} />}
             >
-              해석
+              조회
             </Button>
           </Group>
 
