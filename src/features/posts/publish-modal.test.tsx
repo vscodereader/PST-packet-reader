@@ -106,6 +106,34 @@ describe("PublishModal", () => {
     vi.restoreAllMocks();
   });
 
+  it("publishes naver jobs through the real run_post_jobs command", async () => {
+    renderPublish();
+    // Swap the preselected forum account for a naver one so the cafe
+    // destination (seeded cafe + board) drives a real backend publish.
+    await userEvent.click(await screen.findByText("invest_king7"));
+    await userEvent.click(screen.getByText("money_lab"));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^게시 \(\d+\)/ }),
+    );
+    // The result row renders "{loginId} · {msg}" in one node, so match loosely.
+    expect(
+      await screen.findByText(/글 게시 완료/, undefined, { timeout: 3000 }),
+    ).toBeInTheDocument();
+    expect(ipcBackend).toHaveBeenCalledWith(
+      "run_post_jobs",
+      expect.objectContaining({
+        jobs: [
+          expect.objectContaining({
+            accountId: "a5",
+            cafe: "11111111",
+            menuId: 1,
+            boardType: "L",
+          }),
+        ],
+      }),
+    );
+  });
+
   it("deselects an account when its row is clicked again", async () => {
     renderPublish();
     expect(await screen.findByText("1개")).toBeInTheDocument();

@@ -18,6 +18,8 @@ import {
 import { notifications } from "@mantine/notifications";
 import { useEffect, useState } from "react";
 
+import type { PostJob } from "@/shared/bindings/PostJob";
+import type { PublishOutcome } from "@/shared/bindings/PublishOutcome";
 import { KIND, STATUS_ACCOUNT } from "@/shared/data/config";
 import {
   acctPlatforms,
@@ -423,6 +425,32 @@ function newScheduledId(): string {
   return "qs" + Date.now();
 }
 
+/** Flatten the document's HTML body into plain text for the article body. */
+function htmlToText(html: string): string {
+  return html
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|h[1-6])>/gi, "\n")
+    .replace(/<[^>]*>/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/** Map a backend per-job outcome onto the UI's PublishResult. */
+function outcomeToResult(
+  job: PublishJob,
+  outcome: PublishOutcome | undefined,
+  action: string,
+): PublishResult {
+  const ok = outcome?.success ?? false;
+  return {
+    ...job,
+    ok,
+    msg: ok
+      ? `${action} 게시 완료`
+      : (outcome?.errorMessage ?? "게시 실패 — 잠시 후 재시도"),
+  };
+}
+
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
 /** Current date/time as the picker's `{ date, time }` strings (minute precision). */
@@ -571,31 +599,72 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const targetsOk = !selPlatforms.includes("forum") || stockCodes.length > 0;
   const canPublish = selected.length > 0 && targetsOk && jobs.length > 0;
 
-  const runFlow = () => {
+  const action =
+    mode === "comment" ? "댓글" : mode === "both" ? "글+댓글" : "글";
+
+  // Build the backend PostJob for a naver UI job — cafe/board are looked up by
+  // name in the registered cafes to recover the real cafeId/menuId/boardType.
+  const toPostJob = (j: PublishJob): PostJob => {
+    const cafeObj = cafes.find((c) => c.name === j.targetName);
+    const boardObj = cafeObj?.boards.find((b) => b.name === j.board);
+    return {
+      accountId: j.key,
+      cafe: cafeObj ? String(cafeObj.cafeId) : j.targetName,
+      menuId: boardObj?.menuId ?? 0,
+      boardType: boardObj?.boardType ?? "L",
+      subject: doc.title,
+      bodyText: htmlToText(doc.body ?? ""),
+      tagList: [],
+    };
+  };
+
+  // Publish now: naver jobs hit the real backend (article posting); forum/band
+  // stay mocked until their backends land.
+  const runNow = () => {
     setFlow("running");
-    const action =
-      mode === "comment" ? "댓글" : mode === "both" ? "글+댓글" : "글";
-    window.setTimeout(() => {
-      setFlow(
-        jobs.map((j) => {
-          const ok = Math.random() > 0.1;
-          return {
-            ...j,
-            ok,
-            msg: ok
-              ? when === "schedule"
-                ? `${action} 예약 완료`
-                : `${action} 게시 완료`
-              : "게시 실패 — 잠시 후 재시도",
-          };
-        }),
+    const naverJobs = jobs.filter((j) => j.platform === "naver");
+    const otherJobs = jobs.filter((j) => j.platform !== "naver");
+
+    // Naver posts for real. Forum/band have no backend yet, so they stay
+    // simulated — with a short delay so the progress UI is visible.
+    const real: Promise<PublishResult[]> = naverJobs.length
+      ? ipc.cafes
+          .runPostJobs(naverJobs.map(toPostJob))
+          .then((outs) =>
+            naverJobs.map((j, i) => outcomeToResult(j, outs[i], action)),
+          )
+          .catch(() =>
+            naverJobs.map((j) => ({
+              ...j,
+              ok: false,
+              msg: "게시 실패 — 잠시 후 재시도",
+            })),
+          )
+      : Promise.resolve([]);
+    const mockOthers = new Promise<PublishResult[]>((resolve) => {
+      window.setTimeout(
+        () =>
+          resolve(
+            otherJobs.map((j) => {
+              const ok = Math.random() > 0.1;
+              return {
+                ...j,
+                ok,
+                msg: ok ? `${action} 게시 완료` : "게시 실패 — 잠시 후 재시도",
+              };
+            }),
+          ),
+        otherJobs.length ? 1200 : 0,
       );
-    }, 2000);
+    });
+    void Promise.all([real, mockOthers]).then(([nr, or]) =>
+      setFlow([...nr, ...or]),
+    );
   };
 
   const doPublish = () => {
     if (when !== "schedule") {
-      runFlow();
+      runNow();
       return;
     }
     // Add the post to the scheduled queue so it shows up under 예약 대기.
@@ -624,7 +693,11 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     // already prevents it.
     ipc.queue
       .addScheduled(item, toEpochMs(date, time))
-      .then(runFlow)
+      .then(() =>
+        setFlow(
+          jobs.map((j) => ({ ...j, ok: true, msg: `${action} 예약 완료` })),
+        ),
+      )
       .catch(() =>
         notifications.show({
           message: "예약 시각이 현재보다 과거예요. 시간을 다시 선택하세요.",
