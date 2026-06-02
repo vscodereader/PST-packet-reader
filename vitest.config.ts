@@ -16,6 +16,10 @@ export default defineConfig({
     setupFiles: ["./src/test/setup.ts"],
     pool: "threads",
     maxWorkers: 4,
+    // Heavy Mantine + login-polling suites need real async-query headroom under
+    // the slower coverage instrumentation in CI (mirrors the master-side fix).
+    testTimeout: 15000,
+    hookTimeout: 15000,
     coverage: {
       provider: "v8",
       reporter: ["text", "json-summary", "html"],
