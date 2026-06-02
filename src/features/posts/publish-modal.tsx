@@ -412,14 +412,12 @@ function newScheduledId(): string {
 
 /**
  * Default Chrome DevTools endpoint for the packet engine (hidden from users).
- * Windows distribution uses 127.0.0.1:9222; WSL dev reaches Windows Chrome at
- * 172.24.32.1:9223.
+ * The app talks to a local Chrome on 127.0.0.1:9222. (For WSL dev, forward the
+ * Windows Chrome debug port to localhost rather than hardcoding a host IP — the
+ * WSL2 host address changes per machine/reboot.)
  */
 function defaultEndpoint(): { host: string; port: number } {
-  const isWindows = window.navigator.platform.toLowerCase().includes("win");
-  return isWindows
-    ? { host: "127.0.0.1", port: 9222 }
-    : { host: "172.24.32.1", port: 9223 };
+  return { host: "127.0.0.1", port: 9222 };
 }
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
@@ -617,16 +615,18 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
               link: "",
             })),
           })
-          .then((results) =>
-            accJobs.map((j) => {
-              const r = results.find((x) => x.code === (j.code ?? ""));
+          .then((results) => {
+            // 엔진이 결과를 비워(빈 배열·누락) 돌려줄 수 있으므로 방어적으로 다룬다.
+            const list = Array.isArray(results) ? results : [];
+            return accJobs.map((j) => {
+              const r = list.find((x) => x.code === (j.code ?? ""));
               return {
                 ...j,
                 ok: r?.ok ?? false,
                 msg: r?.message ?? "결과 없음",
               };
-            }),
-          )
+            });
+          })
           .catch((err: unknown) =>
             accJobs.map((j) => ({
               ...j,
