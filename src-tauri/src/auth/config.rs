@@ -88,8 +88,21 @@ mod tests {
         let err = chrome_path().unwrap_err();
         assert!(err.contains("파일이 없습니다"), "unexpected error: {err}");
 
-        // 미설정이면 플랫폼 기본값으로 폴백 — 테스트 호스트(Linux)엔 없으므로 오류.
+        // 미설정이면 플랫폼 기본 후보들을 탐색해 폴백한다. Linux/WSL 빌드는 시스템
+        // Chrome(`/usr/bin/google-chrome` 등)을 찾으므로, 결과는 호스트에 Chrome이
+        // 설치돼 있는지에 따라 달라진다(CI 러너엔 설치돼 있음). 따라서 호스트에
+        // 의존하지 않는 불변식만 검증한다: 성공하면 그 경로는 실제로 존재하고,
+        // 실패하면 탐색한 후보들을 안내하는 오류 메시지를 낸다.
         std::env::remove_var("CHROME_PATH");
-        assert!(chrome_path().is_err());
+        match chrome_path() {
+            Ok(path) => assert!(
+                std::path::Path::new(&path).exists(),
+                "폴백 경로가 존재하지 않습니다: {path}"
+            ),
+            Err(err) => assert!(
+                err.contains("Chrome을 찾을 수 없습니다"),
+                "unexpected error: {err}"
+            ),
+        }
     }
 }
