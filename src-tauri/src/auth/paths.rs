@@ -65,4 +65,46 @@ mod tests {
         assert!(paths.cookies_dir.ends_with("cookies"));
         assert!(paths.logs_dir.ends_with("logs"));
     }
+
+    #[test]
+    fn app_data_root_joins_localappdata_with_app_name() {
+        let _guard = config::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+
+        // LOCALAPPDATA(Windows)가 있으면 그것을 우선 사용한다.
+        env::set_var("LOCALAPPDATA", temp.path());
+        assert_eq!(app_data_root().unwrap(), temp.path().join(config::APP_NAME));
+
+        // 로그인 자동화가 WSL/Linux에서도 동작하므로, LOCALAPPDATA가 없으면
+        // XDG_DATA_HOME으로 대체한다.
+        env::remove_var("LOCALAPPDATA");
+        let xdg = tempfile::tempdir().unwrap();
+        env::set_var("XDG_DATA_HOME", xdg.path());
+        assert_eq!(app_data_root().unwrap(), xdg.path().join(config::APP_NAME));
+
+        // LOCALAPPDATA·XDG_DATA_HOME·HOME이 모두 없을 때만 명확한 오류를 낸다.
+        // (HOME은 테스트 중 일시적으로 제거하고 곧바로 복원한다.)
+        env::remove_var("XDG_DATA_HOME");
+        let saved_home = env::var_os("HOME");
+        env::remove_var("HOME");
+        assert!(matches!(
+            app_data_root(),
+            Err(OrchestratorError::MissingLocalAppData)
+        ));
+        if let Some(home) = saved_home {
+            env::set_var("HOME", home);
+        }
+    }
+
+    #[test]
+    fn ensure_runtime_dirs_creates_every_subdirectory() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_for_root(temp.path());
+
+        ensure_runtime_dirs(&paths).unwrap();
+
+        assert!(paths.accounts_dir.is_dir());
+        assert!(paths.cookies_dir.is_dir());
+        assert!(paths.logs_dir.is_dir());
+    }
 }

@@ -18,7 +18,7 @@ use std::io::ErrorKind;
 use std::net::TcpStream;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
-use tauri::Emitter;
+use tauri::{Emitter, Runtime};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{connect, Message, WebSocket};
 
@@ -144,9 +144,9 @@ pub fn run_naver_discussion_macro(
 // 글쓰기 패킷 등록 후 방금 작성한 글 URL에 댓글 패킷을 이어서 전송하는 함수입니다.
 // sleep_after가 true이면 글 등록 직후 "batch-wait-start" 이벤트를 emit하고,
 // 댓글 작성이 끝난 뒤 1분 중 남은 시간을 기다립니다.
-pub fn run_naver_post_with_comment_macro(
+pub fn run_naver_post_with_comment_macro<R: Runtime>(
     request: NaverPostWithCommentRequest,
-    app: &tauri::AppHandle,
+    app: &tauri::AppHandle<R>,
     sleep_after: bool,
 ) -> AutomationResult<Vec<AutomationReport>> {
     let title = request.title.trim();

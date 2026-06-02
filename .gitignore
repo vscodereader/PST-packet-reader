@@ -11,6 +11,7 @@ node_modules
 dist
 dist-ssr
 coverage
+lcov.info
 *.local
 
 # Brainstorming visual-companion mockups

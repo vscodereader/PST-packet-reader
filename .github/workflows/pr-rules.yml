@@ -7,35 +7,41 @@ on:
 permissions:
   pull-requests: read
 
+# Re-runs on every edit/synchronize — cancel the superseded run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
-  closes-ref:
+  # One runner runs all three lightweight string checks (was three separate
+  # jobs, i.e. three runner VMs). `!cancelled()` on the later steps lets every
+  # rule report independently even when an earlier one fails.
+  pr-rules:
     runs-on: ubuntu-latest
-    # Only feat/<n> branches require an issue link. Trunk-based commit-level
-    # work (chore/fix/refactor/etc.) is exempt — see CLAUDE.md.
-    # Dependabot PRs are also exempt — they're machine-generated.
-    if: |
-      startsWith(github.event.pull_request.head.ref, 'feat/') &&
-      github.event.pull_request.user.login != 'dependabot[bot]'
+    # Dependabot uses its own title/branch/body conventions — skip the whole
+    # job rather than fight the bot.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
-      - name: PR body must reference an issue with Closes/Fixes/Resolves #N
+      - name: Branch name must match the trunk-based convention
         env:
-          BODY: ${{ github.event.pull_request.body }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
-          if printf '%s' "$BODY" | grep -Eqi '(closes|fixes|resolves)[[:space:]]+#[0-9]+'; then
-            echo "OK: PR body references an issue."
+          # feat/<issue-number> for full-ceremony feature work.
+          # <type>/<slug> for commit-level work (chore/fix/refactor/etc.).
+          feat_pattern='^feat/[0-9]+$'
+          slug_pattern='^(fix|chore|refactor|docs|test|build|ci|perf|style)/[a-z][a-z0-9-]*$'
+          if printf '%s' "$BRANCH" | grep -Eq "$feat_pattern"; then
+            echo "OK: feat branch '$BRANCH' uses an issue number."
+          elif printf '%s' "$BRANCH" | grep -Eq "$slug_pattern"; then
+            echo "OK: commit-level branch '$BRANCH' uses a slug."
           else
-            echo "::error::feat/<n> PRs must contain 'Closes #<n>' (or Fixes/Resolves)."
+            echo "::error::Branch '$BRANCH' must be feat/<n> or <type>/<slug>; types: fix|chore|refactor|docs|test|build|ci|perf|style."
             exit 1
           fi
 
-  conventional-title:
-    runs-on: ubuntu-latest
-    # Dependabot generates its own conventional-ish titles
-    # ("chore(deps): Bump X from Y to Z") that don't match our strict
-    # lowercase-subject rule. Skip rather than fight the bot.
-    if: github.event.pull_request.user.login != 'dependabot[bot]'
-    steps:
-      - uses: amannn/action-semantic-pull-request@v6
+      - name: PR title must be a conventional commit
+        if: ${{ !cancelled() }}
+        uses: amannn/action-semantic-pull-request@v6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -55,25 +61,16 @@ jobs:
           subjectPatternError: |
             PR title subject must start with a lowercase letter.
 
-  branch-name:
-    runs-on: ubuntu-latest
-    # Dependabot uses its own branch naming (dependabot/<ecosystem>/<dep>-<ver>)
-    # that doesn't fit the trunk-based <type>/<slug-or-issue> shape.
-    if: github.event.pull_request.user.login != 'dependabot[bot]'
-    steps:
-      - name: Branch name must match the trunk-based convention
+      - name: feat/<n> PR body must reference an issue with Closes/Fixes/Resolves #N
+        # Only feat/<n> branches require an issue link. Trunk-based commit-level
+        # work (chore/fix/refactor/etc.) is exempt — see CLAUDE.md.
+        if: ${{ !cancelled() && startsWith(github.event.pull_request.head.ref, 'feat/') }}
         env:
-          BRANCH: ${{ github.event.pull_request.head.ref }}
+          BODY: ${{ github.event.pull_request.body }}
         run: |
-          # feat/<issue-number> for full-ceremony feature work.
-          # <type>/<slug> for commit-level work (chore/fix/refactor/etc.).
-          feat_pattern='^feat/[0-9]+$'
-          slug_pattern='^(fix|chore|refactor|docs|test|build|ci|perf|style)/[a-z][a-z0-9-]*$'
-          if printf '%s' "$BRANCH" | grep -Eq "$feat_pattern"; then
-            echo "OK: feat branch '$BRANCH' uses an issue number."
-          elif printf '%s' "$BRANCH" | grep -Eq "$slug_pattern"; then
-            echo "OK: commit-level branch '$BRANCH' uses a slug."
+          if printf '%s' "$BODY" | grep -Eqi '(closes|fixes|resolves)[[:space:]]+#[0-9]+'; then
+            echo "OK: PR body references an issue."
           else
-            echo "::error::Branch '$BRANCH' must be feat/<n> or <type>/<slug>; types: fix|chore|refactor|docs|test|build|ci|perf|style."
+            echo "::error::feat/<n> PRs must contain 'Closes #<n>' (or Fixes/Resolves)."
             exit 1
           fi
