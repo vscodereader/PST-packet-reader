@@ -1,4 +1,5 @@
 pub mod cafe_ref;
+pub mod comment;
 pub mod error;
 pub mod joined_cafes;
 pub mod menu;
@@ -15,6 +16,11 @@ pub use cafe_ref::{
 pub use orchestrator::{
     run_post_jobs, CafeOrchestrator, JobReport, PostJob, CODE_INVALID_CAFE_INPUT,
     CODE_NO_COOKIES,
+};
+pub use comment::{
+    build_comment_preview, build_reply_preview, execute_comment, execute_reply,
+    parse_comment_result, CafeCommentClient, CommentError, CommentErrorData, CommentExecutionMode,
+    CommentOutcome, CommentPreview, CommentRequest, CommentResult, ReplyRequest,
 };
 pub use error::{ErrorEnvelope, NaverCafeCommonErrorData, ValidationError};
 pub use joined_cafes::{join_cafes_path, JoinedCafe, JoinedCafesClient, JoinedCafesError, JOINED_CAFES_HOST};
