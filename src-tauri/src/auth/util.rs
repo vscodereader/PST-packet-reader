@@ -38,4 +38,11 @@ mod tests {
     fn safe_file_stem_replaces_path_separators() {
         assert_eq!(safe_file_stem("a/b\\c@example.com"), "a_b_c_example.com");
     }
+
+    #[test]
+    fn now_helpers_return_post_2020_unix_time() {
+        // 2020-09-13 이후의 합리적인 하한으로 두 헬퍼가 동작함을 확인한다.
+        assert!(now_secs() > 1_600_000_000);
+        assert!(now_millis() > 1_600_000_000_000);
+    }
 }

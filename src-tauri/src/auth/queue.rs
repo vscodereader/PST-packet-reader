@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Runtime};
 
 use super::{
     accounts::{account_cookie_status_for_app_data, CookieStatus},
@@ -29,9 +29,9 @@ pub struct QueueState {
 }
 
 /// 계정들을 처리 큐에 추가하고 필요시 처리를 시작한다.
-pub fn enqueue_accounts(
+pub fn enqueue_accounts<R: Runtime>(
     state: &QueueState,
-    app: AppHandle,
+    app: AppHandle<R>,
     account_ids: Vec<String>,
     headless: bool,
     use_adb: bool,
@@ -84,7 +84,7 @@ pub fn get_queue_status(state: &QueueState) -> Result<QueueStatus, OrchestratorE
     })
 }
 
-async fn worker_loop(state: QueueState, app: AppHandle) {
+async fn worker_loop<R: Runtime>(state: QueueState, app: AppHandle<R>) {
     loop {
         let job = {
             let Ok(mut inner) = state.inner.lock() else {
@@ -206,5 +206,35 @@ mod tests {
         assert_eq!(status.current_account_id, Some("id1".to_string()));
         assert_eq!(status.jobs[0].status, QueueJobStatus::Running);
         assert!(status.jobs[0].headless);
+    }
+
+    #[test]
+    fn push_log_caps_history_and_writes_queue_log() {
+        // push_log은 app_data_root()(LOCALAPPDATA)를 읽으므로 env 락을 잡는다.
+        let _guard = crate::auth::config::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("LOCALAPPDATA", temp.path());
+
+        let mut inner = QueueInner::default();
+        for i in 0..205 {
+            push_log(&mut inner, format!("event {i}"));
+        }
+
+        std::env::remove_var("LOCALAPPDATA");
+
+        // 메모리 로그는 최근 200개로 제한되고 가장 최신 항목이 남는다.
+        assert_eq!(inner.logs.len(), 200);
+        assert!(inner.logs.last().unwrap().contains("event 204"));
+
+        // 디스크의 queue.log에도 기록된다.
+        let log_file = temp
+            .path()
+            .join(crate::auth::config::APP_NAME)
+            .join(crate::auth::config::DIR_LOGS)
+            .join("queue.log");
+        assert!(log_file.is_file());
+        assert!(fs::read_to_string(&log_file).unwrap().contains("event 204"));
     }
 }

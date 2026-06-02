@@ -278,4 +278,58 @@ mod tests {
 
         assert!(!has_valid_naver_session_cookies(&value, now));
     }
+
+    #[test]
+    fn cookie_status_reports_missing_then_valid_from_disk() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_for_root(temp.path());
+        ensure_runtime_dirs(&paths).unwrap();
+        let now = now_secs();
+
+        // 아직 쿠키 파일이 없으면 Missing.
+        assert_eq!(
+            account_cookie_status(&paths, "id1").unwrap(),
+            CookieStatus::Missing
+        );
+        assert!(!has_valid_account_cookies(&paths, "id1").unwrap());
+
+        let valid = serde_json::json!({
+            "cookies": [
+                {"name": "NID_AUT", "domain": ".naver.com", "expires": now + 3600},
+                {"name": "NID_SES", "domain": ".naver.com", "expires": now + 3600}
+            ]
+        });
+        let cookie_path = paths.cookies_dir.join("id1.json");
+        fs::write(&cookie_path, valid.to_string()).unwrap();
+
+        assert_eq!(
+            account_cookie_status(&paths, "id1").unwrap(),
+            CookieStatus::Valid
+        );
+        assert!(has_valid_account_cookies(&paths, "id1").unwrap());
+        assert!(has_valid_cookie_file(&cookie_path).unwrap());
+        assert!(!has_valid_cookie_file(&paths.cookies_dir.join("missing.json")).unwrap());
+    }
+
+    #[test]
+    fn missing_cookies_array_is_status_missing() {
+        assert_eq!(
+            cookie_status_from_value(&serde_json::json!({}), 0),
+            CookieStatus::Missing
+        );
+    }
+
+    #[test]
+    fn session_cookie_without_positive_expiry_is_unexpired() {
+        let now = 1_700_000_000;
+        let value = serde_json::json!({
+            "cookies": [
+                {"name": "NID_AUT", "domain": ".naver.com", "expires": -1},
+                {"name": "NID_SES", "domain": ".naver.com"}
+            ]
+        });
+
+        // expires <= 0 또는 누락은 세션 쿠키로 간주 → 만료되지 않음.
+        assert_eq!(cookie_status_from_value(&value, now), CookieStatus::Valid);
+    }
 }
