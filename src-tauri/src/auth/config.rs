@@ -62,3 +62,47 @@ pub const DIR_ACCOUNTS: &str = "accounts";
 pub const DIR_COOKIES: &str = "cookies";
 pub const DIR_LOGS: &str = "logs";
 pub const FILE_ACCOUNTS: &str = "accounts.json";
+
+/// 프로세스 환경 변수(`CHROME_PATH`, `LOCALAPPDATA`)를 만지는 테스트들을
+/// 직렬화하기 위한 공용 락. env는 프로세스 전역이라 병렬 테스트가 동시에
+/// 쓰면 경합하므로, 해당 테스트들은 이 락을 잡고 실행한다.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chrome_path_prefers_existing_env_override() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let existing = file.path().to_string_lossy().into_owned();
+
+        // 존재하는 CHROME_PATH는 그대로 채택된다.
+        std::env::set_var("CHROME_PATH", &existing);
+        assert_eq!(chrome_path().unwrap(), existing);
+
+        // 설정됐지만 파일이 없으면 명확한 오류.
+        std::env::set_var("CHROME_PATH", "/no/such/chrome.exe");
+        let err = chrome_path().unwrap_err();
+        assert!(err.contains("파일이 없습니다"), "unexpected error: {err}");
+
+        // 미설정이면 플랫폼 기본 후보들을 탐색해 폴백한다. CDP 로그인 전환 이후
+        // Linux/WSL 빌드는 시스템 Chrome(`/usr/bin/google-chrome` 등)을 찾으므로,
+        // 결과는 호스트에 Chrome이 설치돼 있는지에 따라 달라진다. 따라서 호스트에
+        // 의존하지 않는 불변식만 검증한다: 성공하면 그 경로는 실제로 존재하고,
+        // 실패하면 탐색한 후보들을 안내하는 오류 메시지를 낸다.
+        std::env::remove_var("CHROME_PATH");
+        match chrome_path() {
+            Ok(path) => assert!(
+                std::path::Path::new(&path).exists(),
+                "폴백 경로가 존재하지 않습니다: {path}"
+            ),
+            Err(err) => assert!(
+                err.contains("Chrome을 찾을 수 없습니다"),
+                "unexpected error: {err}"
+            ),
+        }
+    }
+}

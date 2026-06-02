@@ -10,7 +10,7 @@ mod queue;
 mod types;
 mod util;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Runtime};
 
 pub use accounts::{read_account_cookies, save_accounts_file};
 pub use error::OrchestratorError;
@@ -30,9 +30,10 @@ pub async fn bootstrap_runtime() -> Result<RuntimePaths, OrchestratorError> {
 }
 
 // `_app`은 sidecar 시절 shell 실행에 쓰였으나, CDP 로그인으로 전환하며 더는 쓰이지 않는다.
-// 호출부(queue worker) 변경을 최소화하기 위해 시그니처는 유지한다.
-async fn process_account(
-    _app: &AppHandle,
+// 큐 워커가 `AppHandle<R>`를 넘기므로(IPC 테스트의 MockRuntime 포함) 제네릭 시그니처는
+// 유지하되, 본문은 CDP 로그인을 직접 호출하므로 핸들은 사용하지 않는다.
+async fn process_account<R: Runtime>(
+    _app: &AppHandle<R>,
     account_id: &str,
     headless: bool,
     use_adb: bool,

@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::Emitter;
+use tauri::{Emitter, Runtime};
 
 use crate::naver_automation::{
     run_naver_discussion_macro, run_naver_post_with_comment_macro, AutomationReport,
@@ -93,9 +93,9 @@ pub struct ForumPublishResult {
 
 // 선택한 종목들에 글/댓글을 게시하고 종목별 성공/실패 결과를 돌려주는 함수입니다.
 // 한 종목이 실패해도 다음 종목을 계속 진행합니다. 종목 사이에는 1분 대기합니다.
-pub fn run_forum_publish(
+pub fn run_forum_publish<R: Runtime>(
     request: ForumPublishRequest,
-    app: tauri::AppHandle,
+    app: tauri::AppHandle<R>,
 ) -> Vec<ForumPublishResult> {
     let title = request.title.trim();
     let body = request.body.trim();
@@ -127,13 +127,13 @@ pub fn run_forum_publish(
 }
 
 // 한 종목에 글/댓글을 게시하는 함수입니다(kind에 따라 엔진 함수를 고릅니다).
-fn run_one_forum_stock(
+fn run_one_forum_stock<R: Runtime>(
     request: &ForumPublishRequest,
     stock: &DiscussionStock,
     title: &str,
     body: &str,
     comment: &str,
-    app: &tauri::AppHandle,
+    app: &tauri::AppHandle<R>,
 ) -> Result<(), String> {
     if request.run_post && request.run_comment {
         run_naver_post_with_comment_macro(
@@ -268,9 +268,9 @@ pub fn search_naver_stocks(query: Option<String>) -> Result<Vec<StockCandidate>,
 }
 
 // UI 설정에 따라 글쓰기/댓글쓰기를 여러 번 실행하는 함수입니다.
-pub fn run_discussion_batch(
+pub fn run_discussion_batch<R: Runtime>(
     request: DiscussionBatchRequest,
-    app: tauri::AppHandle,
+    app: tauri::AppHandle<R>,
 ) -> Result<DiscussionBatchReport, String> {
     validate_batch_request(&request)?;
 
@@ -362,7 +362,11 @@ pub fn run_discussion_batch(
 
 // 등록 또는 댓글 작성 한 건이 끝난 뒤 다음 실행 전 1분을 기다리는 함수입니다.
 // 대기 직전 프론트엔드로 "batch-wait-start" 이벤트를 보내 카운트다운 타이머를 표시합니다.
-fn sleep_between_actions(completed_actions: usize, total_actions: usize, app: &tauri::AppHandle) {
+fn sleep_between_actions<R: Runtime>(
+    completed_actions: usize,
+    total_actions: usize,
+    app: &tauri::AppHandle<R>,
+) {
     if completed_actions < total_actions {
         let _ = app.emit("batch-wait-start", serde_json::json!({ "seconds": 60u64 }));
         sleep(Duration::from_secs(60));
