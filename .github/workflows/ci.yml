@@ -17,6 +17,12 @@ on:
       - ".gitignore"
       - ".editorconfig"
 
+# Cancel superseded runs on the same PR (a new push obsoletes the old run).
+# Pushes to master are never cancelled, so each landed commit keeps its run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   frontend:
     runs-on: ubuntu-latest
@@ -32,8 +38,9 @@ jobs:
       - run: pnpm lint
       - run: pnpm lint:css
       - run: pnpm typecheck
+      # `test:coverage` already runs the full suite under coverage — running
+      # `pnpm test` again would just re-run the same tests.
       - run: pnpm test:coverage
-      - run: pnpm test
 
   rust:
     runs-on: ubuntu-latest
