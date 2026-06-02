@@ -16,8 +16,9 @@ import {
   ThemeIcon,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
+import type { JoinedCafe } from "@/shared/bindings/JoinedCafe";
 import type { PostJob } from "@/shared/bindings/PostJob";
 import type { PublishOutcome } from "@/shared/bindings/PublishOutcome";
 import { KIND, STATUS_ACCOUNT } from "@/shared/data/config";
@@ -29,7 +30,7 @@ import {
 import type {
   Account,
   Band,
-  Cafe,
+  Board,
   GoFn,
   LibraryPost,
   PlatformId,
@@ -44,7 +45,6 @@ import { DateTimePicker } from "@/shared/ui/date-time-picker";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo, PlatformPill } from "@/shared/ui/platform-logo";
 
-import { AddCafeModal } from "./add-cafe-modal";
 import { PreviewModal } from "./preview-modal";
 import { StockCrawlModal } from "./stock-crawl-modal";
 
@@ -53,6 +53,20 @@ export interface PublishModalProps {
   doc: LibraryPost | null;
   onClose: () => void;
   go: GoFn;
+}
+
+/**
+ * A single naver account's chosen cafe + board, resolved into the ids the
+ * backend needs (`cafeId`/`menuId`/`boardType`). Built from the account's
+ * joined-cafe list and the cafe's writable boards.
+ */
+interface NaverPick {
+  cafeId: number;
+  cafeName: string;
+  cafeUrl: string;
+  boardName: string;
+  menuId: number;
+  boardType: string;
 }
 
 function AccountRow({
@@ -111,34 +125,39 @@ function DestinationPicker({
   selPlatforms,
   stockCodes,
   openStockModal,
-  openAddCafe,
   removeStock,
-  cafe,
-  setCafe,
-  cafeBoard,
-  setCafeBoard,
   band,
   setBand,
-  cafes,
   bands,
   stocks,
+  naverAccounts,
+  joinedByAccount,
+  joinedLoading,
+  boardsByCafe,
+  boardsLoading,
+  naverPicks,
+  onPickCafe,
+  onPickBoard,
+  onRefreshJoined,
 }: {
   selPlatforms: PlatformId[];
   stockCodes: string[];
   openStockModal: () => void;
-  openAddCafe: () => void;
   removeStock: (code: string) => void;
-  cafe: string;
-  setCafe: (v: string) => void;
-  cafeBoard: string;
-  setCafeBoard: (v: string) => void;
   band: string;
   setBand: (v: string) => void;
-  cafes: Cafe[];
   bands: Band[];
   stocks: Stock[];
+  naverAccounts: Account[];
+  joinedByAccount: Record<string, JoinedCafe[]>;
+  joinedLoading: Record<string, boolean>;
+  boardsByCafe: Record<string, Board[]>;
+  boardsLoading: Record<string, boolean>;
+  naverPicks: Record<string, NaverPick | undefined>;
+  onPickCafe: (accountId: string, cafeId: number) => void;
+  onPickBoard: (accountId: string, boardName: string) => void;
+  onRefreshJoined: (accountId: string) => void;
 }) {
-  const cafeObj = cafes.find((c) => c.name === cafe) ?? cafes[0];
   const card = {
     border: "1px solid var(--mantine-color-gray-2)",
     borderRadius: "var(--mantine-radius-md)",
@@ -214,35 +233,78 @@ function DestinationPicker({
             <Text fz={13} fw={700} style={{ flex: 1 }}>
               네이버 카페
             </Text>
-            <Button
-              size="compact-xs"
-              radius="xl"
-              variant="light"
-              color="naver"
-              leftSection={<Icon.plus size={13} />}
-              onClick={openAddCafe}
-            >
-              카페 추가
-            </Button>
+            <Text fz={11.5} c="gray.5">
+              계정별 가입 카페에서 선택
+            </Text>
           </Group>
-          <Group gap={8} p={10} grow>
-            <Select
-              value={cafe}
-              data={cafes.map((c) => c.name)}
-              onChange={(v) => {
-                if (!v) return;
-                setCafe(v);
-                const c = cafes.find((x) => x.name === v);
-                setCafeBoard(c?.boards[0]?.name ?? "");
-              }}
-            />
-            <Select
-              value={cafeBoard}
-              data={(cafeObj?.boards ?? []).map((b) => b.name)}
-              onChange={(v) => setCafeBoard(v ?? "")}
-              style={{ maxWidth: 130 }}
-            />
-          </Group>
+          <Stack gap={8} p={10}>
+            {naverAccounts.map((a) => {
+              const joined = joinedByAccount[a.id];
+              const loading = joinedLoading[a.id];
+              const pick = naverPicks[a.id];
+              const cafeKey = pick ? String(pick.cafeId) : "";
+              const boards = pick ? boardsByCafe[cafeKey] : undefined;
+              const bLoading = pick ? boardsLoading[cafeKey] : false;
+              return (
+                <Group key={a.id} gap={8} wrap="nowrap" align="center">
+                  <Text
+                    fz={12}
+                    fw={700}
+                    ff="monospace"
+                    c="dimmed"
+                    truncate
+                    style={{ width: 92, flexShrink: 0 }}
+                  >
+                    {a.loginId}
+                  </Text>
+                  {loading && !joined ? (
+                    <Group gap={6} style={{ flex: 1 }}>
+                      <Loader size="xs" />
+                      <Text fz={12} c="dimmed">
+                        가입 카페 불러오는 중…
+                      </Text>
+                    </Group>
+                  ) : joined && joined.length === 0 ? (
+                    <Text fz={12} c="gray.5" style={{ flex: 1 }}>
+                      가입한 카페가 없어요
+                    </Text>
+                  ) : (
+                    <>
+                      <Select
+                        placeholder="가입 카페 선택"
+                        value={pick ? String(pick.cafeId) : null}
+                        data={(joined ?? []).map((c) => ({
+                          value: String(c.cafeId),
+                          label: c.cafeName,
+                        }))}
+                        onChange={(v) => v && onPickCafe(a.id, Number(v))}
+                        searchable
+                        style={{ flex: 1 }}
+                      />
+                      <Select
+                        placeholder={bLoading ? "불러오는 중…" : "게시판"}
+                        value={pick?.boardName || null}
+                        data={(boards ?? []).map((b) => b.name)}
+                        onChange={(v) => v && onPickBoard(a.id, v)}
+                        disabled={
+                          !pick || bLoading || (boards?.length ?? 0) === 0
+                        }
+                        style={{ width: 132, flexShrink: 0 }}
+                      />
+                    </>
+                  )}
+                  <ActionIcon
+                    variant="subtle"
+                    color="gray"
+                    aria-label="가입 카페 새로고침"
+                    onClick={() => onRefreshJoined(a.id)}
+                  >
+                    <Icon.refresh size={15} />
+                  </ActionIcon>
+                </Group>
+              );
+            })}
+          </Stack>
         </Box>
       )}
       {selPlatforms.includes("band") && (
@@ -493,15 +555,29 @@ function scheduleMoment(
 function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [stocks, setStocks] = useState<Stock[]>([]);
-  const [cafes, setCafes] = useState<Cafe[]>([]);
   const [bands, setBands] = useState<Band[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [stockCodes, setStockCodes] = useState<string[]>(["005930"]);
   const [stockModal, setStockModal] = useState(false);
-  const [addCafeOpen, setAddCafeOpen] = useState(false);
-  const [cafe, setCafe] = useState("");
-  const [cafeBoard, setCafeBoard] = useState("");
   const [band, setBand] = useState("");
+  // Account-driven naver state: joined cafes per account, boards per cafe, and
+  // each account's chosen cafe/board. Loaded live on selection and cached for
+  // the modal session (the refresh control re-fetches).
+  const [joinedByAccount, setJoinedByAccount] = useState<
+    Record<string, JoinedCafe[]>
+  >({});
+  const [joinedLoading, setJoinedLoading] = useState<Record<string, boolean>>(
+    {},
+  );
+  const [boardsByCafe, setBoardsByCafe] = useState<Record<string, Board[]>>({});
+  const [boardsLoading, setBoardsLoading] = useState<Record<string, boolean>>(
+    {},
+  );
+  const [naverPicks, setNaverPicks] = useState<
+    Record<string, NaverPick | undefined>
+  >({});
+  const joinedReqRef = useRef<Set<string>>(new Set());
+  const boardPromiseRef = useRef<Map<string, Promise<Board[]>>>(new Map());
   const [when, setWhen] = useState<"now" | "schedule">("now");
   const [date, setDate] = useState(() => nowParts().date);
   const [time, setTime] = useState(() => nowParts().time);
@@ -517,16 +593,58 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       setSelected((s) => (s.length || !firstUsable ? s : [firstUsable.id]));
     });
     void ipc.stocks.list().then(setStocks);
-    void ipc.cafes.list().then((c) => {
-      setCafes(c);
-      setCafe((cur) => cur || (c[0]?.name ?? ""));
-      setCafeBoard((cur) => cur || (c[0]?.boards[0]?.name ?? ""));
-    });
     void ipc.bands.list().then((b) => {
       setBands(b);
       setBand((cur) => cur || (b[0]?.name ?? ""));
     });
   }, []);
+
+  // Fetch an account's joined cafes once (cached in `joinedReqRef`); the refresh
+  // control clears the guard to force a re-fetch.
+  const fetchJoined = useCallback((accountId: string) => {
+    if (joinedReqRef.current.has(accountId)) return;
+    joinedReqRef.current.add(accountId);
+    setJoinedLoading((m) => ({ ...m, [accountId]: true }));
+    ipc.cafes
+      .listJoined(accountId)
+      .then((cs) => setJoinedByAccount((m) => ({ ...m, [accountId]: cs })))
+      .catch(() => setJoinedByAccount((m) => ({ ...m, [accountId]: [] })))
+      .finally(() => setJoinedLoading((m) => ({ ...m, [accountId]: false })));
+  }, []);
+
+  // Lazily discover a cafe's writable boards (reuses resolve_cafe, which returns
+  // boards for a numeric cafeId). De-dupes concurrent/repeat calls via an
+  // in-flight promise cache and resolves to the boards for the caller.
+  const resolveBoards = useCallback(
+    (cafeId: number, accountId: string): Promise<Board[]> => {
+      const key = String(cafeId);
+      const existing = boardPromiseRef.current.get(key);
+      if (existing) return existing;
+      setBoardsLoading((m) => ({ ...m, [key]: true }));
+      const p = ipc.cafes
+        .resolve(key, accountId)
+        .then((c) => {
+          setBoardsByCafe((m) => ({ ...m, [key]: c.boards }));
+          return c.boards;
+        })
+        .catch((): Board[] => {
+          setBoardsByCafe((m) => ({ ...m, [key]: [] }));
+          return [];
+        })
+        .finally(() => setBoardsLoading((m) => ({ ...m, [key]: false })));
+      boardPromiseRef.current.set(key, p);
+      return p;
+    },
+    [],
+  );
+
+  // Auto-load joined cafes for every selected naver account.
+  useEffect(() => {
+    selected.forEach((aid) => {
+      const a = accounts.find((x) => x.id === aid);
+      if (a?.platform === "naver") fetchJoined(aid);
+    });
+  }, [selected, accounts, fetchJoined]);
 
   if (!doc) {
     return <Modal opened={false} onClose={onClose} />;
@@ -538,6 +656,81 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       s.includes(id) ? s.filter((x) => x !== id) : [...s, id],
     );
   const selPlatforms = acctPlatforms(selected, accounts);
+  const selectedNaver = selected
+    .map((id) => accounts.find((a) => a.id === id))
+    .filter((a): a is Account => !!a && a.platform === "naver");
+
+  // Choose a cafe for an account: seed the pick, then discover the cafe's boards
+  // and default to the first one (unless the user has since changed cafe/board).
+  const pickCafe = (accountId: string, cafeId: number) => {
+    const jc = (joinedByAccount[accountId] ?? []).find(
+      (c) => c.cafeId === cafeId,
+    );
+    if (!jc) return;
+    setNaverPicks((m) => ({
+      ...m,
+      [accountId]: {
+        cafeId: jc.cafeId,
+        cafeName: jc.cafeName,
+        cafeUrl: jc.cafeUrl,
+        boardName: "",
+        menuId: 0,
+        boardType: "L",
+      },
+    }));
+    void resolveBoards(jc.cafeId, accountId).then((boards) => {
+      const first = boards[0];
+      if (!first) return;
+      setNaverPicks((m) => {
+        const p = m[accountId];
+        // Skip if the account moved to another cafe or already picked a board.
+        if (!p || p.cafeId !== jc.cafeId || p.boardName) return m;
+        return {
+          ...m,
+          [accountId]: {
+            ...p,
+            boardName: first.name,
+            menuId: first.menuId,
+            boardType: first.boardType,
+          },
+        };
+      });
+    });
+  };
+
+  const pickBoard = (accountId: string, boardName: string) => {
+    const pick = naverPicks[accountId];
+    if (!pick) return;
+    const b = (boardsByCafe[String(pick.cafeId)] ?? []).find(
+      (x) => x.name === boardName,
+    );
+    if (!b) return;
+    setNaverPicks((m) => ({
+      ...m,
+      [accountId]: {
+        ...pick,
+        boardName: b.name,
+        menuId: b.menuId,
+        boardType: b.boardType,
+      },
+    }));
+  };
+
+  // Refresh: drop the cached joined list + pick for this account and re-fetch.
+  const refreshJoined = (accountId: string) => {
+    joinedReqRef.current.delete(accountId);
+    setJoinedByAccount((m) => {
+      const n = { ...m };
+      delete n[accountId];
+      return n;
+    });
+    setNaverPicks((m) => {
+      const n = { ...m };
+      delete n[accountId];
+      return n;
+    });
+    fetchJoined(accountId);
+  };
 
   const acctFilters = [
     { value: "all", label: "전체" },
@@ -577,12 +770,15 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         }),
       );
     } else if (a.platform === "naver") {
+      const pick = naverPicks[aid];
+      // Skip accounts whose cafe/board isn't fully chosen yet.
+      if (!pick || !pick.boardName) return;
       jobs.push({
         key: aid,
         platform: "naver",
         loginId: a.loginId,
-        targetName: cafe,
-        board: cafeBoard,
+        targetName: pick.cafeName,
+        board: pick.boardName,
         status: a.status,
       });
     } else if (a.platform === "band") {
@@ -602,16 +798,15 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const action =
     mode === "comment" ? "댓글" : mode === "both" ? "글+댓글" : "글";
 
-  // Build the backend PostJob for a naver UI job — cafe/board are looked up by
-  // name in the registered cafes to recover the real cafeId/menuId/boardType.
+  // Build the backend PostJob for a naver UI job — the cafeId/menuId/boardType
+  // come straight from the account's pick (joined-cafe + resolved board).
   const toPostJob = (j: PublishJob): PostJob => {
-    const cafeObj = cafes.find((c) => c.name === j.targetName);
-    const boardObj = cafeObj?.boards.find((b) => b.name === j.board);
+    const pick = naverPicks[j.key];
     return {
       accountId: j.key,
-      cafe: cafeObj ? String(cafeObj.cafeId) : j.targetName,
-      menuId: boardObj?.menuId ?? 0,
-      boardType: boardObj?.boardType ?? "L",
+      cafe: pick ? String(pick.cafeId) : j.targetName,
+      menuId: pick?.menuId ?? 0,
+      boardType: pick?.boardType ?? "L",
       subject: doc.title,
       bodyText: htmlToText(doc.body ?? ""),
       tagList: [],
@@ -861,19 +1056,22 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
               selPlatforms={selPlatforms}
               stockCodes={stockCodes}
               openStockModal={() => setStockModal(true)}
-              openAddCafe={() => setAddCafeOpen(true)}
               removeStock={(c) =>
                 setStockCodes((s) => s.filter((x) => x !== c))
               }
-              cafe={cafe}
-              setCafe={setCafe}
-              cafeBoard={cafeBoard}
-              setCafeBoard={setCafeBoard}
               band={band}
               setBand={setBand}
-              cafes={cafes}
               bands={bands}
               stocks={stocks}
+              naverAccounts={selectedNaver}
+              joinedByAccount={joinedByAccount}
+              joinedLoading={joinedLoading}
+              boardsByCafe={boardsByCafe}
+              boardsLoading={boardsLoading}
+              naverPicks={naverPicks}
+              onPickCafe={pickCafe}
+              onPickBoard={pickBoard}
+              onRefreshJoined={refreshJoined}
             />
           </>
         )}
@@ -1053,21 +1251,6 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         onConfirm={(stocks) => {
           setStockCodes(stocks.map((s) => s.code));
           setStockModal(false);
-        }}
-      />
-      <AddCafeModal
-        open={addCafeOpen}
-        accounts={accounts}
-        onClose={() => setAddCafeOpen(false)}
-        onAdded={(c) => {
-          setCafes((cs) => {
-            const i = cs.findIndex((x) => x.cafeId === c.cafeId);
-            return i >= 0
-              ? cs.map((x) => (x.cafeId === c.cafeId ? c : x))
-              : [c, ...cs];
-          });
-          setCafe(c.name);
-          setCafeBoard(c.boards[0]?.name ?? "");
         }}
       />
       <PreviewModal

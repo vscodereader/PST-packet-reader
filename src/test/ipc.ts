@@ -1,5 +1,6 @@
 import { vi } from "vitest";
 
+import type { JoinedCafe } from "@/shared/bindings/JoinedCafe";
 import type { PostJob } from "@/shared/bindings/PostJob";
 import type { PublishOutcome } from "@/shared/bindings/PublishOutcome";
 import type {
@@ -292,6 +293,32 @@ const SEED_CAFES: Cafe[] = [
     ],
   },
 ];
+
+const joinedCafe = (
+  cafeId: number,
+  cafeName: string,
+  cafeUrl: string,
+  levelname = "정회원",
+): JoinedCafe => ({
+  cafeId,
+  cafeName,
+  cafeUrl,
+  memberNickname: "회원",
+  memberLevelname: levelname,
+  managingCafe: false,
+  dormantCafe: false,
+});
+
+// Joined cafes per naver account — keyed by accountId so the publish modal's
+// account-driven loader returns a different list for each account.
+const SEED_JOINED: Record<string, JoinedCafe[]> = {
+  a5: [
+    joinedCafe(11111111, "주식투자연구소 카페", "stocklab", "카페매니저"),
+    joinedCafe(22222222, "개미투자 카페", "antinvest"),
+  ],
+  a10: [joinedCafe(33333333, "가치투자 모임", "valueclub")],
+  a14: [joinedCafe(44444444, "차트분석 카페", "chartlab")],
+};
 
 const SEED_BANDS: Band[] = [
   { name: "가치투자모임 BAND" },
@@ -882,6 +909,10 @@ export const invoke = vi.fn(
         if (i >= 0) state.cafes[i] = cafe;
         else state.cafes = [cafe, ...state.cafes];
         return clone(state.cafes);
+      }
+      case "list_joined_cafes": {
+        const accountId = args!.accountId as string;
+        return clone(SEED_JOINED[accountId] ?? []);
       }
       case "run_post_jobs": {
         const jobs = args!.jobs as PostJob[];
