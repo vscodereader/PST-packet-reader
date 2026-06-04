@@ -76,6 +76,18 @@ describe("formatRelative", () => {
     expect(formatRelative(now - 5 * 60_000, now)).toBe("5분 전");
     expect(formatRelative(now - 3 * 3_600_000, now)).toBe("3시간 전");
   });
+  it("shows 어제 HH:mm for yesterday's items", () => {
+    // 2026-06-03T09:00:00 is 25 h before now (2026-06-04T10:00:00), so diff
+    // exceeds the 24 h threshold and dayBucket returns "어제".
+    const yesterday = new Date("2026-06-03T09:00:00").getTime();
+    const now = new Date("2026-06-04T10:00:00").getTime();
+    expect(formatRelative(yesterday, now)).toBe("어제 09:00");
+  });
+  it("shows M월 D일 for items older than yesterday", () => {
+    const old = new Date("2026-06-01T09:15:00").getTime();
+    const now = new Date("2026-06-04T10:00:00").getTime();
+    expect(formatRelative(old, now)).toBe("6월 1일");
+  });
 });
 
 describe("dayBucket", () => {

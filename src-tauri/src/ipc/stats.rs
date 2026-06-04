@@ -44,7 +44,10 @@ fn stat(key: &str, label: &str, value: StatValue, sub: &str, icon: &str, color: 
     }
 }
 
-/// Mirror the frontend `dayBucket`: treat batches within the past 24 hours as today.
+/// Counts a batch toward "today" if it landed within the last 24 hours.
+/// NOTE: this is a rolling 24h window, deliberately simpler than the frontend
+/// `dayBucket` (which uses local calendar-midnight). They can differ near
+/// midnight; acceptable for a soft dashboard count, and avoids a TZ dependency.
 fn is_today(at: i64) -> bool {
     let now = crate::util::now_ms();
     now - at < 86_400_000
