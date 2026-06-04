@@ -431,35 +431,72 @@ impl Default for CafeOrchestrator {
 /// **한 건이 실패해도 중단하지 않고 다음 작업으로 넘어간다**(단순 건너뛰기).
 ///
 /// 쿠키 값은 어떤 보고/로그에도 노출되지 않는다.
-pub async fn run_post_jobs(jobs: &[PostJob]) -> Vec<JobReport> {
-    let orchestrator = CafeOrchestrator::new();
-    let mut reports = Vec::with_capacity(jobs.len());
-    for job in jobs {
-        reports.push(run_single_job(&orchestrator, job).await);
-    }
-    reports
+/// 계정 쿠키 해석 실패 사유 — 배치 캐시가 성공 헤더와 함께 보관한다.
+#[derive(Clone)]
+enum CookieFailure {
+    /// 쿠키 없음(파일 없음, 또는 네이버 도메인 쿠키 미포함).
+    Missing,
+    /// 쿠키 파일 읽기/검증 오류(메시지 포함, 쿠키 값은 절대 포함하지 않음).
+    Read(String),
 }
 
-async fn run_single_job(orchestrator: &CafeOrchestrator, job: &PostJob) -> JobReport {
-    // 계정 쿠키 읽기 (만료 검증 포함). 없거나 오류면 건너뛴다.
-    let cookie_value = match auth::read_account_cookies(&job.account_id) {
-        Ok(Some(value)) => value,
-        Ok(None) => return JobReport::failure(job, no_cookies_error(&job.account_id, None)),
-        Err(e) => {
-            return JobReport::failure(job, no_cookies_error(&job.account_id, Some(e.to_string())))
-        }
-    };
+/// 한 배치 동안 계정별로 해석한 쿠키 헤더를 캐시한다.
+///
+/// 같은 계정이 여러 건(글/댓글)을 가지면 [`auth::read_account_cookies`]로 같은 쿠키
+/// 파일을 매번 읽고 파싱하던 것을 계정당 1회로 줄인다. 성공/실패 결과 모두 캐시하므로
+/// 한 계정의 쿠키가 없으면 그 계정의 나머지 건도 즉시 동일하게 건너뛴다.
+///
+/// 보안: 쿠키 값은 이 캐시 메모리에만 머물며 로그·에러·`Debug`에 노출되지 않는다
+/// (그래서 `Debug`를 파생하지 않는다).
+#[derive(Default)]
+struct CookieHeaderCache {
+    by_account: std::collections::HashMap<String, Result<String, CookieFailure>>,
+}
 
-    // 보안: cookie_header 값은 로그/보고에 노출하지 않는다.
-    let cookie_header = cookie_header_from_storage_state(&cookie_value);
-    if cookie_header.is_none() {
-        return JobReport::failure(job, no_cookies_error(&job.account_id, None));
+impl CookieHeaderCache {
+    /// 계정의 쿠키 헤더를 반환한다(최초 1회만 파일을 읽고 이후엔 캐시). 성공 시 헤더
+    /// 문자열의 복제본을 돌려준다 — 파일 I/O·JSON 파싱이 아니라 값 복제만 반복된다.
+    fn resolve(&mut self, account_id: &str) -> Result<String, CookieFailure> {
+        self.by_account
+            .entry(account_id.to_string())
+            .or_insert_with(|| match auth::read_account_cookies(account_id) {
+                Ok(Some(value)) => {
+                    cookie_header_from_storage_state(&value).ok_or(CookieFailure::Missing)
+                }
+                Ok(None) => Err(CookieFailure::Missing),
+                Err(e) => Err(CookieFailure::Read(e.to_string())),
+            })
+            .clone()
     }
+}
 
-    match orchestrator.post_one(job, cookie_header.as_deref()).await {
-        Ok(result) => JobReport::success(job, result),
-        Err(err) => JobReport::failure(job, err),
+pub async fn run_post_jobs(jobs: &[PostJob]) -> Vec<JobReport> {
+    let orchestrator = CafeOrchestrator::new();
+    let mut cookies = CookieHeaderCache::default();
+    let mut reports = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        // 계정 쿠키 해석(배치 내 1회 캐시). 없거나 오류면 건너뛴다.
+        let report = match cookies.resolve(&job.account_id) {
+            // 보안: cookie_header 값은 로그/보고에 노출하지 않는다.
+            Ok(cookie_header) => {
+                match orchestrator
+                    .post_one(job, Some(cookie_header.as_str()))
+                    .await
+                {
+                    Ok(result) => JobReport::success(job, result),
+                    Err(err) => JobReport::failure(job, err),
+                }
+            }
+            Err(CookieFailure::Missing) => {
+                JobReport::failure(job, no_cookies_error(&job.account_id, None))
+            }
+            Err(CookieFailure::Read(msg)) => {
+                JobReport::failure(job, no_cookies_error(&job.account_id, Some(msg)))
+            }
+        };
+        reports.push(report);
     }
+    reports
 }
 
 /// N건의 댓글 작업을 순차 실행하고 각 건의 결과를 [`CommentJobReport`]로 보고한다.
@@ -485,6 +522,7 @@ async fn run_comment_jobs_with_delay(
     delay: Duration,
 ) -> Vec<CommentJobReport> {
     let client = CafeCommentClient::new();
+    let mut cookies = CookieHeaderCache::default();
     let total = jobs.len();
     let mut reports = Vec::with_capacity(total);
     for (index, job) in jobs.iter().enumerate() {
@@ -499,7 +537,7 @@ async fn run_comment_jobs_with_delay(
             article_id = job.article_id,
             "댓글 등록 시도"
         );
-        let report = run_single_comment_job(&client, job).await;
+        let report = run_single_comment_job(&client, job, &mut cookies).await;
         match &report.error {
             None => tracing::info!(
                 seq = index + 1,
@@ -521,26 +559,25 @@ async fn run_comment_jobs_with_delay(
     reports
 }
 
-async fn run_single_comment_job(client: &CafeCommentClient, job: &CommentJob) -> CommentJobReport {
-    // 계정 쿠키 읽기 (만료 검증 포함). 없거나 오류면 건너뛴다.
-    let cookie_value = match auth::read_account_cookies(&job.account_id) {
-        Ok(Some(value)) => value,
-        Ok(None) => {
+async fn run_single_comment_job(
+    client: &CafeCommentClient,
+    job: &CommentJob,
+    cookies: &mut CookieHeaderCache,
+) -> CommentJobReport {
+    // 계정 쿠키 해석(배치 내 1회 캐시). 없거나 오류면 건너뛴다.
+    // 보안: cookie_header 값은 로그/보고에 노출하지 않는다.
+    let cookie_header = match cookies.resolve(&job.account_id) {
+        Ok(header) => header,
+        Err(CookieFailure::Missing) => {
             return CommentJobReport::failure(job, no_cookies_comment_error(&job.account_id, None))
         }
-        Err(e) => {
+        Err(CookieFailure::Read(msg)) => {
             return CommentJobReport::failure(
                 job,
-                no_cookies_comment_error(&job.account_id, Some(e.to_string())),
+                no_cookies_comment_error(&job.account_id, Some(msg)),
             )
         }
     };
-
-    // 보안: cookie_header 값은 로그/보고에 노출하지 않는다.
-    let cookie_header = cookie_header_from_storage_state(&cookie_value);
-    if cookie_header.is_none() {
-        return CommentJobReport::failure(job, no_cookies_comment_error(&job.account_id, None));
-    }
 
     let request = CommentRequest {
         cafe_id: job.cafe_id.to_string(),
@@ -550,7 +587,7 @@ async fn run_single_comment_job(client: &CafeCommentClient, job: &CommentJob) ->
     };
 
     match client
-        .post_comment(&request, cookie_header.as_deref())
+        .post_comment(&request, Some(cookie_header.as_str()))
         .await
     {
         Ok(result) => CommentJobReport::success(job, result),
