@@ -14,6 +14,8 @@ use tauri::{AppHandle, Runtime};
 
 pub use accounts::{read_account_cookies, save_accounts_file};
 pub use adb::probe_adb_connection;
+// 게시(forum)에서도 로그인과 같은 Chrome 런처를 재사용해, 디버그 포트 Chrome을 앱이 직접 띄운다.
+pub(crate) use chrome::launch as launch_debug_chrome;
 pub use error::OrchestratorError;
 pub use paths::{app_data_root, paths_for_root};
 pub use queue::{enqueue_accounts, get_queue_status, QueueState};

@@ -109,9 +109,20 @@ async fn run_forum_publish_now<R: Runtime>(
     app: tauri::AppHandle<R>,
     request: ForumPublishRequest,
 ) -> Result<Vec<ForumPublishResult>, String> {
-    tauri::async_runtime::spawn_blocking(move || run_forum_publish(request, app))
-        .await
-        .map_err(|error| format!("게시 실행 스레드 오류: {error}"))
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<ForumPublishResult>, String> {
+        // 게시용 Chrome을 앱이 직접 디버그 포트로 띄운다(헤드리스). 사용자가 따로
+        // `--remote-debugging-port`로 Chrome을 실행할 필요가 없다. 게시가 끝나면
+        // 핸들이 Drop되며 Chrome을 종료한다. (로그인과 같은 런처 재사용)
+        let chrome = auth::launch_debug_chrome(true).map_err(|error| error.to_string())?;
+        let mut request = request;
+        request.host = FORUM_DEVTOOLS_HOST.to_owned();
+        request.port = chrome.port;
+        let results = run_forum_publish(request, app);
+        drop(chrome);
+        Ok(results)
+    })
+    .await
+    .map_err(|error| format!("게시 실행 스레드 오류: {error}"))?
 }
 
 #[cfg(target_os = "windows")]
