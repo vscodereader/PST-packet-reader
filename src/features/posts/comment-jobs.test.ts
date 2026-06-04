@@ -7,8 +7,105 @@ import {
   buildUrlCommentJobs,
   commentSummary,
   commentsAllOk,
+  distributeComments,
+  mulberry32,
   parseCafeArticleUrl,
 } from "./comment-jobs";
+
+describe("mulberry32", () => {
+  it("is deterministic for a fixed seed", () => {
+    const a = mulberry32(123);
+    const b = mulberry32(123);
+    const seqA = [a(), a(), a(), a()];
+    const seqB = [b(), b(), b(), b()];
+    expect(seqA).toEqual(seqB);
+  });
+
+  it("yields values in [0, 1)", () => {
+    const rng = mulberry32(42);
+    for (let i = 0; i < 100; i++) {
+      const v = rng();
+      expect(v).toBeGreaterThanOrEqual(0);
+      expect(v).toBeLessThan(1);
+    }
+  });
+
+  it("produces different streams for different seeds", () => {
+    expect(mulberry32(1)()).not.toBe(mulberry32(2)());
+  });
+});
+
+describe("distributeComments", () => {
+  it("assigns exactly one comment to every account", () => {
+    const got = distributeComments(
+      ["a1", "a2", "a3"],
+      ["c1", "c2", "c3"],
+      mulberry32(7),
+    );
+    expect(got.map((g) => g.accountId)).toEqual(["a1", "a2", "a3"]);
+    expect(got.every((g) => ["c1", "c2", "c3"].includes(g.content))).toBe(true);
+  });
+
+  it("is deterministic for a fixed seed (same input → same output)", () => {
+    const args = [
+      ["a1", "a2", "a3", "a4", "a5"],
+      ["c1", "c2", "c3", "c4", "c5"],
+    ] as const;
+    const first = distributeComments(args[0], args[1], mulberry32(99));
+    const second = distributeComments(args[0], args[1], mulberry32(99));
+    expect(first).toEqual(second);
+  });
+
+  it("actually shuffles (does not return comments in input order) for a seed", () => {
+    // With this seed the assignment must differ from the trivial identity map,
+    // proving the RNG drives a real permutation rather than a passthrough.
+    const got = distributeComments(
+      ["a1", "a2", "a3", "a4"],
+      ["c1", "c2", "c3", "c4"],
+      mulberry32(3),
+    );
+    const contents = got.map((g) => g.content);
+    expect(contents).not.toEqual(["c1", "c2", "c3", "c4"]);
+  });
+
+  it("boundary: comments < accounts — reuses the pool, every account still gets one", () => {
+    const got = distributeComments(
+      ["a1", "a2", "a3", "a4", "a5"],
+      ["c1", "c2"],
+      mulberry32(11),
+    );
+    expect(got).toHaveLength(5);
+    expect(got.map((g) => g.accountId)).toEqual(["a1", "a2", "a3", "a4", "a5"]);
+    expect(got.every((g) => ["c1", "c2"].includes(g.content))).toBe(true);
+    // both comments are used across the five accounts (pool is cycled)
+    const used = new Set(got.map((g) => g.content));
+    expect(used).toEqual(new Set(["c1", "c2"]));
+  });
+
+  it("boundary: comments > accounts — each account gets a distinct comment", () => {
+    const got = distributeComments(
+      ["a1", "a2"],
+      ["c1", "c2", "c3", "c4", "c5"],
+      mulberry32(5),
+    );
+    expect(got).toHaveLength(2);
+    const used = got.map((g) => g.content);
+    expect(new Set(used).size).toBe(2);
+  });
+
+  it("is empty when there are no accounts or no comments", () => {
+    expect(distributeComments([], ["c1"], mulberry32(1))).toEqual([]);
+    expect(distributeComments(["a1"], [], mulberry32(1))).toEqual([]);
+  });
+
+  it("single comment: every account gets that one comment", () => {
+    const got = distributeComments(["a1", "a2"], ["only"], mulberry32(1));
+    expect(got).toEqual([
+      { accountId: "a1", content: "only" },
+      { accountId: "a2", content: "only" },
+    ]);
+  });
+});
 
 describe("parseCafeArticleUrl", () => {
   it("parses the SPA cafes/{id}/articles/{aid} form", () => {
@@ -57,27 +154,41 @@ describe("parseCafeArticleUrl", () => {
 });
 
 describe("buildBothCommentJobs", () => {
-  it("produces one job per (posted article × comment)", () => {
-    const jobs = buildBothCommentJobs(
-      [
-        { accountId: "a5", cafeId: 111, articleId: 1000 },
-        { accountId: "a6", cafeId: 222, articleId: 1001 },
-      ],
-      ["좋네요", "추가매수"],
+  it("produces one randomly-distributed comment per posted article", () => {
+    const posted = [
+      { accountId: "a5", cafeId: 111, articleId: 1000 },
+      { accountId: "a6", cafeId: 222, articleId: 1001 },
+    ];
+    const jobs = buildBothCommentJobs(posted, ["좋네요", "추가매수"], {
+      rng: mulberry32(7),
+    });
+    // one job per posted article (not the old account × all-comments fan-out)
+    expect(jobs).toHaveLength(2);
+    expect(jobs[0]?.accountId).toBe("a5");
+    expect(jobs[0]?.cafeId).toBe(111);
+    expect(jobs[0]?.articleId).toBe(1000);
+    expect(jobs[1]?.accountId).toBe("a6");
+    expect(jobs[1]?.cafeId).toBe(222);
+    expect(jobs[1]?.articleId).toBe(1001);
+    expect(jobs.every((j) => ["좋네요", "추가매수"].includes(j.content))).toBe(
+      true,
     );
-    expect(jobs).toHaveLength(4);
-    expect(jobs[0]).toEqual({
-      accountId: "a5",
-      cafeId: 111,
-      articleId: 1000,
-      content: "좋네요",
+  });
+
+  it("is deterministic for a fixed seed", () => {
+    const posted = [
+      { accountId: "a5", cafeId: 111, articleId: 1000 },
+      { accountId: "a6", cafeId: 222, articleId: 1001 },
+      { accountId: "a7", cafeId: 333, articleId: 1002 },
+    ];
+    const comments = ["c1", "c2", "c3"];
+    const first = buildBothCommentJobs(posted, comments, {
+      rng: mulberry32(5),
     });
-    expect(jobs[3]).toEqual({
-      accountId: "a6",
-      cafeId: 222,
-      articleId: 1001,
-      content: "추가매수",
+    const second = buildBothCommentJobs(posted, comments, {
+      rng: mulberry32(5),
     });
+    expect(first).toEqual(second);
   });
 
   it("is empty when there are no posts or no comments", () => {
@@ -89,18 +200,35 @@ describe("buildBothCommentJobs", () => {
 });
 
 describe("buildUrlCommentJobs", () => {
-  it("produces one job per (account × comment) at the fixed target", () => {
+  it("produces one randomly-distributed comment per account at the fixed target", () => {
     const jobs = buildUrlCommentJobs(
       ["a5", "a10"],
       { cafeId: 31732304, articleId: 9 },
       ["댓글1", "댓글2", "댓글3"],
+      { rng: mulberry32(7) },
     );
-    expect(jobs).toHaveLength(6);
+    expect(jobs).toHaveLength(2);
     expect(jobs.every((j) => j.cafeId === 31732304 && j.articleId === 9)).toBe(
       true,
     );
     expect(jobs[0]?.accountId).toBe("a5");
-    expect(jobs[5]?.accountId).toBe("a10");
+    expect(jobs[1]?.accountId).toBe("a10");
+    expect(
+      jobs.every((j) => ["댓글1", "댓글2", "댓글3"].includes(j.content)),
+    ).toBe(true);
+  });
+
+  it("is deterministic for a fixed seed", () => {
+    const accounts = ["a5", "a10", "a15"];
+    const target = { cafeId: 1, articleId: 2 };
+    const comments = ["c1", "c2", "c3"];
+    const first = buildUrlCommentJobs(accounts, target, comments, {
+      rng: mulberry32(42),
+    });
+    const second = buildUrlCommentJobs(accounts, target, comments, {
+      rng: mulberry32(42),
+    });
+    expect(first).toEqual(second);
   });
 });
 
