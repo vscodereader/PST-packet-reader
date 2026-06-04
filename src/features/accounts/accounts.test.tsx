@@ -3,6 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
+import { ipc } from "@/shared/ipc";
 import { invoke as ipcBackend, resetIpc, setLoginOutcomes } from "@/test/ipc";
 import { pickOption } from "@/test/select";
 
@@ -42,6 +43,7 @@ describe("Accounts", () => {
   beforeEach(() => {
     resetIpc();
     notifShow.mockClear();
+    vi.spyOn(ipc.activity, "append").mockResolvedValue(undefined);
   });
 
   it("renders the title and first page of accounts (10 rows)", async () => {
@@ -250,6 +252,69 @@ describe("Accounts", () => {
         expect.objectContaining({
           message: expect.stringContaining("내보냈어요"),
         }),
+      );
+      // Also logs to the activity feed with the failure message.
+      await waitFor(() =>
+        expect(ipc.activity.append).toHaveBeenCalledWith(
+          "error",
+          expect.stringContaining("내보내기"),
+        ),
+      );
+    } finally {
+      vi.mocked(ipcBackend).mockImplementation(realImpl);
+    }
+  });
+
+  it("logs to activity feed when import IPC command rejects", async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(open).mockResolvedValueOnce("/tmp/계정.xlsx");
+    const realImpl = vi.mocked(ipcBackend).getMockImplementation()! as (
+      cmd: string,
+      args?: Record<string, unknown>,
+    ) => Promise<unknown>;
+    vi.mocked(ipcBackend).mockImplementation((cmd, args) =>
+      cmd === "import_accounts_xlsx"
+        ? Promise.reject(new Error("corrupt file"))
+        : realImpl(cmd, args),
+    );
+    try {
+      await renderAccounts();
+      await userEvent.click(
+        screen.getByRole("button", { name: /엑셀 가져오기/ }),
+      );
+      await waitFor(() =>
+        expect(ipc.activity.append).toHaveBeenCalledWith(
+          "error",
+          expect.stringContaining("가져오기"),
+        ),
+      );
+    } finally {
+      vi.mocked(ipcBackend).mockImplementation(realImpl);
+    }
+  });
+
+  it("logs to activity feed when login start IPC command rejects", async () => {
+    const realImpl = vi.mocked(ipcBackend).getMockImplementation()! as (
+      cmd: string,
+      args?: Record<string, unknown>,
+    ) => Promise<unknown>;
+    vi.mocked(ipcBackend).mockImplementation((cmd, args) =>
+      cmd === "enqueue_cookie_refresh"
+        ? Promise.reject(new Error("sidecar missing"))
+        : realImpl(cmd, args),
+    );
+    try {
+      await renderAccounts();
+      const checkboxes = screen.getAllByRole("checkbox");
+      await userEvent.click(checkboxes[1]!);
+      await userEvent.click(
+        screen.getByRole("button", { name: /선택 로그인/ }),
+      );
+      await waitFor(() =>
+        expect(ipc.activity.append).toHaveBeenCalledWith(
+          "error",
+          expect.stringContaining("로그인"),
+        ),
       );
     } finally {
       vi.mocked(ipcBackend).mockImplementation(realImpl);

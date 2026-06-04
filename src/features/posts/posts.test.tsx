@@ -3,6 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
+import { ipc } from "@/shared/ipc";
 import { invoke as ipcBackend, resetIpc } from "@/test/ipc";
 
 import { Posts } from "./posts";
@@ -36,6 +37,7 @@ describe("Posts", () => {
   beforeEach(() => {
     resetIpc();
     notifShow.mockClear();
+    vi.spyOn(ipc.activity, "append").mockResolvedValue(undefined);
   });
 
   it("renders the title and the 글쓰기 action", async () => {
@@ -199,5 +201,33 @@ describe("Posts", () => {
         .mocked(ipcBackend)
         .mock.calls.some((c) => c[0] === "import_posts_xlsx"),
     ).toBe(false);
+  });
+
+  it("logs to activity feed when import IPC command rejects", async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(open).mockResolvedValueOnce("/tmp/게시글.xlsx");
+    const realImpl = vi.mocked(ipcBackend).getMockImplementation()! as (
+      cmd: string,
+      args?: Record<string, unknown>,
+    ) => Promise<unknown>;
+    vi.mocked(ipcBackend).mockImplementation((cmd, args) =>
+      cmd === "import_posts_xlsx"
+        ? Promise.reject(new Error("parse error"))
+        : realImpl(cmd, args),
+    );
+    try {
+      await renderPosts();
+      await userEvent.click(
+        screen.getByRole("button", { name: /엑셀 가져오기/ }),
+      );
+      await waitFor(() =>
+        expect(ipc.activity.append).toHaveBeenCalledWith(
+          "error",
+          expect.stringContaining("가져오기"),
+        ),
+      );
+    } finally {
+      vi.mocked(ipcBackend).mockImplementation(realImpl);
+    }
   });
 });

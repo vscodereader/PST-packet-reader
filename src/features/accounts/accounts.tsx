@@ -351,6 +351,11 @@ export function Accounts({ go }: { go: GoFn }) {
     } catch (err) {
       setLoggingIn(false);
       toast(err instanceof Error ? err.message : String(err), "red");
+      void ipc.activity.append(
+        "error",
+        "로그인 시작 실패 — " +
+          (err instanceof Error ? err.message : String(err)),
+      );
     }
   };
 
@@ -504,6 +509,11 @@ export function Accounts({ go }: { go: GoFn }) {
                     (err instanceof Error ? err.message : String(err)),
                   "red",
                 );
+                void ipc.activity.append(
+                  "error",
+                  "계정 가져오기 실패 — " +
+                    (err instanceof Error ? err.message : String(err)),
+                );
               }
             }}
           >
@@ -527,6 +537,11 @@ export function Accounts({ go }: { go: GoFn }) {
                   "내보내기 실패: " +
                     (err instanceof Error ? err.message : String(err)),
                   "red",
+                );
+                void ipc.activity.append(
+                  "error",
+                  "계정 내보내기 실패 — " +
+                    (err instanceof Error ? err.message : String(err)),
                 );
               }
             }}
