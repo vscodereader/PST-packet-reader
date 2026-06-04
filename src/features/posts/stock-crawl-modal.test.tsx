@@ -1,7 +1,9 @@
 import { MantineProvider } from "@mantine/core";
-import { render, screen } from "@testing-library/react";
+import { render, screen, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
+
+import { ipc } from "@/shared/ipc";
 
 import { StockCrawlModal } from "./stock-crawl-modal";
 
@@ -28,6 +30,28 @@ function renderModal(
 }
 
 describe("StockCrawlModal", () => {
+  it("logs an activity when crawl completes", async () => {
+    vi.useFakeTimers();
+    const spy = vi.spyOn(ipc.activity, "append");
+    render(
+      <MantineProvider>
+        <StockCrawlModal
+          open
+          preselected={[]}
+          onClose={vi.fn()}
+          onConfirm={vi.fn()}
+        />
+      </MantineProvider>,
+    );
+    // Advance past the 1400ms crawl timeout.
+    await act(async () => {
+      vi.advanceTimersByTime(1500);
+    });
+    expect(spy).toHaveBeenCalledWith("info", expect.stringContaining("종목"));
+    spy.mockRestore();
+    vi.useRealTimers();
+  });
+
   it("shows the crawl source banner while open", async () => {
     renderModal();
     expect(await screen.findByText(/finance\.naver\.com/)).toBeInTheDocument();
