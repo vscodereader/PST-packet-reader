@@ -62,6 +62,17 @@ async fn process_account<R: Runtime>(
     if use_adb {
         assert_adb_device().await?;
         toggle_airplane_mode().await?;
+        // IP가 바뀐 뒤 네트워크가 안정될 시간을 주고 나서 Chrome을 띄운다(사수 권고).
+        // 직전 계정의 Chrome은 직전 login() 반환 시 ChromeHandle Drop에서 kill+wait로
+        // 이미 완전히 종료되며, 그 사실이 "[CHROME] ✓ ... 완전 종료 확인" 로그로 남는다.
+        eprintln!(
+            "[LOGIN] IP 변경 확인 — {}초 안정화 대기 후 Chrome 실행",
+            config::ADB_SETTLE_AFTER_ROTATE_SECS
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(
+            config::ADB_SETTLE_AFTER_ROTATE_SECS,
+        ))
+        .await;
     }
 
     // CDP 로그인은 Chrome을 띄워 동기적으로 동작하므로 blocking 스레드에서 실행한다.

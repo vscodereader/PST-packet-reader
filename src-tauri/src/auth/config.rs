@@ -91,6 +91,8 @@ fn chrome_candidates() -> Vec<String> {
 
 // ADB
 pub const ADB_AIRPLANE_ENABLE_SECS: u64 = 1;
+/// IP 회전(비행기모드 토글) 후 네트워크가 안정될 때까지 기다렸다가 Chrome을 띄운다(초).
+pub const ADB_SETTLE_AFTER_ROTATE_SECS: u64 = 3;
 pub const ADB_INTERNET_POLL_INTERVAL_MS: u64 = 1_000;
 pub const ADB_INTERNET_TIMEOUT_SECS: u64 = 30;
 pub const ADB_INTERNET_PING_HOST: &str = "8.8.8.8";
