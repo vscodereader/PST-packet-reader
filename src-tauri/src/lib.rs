@@ -1,5 +1,6 @@
 mod ipc;
 mod store;
+mod util;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
