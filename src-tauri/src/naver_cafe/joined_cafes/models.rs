@@ -140,9 +140,15 @@ mod tests {
         };
         let json = serde_json::to_value(&cafe).expect("직렬화 실패");
         assert!(json.get("cafeId").is_some(), "cafeId 키가 없음");
-        assert!(json.get("memberLevelname").is_some(), "memberLevelname 키가 없음");
+        assert!(
+            json.get("memberLevelname").is_some(),
+            "memberLevelname 키가 없음"
+        );
         assert!(json.get("managingCafe").is_some(), "managingCafe 키가 없음");
-        assert!(json.get("cafe_id").is_none(), "snake_case 키가 있으면 안 됨");
+        assert!(
+            json.get("cafe_id").is_none(),
+            "snake_case 키가 있으면 안 됨"
+        );
     }
 
     #[test]

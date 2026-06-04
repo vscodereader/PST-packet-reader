@@ -140,10 +140,7 @@ fn serde_err_to_post_error(request: &PostRequest, err: serde_json::Error) -> Pos
     ErrorEnvelope {
         trace_id: String::new(),
         code: CODE_CONTENT_BUILD_FAILED.to_string(),
-        message: format!(
-            "contentJson 또는 요청 바디 직렬화에 실패했습니다: {}",
-            err
-        ),
+        message: format!("contentJson 또는 요청 바디 직렬화에 실패했습니다: {}", err),
         error_data: Some(PostErrorData {
             cafe: NaverCafeCommonErrorData {
                 target: Some(CafeTarget {
@@ -181,9 +178,8 @@ pub fn build_post_preview(
     request: &PostRequest,
     ids: &mut impl IdProvider,
 ) -> Result<PostPreview, PostError> {
-    let body =
-        build_article_write_body_with_content(request, ids)
-            .map_err(|e| serde_err_to_post_error(request, e))?;
+    let body = build_article_write_body_with_content(request, ids)
+        .map_err(|e| serde_err_to_post_error(request, e))?;
 
     let article = &body.article;
 
@@ -366,10 +362,7 @@ pub async fn execute_post_live(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::naver_cafe::post::{
-        client::CafeHttpClient,
-        smart_editor::SequentialIdProvider,
-    };
+    use crate::naver_cafe::post::{client::CafeHttpClient, smart_editor::SequentialIdProvider};
 
     fn base_request() -> PostRequest {
         PostRequest {
@@ -435,7 +428,10 @@ mod tests {
         let preview = build_post_preview(&req, &mut ids).expect("미리보기 생성 실패");
 
         assert!(preview.open, "open=Some(true)이 반영되어야 함");
-        assert!(!preview.enable_comment, "enableComment=Some(false)이 반영되어야 함");
+        assert!(
+            !preview.enable_comment,
+            "enableComment=Some(false)이 반영되어야 함"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -463,10 +459,7 @@ mod tests {
         let req = base_request();
         let mut ids = SequentialIdProvider::new();
         let preview = build_post_preview(&req, &mut ids).expect("미리보기 생성 실패");
-        assert_eq!(
-            preview.path,
-            "/editor/v2.0/cafes/31732304/menus/1/articles"
-        );
+        assert_eq!(preview.path, "/editor/v2.0/cafes/31732304/menus/1/articles");
     }
 
     #[test]
@@ -640,8 +633,7 @@ mod tests {
         let menu_id: u64 = menu_id_str
             .parse()
             .expect("PSTMACRO_LIVE_MENU_ID는 숫자(u64)여야 합니다");
-        let subject =
-            std::env::var("PSTMACRO_LIVE_SUBJECT").unwrap_or_else(|_| "test".to_string());
+        let subject = std::env::var("PSTMACRO_LIVE_SUBJECT").unwrap_or_else(|_| "test".to_string());
         let body = std::env::var("PSTMACRO_LIVE_BODY").unwrap_or_else(|_| "test body".to_string());
         let board_type =
             std::env::var("PSTMACRO_LIVE_BOARD_TYPE").unwrap_or_else(|_| "L".to_string());
@@ -662,10 +654,8 @@ mod tests {
         );
 
         // --- 만료 검증 없이 쿠키 읽기 ---
-        let cookies_value =
-            auth::read_account_cookies_unchecked(&account_id).unwrap_or_else(|e| {
-                panic!("쿠키 파일 읽기 오류: {}", e)
-            });
+        let cookies_value = auth::read_account_cookies_unchecked(&account_id)
+            .unwrap_or_else(|e| panic!("쿠키 파일 읽기 오류: {}", e));
         let cookies_value = cookies_value.unwrap_or_else(|| {
             panic!(
                 "쿠키 파일이 없습니다. 계정 '{}' 의 쿠키 파일이 존재해야 합니다.",
@@ -706,7 +696,13 @@ mod tests {
         // --- 실제 전송 ---
         let client = CafeHttpClient::new();
         let result = client
-            .post_article(&cafe_id, menu_id, &board_type, &body, cookie_header.as_deref())
+            .post_article(
+                &cafe_id,
+                menu_id,
+                &board_type,
+                &body,
+                cookie_header.as_deref(),
+            )
             .await;
 
         // --- 결과 출력 (성공/실패 모두 허용, assert 없음) ---

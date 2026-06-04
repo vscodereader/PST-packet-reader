@@ -6,8 +6,7 @@ pub mod request_builder;
 pub mod service;
 
 pub use client::{
-    CafeCommentClient, CODE_COMMENT_HTTP_ERROR, CODE_COMMENT_PARSE_ERROR,
-    CODE_HTTP_TRANSPORT_ERROR,
+    CafeCommentClient, CODE_COMMENT_HTTP_ERROR, CODE_COMMENT_PARSE_ERROR, CODE_HTTP_TRANSPORT_ERROR,
 };
 pub use error::{CommentError, CommentErrorData};
 pub use models::{CommentRequest, ReplyRequest};

@@ -32,7 +32,10 @@ fn env_filter() -> EnvFilter {
 pub fn init_file_logging(logs_dir: &Path) {
     if let Err(e) = std::fs::create_dir_all(logs_dir) {
         // 로깅 초기화 실패가 앱 부팅을 막아선 안 된다.
-        eprintln!("[logging] 로그 디렉터리 생성 실패 ({}): {e}", logs_dir.display());
+        eprintln!(
+            "[logging] 로그 디렉터리 생성 실패 ({}): {e}",
+            logs_dir.display()
+        );
         return;
     }
 
@@ -86,8 +89,8 @@ mod tests {
     /// `f` 실행 중 방출된 로그를 문자열로 캡처한다(전역 subscriber 미사용).
     fn captured<F: FnOnce()>(f: F) -> String {
         let buf = BufWriter::default();
-        let subscriber =
-            tracing_subscriber::registry().with(fmt::layer().with_ansi(false).with_writer(buf.clone()));
+        let subscriber = tracing_subscriber::registry()
+            .with(fmt::layer().with_ansi(false).with_writer(buf.clone()));
         with_default(subscriber, f);
         let bytes = buf.0.lock().unwrap().clone();
         String::from_utf8(bytes).unwrap()
@@ -112,7 +115,10 @@ mod tests {
         let out = captured(|| {
             tracing::debug!(status = 200, count = 2, "join-cafes request done");
         });
-        assert!(!out.contains("SUPER_SECRET"), "쿠키 값이 로그에 노출됨: {out}");
+        assert!(
+            !out.contains("SUPER_SECRET"),
+            "쿠키 값이 로그에 노출됨: {out}"
+        );
         assert!(!out.contains(secret), "쿠키 헤더가 로그에 노출됨: {out}");
     }
 

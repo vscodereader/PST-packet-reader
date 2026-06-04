@@ -45,7 +45,9 @@ async fn main() {
     }
 
     let cafe_input = pick(&args, "--cafe", "PSTMACRO_LIVE_CAFE_ID").unwrap_or_else(|| {
-        eprintln!("카페가 필요합니다 (--cafe 또는 PSTMACRO_LIVE_CAFE_ID) — URL/vanity/숫자 모두 가능");
+        eprintln!(
+            "카페가 필요합니다 (--cafe 또는 PSTMACRO_LIVE_CAFE_ID) — URL/vanity/숫자 모두 가능"
+        );
         print_usage();
         std::process::exit(2);
     });
@@ -54,8 +56,8 @@ async fn main() {
         print_usage();
         std::process::exit(2);
     });
-    let content =
-        pick(&args, "--content", "PSTMACRO_LIVE_CONTENT").unwrap_or_else(|| "테스트 댓글".to_string());
+    let content = pick(&args, "--content", "PSTMACRO_LIVE_CONTENT")
+        .unwrap_or_else(|| "테스트 댓글".to_string());
     // --ref-comment 가 있으면 대댓글, 없으면 일반 댓글.
     let ref_comment_id = pick(&args, "--ref-comment", "PSTMACRO_LIVE_REF_COMMENT_ID");
 
@@ -93,7 +95,11 @@ async fn main() {
     println!();
 
     // --- 2) 댓글/대댓글 전송 (CafeCommentClient — send_post 의 CafeHttpClient 대응) ---
-    let kind = if ref_comment_id.is_some() { "대댓글" } else { "일반 댓글" };
+    let kind = if ref_comment_id.is_some() {
+        "대댓글"
+    } else {
+        "일반 댓글"
+    };
     println!("=== 2) {kind} 작성 ===");
     println!(
         "요청: cafeId={cafe_id} articleId={article_id} ref={:?} content={content:?}",
@@ -134,7 +140,10 @@ async fn main() {
         Err(comment_error) => {
             // CommentError 에는 http_status, errorCode, reason(api_error_message)이 담김. 쿠키는 없음.
             eprintln!("실패 응답 (쿠키 값은 포함되지 않음):");
-            eprintln!("{}", serde_json::to_string_pretty(&comment_error).unwrap_or_default());
+            eprintln!(
+                "{}",
+                serde_json::to_string_pretty(&comment_error).unwrap_or_default()
+            );
             std::process::exit(1);
         }
     }

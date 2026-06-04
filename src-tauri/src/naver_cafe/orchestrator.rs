@@ -27,7 +27,9 @@ use ts_rs::TS;
 
 use crate::auth;
 use crate::naver_cafe::{
-    cafe_ref::{parse_cafe_ref, CafeGateClient, CafeHomeClient, CafeInfoView, CafeRef, CafeRefError},
+    cafe_ref::{
+        parse_cafe_ref, CafeGateClient, CafeHomeClient, CafeInfoView, CafeRef, CafeRefError,
+    },
     comment::{CafeCommentClient, CommentError, CommentErrorData, CommentRequest, CommentResult},
     error::{ErrorEnvelope, NaverCafeCommonErrorData},
     joined_cafes::{JoinedCafe, JoinedCafesClient, JoinedCafesError},
@@ -499,7 +501,10 @@ async fn run_single_comment_job(client: &CafeCommentClient, job: &CommentJob) ->
         sticker_id: None,
     };
 
-    match client.post_comment(&request, cookie_header.as_deref()).await {
+    match client
+        .post_comment(&request, cookie_header.as_deref())
+        .await
+    {
         Ok(result) => CommentJobReport::success(job, result),
         Err(err) => CommentJobReport::failure(job, err),
     }
@@ -549,11 +554,12 @@ mod tests {
 
     #[tokio::test]
     async fn list_joined_cafes_delegates_to_joined_client() {
-        const FIXTURE: &str =
-            include_str!("joined_cafes/fixtures/join_cafes_groups_success.json");
+        const FIXTURE: &str = include_str!("joined_cafes/fixtures/join_cafes_groups_success.json");
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/cafe-home-web/cafe-home/v1/config/join-cafes/groups/"))
+            .and(path(
+                "/cafe-home-web/cafe-home/v1/config/join-cafes/groups/",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_string(FIXTURE))
             .mount(&server)
             .await;
@@ -675,8 +681,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/bluegrayoc3uc"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(r#"var g_sClubId = "31732304";"#),
+                ResponseTemplate::new(200).set_body_string(r#"var g_sClubId = "31732304";"#),
             )
             .mount(&server)
             .await;
@@ -870,8 +875,7 @@ mod tests {
             },
         );
         let serialized = serde_json::to_string(&report).expect("직렬화 실패");
-        let restored: CommentJobReport =
-            serde_json::from_str(&serialized).expect("역직렬화 실패");
+        let restored: CommentJobReport = serde_json::from_str(&serialized).expect("역직렬화 실패");
         assert_eq!(report, restored);
     }
 }

@@ -21,5 +21,7 @@ pub mod parser;
 
 pub use client::{cafe_gate_info_path, CafeGateClient, CAFE_API_HOST};
 pub use home::{cafe_home_path, parse_club_id_from_html, CafeHomeClient, CAFE_HOME_HOST};
-pub use models::{CafeGateInfoResponse, CafeGateMessage, CafeGateResult, CafeInfoView, CafeRefError};
+pub use models::{
+    CafeGateInfoResponse, CafeGateMessage, CafeGateResult, CafeInfoView, CafeRefError,
+};
 pub use parser::{parse_cafe_id, parse_cafe_ref, CafeRef};

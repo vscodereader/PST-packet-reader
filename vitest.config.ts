@@ -16,8 +16,9 @@ export default defineConfig({
     setupFiles: ["./src/test/setup.ts"],
     pool: "threads",
     maxWorkers: 4,
-    // Headroom for heavy Mantine component suites on slow/CI machines, so a
-    // cold render + async IPC load doesn't trip the default 5s per-test budget.
+    // Heavy Mantine component + login-polling suites need real async-query
+    // headroom on slow/CI machines, so a cold render + async IPC load doesn't
+    // trip the default 5s per-test budget.
     testTimeout: 15000,
     hookTimeout: 15000,
     coverage: {

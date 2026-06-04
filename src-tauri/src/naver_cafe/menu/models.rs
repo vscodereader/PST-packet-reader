@@ -75,7 +75,10 @@ mod tests {
         assert_eq!(menu.board_type, "L");
         assert!(menu.writable, "writable이 true여야 함");
         assert!(!menu.hidden, "hidden이 false여야 함");
-        assert!(!menu.separator_menu_type, "separatorMenuType이 false여야 함");
+        assert!(
+            !menu.separator_menu_type,
+            "separatorMenuType이 false여야 함"
+        );
         assert_eq!(menu.order, 1);
     }
 
@@ -101,7 +104,8 @@ mod tests {
             "separatorMenuType": false,
             "unknownFieldXyz": "ignored"
         });
-        let menu: Menu = serde_json::from_value(json).expect("알 수 없는 필드가 있어도 파싱 성공해야 함");
+        let menu: Menu =
+            serde_json::from_value(json).expect("알 수 없는 필드가 있어도 파싱 성공해야 함");
         assert_eq!(menu.menu_id, 2);
     }
 

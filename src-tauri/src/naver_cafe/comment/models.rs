@@ -61,17 +61,20 @@ mod tests {
 
     #[test]
     fn comment_request_serializes_camel_case_keys() {
-        let json = serde_json::to_value(&sample_comment()).expect("직렬화 실패");
+        let json = serde_json::to_value(sample_comment()).expect("직렬화 실패");
         assert!(json.get("cafeId").is_some(), "cafeId 키가 없음");
         assert!(json.get("articleId").is_some(), "articleId 키가 없음");
         assert!(json.get("content").is_some(), "content 키가 없음");
         assert!(json.get("stickerId").is_some(), "stickerId 키가 없음");
-        assert!(json.get("cafe_id").is_none(), "snake_case 키가 있으면 안 됨");
+        assert!(
+            json.get("cafe_id").is_none(),
+            "snake_case 키가 있으면 안 됨"
+        );
     }
 
     #[test]
     fn reply_request_includes_ref_comment_id() {
-        let json = serde_json::to_value(&sample_reply()).expect("직렬화 실패");
+        let json = serde_json::to_value(sample_reply()).expect("직렬화 실패");
         assert!(json.get("refCommentId").is_some(), "refCommentId 키가 없음");
         assert_eq!(json["refCommentId"].as_str().unwrap(), "62598693");
     }

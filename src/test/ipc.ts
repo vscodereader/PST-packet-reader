@@ -2,6 +2,7 @@ import { vi } from "vitest";
 
 import type { CommentJob } from "@/shared/bindings/CommentJob";
 import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutcome";
+import type { EnvironmentStatus } from "@/shared/bindings/EnvironmentStatus";
 import type { JoinedCafe } from "@/shared/bindings/JoinedCafe";
 import type { PostJob } from "@/shared/bindings/PostJob";
 import type { PublishOutcome } from "@/shared/bindings/PublishOutcome";
@@ -395,6 +396,16 @@ const SEED_ACTIVITY: ActivityItem[] = [
     time: "어제",
   },
 ];
+
+const SEED_ENV_STATUS: EnvironmentStatus = {
+  chrome: {
+    installed: true,
+    path: "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe",
+    version: "125.0.6422.142",
+    error: null,
+  },
+  adb: { connected: true, error: null },
+};
 
 const SEED_QUEUE_NOW: QueueNowItem[] = [
   {
@@ -866,6 +877,21 @@ interface IpcState {
 }
 
 let state: IpcState;
+// 로그인 큐에 enqueue된 계정 id (get_queue_status가 같은 id로 잡을 돌려주도록 보관).
+let loginJobIds: string[] = [];
+// 테스트에서 특정 계정의 로그인 결과를 실패 등으로 시뮬레이션하기 위한 오버라이드.
+// accountId → { status, message }. 미지정 계정은 success로 본다.
+let loginOutcomes: Record<string, { status: string; message: string }> = {};
+
+/**
+ * Override login-queue outcomes for specific accounts (e.g. simulate a failure).
+ * Unset accounts keep the default `success`. Cleared by `resetIpc`.
+ */
+export function setLoginOutcomes(
+  outcomes: Record<string, { status: string; message: string }>,
+): void {
+  loginOutcomes = outcomes;
+}
 
 /** Re-seed the in-memory backend to the pristine dataset. Call in `beforeEach`. */
 export function resetIpc(): void {
@@ -876,9 +902,27 @@ export function resetIpc(): void {
     queueScheduled: clone(SEED_QUEUE_SCHEDULED),
     cafes: clone(SEED_CAFES),
   };
+  loginJobIds = [];
+  loginOutcomes = {};
 }
 
 resetIpc();
+
+/** Login-queue status mirroring the auth queue: every enqueued account succeeds by default. */
+function loginQueueStatus() {
+  return {
+    isRunning: false,
+    currentAccountId: null,
+    jobs: loginJobIds.map((accountId) => {
+      const outcome = loginOutcomes[accountId];
+      return {
+        accountId,
+        status: outcome?.status ?? "success",
+        message: outcome?.message ?? "success",
+      };
+    }),
+  };
+}
 
 /** Drop-in replacement for `@tauri-apps/api/core`'s `invoke`, backed by fixtures. */
 export const invoke = vi.fn(
@@ -940,6 +984,11 @@ export const invoke = vi.fn(
       }
       case "list_bands":
         return clone(SEED_BANDS);
+      case "get_environment_status":
+        return clone(SEED_ENV_STATUS);
+      case "open_chrome_download":
+        // 브라우저 열기는 사이드이펙트뿐 — 목에서는 성공(void)으로 처리.
+        return undefined;
 
       // --- accounts (stateful) ----------------------------------------------
       case "list_accounts":
@@ -1013,6 +1062,47 @@ export const invoke = vi.fn(
         }
         return clone(state.queueNow);
       }
+
+      // --- forum 게시 엔드포인트 (백엔드 소유) -----------------------------
+      case "forum_endpoint":
+        return { host: "127.0.0.1", port: 9222 };
+
+      // --- forum 즉시 게시 (엔진 호출 모킹) ---------------------------------
+      // 실제 백엔드는 패킷 게시를 수행한다. 테스트에서는 기존 목업과 동일하게
+      // Math.random으로 성공/실패를 정하고, "게시하는 중" 상태가 보이도록 약간 지연한다.
+      case "run_forum_publish_now": {
+        const req = args!.request as {
+          stocks: { code: string; name: string }[];
+        };
+        return new Promise((resolve) =>
+          setTimeout(
+            () =>
+              resolve(
+                req.stocks.map((s) => {
+                  const ok = Math.random() > 0.1;
+                  return {
+                    code: s.code,
+                    name: s.name,
+                    ok,
+                    message: ok ? "게시 완료" : "게시 실패 — 잠시 후 재시도",
+                  };
+                }),
+              ),
+            800,
+          ),
+        );
+      }
+
+      // --- 네이버 로그인 자동화 (모킹) -------------------------------------
+      case "bootstrap_runtime":
+        return {};
+      case "save_accounts":
+        return clone(args!.accounts);
+      case "enqueue_cookie_refresh":
+        loginJobIds = (args?.accountIds as string[] | undefined) ?? [];
+        return loginQueueStatus();
+      case "get_queue_status":
+        return loginQueueStatus();
 
       default:
         throw new Error(`test ipc: unhandled command "${cmd}"`);

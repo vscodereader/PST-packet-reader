@@ -52,7 +52,7 @@ pub enum CafeRef {
 /// # 예시
 ///
 /// ```rust
-/// # use crate::naver_cafe::cafe_ref::parser::{parse_cafe_ref, CafeRef};
+/// # use pstmacro_lib::naver_cafe::cafe_ref::parser::{parse_cafe_ref, CafeRef};
 /// let r = parse_cafe_ref("https://cafe.naver.com/ca-fe/cafes/31732304/articles/write?boardType=L");
 /// assert_eq!(r, Some(CafeRef::Id(31732304)));
 ///
@@ -104,7 +104,7 @@ pub fn parse_cafe_ref(input: &str) -> Option<CafeRef> {
 /// # 예시
 ///
 /// ```rust
-/// # use crate::naver_cafe::cafe_ref::parser::parse_cafe_id;
+/// # use pstmacro_lib::naver_cafe::cafe_ref::parser::parse_cafe_id;
 /// assert_eq!(parse_cafe_id("31732304"), Some(31732304));
 /// assert_eq!(parse_cafe_id("cafe.naver.com/myclub"), None);
 /// ```
@@ -188,19 +188,13 @@ fn extract_vanity_name(s: &str) -> Option<String> {
         .unwrap_or(s);
 
     // 호스트가 cafe.naver.com 인지 확인
-    let after_host = if let Some(rest) = s.strip_prefix("cafe.naver.com") {
-        rest
-    } else {
-        return None;
-    };
+    let after_host = s.strip_prefix("cafe.naver.com")?;
 
     // '/' 로 시작하는 경로가 있어야 함
     let path = after_host.strip_prefix('/')?;
 
     // 쿼리/프래그먼트/슬래시 이전 첫 세그먼트 추출
-    let segment_end = path
-        .find(|c: char| c == '/' || c == '?' || c == '#')
-        .unwrap_or(path.len());
+    let segment_end = path.find(['/', '?', '#']).unwrap_or(path.len());
     let segment = &path[..segment_end];
 
     if segment.is_empty() {
@@ -233,9 +227,7 @@ fn strip_scheme(s: &str) -> &str {
 
 /// 쿼리(`?`) 및 프래그먼트(`#`) 이후 부분을 제거하고 경로만 반환한다.
 fn strip_query_and_fragment(s: &str) -> &str {
-    let end = s
-        .find(|c: char| c == '?' || c == '#')
-        .unwrap_or(s.len());
+    let end = s.find(['?', '#']).unwrap_or(s.len());
     &s[..end]
 }
 
@@ -312,7 +304,10 @@ mod tests {
 
     #[test]
     fn parses_clubid_only_query_string() {
-        assert_eq!(parse_cafe_ref("?clubid=31732304"), Some(CafeRef::Id(31732304)));
+        assert_eq!(
+            parse_cafe_ref("?clubid=31732304"),
+            Some(CafeRef::Id(31732304))
+        );
     }
 
     #[test]

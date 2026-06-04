@@ -265,9 +265,8 @@ impl CafeCommentClient {
         request: &ReplyRequest,
         cookie_header: Option<&str>,
     ) -> Result<CommentResult, CommentError> {
-        let body = encode_form(&build_reply_form(request)).map_err(|e| {
-            form_build_error(&request.article_id, Some(&request.ref_comment_id), e)
-        })?;
+        let body = encode_form(&build_reply_form(request))
+            .map_err(|e| form_build_error(&request.article_id, Some(&request.ref_comment_id), e))?;
         self.send(
             comment_reply_path(),
             &request.cafe_id,
@@ -383,8 +382,9 @@ mod tests {
         Mock::given(method("POST"))
             .and(path(comment_post_path()))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({"commentId": 62628988_u64, "refCommentId": 62628988_u64})),
+                ResponseTemplate::new(200).set_body_json(
+                    json!({"commentId": 62628988_u64, "refCommentId": 62628988_u64}),
+                ),
             )
             .mount(&server)
             .await;
@@ -406,8 +406,9 @@ mod tests {
         Mock::given(method("POST"))
             .and(path(comment_reply_path()))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({"commentId": 62628990_u64, "refCommentId": 62628988_u64})),
+                ResponseTemplate::new(200).set_body_json(
+                    json!({"commentId": 62628990_u64, "refCommentId": 62628988_u64}),
+                ),
             )
             .mount(&server)
             .await;
@@ -549,6 +550,9 @@ mod tests {
             .cafe
             .api_error_message
             .expect("api_error_message가 없음");
-        assert!(captured.contains(r#"{"unexpected":true}"#), "원본 바디 보존: {captured}");
+        assert!(
+            captured.contains(r#"{"unexpected":true}"#),
+            "원본 바디 보존: {captured}"
+        );
     }
 }

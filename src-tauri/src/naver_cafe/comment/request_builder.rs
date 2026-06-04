@@ -256,7 +256,10 @@ mod tests {
         let mut req = capture_comment();
         req.sticker_id = Some("st-99".to_string());
         let body = encode_form(&build_comment_form(&req)).expect("인코딩 실패");
-        assert!(body.contains("stickerId=st-99"), "stickerId 값이 반영되어야 함: {body}");
+        assert!(
+            body.contains("stickerId=st-99"),
+            "stickerId 값이 반영되어야 함: {body}"
+        );
     }
 
     #[test]
@@ -268,7 +271,10 @@ mod tests {
             body.starts_with("content=%"),
             "한글 본문은 percent-encoding되어야 함: {body}"
         );
-        assert!(!body.contains("테스트"), "원문 한글이 그대로 남으면 안 됨: {body}");
+        assert!(
+            !body.contains("테스트"),
+            "원문 한글이 그대로 남으면 안 됨: {body}"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -277,7 +283,10 @@ mod tests {
 
     #[test]
     fn comment_post_path_is_correct() {
-        assert_eq!(comment_post_path(), "/cafe-web/cafe-mobile/CommentPost.json");
+        assert_eq!(
+            comment_post_path(),
+            "/cafe-web/cafe-mobile/CommentPost.json"
+        );
     }
 
     #[test]
@@ -320,7 +329,10 @@ mod tests {
     #[test]
     fn headers_origin_is_correct() {
         let headers = comment_headers("31732304", "2");
-        assert_eq!(header_value(&headers, "Origin"), Some("https://cafe.naver.com"));
+        assert_eq!(
+            header_value(&headers, "Origin"),
+            Some("https://cafe.naver.com")
+        );
     }
 
     #[test]

@@ -7,13 +7,13 @@
 //! 쿠키 헤더 값은 사용자의 인증 자격 증명이다. 이 모듈은 쿠키 값을
 //! 로그, 에러 메시지, `Debug` 출력에 절대 포함하지 않는다.
 
+use crate::naver_cafe::error::ErrorEnvelope;
+use crate::naver_cafe::post::BROWSER_USER_AGENT;
 use crate::naver_cafe::{
     error::NaverCafeCommonErrorData,
     menu::models::{general_writable_boards, Menu, MenuError},
     response::{NaverApiErrorBody, ResultEnvelope},
 };
-use crate::naver_cafe::error::ErrorEnvelope;
-use crate::naver_cafe::post::BROWSER_USER_AGENT;
 
 // ---------------------------------------------------------------------------
 // 상수
@@ -481,10 +481,7 @@ mod tests {
         let error_data = err.error_data.expect("errorData가 없음");
         assert_eq!(error_data.http_status, Some(500));
         assert!(error_data.retryable, "500은 재시도 가능이어야 함");
-        assert_eq!(
-            error_data.api_error_code.as_deref(),
-            Some("10404")
-        );
+        assert_eq!(error_data.api_error_code.as_deref(), Some("10404"));
         assert_eq!(
             error_data.api_error_message.as_deref(),
             Some("Page Not Found")

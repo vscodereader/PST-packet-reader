@@ -47,7 +47,9 @@ async fn main() {
     }
 
     let cafe_input = pick(&args, "--cafe", "PSTMACRO_LIVE_CAFE_ID").unwrap_or_else(|| {
-        eprintln!("카페가 필요합니다 (--cafe 또는 PSTMACRO_LIVE_CAFE_ID) — URL/vanity/숫자 모두 가능");
+        eprintln!(
+            "카페가 필요합니다 (--cafe 또는 PSTMACRO_LIVE_CAFE_ID) — URL/vanity/숫자 모두 가능"
+        );
         print_usage();
         std::process::exit(2);
     });
@@ -58,12 +60,12 @@ async fn main() {
             std::process::exit(2);
         })
     });
-    let subject =
-        pick(&args, "--subject", "PSTMACRO_LIVE_SUBJECT").unwrap_or_else(|| "테스트 제목".to_string());
+    let subject = pick(&args, "--subject", "PSTMACRO_LIVE_SUBJECT")
+        .unwrap_or_else(|| "테스트 제목".to_string());
     let body =
         pick(&args, "--body", "PSTMACRO_LIVE_BODY").unwrap_or_else(|| "테스트 본문".to_string());
-    let account_label =
-        pick(&args, "--account", "PSTMACRO_LIVE_ACCOUNT_ID").unwrap_or_else(|| "(file)".to_string());
+    let account_label = pick(&args, "--account", "PSTMACRO_LIVE_ACCOUNT_ID")
+        .unwrap_or_else(|| "(file)".to_string());
 
     // 쿠키 확보 (파일 경로 우선, 없으면 account_id 로 조회)
     let cookies_value = match resolve_cookies(&args) {

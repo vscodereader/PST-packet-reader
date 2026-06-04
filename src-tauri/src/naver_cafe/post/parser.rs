@@ -117,7 +117,7 @@ fn parse_status_code(status: &str) -> Option<u16> {
 /// - 5xx → `true` (서버 일시 오류, 재시도 권장)
 /// - 4xx 및 나머지 → `false` (클라이언트 오류, 재시도 무의미)
 fn is_retryable(status: &str) -> bool {
-    parse_status_code(status).map_or(false, |code| code >= 500)
+    parse_status_code(status).is_some_and(|code| code >= 500)
 }
 
 /// `ApiFailure`(write-info 실패 분기, 추정)와 상태 코드를 `PostError`로 변환한다.
@@ -177,11 +177,14 @@ pub fn parse_write_info(raw: &str) -> Result<WriteInfo, PostError> {
     if status != "200" {
         let failure_envelope: NaverApiEnvelope<ApiFailure> =
             serde_json::from_str(raw).map_err(json_error_to_post_error)?;
-        return Err(failure_to_post_error(failure_envelope.message.result, status));
+        return Err(failure_to_post_error(
+            failure_envelope.message.result,
+            status,
+        ));
     }
 
-    let result: WriteInfo = serde_json::from_value(envelope.message.result)
-        .map_err(json_error_to_post_error)?;
+    let result: WriteInfo =
+        serde_json::from_value(envelope.message.result).map_err(json_error_to_post_error)?;
     Ok(result)
 }
 
@@ -209,14 +212,11 @@ mod tests {
     use super::*;
 
     // write_info_success.assumed.json — 미확인 스키마 기준 픽스처
-    const WRITE_INFO_SUCCESS: &str =
-        include_str!("fixtures/write_info_success.assumed.json");
+    const WRITE_INFO_SUCCESS: &str = include_str!("fixtures/write_info_success.assumed.json");
     // article_register_success.json — 패킷 캡처로 확인된 실제 형태
-    const ARTICLE_REGISTER_SUCCESS: &str =
-        include_str!("fixtures/article_register_success.json");
+    const ARTICLE_REGISTER_SUCCESS: &str = include_str!("fixtures/article_register_success.json");
     // article_register_failure.json — 실측 캡처된 실제 실패 형태 (HTTP 500)
-    const ARTICLE_REGISTER_FAILURE: &str =
-        include_str!("fixtures/article_register_failure.json");
+    const ARTICLE_REGISTER_FAILURE: &str = include_str!("fixtures/article_register_failure.json");
 
     // ------------------------------------------------------------------
     // parse_write_info — 성공 케이스 (미확인 스키마 기준 테스트)
@@ -300,22 +300,19 @@ mod tests {
 
     #[test]
     fn article_register_success_parses_cafe_id() {
-        let result =
-            parse_article_register(ARTICLE_REGISTER_SUCCESS).expect("파싱 실패");
+        let result = parse_article_register(ARTICLE_REGISTER_SUCCESS).expect("파싱 실패");
         assert_eq!(result.cafe_id, 31732304);
     }
 
     #[test]
     fn article_register_success_parses_article_id() {
-        let result =
-            parse_article_register(ARTICLE_REGISTER_SUCCESS).expect("파싱 실패");
+        let result = parse_article_register(ARTICLE_REGISTER_SUCCESS).expect("파싱 실패");
         assert_eq!(result.article_id, 4);
     }
 
     #[test]
     fn article_register_success_parses_menu_id() {
-        let result =
-            parse_article_register(ARTICLE_REGISTER_SUCCESS).expect("파싱 실패");
+        let result = parse_article_register(ARTICLE_REGISTER_SUCCESS).expect("파싱 실패");
         assert_eq!(result.menu_id, 1);
     }
 
@@ -337,8 +334,7 @@ mod tests {
     #[test]
     fn article_register_failure_parse_error_code() {
         // 실측 캡처된 실패 봉투는 ResultEnvelope와 맞지 않으므로 PARSE_ERROR 발생
-        let err = parse_article_register(ARTICLE_REGISTER_FAILURE)
-            .expect_err("Err를 기대함");
+        let err = parse_article_register(ARTICLE_REGISTER_FAILURE).expect_err("Err를 기대함");
         assert_eq!(
             err.code, "PARSE_ERROR",
             "실패 봉투 형태(error 키) → PARSE_ERROR 예상"
@@ -388,10 +384,7 @@ mod tests {
         }"#;
         // result가 WriteInfo 형태가 아니므로 파싱 실패 → Err
         let result = parse_write_info(raw);
-        assert!(
-            result.is_err(),
-            "WriteInfo 형태가 아닌 result는 Err여야 함"
-        );
+        assert!(result.is_err(), "WriteInfo 형태가 아닌 result는 Err여야 함");
     }
 
     /// parse_article_register는 ResultEnvelope를 사용하므로 message/status
@@ -409,7 +402,10 @@ mod tests {
             }
         }"#;
         let result = parse_article_register(raw);
-        assert!(result.is_err(), "ResultEnvelope가 아닌 봉투 형태는 Err여야 함");
+        assert!(
+            result.is_err(),
+            "ResultEnvelope가 아닌 봉투 형태는 Err여야 함"
+        );
     }
 
     /// write_info(추정) 파싱 경로로 5xx retryable 규칙을 검증한다.

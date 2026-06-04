@@ -168,7 +168,10 @@ impl CafeHomeClient {
         let mut req = self
             .http
             .get(&url)
-            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
             .header("User-Agent", BROWSER_USER_AGENT);
 
         // 보안: Cookie 헤더 값은 로그에 기록하지 않는다.
@@ -331,15 +334,15 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/myclub"))
             .and(header_exists("User-Agent"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(r#"var g_sClubId = "7";"#),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"var g_sClubId = "7";"#))
             .mount(&server)
             .await;
 
         let client = CafeHomeClient::with_base_url(server.uri());
-        client.resolve_slug("myclub", None).await.expect("성공해야 함");
+        client
+            .resolve_slug("myclub", None)
+            .await
+            .expect("성공해야 함");
     }
 
     #[tokio::test]
@@ -352,9 +355,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/myclub"))
             .and(header("Cookie", fake_cookie))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string(r#"g_sClubId = "7";"#),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"g_sClubId = "7";"#))
             .mount(&server)
             .await;
 
@@ -395,9 +396,7 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/noclub"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string("<html>clubId 없음</html>"),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>clubId 없음</html>"))
             .mount(&server)
             .await;
 

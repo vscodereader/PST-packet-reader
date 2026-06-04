@@ -180,10 +180,7 @@ pub fn article_post_headers(cafe_id: &str, board_type: &str) -> Vec<(String, Str
                 "https://cafe.naver.com/ca-fe/cafes/{cafe_id}/articles/write?boardType={board_type}"
             ),
         ),
-        (
-            "x-cafe-product".to_string(),
-            CAFE_PRODUCT_PC.to_string(),
-        ),
+        ("x-cafe-product".to_string(), CAFE_PRODUCT_PC.to_string()),
         ("sec-fetch-site".to_string(), "same-site".to_string()),
         ("sec-fetch-mode".to_string(), "cors".to_string()),
         ("sec-fetch-dest".to_string(), "empty".to_string()),
@@ -208,8 +205,7 @@ mod tests {
     const FIXTURE_CONTENT_JSON: &str = "<contentJson>";
 
     /// 패킷 캡처로 확인된 요청 바디 픽스처.
-    const ARTICLE_REGISTER_REQUEST: &str =
-        include_str!("fixtures/article_register_request.json");
+    const ARTICLE_REGISTER_REQUEST: &str = include_str!("fixtures/article_register_request.json");
 
     fn capture_request() -> PostRequest {
         PostRequest {
@@ -239,8 +235,7 @@ mod tests {
     #[test]
     fn body_equals_fixture_as_json_value() {
         let body = build_article_write_body(&capture_request(), FIXTURE_CONTENT_JSON.to_string());
-        let actual: serde_json::Value =
-            serde_json::to_value(&body).expect("직렬화 실패");
+        let actual: serde_json::Value = serde_json::to_value(&body).expect("직렬화 실패");
         let expected: serde_json::Value =
             serde_json::from_str(ARTICLE_REGISTER_REQUEST).expect("픽스처 파싱 실패");
         assert_eq!(actual, expected, "생성된 바디가 픽스처와 다름");
@@ -297,7 +292,10 @@ mod tests {
         let mut req = capture_request();
         req.naver_open = Some(false);
         let body = build_article_write_body(&req, FIXTURE_CONTENT_JSON.to_string());
-        assert!(!body.article.naver_open, "Some(false)는 기본값 true를 덮어써야 함");
+        assert!(
+            !body.article.naver_open,
+            "Some(false)는 기본값 true를 덮어써야 함"
+        );
     }
 
     #[test]
@@ -313,7 +311,10 @@ mod tests {
         let mut req = capture_request();
         req.enable_scrap = Some(true);
         let body = build_article_write_body(&req, FIXTURE_CONTENT_JSON.to_string());
-        assert!(body.article.enable_scrap, "Some(true)는 기본값 false를 덮어써야 함");
+        assert!(
+            body.article.enable_scrap,
+            "Some(true)는 기본값 false를 덮어써야 함"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -373,8 +374,7 @@ mod tests {
             .map(|(_, val)| val.as_str())
             .expect("Referer 헤더가 없음");
         assert_eq!(
-            referer,
-            "https://cafe.naver.com/ca-fe/cafes/31732304/articles/write?boardType=L",
+            referer, "https://cafe.naver.com/ca-fe/cafes/31732304/articles/write?boardType=L",
             "Referer는 브라우저 캡처 값(boardType=L)을 사용해야 함"
         );
     }
@@ -389,8 +389,7 @@ mod tests {
             .map(|(_, val)| val.as_str())
             .expect("Referer 헤더가 없음");
         assert_eq!(
-            referer,
-            "https://cafe.naver.com/ca-fe/cafes/31732304/articles/write?boardType=M",
+            referer, "https://cafe.naver.com/ca-fe/cafes/31732304/articles/write?boardType=M",
             "Referer는 전달된 board_type을 사용해야 함"
         );
     }
@@ -497,8 +496,7 @@ mod tests {
             enable_copy: None,
         };
         let mut ids = SequentialIdProvider::new();
-        let body = build_article_write_body_with_content(&req, &mut ids)
-            .expect("빌드 실패");
+        let body = build_article_write_body_with_content(&req, &mut ids).expect("빌드 실패");
         assert!(
             !body.article.content_json.is_empty(),
             "contentJson이 빈 문자열이어서는 안 됨"
@@ -522,8 +520,7 @@ mod tests {
             enable_copy: None,
         };
         let mut ids = SequentialIdProvider::new();
-        let body = build_article_write_body_with_content(&req, &mut ids)
-            .expect("빌드 실패");
+        let body = build_article_write_body_with_content(&req, &mut ids).expect("빌드 실패");
         assert!(
             body.article.content_json.contains("rust 본문"),
             "contentJson에 본문 텍스트가 없음: {}",

@@ -354,7 +354,10 @@ mod tests {
 
     #[test]
     fn default_mode_is_dry_run() {
-        assert_eq!(CommentExecutionMode::default(), CommentExecutionMode::DryRun);
+        assert_eq!(
+            CommentExecutionMode::default(),
+            CommentExecutionMode::DryRun
+        );
     }
 
     #[test]

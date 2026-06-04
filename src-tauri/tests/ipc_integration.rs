@@ -75,12 +75,40 @@ fn every_list_command_returns_its_seeded_collection() {
         "list_activity",
         "list_stats",
         "list_log_batches",
-        "list_cafes",
         "list_bands",
     ] {
         let out = invoke_ok(&wv, cmd, json!({}));
         assert!(!array(&out).is_empty(), "`{cmd}` returned an empty seed");
     }
+}
+
+// `list_cafes` is intentionally NOT in the seeded-collection loop above: since
+// #67, cafes are registered by the user (via discovery), so the default seed is
+// empty (see `cafes::seed` + its `seed_is_empty_until_user_registers` unit test).
+// We still verify the command is wired and returns a JSON array.
+#[test]
+fn list_cafes_returns_an_array_with_no_seed() {
+    let (app, _dir) = mock_app();
+    let wv = main_webview(&app);
+
+    let out = invoke_ok(&wv, "list_cafes", json!({}));
+    assert!(
+        array(&out).is_empty(),
+        "cafes seed should start empty: {out}"
+    );
+}
+
+#[test]
+fn get_environment_status_returns_chrome_and_adb_state() {
+    let (app, _dir) = mock_app();
+    let wv = main_webview(&app);
+
+    // Always resolves (never throws) and carries both probes' state, even on a
+    // CI host with no Chrome and no ADB device (both report false).
+    let out = invoke_ok(&wv, "get_environment_status", json!({}));
+
+    assert!(out["chrome"]["installed"].is_boolean(), "chrome: {out}");
+    assert!(out["adb"]["connected"].is_boolean(), "adb: {out}");
 }
 
 #[test]

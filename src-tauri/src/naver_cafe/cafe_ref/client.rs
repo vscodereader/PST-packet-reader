@@ -7,13 +7,13 @@
 //! 쿠키 헤더 값은 사용자의 인증 자격 증명이다. 이 모듈은 쿠키 값을
 //! 로그, 에러 메시지, `Debug` 출력에 절대 포함하지 않는다.
 
+use crate::naver_cafe::error::ErrorEnvelope;
 use crate::naver_cafe::{
     cafe_ref::models::{CafeGateInfoResponse, CafeInfoView, CafeRefError},
     error::NaverCafeCommonErrorData,
     post::BROWSER_USER_AGENT,
     response::NaverApiErrorBody,
 };
-use crate::naver_cafe::error::ErrorEnvelope;
 
 // ---------------------------------------------------------------------------
 // 상수
@@ -34,7 +34,7 @@ const RAW_BODY_MAX_LEN: usize = 2000;
 /// # 예시
 ///
 /// ```rust
-/// # use crate::naver_cafe::cafe_ref::client::cafe_gate_info_path;
+/// # use pstmacro_lib::naver_cafe::cafe_ref::client::cafe_gate_info_path;
 /// assert_eq!(
 ///     cafe_gate_info_path(31732304),
 ///     "/cafe-web/cafe2/CafeGateInfo.json?cafeId=31732304"
@@ -443,7 +443,11 @@ mod tests {
         let error_data = err.error_data.expect("errorData가 없음");
         assert_eq!(error_data.http_status, Some(500));
         assert!(
-            error_data.api_error_message.as_deref().unwrap_or("").contains("Internal Server Error"),
+            error_data
+                .api_error_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("Internal Server Error"),
             "원본 바디가 api_error_message에 있어야 함"
         );
     }
@@ -534,7 +538,10 @@ mod tests {
             .await
             .expect_err("빈 본문은 Err여야 함");
 
-        assert_eq!(err.code, "CAFE_REF_PARSE_ERROR", "빈 응답은 파싱 오류여야 함");
+        assert_eq!(
+            err.code, "CAFE_REF_PARSE_ERROR",
+            "빈 응답은 파싱 오류여야 함"
+        );
     }
 
     // ------------------------------------------------------------------

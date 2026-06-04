@@ -91,8 +91,7 @@ mod tests {
     use super::*;
 
     /// 실측 캡처된 픽스처 JSON.
-    const FIXTURE: &str =
-        include_str!("fixtures/cafe_gate_info_success.json");
+    const FIXTURE: &str = include_str!("fixtures/cafe_gate_info_success.json");
 
     // ------------------------------------------------------------------
     // 픽스처 역직렬화 — 실측 데이터 기준
@@ -127,9 +126,18 @@ mod tests {
         assert!(json.get("cafeName").is_some(), "cafeName 키가 없음");
 
         // snake_case 키가 없어야 함
-        assert!(json.get("cafe_id").is_none(), "snake_case 키가 있으면 안 됨");
-        assert!(json.get("cafe_url").is_none(), "snake_case 키가 있으면 안 됨");
-        assert!(json.get("cafe_name").is_none(), "snake_case 키가 있으면 안 됨");
+        assert!(
+            json.get("cafe_id").is_none(),
+            "snake_case 키가 있으면 안 됨"
+        );
+        assert!(
+            json.get("cafe_url").is_none(),
+            "snake_case 키가 있으면 안 됨"
+        );
+        assert!(
+            json.get("cafe_name").is_none(),
+            "snake_case 키가 있으면 안 됨"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -166,8 +174,7 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&original).expect("직렬화 실패");
-        let restored: CafeGateInfoResponse =
-            serde_json::from_str(&json).expect("역직렬화 실패");
+        let restored: CafeGateInfoResponse = serde_json::from_str(&json).expect("역직렬화 실패");
         assert_eq!(original, restored);
     }
 
@@ -190,7 +197,10 @@ mod tests {
         // result 아래에 cafeInfoView 키가 있어야 함
         let cafe_info_view = result.get("cafeInfoView").expect("cafeInfoView 키가 없음");
 
-        assert_eq!(cafe_info_view.get("cafeId").and_then(|v| v.as_u64()), Some(31732304));
+        assert_eq!(
+            cafe_info_view.get("cafeId").and_then(|v| v.as_u64()),
+            Some(31732304)
+        );
         assert_eq!(
             cafe_info_view.get("cafeUrl").and_then(|v| v.as_str()),
             Some("bluegrayoc3uc")

@@ -3,17 +3,5 @@
   "identifier": "default",
   "description": "Capability for the main window",
   "windows": ["main"],
-  "permissions": [
-    "core:default",
-    {
-      "identifier": "shell:allow-execute",
-      "allow": [
-        {
-          "args": true,
-          "name": "binaries/naver-login",
-          "sidecar": true
-        }
-      ]
-    }
-  ]
+  "permissions": ["core:default"]
 }

@@ -78,7 +78,10 @@ mod tests {
 
         assert!(json.get("traceId").is_some(), "traceId 키가 없음");
         assert!(json.get("errorData").is_some(), "errorData 키가 없음");
-        assert!(json.get("trace_id").is_none(), "snake_case 키가 있으면 안 됨");
+        assert!(
+            json.get("trace_id").is_none(),
+            "snake_case 키가 있으면 안 됨"
+        );
     }
 
     #[test]
@@ -101,7 +104,10 @@ mod tests {
 
         assert!(json.get("httpStatus").is_some(), "httpStatus 키가 없음");
         assert!(json.get("apiErrorCode").is_some(), "apiErrorCode 키가 없음");
-        assert!(json.get("apiErrorMessage").is_some(), "apiErrorMessage 키가 없음");
+        assert!(
+            json.get("apiErrorMessage").is_some(),
+            "apiErrorMessage 키가 없음"
+        );
         assert!(json.get("retryable").is_some(), "retryable 키가 없음");
     }
 

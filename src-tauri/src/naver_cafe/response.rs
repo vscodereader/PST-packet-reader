@@ -153,8 +153,7 @@ mod tests {
             value: u32,
         }
 
-        let envelope: NaverApiEnvelope<Inner> =
-            serde_json::from_str(&raw).expect("역직렬화 실패");
+        let envelope: NaverApiEnvelope<Inner> = serde_json::from_str(&raw).expect("역직렬화 실패");
         assert_eq!(envelope.message.status, "200");
         assert_eq!(envelope.message.result.value, 42);
     }

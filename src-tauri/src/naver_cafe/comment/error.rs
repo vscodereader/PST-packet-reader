@@ -63,20 +63,26 @@ mod tests {
 
     #[test]
     fn comment_error_serializes_camel_case_top_level_keys() {
-        let json = serde_json::to_value(&sample_comment_error()).expect("직렬화 실패");
+        let json = serde_json::to_value(sample_comment_error()).expect("직렬화 실패");
         assert!(json.get("traceId").is_some(), "traceId 키가 없음");
         assert!(json.get("code").is_some(), "code 키가 없음");
         assert!(json.get("message").is_some(), "message 키가 없음");
         assert!(json.get("errorData").is_some(), "errorData 키가 없음");
-        assert!(json.get("trace_id").is_none(), "snake_case trace_id가 있으면 안 됨");
+        assert!(
+            json.get("trace_id").is_none(),
+            "snake_case trace_id가 있으면 안 됨"
+        );
     }
 
     #[test]
     fn comment_error_nested_keys_are_camel_case() {
-        let json = serde_json::to_value(&sample_comment_error()).expect("직렬화 실패");
+        let json = serde_json::to_value(sample_comment_error()).expect("직렬화 실패");
         let error_data = json.get("errorData").unwrap();
         assert!(error_data.get("articleId").is_some(), "articleId 키가 없음");
-        assert!(error_data.get("refCommentId").is_some(), "refCommentId 키가 없음");
+        assert!(
+            error_data.get("refCommentId").is_some(),
+            "refCommentId 키가 없음"
+        );
         assert!(
             error_data.get("validationErrors").is_some(),
             "validationErrors 키가 없음"

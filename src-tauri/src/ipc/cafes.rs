@@ -72,7 +72,13 @@ pub fn apply_upsert(cafes: Vec<Cafe>, cafe: Cafe) -> Vec<Cafe> {
     if cafes.iter().any(|c| c.cafe_id == cafe.cafe_id) {
         cafes
             .into_iter()
-            .map(|c| if c.cafe_id == cafe.cafe_id { cafe.clone() } else { c })
+            .map(|c| {
+                if c.cafe_id == cafe.cafe_id {
+                    cafe.clone()
+                } else {
+                    c
+                }
+            })
             .collect()
     } else {
         let mut next = Vec::with_capacity(cafes.len() + 1);
@@ -237,7 +243,11 @@ fn outcome_from_report(report: &JobReport) -> PublishOutcome {
 /// not stop the rest. Cookie values never appear in any outcome.
 #[tauri::command]
 pub async fn run_post_jobs(jobs: Vec<PostJob>) -> Vec<PublishOutcome> {
-    run_jobs(&jobs).await.iter().map(outcome_from_report).collect()
+    run_jobs(&jobs)
+        .await
+        .iter()
+        .map(outcome_from_report)
+        .collect()
 }
 
 /// Slim per-job comment result returned to the UI. The rich internal
@@ -531,8 +541,7 @@ mod tests {
     #[test]
     fn roundtrips_through_json() {
         let cafe = sample();
-        let back: Cafe =
-            serde_json::from_str(&serde_json::to_string(&cafe).unwrap()).unwrap();
+        let back: Cafe = serde_json::from_str(&serde_json::to_string(&cafe).unwrap()).unwrap();
         assert_eq!(cafe, back);
     }
 }

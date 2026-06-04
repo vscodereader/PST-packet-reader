@@ -76,7 +76,10 @@ mod tests {
         assert!(json.get("code").is_some(), "code 키가 없음");
         assert!(json.get("message").is_some(), "message 키가 없음");
         assert!(json.get("errorData").is_some(), "errorData 키가 없음");
-        assert!(json.get("trace_id").is_none(), "snake_case trace_id가 있으면 안 됨");
+        assert!(
+            json.get("trace_id").is_none(),
+            "snake_case trace_id가 있으면 안 됨"
+        );
     }
 
     #[test]
@@ -86,7 +89,10 @@ mod tests {
 
         let error_data = json.get("errorData").unwrap();
         assert!(error_data.get("menuId").is_some(), "menuId 키가 없음");
-        assert!(error_data.get("validationErrors").is_some(), "validationErrors 키가 없음");
+        assert!(
+            error_data.get("validationErrors").is_some(),
+            "validationErrors 키가 없음"
+        );
 
         let cafe = error_data.get("cafe").unwrap();
         assert!(cafe.get("httpStatus").is_some(), "httpStatus 키가 없음");

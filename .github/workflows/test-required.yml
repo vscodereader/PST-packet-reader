@@ -13,6 +13,11 @@ on:
 permissions:
   contents: read
 
+# Cancel a superseded run when the PR is pushed again.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test-required:
     runs-on: ubuntu-latest

@@ -65,13 +65,22 @@ mod tests {
         assert!(json.get("tagList").is_some(), "tagList 키가 없음");
         assert!(json.get("naverOpen").is_some(), "naverOpen 키가 없음");
         assert!(json.get("externalOpen").is_some(), "externalOpen 키가 없음");
-        assert!(json.get("enableComment").is_some(), "enableComment 키가 없음");
+        assert!(
+            json.get("enableComment").is_some(),
+            "enableComment 키가 없음"
+        );
         assert!(json.get("enableScrap").is_some(), "enableScrap 키가 없음");
         assert!(json.get("enableCopy").is_some(), "enableCopy 키가 없음");
 
         // snake_case 키는 없어야 함
-        assert!(json.get("cafe_id").is_none(), "snake_case cafe_id가 있으면 안 됨");
-        assert!(json.get("body_text").is_none(), "snake_case body_text가 있으면 안 됨");
+        assert!(
+            json.get("cafe_id").is_none(),
+            "snake_case cafe_id가 있으면 안 됨"
+        );
+        assert!(
+            json.get("body_text").is_none(),
+            "snake_case body_text가 있으면 안 됨"
+        );
     }
 
     #[test]

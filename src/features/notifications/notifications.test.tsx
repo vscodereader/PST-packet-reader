@@ -96,4 +96,85 @@ describe("Notifications", () => {
     await pickOption(1, "밴드");
     expect(screen.getByRole("heading", { name: "알림" })).toBeInTheDocument();
   });
+
+  it("shows Chrome version and ADB connection from the environment probe", async () => {
+    renderLog();
+    // Chrome card: installed + version from the SEED env status.
+    expect(await screen.findByText("버전 125.0.6422.142")).toBeInTheDocument();
+    expect(screen.getByText("설치됨")).toBeInTheDocument();
+    // ADB card: connected.
+    expect(screen.getByText("연결됨")).toBeInTheDocument();
+  });
+
+  it("surfaces the real ADB error reason on the card when not connected", async () => {
+    const { invoke } = await import("@/test/ipc");
+    // The first invoke on mount is diagnostics.getStatus — return a not-connected
+    // ADB with a concrete error; later mount calls fall through to the default mock.
+    vi.mocked(invoke).mockImplementationOnce(async () => ({
+      chrome: {
+        installed: true,
+        path: "/x/chrome",
+        version: "149.0",
+        error: null,
+      },
+      adb: { connected: false, error: "adb: Device busy" },
+    }));
+    renderLog();
+    expect(await screen.findByText(/Device busy/)).toBeInTheDocument();
+    expect(screen.getByText("미연결")).toBeInTheDocument();
+  });
+
+  it("re-probes the environment when the 새로고침 button is clicked", async () => {
+    const { invoke } = await import("@/test/ipc");
+    renderLog();
+    await screen.findByText("설치됨"); // initial probe resolved
+    const calls = () =>
+      vi
+        .mocked(invoke)
+        .mock.calls.filter((c) => c[0] === "get_environment_status").length;
+    const before = calls();
+    await userEvent.click(
+      screen.getByRole("button", { name: "환경 상태 새로고침" }),
+    );
+    expect(calls()).toBeGreaterThan(before);
+  });
+
+  it("guides to the Chrome install page when Chrome is missing", async () => {
+    const { invoke } = await import("@/test/ipc");
+    // First mount invoke is diagnostics.getStatus — report Chrome as missing.
+    vi.mocked(invoke).mockImplementationOnce(async () => ({
+      chrome: {
+        installed: false,
+        path: null,
+        version: null,
+        error: "Chrome 브라우저가 설치되어 있지 않습니다.",
+      },
+      adb: { connected: true, error: null },
+    }));
+    renderLog();
+    // The 미설치 card surfaces an action button that opens the download page.
+    await userEvent.click(
+      await screen.findByRole("button", { name: /설치 페이지 열기/ }),
+    );
+    expect(
+      vi.mocked(invoke).mock.calls.some((c) => c[0] === "open_chrome_download"),
+    ).toBe(true);
+  });
+
+  it("warns that IP rotation is unavailable while ADB is not connected", async () => {
+    const { invoke } = await import("@/test/ipc");
+    vi.mocked(invoke).mockImplementationOnce(async () => ({
+      chrome: {
+        installed: true,
+        path: "/x/chrome",
+        version: "149.0",
+        error: null,
+      },
+      adb: { connected: false, error: "감지된 디바이스 없음" },
+    }));
+    renderLog();
+    expect(
+      await screen.findByText(/IP 변경\(로테이션\)이 동작하지 않습니다/),
+    ).toBeInTheDocument();
+  });
 });

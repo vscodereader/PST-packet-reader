@@ -140,12 +140,20 @@ impl JoinedCafesClient {
         let mut page = 1u32;
         loop {
             let (mut cafes, last_page) = self.fetch_page(page, cookie_header).await?;
-            tracing::debug!(page, fetched = cafes.len(), last_page, "가입 카페 페이지 조회");
+            tracing::debug!(
+                page,
+                fetched = cafes.len(),
+                last_page,
+                "가입 카페 페이지 조회"
+            );
             all.append(&mut cafes);
 
             if last_page || page >= MAX_PAGES {
                 if !last_page {
-                    tracing::warn!(max_pages = MAX_PAGES, "가입 카페 페이지 상한 도달 — 목록이 잘렸을 수 있음");
+                    tracing::warn!(
+                        max_pages = MAX_PAGES,
+                        "가입 카페 페이지 상한 도달 — 목록이 잘렸을 수 있음"
+                    );
                 }
                 break;
             }
@@ -281,7 +289,9 @@ mod tests {
     async fn fetch_joined_cafes_success_returns_flattened_cafes() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/cafe-home-web/cafe-home/v1/config/join-cafes/groups/"))
+            .and(path(
+                "/cafe-home-web/cafe-home/v1/config/join-cafes/groups/",
+            ))
             .and(query_param("page", "1"))
             .respond_with(ResponseTemplate::new(200).set_body_string(REAL_FIXTURE))
             .mount(&server)
@@ -301,7 +311,9 @@ mod tests {
         let server = MockServer::start().await;
         let fake_cookie = "NID_AUT=FAKE; NID_SES=FAKE_SES";
         Mock::given(method("GET"))
-            .and(path("/cafe-home-web/cafe-home/v1/config/join-cafes/groups/"))
+            .and(path(
+                "/cafe-home-web/cafe-home/v1/config/join-cafes/groups/",
+            ))
             .and(header("x-cafe-product", "pc"))
             .and(header("Cookie", fake_cookie))
             .respond_with(ResponseTemplate::new(200).set_body_string(REAL_FIXTURE))
@@ -319,13 +331,17 @@ mod tests {
     async fn fetch_joined_cafes_follows_pagination_until_last_page() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/cafe-home-web/cafe-home/v1/config/join-cafes/groups/"))
+            .and(path(
+                "/cafe-home-web/cafe-home/v1/config/join-cafes/groups/",
+            ))
             .and(query_param("page", "1"))
             .respond_with(ResponseTemplate::new(200).set_body_string(page1_not_last()))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/cafe-home-web/cafe-home/v1/config/join-cafes/groups/"))
+            .and(path(
+                "/cafe-home-web/cafe-home/v1/config/join-cafes/groups/",
+            ))
             .and(query_param("page", "2"))
             .respond_with(ResponseTemplate::new(200).set_body_string(page2_empty_last()))
             .mount(&server)
@@ -346,7 +362,10 @@ mod tests {
             .await;
 
         let client = JoinedCafesClient::with_base_url(server.uri());
-        let err = client.fetch_joined_cafes(None).await.expect_err("404는 Err여야 함");
+        let err = client
+            .fetch_joined_cafes(None)
+            .await
+            .expect_err("404는 Err여야 함");
         assert_eq!(err.code, "JOINED_CAFES_HTTP_ERROR");
         assert_eq!(err.error_data.unwrap().http_status, Some(404));
     }
@@ -360,7 +379,10 @@ mod tests {
             .await;
 
         let client = JoinedCafesClient::with_base_url(server.uri());
-        let err = client.fetch_joined_cafes(None).await.expect_err("파싱불가는 Err여야 함");
+        let err = client
+            .fetch_joined_cafes(None)
+            .await
+            .expect_err("파싱불가는 Err여야 함");
         assert_eq!(err.code, "JOINED_CAFES_PARSE_ERROR");
     }
 
@@ -368,7 +390,10 @@ mod tests {
     async fn fetch_joined_cafes_transport_error_when_server_down() {
         // 존재하지 않는 포트로 전송 → 연결 오류
         let client = JoinedCafesClient::with_base_url("http://127.0.0.1:1");
-        let err = client.fetch_joined_cafes(None).await.expect_err("전송오류는 Err여야 함");
+        let err = client
+            .fetch_joined_cafes(None)
+            .await
+            .expect_err("전송오류는 Err여야 함");
         assert_eq!(err.code, "JOINED_CAFES_TRANSPORT_ERROR");
     }
 }

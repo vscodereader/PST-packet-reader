@@ -95,7 +95,11 @@ async fn main() {
             }
             Ok(boards) => {
                 for b in &boards {
-                    println!("    - {:<28} (menuId={})", truncate(&b.menu_name, 28), b.menu_id);
+                    println!(
+                        "    - {:<28} (menuId={})",
+                        truncate(&b.menu_name, 28),
+                        b.menu_id
+                    );
                 }
             }
             Err(err) => {
@@ -157,7 +161,9 @@ fn truncate(s: &str, max: usize) -> String {
 
 fn print_usage() {
     eprintln!("usage:");
-    eprintln!("  production: PSTMACRO_LIVE_ACCOUNT_ID=id cargo run --example list_joined_cafe_boards");
+    eprintln!(
+        "  production: PSTMACRO_LIVE_ACCOUNT_ID=id cargo run --example list_joined_cafe_boards"
+    );
     eprintln!(
         "  로컬 테스트: PSTMACRO_LIVE_COOKIES_PATH=/tmp/<id>.json cargo run --example list_joined_cafe_boards"
     );

@@ -97,11 +97,21 @@ fn default_document_info() -> DocumentInfo {
         dio: vec![
             DocumentInfoOption {
                 dis: "N".to_string(),
-                dia: Dia { t: 0, p: 0, st: 1, sk: 0 },
+                dia: Dia {
+                    t: 0,
+                    p: 0,
+                    st: 1,
+                    sk: 0,
+                },
             },
             DocumentInfoOption {
                 dis: "N".to_string(),
-                dia: Dia { t: 0, p: 0, st: 15, sk: 1 },
+                dia: Dia {
+                    t: 0,
+                    p: 0,
+                    st: 15,
+                    sk: 1,
+                },
             },
         ],
     }
@@ -344,8 +354,7 @@ mod tests {
 
     #[test]
     fn serialized_string_contains_at_ctype_key() {
-        let json = build_content_json_string("74423", &mut fixed_ids())
-            .expect("직렬화 실패");
+        let json = build_content_json_string("74423", &mut fixed_ids()).expect("직렬화 실패");
         assert!(
             json.contains("\"@ctype\""),
             "직렬화 결과에 @ctype 키가 없음: {}",
@@ -355,8 +364,7 @@ mod tests {
 
     #[test]
     fn serialized_string_contains_body_text() {
-        let json = build_content_json_string("74423", &mut fixed_ids())
-            .expect("직렬화 실패");
+        let json = build_content_json_string("74423", &mut fixed_ids()).expect("직렬화 실패");
         assert!(
             json.contains("74423"),
             "직렬화 결과에 본문 텍스트가 없음: {}",
@@ -370,22 +378,25 @@ mod tests {
         let original = build_content_document("74423", &mut ids);
 
         let mut ids2 = fixed_ids();
-        let json = build_content_json_string("74423", &mut ids2)
-            .expect("직렬화 실패");
+        let json = build_content_json_string("74423", &mut ids2).expect("직렬화 실패");
 
-        let restored: ContentJsonRoot = serde_json::from_str(&json)
-            .expect("역직렬화 실패");
+        let restored: ContentJsonRoot = serde_json::from_str(&json).expect("역직렬화 실패");
 
-        assert_eq!(original, restored, "@ctype rename이 역직렬화에서 동작해야 함");
+        assert_eq!(
+            original, restored,
+            "@ctype rename이 역직렬화에서 동작해야 함"
+        );
     }
 
     #[test]
     fn serialized_at_ctype_value_is_preserved_after_round_trip() {
-        let json = build_content_json_string("74423", &mut fixed_ids())
-            .expect("직렬화 실패");
-        let restored: ContentJsonRoot = serde_json::from_str(&json)
-            .expect("역직렬화 실패");
-        let comp = restored.document.components.first().expect("컴포넌트가 없음");
+        let json = build_content_json_string("74423", &mut fixed_ids()).expect("직렬화 실패");
+        let restored: ContentJsonRoot = serde_json::from_str(&json).expect("역직렬화 실패");
+        let comp = restored
+            .document
+            .components
+            .first()
+            .expect("컴포넌트가 없음");
         assert_eq!(comp.ctype, "text");
         let para = comp.value.first().expect("단락이 없음");
         assert_eq!(para.ctype, "paragraph");

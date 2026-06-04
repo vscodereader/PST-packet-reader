@@ -171,12 +171,7 @@ fn make_non_2xx_error(
 /// 원본 바디(최대 2000자)를 `api_error_message`에 담아 실제 응답 스키마 확인에 사용한다.
 ///
 /// 쿠키/세션 값은 절대 이 오류에 포함되지 않는다.
-fn make_parse_error(
-    code: &str,
-    message: String,
-    status: u16,
-    raw_body: String,
-) -> PostError {
+fn make_parse_error(code: &str, message: String, status: u16, raw_body: String) -> PostError {
     let api_error_message = truncate_body(raw_body);
     ErrorEnvelope {
         trace_id: String::new(),
@@ -368,7 +363,11 @@ mod tests {
     }
 
     fn expected_path() -> String {
-        format!("/editor/v2.0/cafes/{}/menus/{}/articles", cafe_id(), menu_id())
+        format!(
+            "/editor/v2.0/cafes/{}/menus/{}/articles",
+            cafe_id(),
+            menu_id()
+        )
     }
 
     // ------------------------------------------------------------------
@@ -500,7 +499,13 @@ mod tests {
 
         let client = CafeHttpClient::with_base_url(server.uri());
         client
-            .post_article(cafe_id(), menu_id(), board_type(), &dummy_body(), Some(fake_cookie))
+            .post_article(
+                cafe_id(),
+                menu_id(),
+                board_type(),
+                &dummy_body(),
+                Some(fake_cookie),
+            )
             .await
             .expect("성공 응답이어야 함");
     }
@@ -523,7 +528,13 @@ mod tests {
 
         let client = CafeHttpClient::with_base_url(server.uri());
         client
-            .post_article(cafe_id(), menu_id(), board_type(), &dummy_body(), Some(fake_cookie))
+            .post_article(
+                cafe_id(),
+                menu_id(),
+                board_type(),
+                &dummy_body(),
+                Some(fake_cookie),
+            )
             .await
             .expect("성공 응답이어야 함");
     }
@@ -735,8 +746,8 @@ mod tests {
             ]
         });
 
-        let header = cookie_header_from_storage_state(&storage_state)
-            .expect("쿠키 헤더가 생성되어야 함");
+        let header =
+            cookie_header_from_storage_state(&storage_state).expect("쿠키 헤더가 생성되어야 함");
 
         // 네이버 쿠키 포함 여부
         assert!(

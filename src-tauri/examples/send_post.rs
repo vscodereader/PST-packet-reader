@@ -50,8 +50,8 @@ async fn main() {
         eprintln!("menuId 는 숫자여야 합니다: {menu_id_raw:?}");
         std::process::exit(2);
     });
-    let subject =
-        pick(&args, "--subject", "PSTMACRO_LIVE_SUBJECT").unwrap_or_else(|| "테스트 제목".to_string());
+    let subject = pick(&args, "--subject", "PSTMACRO_LIVE_SUBJECT")
+        .unwrap_or_else(|| "테스트 제목".to_string());
     let body =
         pick(&args, "--body", "PSTMACRO_LIVE_BODY").unwrap_or_else(|| "테스트 본문".to_string());
     let board_type =
@@ -89,18 +89,25 @@ async fn main() {
         enable_copy: None,
     };
 
-    let body = match build_article_write_body_with_content(&request, &mut SequentialIdProvider::default())
-    {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("요청 본문 생성 실패: {e}");
-            std::process::exit(1);
-        }
-    };
+    let body =
+        match build_article_write_body_with_content(&request, &mut SequentialIdProvider::default())
+        {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("요청 본문 생성 실패: {e}");
+                std::process::exit(1);
+            }
+        };
 
     let client = CafeHttpClient::new();
     match client
-        .post_article(&cafe_id, menu_id, &board_type, &body, Some(cookie_header.as_str()))
+        .post_article(
+            &cafe_id,
+            menu_id,
+            &board_type,
+            &body,
+            Some(cookie_header.as_str()),
+        )
         .await
     {
         Ok(result) => {
