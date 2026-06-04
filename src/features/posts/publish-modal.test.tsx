@@ -133,7 +133,8 @@ describe("PublishModal", () => {
       expect.objectContaining({
         jobs: [
           expect.objectContaining({
-            accountId: "a5",
+            // 백엔드는 쿠키 파일 키(loginId)로 계정을 찾는다 — UI 고유 id("a5")가 아니다.
+            accountId: "money_lab",
             cafe: "11111111",
             menuId: 1,
             boardType: "L",
@@ -148,7 +149,12 @@ describe("PublishModal", () => {
     await userEvent.click(await screen.findByText("money_lab"));
     // The joined-cafe loader populates the per-account cafe select.
     await screen.findByPlaceholderText("가입 카페 선택");
+    // 가입 카페는 쿠키 파일 키(loginId)로 조회해야 한다 — UI 고유 id("a5")로 조회하면
+    // 백엔드가 쿠키 파일을 못 찾아 빈 목록을 돌려준다(회귀: 가입 카페가 안 뜨던 버그).
     expect(ipcBackend).toHaveBeenCalledWith("list_joined_cafes", {
+      accountId: "money_lab",
+    });
+    expect(ipcBackend).not.toHaveBeenCalledWith("list_joined_cafes", {
       accountId: "a5",
     });
   });
@@ -247,7 +253,7 @@ describe("PublishModal", () => {
       expect.objectContaining({
         jobs: [
           expect.objectContaining({
-            accountId: "a5",
+            accountId: "money_lab",
             cafeId: 11111111,
             articleId: 1000,
             content: "좋네요",
@@ -286,13 +292,13 @@ describe("PublishModal", () => {
       expect.objectContaining({
         jobs: [
           expect.objectContaining({
-            accountId: "a5",
+            accountId: "money_lab",
             cafeId: 31732304,
             articleId: 9,
             content: "댓글1",
           }),
           expect.objectContaining({
-            accountId: "a5",
+            accountId: "money_lab",
             cafeId: 31732304,
             articleId: 9,
             content: "댓글2",

@@ -314,13 +314,15 @@ const joinedCafe = (
 
 // Joined cafes per naver account — keyed by accountId so the publish modal's
 // account-driven loader returns a different list for each account.
+// 백엔드 계약상 가입 카페는 계정의 `loginId`(쿠키 파일 키)로 조회된다 — UI 내부
+// 고유 id(a5 등)가 아니다. 시드도 loginId로 키한다.
 const SEED_JOINED: Record<string, JoinedCafe[]> = {
-  a5: [
+  money_lab: [
     joinedCafe(11111111, "주식투자연구소 카페", "stocklab", "카페매니저"),
     joinedCafe(22222222, "개미투자 카페", "antinvest"),
   ],
-  a10: [joinedCafe(33333333, "가치투자 모임", "valueclub")],
-  a14: [joinedCafe(44444444, "차트분석 카페", "chartlab")],
+  insight_note: [joinedCafe(33333333, "가치투자 모임", "valueclub")],
+  cafe_master9: [joinedCafe(44444444, "차트분석 카페", "chartlab")],
 };
 
 const SEED_BANDS: Band[] = [

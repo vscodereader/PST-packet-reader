@@ -504,6 +504,18 @@ function htmlToText(html: string): string {
 }
 
 /** Map a backend per-job outcome onto the UI's PublishResult. */
+// 백엔드가 거부하는 값은 ErrorEnvelope(`{ code, message? }`)이거나 Error다. 사용자에게
+// 보일 짧은 사유 문자열로 환원한다(쿠키 만료/없음 등 침묵 실패를 드러내기 위함).
+function errText(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (err && typeof err === "object") {
+    const e = err as { message?: unknown; code?: unknown };
+    if (typeof e.message === "string" && e.message) return e.message;
+    if (typeof e.code === "string" && e.code) return e.code;
+  }
+  return String(err);
+}
+
 function outcomeToResult(
   job: PublishJob,
   outcome: PublishOutcome | undefined,
@@ -626,17 +638,30 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   }, []);
 
   // Fetch an account's joined cafes once (cached in `joinedReqRef`); the refresh
-  // control clears the guard to force a re-fetch.
-  const fetchJoined = useCallback((accountId: string) => {
-    if (joinedReqRef.current.has(accountId)) return;
-    joinedReqRef.current.add(accountId);
-    setJoinedLoading((m) => ({ ...m, [accountId]: true }));
-    ipc.cafes
-      .listJoined(accountId)
-      .then((cs) => setJoinedByAccount((m) => ({ ...m, [accountId]: cs })))
-      .catch(() => setJoinedByAccount((m) => ({ ...m, [accountId]: [] })))
-      .finally(() => setJoinedLoading((m) => ({ ...m, [accountId]: false })));
-  }, []);
+  // control clears the guard to force a re-fetch. State is keyed by the UI's
+  // unique account id, but the backend looks cafes up by the account's `loginId`
+  // (its cookie-file key) — passing the UI id finds no cookie and returns nothing.
+  const fetchJoined = useCallback(
+    (accountId: string) => {
+      if (joinedReqRef.current.has(accountId)) return;
+      const loginId = accounts.find((a) => a.id === accountId)?.loginId;
+      if (!loginId) return;
+      joinedReqRef.current.add(accountId);
+      setJoinedLoading((m) => ({ ...m, [accountId]: true }));
+      ipc.cafes
+        .listJoined(loginId)
+        .then((cs) => setJoinedByAccount((m) => ({ ...m, [accountId]: cs })))
+        .catch((err) => {
+          notifications.show({
+            message: `${loginId} 가입 카페를 불러오지 못했어요: ${errText(err)}`,
+            color: "red",
+          });
+          setJoinedByAccount((m) => ({ ...m, [accountId]: [] }));
+        })
+        .finally(() => setJoinedLoading((m) => ({ ...m, [accountId]: false })));
+    },
+    [accounts],
+  );
 
   // Lazily discover a cafe's writable boards (reuses resolve_cafe, which returns
   // boards for a numeric cafeId). De-dupes concurrent/repeat calls via an
@@ -646,14 +671,22 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       const key = String(cafeId);
       const existing = boardPromiseRef.current.get(key);
       if (existing) return existing;
+      // resolve_cafe reads the account's cookie too — pass the `loginId`, not the
+      // UI account id (same cookie-file-key mismatch as fetchJoined).
+      const loginId = accounts.find((a) => a.id === accountId)?.loginId;
+      if (!loginId) return Promise.resolve([]);
       setBoardsLoading((m) => ({ ...m, [key]: true }));
       const p = ipc.cafes
-        .resolve(key, accountId)
+        .resolve(key, loginId)
         .then((c) => {
           setBoardsByCafe((m) => ({ ...m, [key]: c.boards }));
           return c.boards;
         })
-        .catch((): Board[] => {
+        .catch((err): Board[] => {
+          notifications.show({
+            message: `${loginId} 게시판을 불러오지 못했어요: ${errText(err)}`,
+            color: "red",
+          });
           setBoardsByCafe((m) => ({ ...m, [key]: [] }));
           return [];
         })
@@ -661,7 +694,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       boardPromiseRef.current.set(key, p);
       return p;
     },
-    [],
+    [accounts],
   );
 
   // Auto-load joined cafes for every selected naver account.
@@ -862,7 +895,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const toPostJob = (j: PublishJob): PostJob => {
     const pick = naverPicks[j.key];
     return {
-      accountId: j.key,
+      // 백엔드는 loginId(쿠키 파일 키)로 계정을 찾는다. UI 키(j.key)는 picks 조회용일 뿐.
+      accountId: j.loginId,
       cafe: pick ? String(pick.cafeId) : j.targetName,
       menuId: pick?.menuId ?? 0,
       boardType: pick?.boardType ?? "L",
@@ -901,7 +935,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
           !!x.out && x.out.success && x.out.articleId != null,
       )
       .map((x) => ({
-        accountId: x.j.key,
+        accountId: x.j.loginId,
         cafeId: naverPicks[x.j.key]?.cafeId ?? 0,
         articleId: x.out.articleId as number,
       }));
@@ -911,7 +945,9 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       .runCommentJobs(commentJobs)
       .catch((): null => null);
     return postResults.map((r) =>
-      r.ok ? { ...r, msg: `${r.msg} · ${commentSummary(couts, r.key)}` } : r,
+      r.ok
+        ? { ...r, msg: `${r.msg} · ${commentSummary(couts, r.loginId)}` }
+        : r,
     );
   };
 
@@ -928,19 +964,23 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       }));
     }
     const commentJobs = buildUrlCommentJobs(
-      naverJobs.map((j) => j.key),
+      naverJobs.map((j) => j.loginId),
       urlTarget,
       comments,
     );
     const couts = await ipc.cafes
       .runCommentJobs(commentJobs)
       .catch((): null => null);
-    return naverJobs.map((j) => ({
-      ...j,
-      ok:
-        couts != null && couts.some((o) => o.accountId === j.key && o.success),
-      msg: commentSummary(couts, j.key),
-    }));
+    return naverJobs.map((j) => {
+      const mine = (couts ?? []).filter((o) => o.accountId === j.loginId);
+      return {
+        ...j,
+        // 한 계정의 댓글이 여러 건이면 모두 성공해야 성공으로 본다 — 일부만 올라간
+        // 경우(예: 2건 중 1건)를 성공 배지로 묻지 않는다. 자세한 건수는 msg에 표시.
+        ok: couts != null && mine.length > 0 && mine.every((o) => o.success),
+        msg: commentSummary(couts, j.loginId),
+      };
+    });
   };
 
   // Publish now: naver cafe(글/댓글)와 종목토론방(forum)은 실제 백엔드를 호출하고,

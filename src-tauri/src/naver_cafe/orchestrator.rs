@@ -22,7 +22,10 @@
 //! # 쿠키 보안
 //! 쿠키 값은 로그·에러·`Debug` 출력에 절대 포함되지 않는다.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
+use tokio::time::sleep;
 use ts_rs::TS;
 
 use crate::auth;
@@ -464,11 +467,56 @@ async fn run_single_job(orchestrator: &CafeOrchestrator, job: &PostJob) -> JobRe
 /// [`run_post_jobs`]의 댓글 버전이다. 각 작업마다 계정 쿠키를 읽어
 /// ([`auth::read_account_cookies`]) 댓글 등록에 사용하며, **한 건이 실패해도
 /// 중단하지 않고 다음 작업으로 넘어간다**. 쿠키 값은 어떤 보고/로그에도 노출되지 않는다.
+/// 같은 계정이 한 게시글에 댓글을 연속으로 달 때, 네이버의 연속요청/도배 차단으로
+/// 두 번째 이후가 거부되는 것을 피하려고 작업 사이에 두는 기본 간격.
+const COMMENT_JOB_DELAY: Duration = Duration::from_millis(2000);
+
 pub async fn run_comment_jobs(jobs: &[CommentJob]) -> Vec<CommentJobReport> {
+    run_comment_jobs_with_delay(jobs, COMMENT_JOB_DELAY).await
+}
+
+/// [`run_comment_jobs`]의 본체. 작업 간 간격을 인자로 받아 테스트에서 0으로 둘 수 있다.
+///
+/// 각 작업의 시도/성공/실패를 `tracing`으로 남겨, 두 번째 이후 댓글이 누락될 때
+/// 네이버가 돌려준 오류 코드/사유를 로그에서 확인할 수 있게 한다. 쿠키 값은 절대
+/// 로그에 포함하지 않는다(본문 `content`도 남기지 않는다).
+async fn run_comment_jobs_with_delay(
+    jobs: &[CommentJob],
+    delay: Duration,
+) -> Vec<CommentJobReport> {
     let client = CafeCommentClient::new();
-    let mut reports = Vec::with_capacity(jobs.len());
-    for job in jobs {
-        reports.push(run_single_comment_job(&client, job).await);
+    let total = jobs.len();
+    let mut reports = Vec::with_capacity(total);
+    for (index, job) in jobs.iter().enumerate() {
+        // 첫 작업 이후에는 작업 사이에 간격을 둬 연속 요청 차단을 피한다.
+        if index > 0 && !delay.is_zero() {
+            sleep(delay).await;
+        }
+        tracing::info!(
+            seq = index + 1,
+            total,
+            cafe_id = job.cafe_id,
+            article_id = job.article_id,
+            "댓글 등록 시도"
+        );
+        let report = run_single_comment_job(&client, job).await;
+        match &report.error {
+            None => tracing::info!(
+                seq = index + 1,
+                total,
+                article_id = job.article_id,
+                "댓글 등록 성공"
+            ),
+            Some(err) => tracing::warn!(
+                seq = index + 1,
+                total,
+                article_id = job.article_id,
+                error_code = %err.code,
+                error_message = %err.message,
+                "댓글 등록 실패"
+            ),
+        }
+        reports.push(report);
     }
     reports
 }
@@ -835,7 +883,8 @@ mod tests {
             sample_comment_job("no-such-account-2"),
         ];
 
-        let reports = run_comment_jobs(&jobs).await;
+        // 지연 0으로 둬 테스트가 작업 간 간격을 기다리지 않게 한다(여러 건이어도 즉시 보고).
+        let reports = run_comment_jobs_with_delay(&jobs, Duration::ZERO).await;
 
         assert_eq!(reports.len(), 2, "작업 수만큼 보고가 나와야 함");
         for report in &reports {
