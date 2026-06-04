@@ -155,14 +155,21 @@ function PwCell({
         title="클릭하여 편집"
         style={{
           flex: 1,
+          display: "block",
           fontSize: 13.5,
           fontFamily: "monospace",
-          letterSpacing: show ? 0 : 2,
-          color: "var(--mantine-color-gray-7)",
+          letterSpacing: value && !show ? 2 : 0,
+          color: value
+            ? "var(--mantine-color-gray-7)"
+            : "var(--mantine-color-gray-5)",
           overflow: "hidden",
         }}
       >
-        {show ? value : "•".repeat(Math.min(value.length, 10))}
+        {value
+          ? show
+            ? value
+            : "•".repeat(Math.min(value.length, 10))
+          : "비밀번호"}
       </UnstyledButton>
       <ActionIcon
         variant="subtle"
