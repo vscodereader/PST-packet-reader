@@ -49,9 +49,11 @@ import {
   buildBothCommentJobs,
   buildUrlCommentJobs,
   commentSummary,
+  commentsAllOk,
   parseCafeArticleUrl,
 } from "./comment-jobs";
 import { PreviewModal } from "./preview-modal";
+import { htmlToText, unreadyNaverAccountIds } from "./publish-helpers";
 import { StockCrawlModal } from "./stock-crawl-modal";
 
 export interface PublishModalProps {
@@ -493,16 +495,6 @@ function newScheduledId(): string {
   return "qs" + Date.now();
 }
 
-/** Flatten the document's HTML body into plain text for the article body. */
-function htmlToText(html: string): string {
-  return html
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(p|div|li|h[1-6])>/gi, "\n")
-    .replace(/<[^>]*>/g, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
 /** Map a backend per-job outcome onto the UI's PublishResult. */
 // 백엔드가 거부하는 값은 ErrorEnvelope(`{ code, message? }`)이거나 Error다. 사용자에게
 // 보일 짧은 사유 문자열로 환원한다(쿠키 만료/없음 등 침묵 실패를 드러내기 위함).
@@ -884,8 +876,20 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   // the `url` target; latest/popular are Phase 2, so they can't publish yet.
   const commentReady =
     mode !== "comment" || (comments.length > 0 && urlTarget !== null);
+  // 게시판이 아직 안 정해진 네이버 계정은 job 생성에서 빠진다. 이들이 있으면 게시를
+  // 막아 "일부만 올라가고 나머지는 결과에도 안 뜨는" 조용한 부분 게시를 방지한다.
+  const naverNotReady = unreadyNaverAccountIds(
+    selected,
+    accounts,
+    naverPicks,
+    mode,
+  );
   const canPublish =
-    selected.length > 0 && targetsOk && commentReady && jobs.length > 0;
+    selected.length > 0 &&
+    targetsOk &&
+    commentReady &&
+    naverNotReady.length === 0 &&
+    jobs.length > 0;
 
   const action =
     mode === "comment" ? "댓글" : mode === "both" ? "글+댓글" : "글";
@@ -944,9 +948,15 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     const couts = await ipc.cafes
       .runCommentJobs(commentJobs)
       .catch((): null => null);
+    // 글이 올라간 행이라도 그 계정 댓글이 전부 성공해야 "성공"으로 둔다. 일부/전부
+    // 실패를 초록 배지로 묻으면(이전 동작) 운영자가 재시도를 안 한다. 건수는 msg에.
     return postResults.map((r) =>
       r.ok
-        ? { ...r, msg: `${r.msg} · ${commentSummary(couts, r.loginId)}` }
+        ? {
+            ...r,
+            ok: commentsAllOk(couts, r.loginId),
+            msg: `${r.msg} · ${commentSummary(couts, r.loginId)}`,
+          }
         : r,
     );
   };
@@ -971,16 +981,13 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     const couts = await ipc.cafes
       .runCommentJobs(commentJobs)
       .catch((): null => null);
-    return naverJobs.map((j) => {
-      const mine = (couts ?? []).filter((o) => o.accountId === j.loginId);
-      return {
-        ...j,
-        // 한 계정의 댓글이 여러 건이면 모두 성공해야 성공으로 본다 — 일부만 올라간
-        // 경우(예: 2건 중 1건)를 성공 배지로 묻지 않는다. 자세한 건수는 msg에 표시.
-        ok: couts != null && mine.length > 0 && mine.every((o) => o.success),
-        msg: commentSummary(couts, j.loginId),
-      };
-    });
+    return naverJobs.map((j) => ({
+      ...j,
+      // 한 계정의 댓글이 여러 건이면 모두 성공해야 성공으로 본다 — 일부만 올라간
+      // 경우(예: 2건 중 1건)를 성공 배지로 묻지 않는다. 자세한 건수는 msg에 표시.
+      ok: commentsAllOk(couts, j.loginId),
+      msg: commentSummary(couts, j.loginId),
+    }));
   };
 
   // Publish now: naver cafe(글/댓글)와 종목토론방(forum)은 실제 백엔드를 호출하고,
@@ -1437,6 +1444,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
           {jobs.length}곳
         </Text>
         <PlatformPill ids={selPlatforms} size={16} />
+        {naverNotReady.length > 0 && (
+          <Text fz={12} c="orange.7">
+            게시판 미설정 계정 {naverNotReady.length}개 — 게시판을 선택해야
+            게시할 수 있어요
+          </Text>
+        )}
         <Box style={{ flex: 1 }} />
         <Button
           size="sm"

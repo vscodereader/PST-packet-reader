@@ -116,3 +116,18 @@ export function commentSummary(
   const ok = mine.filter((o) => o.success).length;
   return `댓글 ${ok}/${mine.length}건`;
 }
+
+/**
+ * Whether *every* one of this account's comments landed. A `null` result (the
+ * whole call rejected) or an account with no outcomes both read as not-ok — so a
+ * row that posted but whose comments all failed never shows a green "성공" badge.
+ * Shared by the comment-only and `both` (글+댓글) success judgements.
+ */
+export function commentsAllOk(
+  outs: CommentPublishOutcome[] | null,
+  accountId: string,
+): boolean {
+  if (!outs) return false;
+  const mine = outs.filter((o) => o.accountId === accountId);
+  return mine.length > 0 && mine.every((o) => o.success);
+}

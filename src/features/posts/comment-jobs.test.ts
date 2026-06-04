@@ -6,6 +6,7 @@ import {
   buildBothCommentJobs,
   buildUrlCommentJobs,
   commentSummary,
+  commentsAllOk,
   parseCafeArticleUrl,
 } from "./comment-jobs";
 
@@ -123,5 +124,33 @@ describe("commentSummary", () => {
 
   it("reads as 없음 when the account has no outcomes", () => {
     expect(commentSummary([out("a10", true)], "a5")).toBe("댓글 없음");
+  });
+});
+
+describe("commentsAllOk", () => {
+  const out = (accountId: string, success: boolean): CommentPublishOutcome => ({
+    accountId,
+    cafeId: 1,
+    articleId: 2,
+    success,
+  });
+
+  it("is true only when all of this account's comments succeeded", () => {
+    expect(commentsAllOk([out("a5", true), out("a5", true)], "a5")).toBe(true);
+  });
+
+  it("is false when any of this account's comments failed", () => {
+    // The 글+댓글 regression: post landed but a comment failed — must not be ok.
+    expect(commentsAllOk([out("a5", true), out("a5", false)], "a5")).toBe(
+      false,
+    );
+  });
+
+  it("is false when the whole call rejected (null)", () => {
+    expect(commentsAllOk(null, "a5")).toBe(false);
+  });
+
+  it("is false when the account has no outcomes", () => {
+    expect(commentsAllOk([out("a10", true)], "a5")).toBe(false);
   });
 });
