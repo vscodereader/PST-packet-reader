@@ -210,7 +210,11 @@ pub fn delete_post(
         }
         apply_delete(posts, &id)
     });
-    record(activity.inner(), ActivityType::Info, deleted_msg(&recorded_title));
+    record(
+        activity.inner(),
+        ActivityType::Info,
+        deleted_msg(&recorded_title),
+    );
     next
 }
 

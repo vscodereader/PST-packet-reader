@@ -205,9 +205,7 @@ pub fn import_posts(
         let body = cell(r, i_body);
         if title_raw.is_empty() || body.trim().is_empty() {
             summary.skipped += 1;
-            summary
-                .errors
-                .push(format!("{}행: title/body 누락", n + 2));
+            summary.errors.push(format!("{}행: title/body 누락", n + 2));
             continue;
         }
         let taken: Vec<String> = existing.iter().map(|p| p.title.clone()).collect();
@@ -314,7 +312,14 @@ pub fn write_activity_xlsx(
         .set_name("게시 배치")
         .map_err(|e| e.to_string())?;
     let h1 = [
-        "시각(ms)", "제목", "플랫폼", "대상", "코드", "계정", "상태", "메시지",
+        "시각(ms)",
+        "제목",
+        "플랫폼",
+        "대상",
+        "코드",
+        "계정",
+        "상태",
+        "메시지",
     ];
     for (c, h) in h1.iter().enumerate() {
         s1.write_string(0, c as u16, *h)
@@ -359,8 +364,7 @@ pub fn write_activity_xlsx(
             .map_err(|e| e.to_string())?;
         s2.write_string(rr, 1, activity_type_str(&a.r#type))
             .map_err(|e| e.to_string())?;
-        s2.write_string(rr, 2, &a.text)
-            .map_err(|e| e.to_string())?;
+        s2.write_string(rr, 2, &a.text).map_err(|e| e.to_string())?;
     }
 
     wb.save(path).map_err(|e| e.to_string())
@@ -454,7 +458,7 @@ mod tests {
         assert_eq!(brows[1][5].to_string(), "invest_king7"); // 계정
         assert_eq!(brows[1][6].to_string(), "성공"); // 상태 (item_status_str Success)
         assert_eq!(brows[1][7].to_string(), "게시 완료"); // 메시지
-        // timestamp column is written via write_number → calamine reads it back as Data::Float
+                                                          // timestamp column is written via write_number → calamine reads it back as Data::Float
         assert!(
             matches!(brows[1][0], calamine::Data::Float(_)),
             "expected Data::Float for timestamp, got {:?}",
@@ -565,7 +569,10 @@ mod tests {
         }];
         let (next, summary) = import_posts(path.to_str().unwrap(), existing).unwrap();
         assert_eq!(summary.imported, 1);
-        assert_eq!(summary.skipped, 1, "empty-title row must be counted as skipped");
+        assert_eq!(
+            summary.skipped, 1,
+            "empty-title row must be counted as skipped"
+        );
         assert!(
             !summary.errors.is_empty(),
             "empty-title row must record an error"

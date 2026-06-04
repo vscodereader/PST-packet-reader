@@ -221,7 +221,11 @@ fn account_mutation_appends_to_activity_feed() {
         "last": "—",
         "tags": []
     });
-    invoke_ok(&wv, "add_account", serde_json::json!({ "account": account }));
+    invoke_ok(
+        &wv,
+        "add_account",
+        serde_json::json!({ "account": account }),
+    );
 
     let after = invoke_ok(&wv, "list_activity", serde_json::json!({}));
     assert_eq!(array(&after).len(), 1);

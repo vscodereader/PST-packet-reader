@@ -8,8 +8,7 @@ use std::process::Command;
 use tauri::{AppHandle, Builder, Manager, Runtime};
 
 use crate::ipc::{
-    accounts, activity, bands, cafes, diagnostics, excel, log_batches, posts, queue, stats,
-    stocks,
+    accounts, activity, bands, cafes, diagnostics, excel, log_batches, posts, queue, stats, stocks,
 };
 use crate::store::JsonStore;
 
