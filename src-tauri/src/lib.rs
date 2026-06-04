@@ -363,6 +363,38 @@ fn export_activity_xlsx(
     excel::write_activity_xlsx(&path, &logs.snapshot(), &activity.snapshot())
 }
 
+#[tauri::command]
+fn import_accounts_xlsx(
+    store: tauri::State<'_, JsonStore<ipc::accounts::Account>>,
+    activity: tauri::State<'_, JsonStore<ipc::activity::ActivityItem>>,
+    path: String,
+) -> Result<ipc::excel::ImportSummary, String> {
+    let (next, summary) = ipc::excel::import_accounts(&path, store.snapshot())?;
+    store.mutate(|_| next.clone());
+    ipc::activity::record(
+        activity.inner(),
+        ipc::activity::ActivityType::Info,
+        format!("엑셀에서 계정 {}건 가져옴", summary.imported),
+    );
+    Ok(summary)
+}
+
+#[tauri::command]
+fn import_posts_xlsx(
+    store: tauri::State<'_, JsonStore<ipc::posts::LibraryPost>>,
+    activity: tauri::State<'_, JsonStore<ipc::activity::ActivityItem>>,
+    path: String,
+) -> Result<ipc::excel::ImportSummary, String> {
+    let (next, summary) = ipc::excel::import_posts(&path, store.snapshot())?;
+    store.mutate(|_| next.clone());
+    ipc::activity::record(
+        activity.inner(),
+        ipc::activity::ActivityType::Info,
+        format!("엑셀에서 게시글 {}건 가져옴", summary.imported),
+    );
+    Ok(summary)
+}
+
 /// Registers every IPC command handler on the builder.
 ///
 /// Extracted from [`run`] so integration tests can mount the exact same
@@ -406,6 +438,8 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         run_forum_publish_now,
         export_accounts_xlsx,
         export_activity_xlsx,
+        import_accounts_xlsx,
+        import_posts_xlsx,
     ])
 }
 
