@@ -10,7 +10,7 @@ import {
   UnstyledButton,
 } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { Accounts } from "@/features/accounts/accounts";
 import { Dashboard } from "@/features/dashboard/dashboard";
@@ -91,9 +91,11 @@ export function MacroApp() {
     useDisclosure(false);
   const [desktopOpened, { toggle: toggleDesktop }] = useDisclosure(true);
 
-  // Nav badge counts, loaded once over IPC.
+  // Nav badge counts. Refreshed on mount and on every navigation so the badges
+  // reflect the current data after adding/deleting accounts/posts/queue items
+  // (previously loaded once on mount, so the numbers looked frozen).
   const [counts, setCounts] = useState({ posts: 0, queue: 0, accounts: 0 });
-  useEffect(() => {
+  const refreshCounts = useCallback(() => {
     void Promise.all([
       ipc.posts.list(),
       ipc.queue.listNow(),
@@ -107,10 +109,14 @@ export function MacroApp() {
       }),
     );
   }, []);
+  useEffect(() => {
+    refreshCounts();
+  }, [refreshCounts]);
 
   const go: GoFn = (v, opts) => {
     setView(v);
     localStorage.setItem("mc-view", v);
+    refreshCounts();
     if (v === "log") {
       setLogFilter(opts?.logFilter ?? null);
       setLogNonce((n) => n + 1);
