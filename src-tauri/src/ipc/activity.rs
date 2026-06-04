@@ -2,10 +2,35 @@
 //! Tauri IPC. Read-only for the UI (dashboard timeline + notifications "system"
 //! rows), so the only command is `list_activity`.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::store::JsonStore;
+
+const MAX_ACTIVITY: usize = 500;
+
+fn gen_id() -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("ac-{}-{}", crate::util::now_ms(), n)
+}
+
+/// 새 활동을 맨 앞에 추가하고 최신 500건만 유지(영속).
+pub fn record(store: &JsonStore<ActivityItem>, ty: ActivityType, text: impl Into<String>) {
+    let entry = ActivityItem {
+        id: gen_id(),
+        r#type: ty,
+        text: text.into(),
+        at: crate::util::now_ms(),
+    };
+    store.mutate(|mut items| {
+        items.insert(0, entry.clone());
+        items.truncate(MAX_ACTIVITY);
+        items
+    });
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../src/shared/bindings/")]
@@ -59,5 +84,19 @@ mod tests {
     #[test]
     fn seed_is_empty() {
         assert!(seed().is_empty());
+    }
+
+    #[test]
+    fn record_prepends_newest_first_and_caps_at_500() {
+        let dir = std::env::temp_dir().join("pstmacro_activity_record_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = JsonStore::<ActivityItem>::load_or_seed(dir.join("a.json"), Vec::new());
+        for i in 0..520 {
+            record(&store, ActivityType::Info, format!("evt {i}"));
+        }
+        let items = store.snapshot();
+        assert_eq!(items.len(), 500); // capped
+        assert_eq!(items[0].text, "evt 519"); // newest first
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
