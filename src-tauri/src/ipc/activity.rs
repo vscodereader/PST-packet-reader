@@ -26,7 +26,7 @@ pub fn record(store: &JsonStore<ActivityItem>, ty: ActivityType, text: impl Into
         at: crate::util::now_ms(),
     };
     store.mutate(|mut items| {
-        items.insert(0, entry.clone());
+        items.insert(0, entry);
         items.truncate(MAX_ACTIVITY);
         items
     });

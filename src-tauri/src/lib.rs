@@ -112,14 +112,21 @@ fn build_publish_batch(
     at: i64,
     results: &[ForumPublishResult],
 ) -> ipc::log_batches::LogBatch {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use ipc::accounts::PlatformId;
     use ipc::log_batches::{BatchItem, BatchItemStatus, LogBatch};
     use ipc::posts::ModeValue;
+
+    static LB_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = LB_SEQ.fetch_add(1, Ordering::Relaxed);
+
     let kind = if run_post && run_comment {
         ModeValue::Both
     } else if run_comment {
         ModeValue::Comment
     } else {
+        // (false, false) is rejected upstream; default to Post for a total match.
         ModeValue::Post
     };
     let items = results
@@ -140,7 +147,7 @@ fn build_publish_batch(
         })
         .collect();
     LogBatch {
-        id: format!("lb-{at}"),
+        id: format!("lb-{at}-{seq}"),
         title: title.to_owned(),
         kind,
         at,

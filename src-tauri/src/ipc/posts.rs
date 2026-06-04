@@ -203,14 +203,14 @@ pub fn delete_post(
     activity: tauri::State<'_, JsonStore<crate::ipc::activity::ActivityItem>>,
     id: String,
 ) -> Vec<LibraryPost> {
-    let title = store
-        .snapshot()
-        .into_iter()
-        .find(|p| p.id == id)
-        .map(|p| p.title)
-        .unwrap_or_default();
-    let next = store.mutate(|posts| apply_delete(posts, &id));
-    record(activity.inner(), ActivityType::Info, deleted_msg(&title));
+    let mut recorded_title = String::new();
+    let next = store.mutate(|posts| {
+        if let Some(p) = posts.iter().find(|p| p.id == id) {
+            recorded_title = p.title.clone();
+        }
+        apply_delete(posts, &id)
+    });
+    record(activity.inner(), ActivityType::Info, deleted_msg(&recorded_title));
     next
 }
 
