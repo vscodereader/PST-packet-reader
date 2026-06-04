@@ -93,12 +93,28 @@ pub(crate) fn run(
     }
 }
 
+/// 자격증명이 로그인 시도에 충분한지(둘 다 비어있지 않은지) 검사한다(순수 함수).
+/// `type_into`는 빈 문자열에 대해 "0글자를 성공적으로 입력"으로 `Ok(true)`를 돌려주므로,
+/// 빈 자격증명이 그대로 로그인 버튼 클릭까지 진행되는 것을 막으려면 시도 전에 걸러야 한다.
+pub(crate) fn credentials_present(id: &str, pw: &str) -> bool {
+    !id.trim().is_empty() && !pw.is_empty()
+}
+
 fn run_inner(
     client: &mut CdpClient,
     id: &str,
     pw: &str,
     wait_for_human: bool,
 ) -> Result<LoginOutcome, AutomationError> {
+    // 빈/공백 자격증명이면 브라우저 폼을 건드리지 않고 즉시 입력 실패로 중단한다(기존
+    // 사이드카도 빈 자격증명이면 브라우저를 띄우지 않았다). BadCredentials로 두면 "비번
+    // 틀림"으로 오분류되므로, 사용자 입력 누락을 알리는 명확한 Error로 반환한다.
+    if !credentials_present(id, pw) {
+        return Ok(LoginOutcome::Error(
+            "아이디 또는 비밀번호가 비어 있어 로그인을 시도하지 않았습니다.".to_owned(),
+        ));
+    }
+
     client.navigate(LOGIN_URL)?;
     // navigate가 readyState까지 기다려도, 로그인 폼이 렌더되고 네이버의 keydown 암호화
     // 핸들러가 붙기 전에 타이핑하면 글자가 필드에 들어가지 않는다. 폼이 준비될 때까지 기다린다.
@@ -130,6 +146,14 @@ fn run_inner(
     } else {
         HEADLESS_TIMEOUT
     };
+    // 클릭 직후 네비게이션이 정리될 시간을 준다. 이 settle 없이 곧장 읽으면, 클릭 직후
+    // 잠깐 렌더된 #err_common이나 네비게이션 중간에 폼이 사라진 과도기 상태를 — 실제로는
+    // 성공 중인 로그인인데도 — 실패로 latch한다.
+    sleep(POLL_INTERVAL);
+
+    // 음성 신호(BadCredentials/Blocked)는 한 번 보였다고 바로 확정하지 않고, 2회 연속
+    // 폴링에서 지속될 때만 확정한다(과도기 깜빡임 latch 방지).
+    let mut last_negative: Option<Signal> = None;
     let deadline = Instant::now() + timeout;
     loop {
         // 인증 성공 직후 뜨는 "새 기기 등록" 페이지면 "등록 안함"을 눌러 마무리한다
@@ -137,7 +161,8 @@ fn run_inner(
         let _ = client.click_device_dontsave_if_present(Duration::from_millis(300));
 
         let signals = read_signals(client)?;
-        match classify(&signals) {
+        let signal = classify(&signals);
+        match signal {
             Signal::Success => {
                 let cookies = collect_naver_cookies(client)?;
                 return Ok(LoginOutcome::Ok { cookies });
@@ -148,18 +173,28 @@ fn run_inner(
                 if !wait_for_human {
                     return Ok(LoginOutcome::ChallengeRequired { kind });
                 }
+                last_negative = None;
             }
-            Signal::BadCredentials => return Ok(LoginOutcome::BadCredentials),
+            Signal::BadCredentials => {
+                // 2회 연속일 때만 확정. 첫 히트는 과도기일 수 있으므로 다음 폴링을 기다린다.
+                if last_negative == Some(Signal::BadCredentials) {
+                    return Ok(LoginOutcome::BadCredentials);
+                }
+                last_negative = Some(Signal::BadCredentials);
+            }
             Signal::Blocked => {
                 // headless에서만 즉시 차단으로 본다. headed에서는 기기등록/인증 중간 페이지를
                 // 차단으로 오판하지 않도록, 사람이 진행하는 동안 타임아웃까지 기다린다.
                 if !wait_for_human {
-                    return Ok(LoginOutcome::Error(
-                        "로그인 접근이 차단되었습니다.".to_owned(),
-                    ));
+                    if last_negative == Some(Signal::Blocked) {
+                        return Ok(LoginOutcome::Error(
+                            "로그인 접근이 차단되었습니다.".to_owned(),
+                        ));
+                    }
+                    last_negative = Some(Signal::Blocked);
                 }
             }
-            Signal::Pending => {}
+            Signal::Pending => last_negative = None,
         }
 
         if Instant::now() >= deadline {
@@ -356,6 +391,14 @@ mod tests {
             Signal::Blocked
         );
         assert_eq!(classify(&PageSignals::default()), Signal::Pending);
+    }
+
+    #[test]
+    fn credentials_present_rejects_empty_or_whitespace() {
+        assert!(credentials_present("user", "pw"));
+        assert!(!credentials_present("", "pw"));
+        assert!(!credentials_present("   ", "pw"));
+        assert!(!credentials_present("user", ""));
     }
 
     #[test]
