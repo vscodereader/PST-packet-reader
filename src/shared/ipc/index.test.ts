@@ -75,4 +75,12 @@ describe("ipc facade", () => {
       "list_bands",
     ]);
   });
+
+  it("diagnostics.getStatus invokes the environment-status command", async () => {
+    await ipc.diagnostics.getStatus();
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "get_environment_status",
+      undefined,
+    );
+  });
 });

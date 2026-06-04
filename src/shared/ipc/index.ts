@@ -5,6 +5,7 @@ import type { ActivityItem } from "@/shared/bindings/ActivityItem";
 import type { Band } from "@/shared/bindings/Band";
 import type { Cafe } from "@/shared/bindings/Cafe";
 import type { DashStat } from "@/shared/bindings/DashStat";
+import type { EnvironmentStatus } from "@/shared/bindings/EnvironmentStatus";
 import type { LibraryPost } from "@/shared/bindings/LibraryPost";
 import type { LogBatch } from "@/shared/bindings/LogBatch";
 import type { QueueNowItem } from "@/shared/bindings/QueueNowItem";
@@ -17,6 +18,7 @@ export type {
   Band,
   Cafe,
   DashStat,
+  EnvironmentStatus,
   LibraryPost,
   LogBatch,
   QueueNowItem,
@@ -127,6 +129,12 @@ export const ipc = {
   logBatches: { list: () => call<LogBatch[]>("list_log_batches") },
   cafes: { list: () => call<Cafe[]>("list_cafes") },
   bands: { list: () => call<Band[]>("list_bands") },
+  diagnostics: {
+    /** Probe Chrome install/version + ADB device connection (UI 새로고침). */
+    getStatus: () => call<EnvironmentStatus>("get_environment_status"),
+    /** Chrome 미설치 안내 카드의 "설치 페이지 열기" — 공식 다운로드 페이지를 기본 브라우저로 연다. */
+    openChromeDownload: () => call<void>("open_chrome_download"),
+  },
   // 종목토론방(forum) 즉시 게시 — 네이버 증권 토론방 패킷 게시 엔진 호출.
   forum: {
     /** 게시 엔진이 붙을 Chrome DevTools 엔드포인트. 백엔드가 단일 출처(프론트 상수 아님). */

@@ -1,5 +1,6 @@
 import { vi } from "vitest";
 
+import type { EnvironmentStatus } from "@/shared/bindings/EnvironmentStatus";
 import type {
   Account,
   ActivityItem,
@@ -343,6 +344,16 @@ const SEED_ACTIVITY: ActivityItem[] = [
     time: "어제",
   },
 ];
+
+const SEED_ENV_STATUS: EnvironmentStatus = {
+  chrome: {
+    installed: true,
+    path: "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe",
+    version: "125.0.6422.142",
+    error: null,
+  },
+  adb: { connected: true, error: null },
+};
 
 const SEED_QUEUE_NOW: QueueNowItem[] = [
   {
@@ -876,6 +887,11 @@ export const invoke = vi.fn(
         return clone(SEED_CAFES);
       case "list_bands":
         return clone(SEED_BANDS);
+      case "get_environment_status":
+        return clone(SEED_ENV_STATUS);
+      case "open_chrome_download":
+        // 브라우저 열기는 사이드이펙트뿐 — 목에서는 성공(void)으로 처리.
+        return undefined;
 
       // --- accounts (stateful) ----------------------------------------------
       case "list_accounts":
