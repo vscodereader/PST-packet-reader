@@ -131,11 +131,13 @@ export function Posts({ go }: { go: GoFn }) {
                     (err instanceof Error ? err.message : String(err)),
                   "red",
                 );
-                void ipc.activity.append(
-                  "error",
-                  "게시글 가져오기 실패 — " +
-                    (err instanceof Error ? err.message : String(err)),
-                );
+                ipc.activity
+                  .append(
+                    "error",
+                    "게시글 가져오기 실패 — " +
+                      (err instanceof Error ? err.message : String(err)),
+                  )
+                  .catch(() => {});
               }
             }}
           >

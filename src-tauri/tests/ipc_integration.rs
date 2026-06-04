@@ -293,8 +293,9 @@ fn export_accounts_xlsx_appends_to_activity_feed() {
     let before = invoke_ok(&wv, "list_activity", json!({}));
     assert_eq!(array(&before).len(), 0, "activity should start empty");
 
-    // Export to a temp xlsx path.
-    let out_path = std::env::temp_dir().join("test_export_accounts.xlsx");
+    // Export to a per-test temp dir (auto-cleans on drop).
+    let out_dir = tempfile::tempdir().expect("temp xlsx dir");
+    let out_path = out_dir.path().join("accounts.xlsx");
     let result = invoke(
         &wv,
         "export_accounts_xlsx",
@@ -310,7 +311,6 @@ fn export_accounts_xlsx_appends_to_activity_feed() {
         out_path.exists(),
         "exported xlsx file should exist at {out_path:?}"
     );
-    let _ = std::fs::remove_file(&out_path);
 
     // The activity feed should contain an entry with "내보냈어요".
     let after = invoke_ok(&wv, "list_activity", json!({}));
@@ -332,8 +332,9 @@ fn export_activity_xlsx_appends_to_activity_feed() {
     let before = invoke_ok(&wv, "list_activity", json!({}));
     assert_eq!(array(&before).len(), 0, "activity should start empty");
 
-    // Export to a temp xlsx path.
-    let out_path = std::env::temp_dir().join("test_export_activity.xlsx");
+    // Export to a per-test temp dir (auto-cleans on drop).
+    let out_dir = tempfile::tempdir().expect("temp xlsx dir");
+    let out_path = out_dir.path().join("activity.xlsx");
     let result = invoke(
         &wv,
         "export_activity_xlsx",
@@ -349,16 +350,15 @@ fn export_activity_xlsx_appends_to_activity_feed() {
         out_path.exists(),
         "exported xlsx file should exist at {out_path:?}"
     );
-    let _ = std::fs::remove_file(&out_path);
 
-    // The activity feed should now contain an entry with "내보냈어요".
+    // The activity feed should now contain an entry with "알림 내역".
     let after = invoke_ok(&wv, "list_activity", json!({}));
     let found = array(&after)
         .iter()
-        .any(|item| item["text"].as_str().unwrap_or("").contains("내보냈어요"));
+        .any(|item| item["text"].as_str().unwrap_or("").contains("알림 내역"));
     assert!(
         found,
-        "activity feed should contain '내보냈어요'; got: {after}"
+        "activity feed should contain '알림 내역'; got: {after}"
     );
 }
 

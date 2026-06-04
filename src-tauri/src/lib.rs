@@ -337,7 +337,7 @@ fn enqueue_cookie_refresh<R: Runtime>(
         ipc::activity::record(
             activity.inner(),
             ipc::activity::ActivityType::Info,
-            format!("계정 {n}개 로그인 시작"),
+            format!("계정 {n}건 로그인 시작"),
         );
     }
     Ok(result)

@@ -424,11 +424,13 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
                   (err instanceof Error ? err.message : String(err)),
                 color: "red",
               });
-              void ipc.activity.append(
-                "error",
-                "알림 내보내기 실패 — " +
-                  (err instanceof Error ? err.message : String(err)),
-              );
+              ipc.activity
+                .append(
+                  "error",
+                  "알림 내보내기 실패 — " +
+                    (err instanceof Error ? err.message : String(err)),
+                )
+                .catch(() => {});
             }
           }}
         >
