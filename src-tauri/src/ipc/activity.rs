@@ -1,6 +1,7 @@
 //! Activity feed (최근 활동 / 시스템 알림) domain — JSON-file-backed, served over
-//! Tauri IPC. Read-only for the UI (dashboard timeline + notifications "system"
-//! rows), so the only command is `list_activity`.
+//! Tauri IPC. The UI reads it (dashboard timeline + notifications "system" rows)
+//! via `list_activity`; backend command handlers append real events through
+//! [`record`], and `append_activity` lets frontend-orchestrated flows log too.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

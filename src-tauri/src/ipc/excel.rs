@@ -269,7 +269,7 @@ pub fn write_accounts_xlsx(path: &str, accounts: &[Account]) -> Result<(), Strin
             .write_string(row, 3, status_str(&a.status))
             .map_err(|e| e.to_string())?;
         sheet
-            .write_string(row, 4, &a.tags.join(","))
+            .write_string(row, 4, a.tags.join(","))
             .map_err(|e| e.to_string())?;
         sheet
             .write_string(row, 5, &a.last)

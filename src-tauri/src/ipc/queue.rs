@@ -2,8 +2,6 @@
 //! `PlatformId`/`ModeValue` from the accounts/posts modules so the generated TS
 //! bindings stay a single source of truth.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -178,13 +176,6 @@ pub fn cancel_queue_scheduled(
     next
 }
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
 /// True if `at` is no earlier than the start of the current minute. Minute
 /// precision keeps "now" (the picker default) schedulable despite seconds drift.
 pub fn is_future_enough(at: i64, now: i64) -> bool {
@@ -200,7 +191,7 @@ pub fn add_queue_scheduled(
     item: QueueScheduledItem,
     at: i64,
 ) -> Result<Vec<QueueScheduledItem>, String> {
-    if !is_future_enough(at, now_ms()) {
+    if !is_future_enough(at, crate::util::now_ms()) {
         return Err("예약 시각이 현재보다 과거입니다".into());
     }
     let title = item.title.clone();
