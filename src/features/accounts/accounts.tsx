@@ -501,8 +501,16 @@ export function Accounts({ go }: { go: GoFn }) {
                 filters: [{ name: "Excel", extensions: ["xlsx"] }],
               });
               if (!path) return;
-              await ipc.excel.exportAccounts(path);
-              toast("현재 계정 목록을 엑셀로 내보냈어요", "green");
+              try {
+                await ipc.excel.exportAccounts(path);
+                toast("현재 계정 목록을 엑셀로 내보냈어요", "green");
+              } catch (err) {
+                toast(
+                  "내보내기 실패: " +
+                    (err instanceof Error ? err.message : String(err)),
+                  "red",
+                );
+              }
             }}
           >
             내보내기

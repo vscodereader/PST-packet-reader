@@ -411,11 +411,20 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
               filters: [{ name: "Excel", extensions: ["xlsx"] }],
             });
             if (!path) return;
-            await ipc.excel.exportActivity(path);
-            notifications.show({
-              message: "알림 내역을 엑셀로 내보냈어요",
-              color: "green",
-            });
+            try {
+              await ipc.excel.exportActivity(path);
+              notifications.show({
+                message: "알림 내역을 엑셀로 내보냈어요",
+                color: "green",
+              });
+            } catch (err) {
+              notifications.show({
+                message:
+                  "내보내기 실패: " +
+                  (err instanceof Error ? err.message : String(err)),
+                color: "red",
+              });
+            }
           }}
         >
           내보내기

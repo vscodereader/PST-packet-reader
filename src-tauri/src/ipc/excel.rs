@@ -176,11 +176,20 @@ mod tests {
         let mut wb: Xlsx<_> = open_workbook(&path).unwrap();
         let range = wb.worksheet_range("계정").unwrap();
         let rows: Vec<_> = range.rows().collect();
+        // header row
         assert_eq!(rows[0][0].to_string(), "loginId");
+        assert_eq!(rows[0][1].to_string(), "pw");
+        assert_eq!(rows[0][2].to_string(), "platform");
+        assert_eq!(rows[0][3].to_string(), "status");
+        assert_eq!(rows[0][4].to_string(), "tags");
+        assert_eq!(rows[0][5].to_string(), "last");
+        // data row
         assert_eq!(rows[1][0].to_string(), "invest_king7");
         assert_eq!(rows[1][1].to_string(), "pw123"); // pw 포함
-        assert_eq!(rows[1][2].to_string(), "forum");
+        assert_eq!(rows[1][2].to_string(), "forum"); // PlatformId::Forum → "forum"
+        assert_eq!(rows[1][3].to_string(), "active"); // AccountStatus::Active → "active"
         assert!(rows[1][4].to_string().contains("반도체")); // tags
+        assert_eq!(rows[1][5].to_string(), "—"); // last
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -233,11 +242,23 @@ mod tests {
         assert_eq!(brows[1][5].to_string(), "invest_king7"); // 계정
         assert_eq!(brows[1][6].to_string(), "성공"); // 상태 (item_status_str Success)
         assert_eq!(brows[1][7].to_string(), "게시 완료"); // 메시지
+        // timestamp column is written via write_number → calamine reads it back as Data::Float
+        assert!(
+            matches!(brows[1][0], calamine::Data::Float(_)),
+            "expected Data::Float for timestamp, got {:?}",
+            brows[1][0]
+        );
 
         // 시스템 활동 시트 검증
         let sys = wb.worksheet_range("시스템 활동").unwrap();
         let rows: Vec<_> = sys.rows().collect();
         assert_eq!(rows[1][2].to_string(), "종목 12개 크롤링");
+        // system activity timestamp also written via write_number → Data::Float
+        assert!(
+            matches!(rows[1][0], calamine::Data::Float(_)),
+            "expected Data::Float for activity timestamp, got {:?}",
+            rows[1][0]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

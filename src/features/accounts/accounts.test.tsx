@@ -223,6 +223,39 @@ describe("Accounts", () => {
     ).toBe(false);
   });
 
+  it("shows a red error toast when the export IPC command rejects", async () => {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(save).mockResolvedValueOnce("/tmp/계정.xlsx");
+    const realImpl = vi.mocked(ipcBackend).getMockImplementation()! as (
+      cmd: string,
+      args?: Record<string, unknown>,
+    ) => Promise<unknown>;
+    vi.mocked(ipcBackend).mockImplementation((cmd, args) =>
+      cmd === "export_accounts_xlsx"
+        ? Promise.reject(new Error("disk full"))
+        : realImpl(cmd, args),
+    );
+    try {
+      await renderAccounts();
+      await userEvent.click(screen.getByRole("button", { name: /내보내기/ }));
+      await waitFor(() =>
+        expect(notifShow).toHaveBeenCalledWith(
+          expect.objectContaining({
+            color: "red",
+            message: expect.stringContaining("내보내기 실패"),
+          }),
+        ),
+      );
+      expect(notifShow).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining("내보냈어요"),
+        }),
+      );
+    } finally {
+      vi.mocked(ipcBackend).mockImplementation(realImpl);
+    }
+  });
+
   it("fires excel import action (stub, no dialog)", async () => {
     await renderAccounts();
     await userEvent.click(
