@@ -1,5 +1,7 @@
 import { vi } from "vitest";
 
+import type { Article } from "@/shared/bindings/Article";
+import type { ArticleListResponse } from "@/shared/bindings/ArticleListResponse";
 import type { CommentJob } from "@/shared/bindings/CommentJob";
 import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutcome";
 import type { EnvironmentStatus } from "@/shared/bindings/EnvironmentStatus";
@@ -323,6 +325,33 @@ const SEED_JOINED: Record<string, JoinedCafe[]> = {
   ],
   insight_note: [joinedCafe(33333333, "가치투자 모임", "valueclub")],
   cafe_master9: [joinedCafe(44444444, "차트분석 카페", "chartlab")],
+};
+
+const article = (articleId: number, subject: string, menuId = 1): Article => ({
+  articleId,
+  subject,
+  writerNickname: "회원",
+  menuId,
+  menuName: "자유게시판",
+  commentCount: 0,
+  readCount: 100,
+  likeCount: 5,
+  writeDateTimestamp: 1_700_000_000_000 + articleId,
+});
+
+// Latest/popular article fixtures per cafeId (keyed by the string id the modal
+// passes). 10 entries so tests can exercise N=1/3/5/10 top-N extraction; the
+// `popular` sort just reverses the order so latest≠popular is observable.
+const SEED_ARTICLES_DEFAULT: Article[] = Array.from({ length: 10 }, (_, i) =>
+  article(9000 + i, `게시글 ${i + 1}`),
+);
+
+const SEED_ARTICLES: Record<string, Article[]> = {
+  "11111111": Array.from({ length: 10 }, (_, i) =>
+    article(8000 + i, `주식투자연구소 글 ${i + 1}`),
+  ),
+  // 게시글이 2건뿐인 카페 — N보다 적을 때의 폴백 검증용.
+  "22222222": [article(7000, "개미투자 글 1"), article(7001, "개미투자 글 2")],
 };
 
 const SEED_BANDS: Band[] = [
@@ -961,6 +990,20 @@ export const invoke = vi.fn(
       case "list_joined_cafes": {
         const accountId = args!.accountId as string;
         return clone(SEED_JOINED[accountId] ?? []);
+      }
+      case "list_cafe_articles": {
+        // 최신글/인기글 목록. cafeId(문자열)·sortBy로 키해 시드를 돌려주고,
+        // 미지정 카페는 기본 목록을 쓴다. 테스트에서 N개 추출/폴백을 검증할 수 있게
+        // 충분한 건수를 둔다.
+        const cafeId = args!.cafeId as string;
+        const sortBy = args!.sortBy as string;
+        const seed = SEED_ARTICLES[cafeId] ?? SEED_ARTICLES_DEFAULT;
+        const articles = sortBy === "popular" ? [...seed].reverse() : seed;
+        const response: ArticleListResponse = {
+          articles: clone(articles),
+          lastPage: true,
+        };
+        return clone(response);
       }
       case "run_post_jobs": {
         const jobs = args!.jobs as PostJob[];

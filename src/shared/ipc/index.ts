@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type { Account } from "@/shared/bindings/Account";
 import type { ActivityItem } from "@/shared/bindings/ActivityItem";
+import type { Article } from "@/shared/bindings/Article";
+import type { ArticleListResponse } from "@/shared/bindings/ArticleListResponse";
 import type { Band } from "@/shared/bindings/Band";
 import type { Cafe } from "@/shared/bindings/Cafe";
 import type { CommentJob } from "@/shared/bindings/CommentJob";
@@ -15,11 +17,14 @@ import type { PostJob } from "@/shared/bindings/PostJob";
 import type { PublishOutcome } from "@/shared/bindings/PublishOutcome";
 import type { QueueNowItem } from "@/shared/bindings/QueueNowItem";
 import type { QueueScheduledItem } from "@/shared/bindings/QueueScheduledItem";
+import type { SortBy } from "@/shared/bindings/SortBy";
 import type { Stock } from "@/shared/bindings/Stock";
 
 export type {
   Account,
   ActivityItem,
+  Article,
+  ArticleListResponse,
   Band,
   Cafe,
   CommentJob,
@@ -33,6 +38,7 @@ export type {
   PublishOutcome,
   QueueNowItem,
   QueueScheduledItem,
+  SortBy,
   Stock,
 };
 
@@ -165,6 +171,18 @@ export const ipc = {
      */
     listJoined: (accountId: string) =>
       call<JoinedCafe[]>("list_joined_cafes", { accountId }),
+    /**
+     * List a cafe's articles sorted by `sortBy` ("latest" | "popular"), using
+     * `accountId`'s session cookie. Backs the comment-target 최신글/인기글 flow:
+     * the modal takes the top-N of the returned `articles`. Rejects with the
+     * backend's error envelope on failure.
+     */
+    listArticles: (cafeId: number, sortBy: SortBy, accountId: string) =>
+      call<ArticleListResponse>("list_cafe_articles", {
+        cafeId: String(cafeId),
+        sortBy,
+        accountId,
+      }),
   },
   bands: { list: () => call<Band[]>("list_bands") },
   diagnostics: {
