@@ -28,10 +28,22 @@ const DEFAULT_PROFILE_INTRODUCTION: &str = "2222";
 // Chrome에서 수거한 쿠키 한 개(도메인까지 보존). 이름만으로 합치면 서브도메인별
 // host-scoped 동일 이름 쿠키(NNB, 서비스별 세션/CSRF 등)가 last-write-wins로 뭉개져
 // 호스트 간에 누출되므로, (domain, name)으로 구분해 둔다.
-struct NaverCookie {
+pub(crate) struct NaverCookie {
     domain: String,
     name: String,
     value: String,
+}
+
+impl NaverCookie {
+    /// 테스트(회귀 스위트)에서 쿠키를 만들기 위한 생성자.
+    #[cfg(test)]
+    pub(crate) fn new(domain: &str, name: &str, value: &str) -> Self {
+        Self {
+            domain: domain.to_owned(),
+            name: name.to_owned(),
+            value: value.to_owned(),
+        }
+    }
 }
 
 pub(super) struct NaverPacketClient {
@@ -1104,7 +1116,7 @@ fn header_value(value: &str, label: &str) -> AutomationResult<HeaderValue> {
 
 // 대상 호스트에 적용되는 쿠키만 골라 "name=value; ..." Cookie 헤더를 만드는 함수입니다.
 // (domain, name)으로 구분하고, 같은 이름이 겹치면 host-only 쿠키가 도메인 쿠키를 이깁니다.
-fn build_cookie_header(cookies: &[NaverCookie], host: &str) -> String {
+pub(crate) fn build_cookie_header(cookies: &[NaverCookie], host: &str) -> String {
     let mut applicable: Vec<&NaverCookie> = cookies
         .iter()
         .filter(|cookie| cookie_applies_to_host(&cookie.domain, host))
@@ -1125,7 +1137,7 @@ fn build_cookie_header(cookies: &[NaverCookie], host: &str) -> String {
 
 // 쿠키 도메인이 대상 호스트에 적용되는지 판단하는 함수입니다. 앞에 '.'가 있으면 도메인
 // 쿠키(서브도메인 포함), 없으면 host-only 쿠키(정확히 그 호스트만)입니다.
-fn cookie_applies_to_host(domain: &str, host: &str) -> bool {
+pub(crate) fn cookie_applies_to_host(domain: &str, host: &str) -> bool {
     match domain.strip_prefix('.') {
         Some(base) => host == base || host.ends_with(&format!(".{base}")),
         None => host == domain,
@@ -1140,47 +1152,7 @@ mod tests {
 
     use super::*;
 
-    fn cookie(domain: &str, name: &str, value: &str) -> NaverCookie {
-        NaverCookie {
-            domain: domain.to_owned(),
-            name: name.to_owned(),
-            value: value.to_owned(),
-        }
-    }
-
-    #[test]
-    fn cookie_applies_to_host_respects_domain_vs_host_scope() {
-        // 도메인 쿠키(앞에 '.')는 서브도메인까지 적용된다.
-        assert!(cookie_applies_to_host(".naver.com", "stock.naver.com"));
-        assert!(cookie_applies_to_host(".naver.com", "apis.naver.com"));
-        // host-only 쿠키는 정확히 그 호스트만.
-        assert!(cookie_applies_to_host("stock.naver.com", "stock.naver.com"));
-        assert!(!cookie_applies_to_host(
-            "stock.naver.com",
-            "m.stock.naver.com"
-        ));
-        assert!(!cookie_applies_to_host("stock.naver.com", "apis.naver.com"));
-    }
-
-    #[test]
-    fn build_cookie_header_scopes_host_only_cookies_per_host() {
-        // 같은 이름 NNB가 도메인 전역(.naver.com)과 host-only(stock.naver.com) 둘 다 존재.
-        let cookies = vec![
-            cookie(".naver.com", "NID_AUT", "aut"),
-            cookie(".naver.com", "NNB", "global"),
-            cookie("stock.naver.com", "NNB", "stockonly"),
-        ];
-
-        let stock = build_cookie_header(&cookies, "stock.naver.com");
-        // stock.naver.com에는 host-only 값이 우선 적용된다.
-        assert!(stock.contains("NNB=stockonly"));
-        assert!(stock.contains("NID_AUT=aut"));
-
-        let apis = build_cookie_header(&cookies, "apis.naver.com");
-        // apis.naver.com에는 stock host-only 쿠키가 새지 않고 전역 값만 적용된다.
-        assert!(apis.contains("NNB=global"));
-        assert!(!apis.contains("stockonly"));
-    }
+    // 쿠키 호스트 스코핑 회귀 테스트는 통합 회귀 스위트(review_regression.rs)에 모았다.
 
     #[test]
     fn strip_jsonp_extracts_get_profile_payload() {

@@ -15,6 +15,10 @@ pub mod auth;
 pub mod discussion_batch;
 pub mod naver_automation;
 
+// 사수 PR #60 리뷰 지적 + 그 외 위험 지점에 대한 통합 회귀 테스트 스위트.
+#[cfg(test)]
+mod review_regression;
+
 use discussion_batch::{
     parse_discussion_template_csv, run_discussion_batch, run_forum_publish, search_naver_stocks,
     DiscussionBatchReport, DiscussionBatchRequest, ForumPublishRequest, ForumPublishResult,

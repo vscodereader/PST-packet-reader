@@ -2,7 +2,7 @@ mod browser_flow;
 mod cookie_bridge;
 mod devtools_connection;
 mod discussion_room;
-mod packet_client;
+pub(crate) mod packet_client;
 mod post_form;
 pub mod types;
 

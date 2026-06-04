@@ -32,7 +32,7 @@ pub fn save_accounts_file(accounts: &[Account]) -> Result<Vec<Account>, Orchestr
 }
 
 /// 기존 계정 목록에 들어온 계정을 병합한다(같은 `id`는 갱신, 새 `id`는 추가). 순수 함수.
-fn merge_accounts(mut existing: Vec<Account>, incoming: &[Account]) -> Vec<Account> {
+pub(crate) fn merge_accounts(mut existing: Vec<Account>, incoming: &[Account]) -> Vec<Account> {
     for account in incoming {
         if let Some(slot) = existing.iter_mut().find(|a| a.id == account.id) {
             *slot = account.clone();
@@ -181,32 +181,7 @@ mod tests {
     use super::*;
     use crate::auth::paths::{ensure_runtime_dirs, paths_for_root};
 
-    fn account(id: &str, pw: &str) -> Account {
-        Account {
-            id: id.to_string(),
-            password: pw.to_string(),
-            label: id.to_string(),
-        }
-    }
-
-    #[test]
-    fn merge_accounts_upserts_without_dropping_others() {
-        // 기존 3개 중 1개만(갱신된 비번으로) 넘겨도 나머지 2개가 보존되어야 한다.
-        let existing = vec![account("a", "1"), account("b", "2"), account("c", "3")];
-        let merged = merge_accounts(existing, &[account("b", "new")]);
-
-        assert_eq!(merged.len(), 3);
-        assert_eq!(merged.iter().find(|a| a.id == "b").unwrap().password, "new");
-        assert!(merged.iter().any(|a| a.id == "a"));
-        assert!(merged.iter().any(|a| a.id == "c"));
-    }
-
-    #[test]
-    fn merge_accounts_appends_new_ids() {
-        let merged = merge_accounts(vec![account("a", "1")], &[account("z", "9")]);
-        assert_eq!(merged.len(), 2);
-        assert!(merged.iter().any(|a| a.id == "z"));
-    }
+    // merge_accounts 회귀 테스트는 통합 회귀 스위트(review_regression.rs)에 모았다.
 
     #[test]
     fn account_json_round_trips() {
