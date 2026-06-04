@@ -287,23 +287,22 @@ describe("PublishModal", () => {
         { timeout: 3000 },
       ),
     );
-    expect(ipcBackend).toHaveBeenCalledWith(
-      "run_comment_jobs",
+    // Comments are now distributed one-per-account (issue #98): a single
+    // account yields a single job carrying ONE of the comments (which one is
+    // RNG-chosen at runtime), not the old account × every-comment fan-out.
+    const commentCalls = ipcBackend.mock.calls.filter(
+      (c) => c[0] === "run_comment_jobs",
+    );
+    const call = commentCalls[commentCalls.length - 1];
+    expect(call).toBeDefined();
+    const jobs = (call?.[1] as { jobs: unknown[] }).jobs;
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toEqual(
       expect.objectContaining({
-        jobs: [
-          expect.objectContaining({
-            accountId: "money_lab",
-            cafeId: 31732304,
-            articleId: 9,
-            content: "댓글1",
-          }),
-          expect.objectContaining({
-            accountId: "money_lab",
-            cafeId: 31732304,
-            articleId: 9,
-            content: "댓글2",
-          }),
-        ],
+        accountId: "money_lab",
+        cafeId: 31732304,
+        articleId: 9,
+        content: expect.stringMatching(/^댓글[12]$/),
       }),
     );
   });
