@@ -14,6 +14,7 @@
 use crate::naver_cafe::cafe_ref::models::CafeRefError;
 use crate::naver_cafe::error::{ErrorEnvelope, NaverCafeCommonErrorData};
 use crate::naver_cafe::post::BROWSER_USER_AGENT;
+use crate::naver_cafe::response::truncate_body;
 
 // ---------------------------------------------------------------------------
 // 상수
@@ -27,9 +28,6 @@ pub const CAFE_HOME_HOST: &str = "cafe.naver.com";
 /// `g_sClubId = "31732304"`처럼 마커 직후 곧바로 숫자가 나오는 경우만 허용하고,
 /// 멀리 떨어진 무관한 숫자를 잘못 집는 것을 막는다.
 const MARKER_DIGIT_WINDOW: usize = 16;
-
-/// 오류 응답 바디 최대 보존 길이(바이트).
-const RAW_BODY_MAX_LEN: usize = 2000;
 
 // ---------------------------------------------------------------------------
 // 경로 헬퍼
@@ -88,21 +86,6 @@ fn digits_near_marker(haystack: &str, marker: &str, window: usize) -> Option<u64
 // ---------------------------------------------------------------------------
 // 내부 헬퍼
 // ---------------------------------------------------------------------------
-
-/// 응답 바디 텍스트를 최대 `RAW_BODY_MAX_LEN` 바이트로 잘라낸다.
-fn truncate_body(raw: String) -> String {
-    if raw.len() <= RAW_BODY_MAX_LEN {
-        raw
-    } else {
-        let cutoff = raw
-            .char_indices()
-            .take_while(|(i, _)| *i < RAW_BODY_MAX_LEN)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(RAW_BODY_MAX_LEN);
-        format!("{} [truncated]", &raw[..cutoff])
-    }
-}
 
 fn http_error(code: &str, message: String, status: Option<u16>, retryable: bool) -> CafeRefError {
     ErrorEnvelope {

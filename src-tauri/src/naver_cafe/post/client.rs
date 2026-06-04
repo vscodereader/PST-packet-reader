@@ -14,7 +14,7 @@ use super::{
 };
 use crate::naver_cafe::{
     error::{ErrorEnvelope, NaverCafeCommonErrorData},
-    response::NaverApiErrorBody,
+    response::{truncate_body, NaverApiErrorBody},
 };
 
 // ---------------------------------------------------------------------------
@@ -42,9 +42,6 @@ pub const CODE_REGISTER_PARSE_ERROR: &str = "REGISTER_PARSE_ERROR";
 
 /// 세션 쿠키 없음/만료 오류 코드.
 pub const CODE_SESSION_INVALID: &str = "SESSION_INVALID";
-
-/// 응답 바디 최대 보존 길이(바이트). 초과 시 잘라내고 주석을 추가한다.
-const RAW_BODY_MAX_LEN: usize = 2000;
 
 // ---------------------------------------------------------------------------
 // 쿠키 헬퍼
@@ -85,23 +82,6 @@ pub fn cookie_header_from_storage_state(value: &serde_json::Value) -> Option<Str
 // ---------------------------------------------------------------------------
 // 내부 헬퍼
 // ---------------------------------------------------------------------------
-
-/// 응답 바디 텍스트를 최대 `RAW_BODY_MAX_LEN` 바이트로 잘라낸다.
-/// 잘린 경우 끝에 `[truncated]` 주석을 추가한다.
-fn truncate_body(raw: String) -> String {
-    if raw.len() <= RAW_BODY_MAX_LEN {
-        raw
-    } else {
-        // 문자 경계에서 안전하게 잘라낸다
-        let cutoff = raw
-            .char_indices()
-            .take_while(|(i, _)| *i < RAW_BODY_MAX_LEN)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(RAW_BODY_MAX_LEN);
-        format!("{} [truncated]", &raw[..cutoff])
-    }
-}
 
 /// reqwest 전송/본문 읽기 오류를 [`PostError`]로 변환한다. 쿠키 값은 포함하지 않는다.
 fn transport_error(e: reqwest::Error) -> PostError {
@@ -867,30 +847,5 @@ mod tests {
         let storage_state = json!({});
         let header = cookie_header_from_storage_state(&storage_state);
         assert!(header.is_none(), "cookies 키가 없으면 None이어야 함");
-    }
-
-    // ------------------------------------------------------------------
-    // truncate_body 단위 테스트
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn truncate_body_short_string_unchanged() {
-        let s = "short string".to_string();
-        let result = truncate_body(s.clone());
-        assert_eq!(result, s);
-    }
-
-    #[test]
-    fn truncate_body_long_string_is_truncated() {
-        let s = "x".repeat(RAW_BODY_MAX_LEN + 100);
-        let result = truncate_body(s);
-        assert!(
-            result.contains("[truncated]"),
-            "[truncated] 주석이 있어야 함"
-        );
-        assert!(
-            result.len() <= RAW_BODY_MAX_LEN + 50,
-            "결과가 너무 길면 안 됨"
-        );
     }
 }

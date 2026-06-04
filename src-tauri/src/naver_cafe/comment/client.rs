@@ -27,6 +27,7 @@ use super::{
 use crate::naver_cafe::{
     error::{ErrorEnvelope, NaverCafeCommonErrorData},
     post::BROWSER_USER_AGENT,
+    response::truncate_body,
 };
 
 // ---------------------------------------------------------------------------
@@ -41,28 +42,6 @@ pub const CODE_COMMENT_HTTP_ERROR: &str = "COMMENT_HTTP_ERROR";
 
 /// 2xx이지만 성공 형태로 파싱 불가능한 경우의 오류 코드.
 pub const CODE_COMMENT_PARSE_ERROR: &str = "COMMENT_PARSE_ERROR";
-
-/// 응답 바디 최대 보존 길이(바이트). 초과 시 잘라내고 주석을 추가한다.
-const RAW_BODY_MAX_LEN: usize = 2000;
-
-// ---------------------------------------------------------------------------
-// 내부 헬퍼
-// ---------------------------------------------------------------------------
-
-/// 응답 바디 텍스트를 최대 `RAW_BODY_MAX_LEN` 바이트로 잘라낸다.
-fn truncate_body(raw: String) -> String {
-    if raw.len() <= RAW_BODY_MAX_LEN {
-        raw
-    } else {
-        let cutoff = raw
-            .char_indices()
-            .take_while(|(i, _)| *i < RAW_BODY_MAX_LEN)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(RAW_BODY_MAX_LEN);
-        format!("{} [truncated]", &raw[..cutoff])
-    }
-}
 
 /// [`CommentErrorData`]를 조립한다.
 fn error_data(

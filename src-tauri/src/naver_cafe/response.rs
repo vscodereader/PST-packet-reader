@@ -82,6 +82,29 @@ impl NaverApiErrorBody {
     }
 }
 
+/// 오류에 담는 원본 응답 본문의 최대 길이(바이트). 이를 넘으면 잘라낸다.
+pub const RAW_BODY_MAX_LEN: usize = 2000;
+
+/// 원본 응답 본문을 [`RAW_BODY_MAX_LEN`] 바이트로 잘라낸다(문자 경계에서 안전하게).
+///
+/// 알 수 없는 형태의 실패 응답을 오류 메시지에 담을 때, 본문이 과도하게 길거나
+/// UTF-8 경계를 깨뜨리지 않도록 공통으로 사용한다. 네이버 카페 클라이언트 6개
+/// 모듈이 동일 로직을 복제하던 것을 한곳으로 모은 것.
+pub fn truncate_body(raw: String) -> String {
+    if raw.len() <= RAW_BODY_MAX_LEN {
+        raw
+    } else {
+        // 문자 경계에서 안전하게 잘라낸다.
+        let cutoff = raw
+            .char_indices()
+            .take_while(|(i, _)| *i < RAW_BODY_MAX_LEN)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(RAW_BODY_MAX_LEN);
+        format!("{} [truncated]", &raw[..cutoff])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +193,31 @@ mod tests {
         let restored: NaverApiEnvelope<String> =
             serde_json::from_str(&json).expect("역직렬화 실패");
         assert_eq!(original, restored);
+    }
+
+    // ------------------------------------------------------------------
+    // truncate_body — 공통 본문 절단 헬퍼
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn truncate_body_short_string_unchanged() {
+        let s = "short body".to_string();
+        assert_eq!(truncate_body(s.clone()), s);
+    }
+
+    #[test]
+    fn truncate_body_long_string_is_truncated() {
+        let s = "x".repeat(RAW_BODY_MAX_LEN + 100);
+        let result = truncate_body(s);
+        assert!(result.ends_with(" [truncated]"));
+        assert!(result.len() < RAW_BODY_MAX_LEN + 100);
+    }
+
+    #[test]
+    fn truncate_body_respects_utf8_char_boundary() {
+        // 멀티바이트 문자가 경계에 걸쳐도 깨진 바이트로 자르지 않는다.
+        let s = "가".repeat(RAW_BODY_MAX_LEN);
+        let result = truncate_body(s);
+        assert!(result.ends_with(" [truncated]"));
     }
 }

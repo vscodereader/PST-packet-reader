@@ -12,7 +12,7 @@ use crate::naver_cafe::post::BROWSER_USER_AGENT;
 use crate::naver_cafe::{
     error::NaverCafeCommonErrorData,
     menu::models::{general_writable_boards, Menu, MenuError},
-    response::{NaverApiErrorBody, ResultEnvelope},
+    response::{truncate_body, NaverApiErrorBody, ResultEnvelope},
 };
 
 // ---------------------------------------------------------------------------
@@ -21,9 +21,6 @@ use crate::naver_cafe::{
 
 /// 게시판 목록 API 호스트.
 pub const MENU_API_HOST: &str = "apis.naver.com";
-
-/// 응답 바디 최대 보존 길이(바이트). 초과 시 잘라내고 주석을 추가한다.
-const RAW_BODY_MAX_LEN: usize = 2000;
 
 // ---------------------------------------------------------------------------
 // 경로 헬퍼
@@ -35,26 +32,6 @@ pub fn menu_list_path(cafe_id: &str) -> String {
         "/cafe-web/cafe-cafeinfo-api/v1.0/cafes/{}/editor/menus",
         cafe_id
     )
-}
-
-// ---------------------------------------------------------------------------
-// 내부 헬퍼
-// ---------------------------------------------------------------------------
-
-/// 응답 바디 텍스트를 최대 `RAW_BODY_MAX_LEN` 바이트로 잘라낸다.
-/// 잘린 경우 끝에 `[truncated]` 주석을 추가한다.
-fn truncate_body(raw: String) -> String {
-    if raw.len() <= RAW_BODY_MAX_LEN {
-        raw
-    } else {
-        let cutoff = raw
-            .char_indices()
-            .take_while(|(i, _)| *i < RAW_BODY_MAX_LEN)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(RAW_BODY_MAX_LEN);
-        format!("{} [truncated]", &raw[..cutoff])
-    }
 }
 
 /// non-2xx 응답 시 `MenuError`를 생성한다.

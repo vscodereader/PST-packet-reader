@@ -12,7 +12,7 @@
 use crate::naver_cafe::error::{ErrorEnvelope, NaverCafeCommonErrorData};
 use crate::naver_cafe::joined_cafes::models::{JoinCafesEnvelope, JoinedCafe, JoinedCafesError};
 use crate::naver_cafe::post::BROWSER_USER_AGENT;
-use crate::naver_cafe::response::NaverApiErrorBody;
+use crate::naver_cafe::response::{truncate_body, NaverApiErrorBody};
 
 // ---------------------------------------------------------------------------
 // 상수
@@ -20,9 +20,6 @@ use crate::naver_cafe::response::NaverApiErrorBody;
 
 /// 가입 카페 목록 API 호스트.
 pub const JOINED_CAFES_HOST: &str = "apis.naver.com";
-
-/// 응답 바디 최대 보존 길이(바이트).
-const RAW_BODY_MAX_LEN: usize = 2000;
 
 /// 페이지 순회 안전 상한(무한 루프 방지).
 const MAX_PAGES: u32 = 50;
@@ -37,25 +34,6 @@ pub fn join_cafes_path(page: u32) -> String {
         "/cafe-home-web/cafe-home/v1/config/join-cafes/groups/?page={}",
         page
     )
-}
-
-// ---------------------------------------------------------------------------
-// 내부 헬퍼
-// ---------------------------------------------------------------------------
-
-/// 응답 바디 텍스트를 최대 `RAW_BODY_MAX_LEN` 바이트로 잘라낸다.
-fn truncate_body(raw: String) -> String {
-    if raw.len() <= RAW_BODY_MAX_LEN {
-        raw
-    } else {
-        let cutoff = raw
-            .char_indices()
-            .take_while(|(i, _)| *i < RAW_BODY_MAX_LEN)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(RAW_BODY_MAX_LEN);
-        format!("{} [truncated]", &raw[..cutoff])
-    }
 }
 
 /// non-2xx 응답 시 오류를 생성한다(쿠키/세션 값은 절대 포함하지 않는다).
