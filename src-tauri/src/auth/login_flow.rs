@@ -19,6 +19,12 @@ const HEADLESS_TIMEOUT: Duration = Duration::from_secs(40);
 const HEADED_TIMEOUT: Duration = Duration::from_secs(180);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
+// 봇탐지(ncaptcha) 완화용 스텔스 스크립트. 페이지 스크립트보다 먼저 모든 새 문서에서 실행되어
+// CDP 제어 흔적인 `navigator.webdriver` 를 가린다(undefined). Chrome 실행 플래그
+// `--disable-blink-features=AutomationControlled` 와 belt-and-suspenders로 함께 둔다.
+// 헤드리스 모드에서도 webdriver 플래그가 노출되므로 JS로 한 번 더 덮는다.
+const STEALTH_INIT_JS: &str = "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});";
+
 /// 챌린지(추가 인증) 종류.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChallengeKind {
@@ -163,6 +169,14 @@ fn run_inner(
             "아이디 또는 비밀번호가 비어 있어 로그인을 시도하지 않았습니다.".to_owned(),
         ));
     }
+
+    // navigate 전에 스텔스 스크립트를 등록해, 로그인 폼이 로드되며 실행되는 ncaptcha JS가
+    // navigator.webdriver 를 읽기 전에 가려지도록 한다. CDP 호출이 실패해도 로그인 자체는
+    // 진행해야 하므로 best-effort(let _)로 둔다(Page 도메인 미활성 등 환경 차이 흡수).
+    let _ = client.call(
+        "Page.addScriptToEvaluateOnNewDocument",
+        json!({ "source": STEALTH_INIT_JS }),
+    );
 
     client.navigate(LOGIN_URL)?;
     // navigate가 readyState까지 기다려도, 로그인 폼이 렌더되고 네이버의 keydown 암호화
