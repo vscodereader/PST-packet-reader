@@ -66,20 +66,26 @@ fn every_list_command_returns_its_seeded_collection() {
     let (app, _dir) = mock_app();
     let wv = main_webview(&app);
 
+    // These domains have static seed data and must always return non-empty.
     for cmd in [
         "list_accounts",
         "list_posts",
         "list_queue_now",
         "list_queue_scheduled",
         "list_stocks",
-        "list_activity",
         "list_stats",
-        "list_log_batches",
         "list_cafes",
         "list_bands",
     ] {
         let out = invoke_ok(&wv, cmd, json!({}));
         assert!(!array(&out).is_empty(), "`{cmd}` returned an empty seed");
+    }
+
+    // activity and log_batches start empty — they are filled by real actions,
+    // not a static seed. Verify the commands return a JSON array (even if []).
+    for cmd in ["list_activity", "list_log_batches"] {
+        let out = invoke_ok(&wv, cmd, json!({}));
+        let _ = array(&out); // panics if not an array
     }
 }
 
