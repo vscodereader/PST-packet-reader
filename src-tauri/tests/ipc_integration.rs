@@ -203,6 +203,33 @@ fn scheduled_add_promote_and_cancel_flow() {
 }
 
 #[test]
+fn account_mutation_appends_to_activity_feed() {
+    let (app, _dir) = mock_app();
+    let wv = main_webview(&app);
+
+    // Activity feed starts empty (no static seed).
+    let before = invoke_ok(&wv, "list_activity", serde_json::json!({}));
+    assert_eq!(array(&before).len(), 0);
+
+    // add_account should prepend one activity row.
+    let account = serde_json::json!({
+        "id": "test-acct",
+        "platform": "forum",
+        "loginId": "test_user",
+        "pw": "pw123",
+        "status": "new",
+        "last": "—",
+        "tags": []
+    });
+    invoke_ok(&wv, "add_account", serde_json::json!({ "account": account }));
+
+    let after = invoke_ok(&wv, "list_activity", serde_json::json!({}));
+    assert_eq!(array(&after).len(), 1);
+    let text = after[0]["text"].as_str().expect("activity text");
+    assert!(text.contains("추가됨"), "expected '추가됨' in: {text}");
+}
+
+#[test]
 fn auth_commands_operate_against_a_temp_app_data_root() {
     // The auth commands resolve their paths from LOCALAPPDATA; point it at a
     // temp dir so the test never touches the real user data directory. This is
