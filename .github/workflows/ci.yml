@@ -81,7 +81,7 @@ jobs:
         run: cargo llvm-cov report --ignore-filename-regex '(/main\.rs|/lib\.rs|/bin/|/discussion_batch\.rs|/naver_automation\.rs|/naver_automation/(browser_flow|devtools_connection|discussion_room|post_form|packet_client)\.rs|/auth/(chrome|login|login_flow|adb)\.rs)'
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rust-coverage-lcov
           path: src-tauri/lcov.info
