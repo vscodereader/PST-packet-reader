@@ -56,6 +56,55 @@ pub(crate) enum Signal {
     Blocked,
 }
 
+/// 폴링 한 스텝의 판정 결과. 루프는 이 값을 실제 동작(반환/대기)으로 옮긴다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopDecision {
+    Success,
+    PromoteChallenge(ChallengeKind),
+    ConfirmedBad,
+    ConfirmedBlocked,
+    KeepWaiting(Option<Signal>),
+}
+
+/// 직전 음성 신호(`last_negative`)와 현재 신호로 이번 폴링의 동작을 결정한다(순수 함수).
+///
+/// 핵심: BadCredentials/Blocked는 **2회 연속**일 때만 확정한다. 클릭 직후 잠깐 떴다
+/// 사라지는 `#err_common`이나 네비게이션 과도기에 폼이 사라진 상태를 영구 실패로 latch하지
+/// 않기 위함이다. Success/Pending/headed-Challenge는 음성 누적을 초기화한다.
+fn decide_loop_step(
+    last_negative: Option<Signal>,
+    signal: Signal,
+    wait_for_human: bool,
+) -> LoopDecision {
+    match signal {
+        Signal::Success => LoopDecision::Success,
+        Signal::Challenge(kind) => {
+            if wait_for_human {
+                LoopDecision::KeepWaiting(None)
+            } else {
+                LoopDecision::PromoteChallenge(kind)
+            }
+        }
+        Signal::BadCredentials => {
+            if last_negative == Some(Signal::BadCredentials) {
+                LoopDecision::ConfirmedBad
+            } else {
+                LoopDecision::KeepWaiting(Some(Signal::BadCredentials))
+            }
+        }
+        Signal::Blocked => {
+            if wait_for_human {
+                LoopDecision::KeepWaiting(last_negative)
+            } else if last_negative == Some(Signal::Blocked) {
+                LoopDecision::ConfirmedBlocked
+            } else {
+                LoopDecision::KeepWaiting(Some(Signal::Blocked))
+            }
+        }
+        Signal::Pending => LoopDecision::KeepWaiting(None),
+    }
+}
+
 /// 페이지 신호를 로그인 진행/결과 신호로 분류한다(순수 함수).
 pub(crate) fn classify(signals: &PageSignals) -> Signal {
     if signals.logged_in {
@@ -161,40 +210,21 @@ fn run_inner(
         let _ = client.click_device_dontsave_if_present(Duration::from_millis(300));
 
         let signals = read_signals(client)?;
-        let signal = classify(&signals);
-        match signal {
-            Signal::Success => {
+        match decide_loop_step(last_negative, classify(&signals), wait_for_human) {
+            LoopDecision::Success => {
                 let cookies = collect_naver_cookies(client)?;
                 return Ok(LoginOutcome::Ok { cookies });
             }
-            Signal::Challenge(kind) => {
-                // headed: 사용자가 직접 푸는 중이므로 성공/타임아웃까지 계속 기다린다.
-                // headless: 즉시 반환해 호출자가 headed로 승격하게 한다.
-                if !wait_for_human {
-                    return Ok(LoginOutcome::ChallengeRequired { kind });
-                }
-                last_negative = None;
+            LoopDecision::PromoteChallenge(kind) => {
+                return Ok(LoginOutcome::ChallengeRequired { kind });
             }
-            Signal::BadCredentials => {
-                // 2회 연속일 때만 확정. 첫 히트는 과도기일 수 있으므로 다음 폴링을 기다린다.
-                if last_negative == Some(Signal::BadCredentials) {
-                    return Ok(LoginOutcome::BadCredentials);
-                }
-                last_negative = Some(Signal::BadCredentials);
+            LoopDecision::ConfirmedBad => return Ok(LoginOutcome::BadCredentials),
+            LoopDecision::ConfirmedBlocked => {
+                return Ok(LoginOutcome::Error(
+                    "로그인 접근이 차단되었습니다.".to_owned(),
+                ));
             }
-            Signal::Blocked => {
-                // headless에서만 즉시 차단으로 본다. headed에서는 기기등록/인증 중간 페이지를
-                // 차단으로 오판하지 않도록, 사람이 진행하는 동안 타임아웃까지 기다린다.
-                if !wait_for_human {
-                    if last_negative == Some(Signal::Blocked) {
-                        return Ok(LoginOutcome::Error(
-                            "로그인 접근이 차단되었습니다.".to_owned(),
-                        ));
-                    }
-                    last_negative = Some(Signal::Blocked);
-                }
-            }
-            Signal::Pending => last_negative = None,
+            LoopDecision::KeepWaiting(next) => last_negative = next,
         }
 
         if Instant::now() >= deadline {
@@ -399,6 +429,76 @@ mod tests {
         assert!(!credentials_present("", "pw"));
         assert!(!credentials_present("   ", "pw"));
         assert!(!credentials_present("user", ""));
+    }
+
+    // --- decide_loop_step: 클릭 직후 과도기 신호를 영구 실패로 latch하지 않는지(2회 확정) ---
+
+    #[test]
+    fn loop_success_returns_even_after_negative() {
+        assert_eq!(
+            decide_loop_step(None, Signal::Success, false),
+            LoopDecision::Success
+        );
+        // 직전에 음성 신호가 누적돼 있었어도 성공이면 성공으로 끝낸다.
+        assert_eq!(
+            decide_loop_step(Some(Signal::BadCredentials), Signal::Success, false),
+            LoopDecision::Success
+        );
+    }
+
+    #[test]
+    fn loop_bad_credentials_needs_two_consecutive_polls() {
+        // 첫 히트는 확정하지 않고 대기(과도기 깜빡임일 수 있으므로).
+        assert_eq!(
+            decide_loop_step(None, Signal::BadCredentials, false),
+            LoopDecision::KeepWaiting(Some(Signal::BadCredentials))
+        );
+        // 2회 연속이면 확정.
+        assert_eq!(
+            decide_loop_step(Some(Signal::BadCredentials), Signal::BadCredentials, false),
+            LoopDecision::ConfirmedBad
+        );
+    }
+
+    #[test]
+    fn loop_pending_resets_negative_so_transient_does_not_latch() {
+        assert_eq!(
+            decide_loop_step(Some(Signal::BadCredentials), Signal::Pending, false),
+            LoopDecision::KeepWaiting(None)
+        );
+    }
+
+    #[test]
+    fn loop_blocked_confirms_only_in_headless_over_two_polls() {
+        assert_eq!(
+            decide_loop_step(None, Signal::Blocked, false),
+            LoopDecision::KeepWaiting(Some(Signal::Blocked))
+        );
+        assert_eq!(
+            decide_loop_step(Some(Signal::Blocked), Signal::Blocked, false),
+            LoopDecision::ConfirmedBlocked
+        );
+    }
+
+    #[test]
+    fn loop_blocked_in_headed_keeps_waiting_for_user() {
+        // headed에서는 기기등록/인증 중간 페이지를 차단으로 단정하지 않는다.
+        assert_eq!(
+            decide_loop_step(None, Signal::Blocked, true),
+            LoopDecision::KeepWaiting(None)
+        );
+    }
+
+    #[test]
+    fn loop_challenge_promotes_in_headless_but_waits_in_headed() {
+        assert_eq!(
+            decide_loop_step(None, Signal::Challenge(ChallengeKind::Captcha), false),
+            LoopDecision::PromoteChallenge(ChallengeKind::Captcha)
+        );
+        assert_eq!(
+            decide_loop_step(None, Signal::Challenge(ChallengeKind::Otp), true),
+            LoopDecision::KeepWaiting(None)
+        );
     }
 
     #[test]
