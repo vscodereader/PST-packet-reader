@@ -78,6 +78,10 @@ pub fn import_accounts(
         .next()
         .map(|r| r.iter().map(|c| c.to_string()).collect())
         .unwrap_or_default();
+    // M-4: empty sheet check before required-column check
+    if headers.is_empty() {
+        return Err("시트가 비어 있습니다".into());
+    }
     let (Some(i_login), Some(i_pw), Some(i_plat)) = (
         header_index(&headers, "loginId"),
         header_index(&headers, "pw"),
@@ -93,6 +97,8 @@ pub fn import_accounts(
         errors: vec![],
     };
     let cell = |r: &[Data], i: usize| r.get(i).map(|c| c.to_string()).unwrap_or_default();
+    // I-2: track loginIds seen in this import to surface within-file duplicates
+    let mut seen = std::collections::HashSet::<String>::new();
 
     for (n, r) in rows.enumerate() {
         let login = cell(r, i_login).trim().to_owned();
@@ -105,6 +111,13 @@ pub fn import_accounts(
                 .push(format!("{}행: loginId/pw/platform 누락 또는 오류", n + 2));
             continue;
         }
+        // I-2: warn if this loginId was already seen earlier in this import
+        if seen.contains(&login) {
+            summary
+                .errors
+                .push(format!("{}행: loginId '{}' 중복 — 덮어씀", n + 2, login));
+        }
+        seen.insert(login.clone());
         let tags: Vec<String> = i_tags
             .map(|i| {
                 cell(r, i)
@@ -114,7 +127,7 @@ pub fn import_accounts(
                     .collect()
             })
             .unwrap_or_default();
-        let acct = Account {
+        let mut acct = Account {
             id: login.clone(),
             platform: plat.unwrap(),
             login_id: login.clone(),
@@ -124,7 +137,10 @@ pub fn import_accounts(
             tags,
         };
         match existing.iter_mut().find(|a| a.login_id == login) {
-            Some(a) => *a = acct,   // 중복 → 업데이트
+            Some(a) => {
+                acct.id = a.id.clone(); // I-1: preserve existing opaque id
+                *a = acct;
+            }
             None => existing.push(acct), // 신규 → 추가
         }
         summary.imported += 1;
@@ -163,6 +179,10 @@ pub fn import_posts(
         .next()
         .map(|r| r.iter().map(|c| c.to_string()).collect())
         .unwrap_or_default();
+    // M-4: empty sheet check before required-column check
+    if headers.is_empty() {
+        return Err("시트가 비어 있습니다".into());
+    }
     let (Some(i_title), Some(i_body)) = (
         header_index(&headers, "title"),
         header_index(&headers, "body"),
@@ -177,6 +197,8 @@ pub fn import_posts(
         errors: vec![],
     };
     let cell = |r: &[Data], i: usize| r.get(i).map(|c| c.to_string()).unwrap_or_default();
+    // M-6: hoist now_ms() so it's called once per import, not per row
+    let base_ms = crate::util::now_ms();
 
     for (n, r) in rows.enumerate() {
         let title_raw = cell(r, i_title).trim().to_owned();
@@ -193,8 +215,10 @@ pub fn import_posts(
         let kind = i_kind
             .map(|i| parse_kind(&cell(r, i)))
             .unwrap_or(ModeValue::Post);
-        let id = format!("imp-{}", crate::util::now_ms() + n as i64);
-        let excerpt: String = body.chars().take(60).collect();
+        let id = format!("imp-{}", base_ms + n as i64);
+        // I-3: align with writer-modal — non-whitespace char count, 70-char excerpt
+        let words = body.chars().filter(|c| !c.is_whitespace()).count() as u32;
+        let excerpt: String = body.chars().take(70).collect();
         existing.insert(
             0,
             LibraryPost {
@@ -202,7 +226,7 @@ pub fn import_posts(
                 title,
                 kind,
                 updated: "방금 전".into(),
-                words: body.chars().count() as u32,
+                words,
                 status: PostStatus::Draft,
                 excerpt,
                 body: Some(body),
@@ -516,9 +540,12 @@ mod tests {
             for (c, h) in ["title", "body", "kind"].iter().enumerate() {
                 s.write_string(0, c as u16, *h).unwrap();
             }
+            // row 1: valid row that duplicates the existing title
             s.write_string(1, 0, "실적 정리").unwrap();
             s.write_string(1, 1, "본문").unwrap();
             s.write_string(1, 2, "post").unwrap();
+            // M-5: row 2: empty title → should be skipped with an error recorded
+            s.write_string(2, 1, "body without title").unwrap();
             wb.save(&path).unwrap();
         }
         use crate::ipc::posts::PostStatus;
@@ -538,6 +565,11 @@ mod tests {
         }];
         let (next, summary) = import_posts(path.to_str().unwrap(), existing).unwrap();
         assert_eq!(summary.imported, 1);
+        assert_eq!(summary.skipped, 1, "empty-title row must be counted as skipped");
+        assert!(
+            !summary.errors.is_empty(),
+            "empty-title row must record an error"
+        );
         assert!(next.iter().any(|p| p.title == "실적 정리 (1)"));
         let _ = std::fs::remove_dir_all(&dir);
     }
