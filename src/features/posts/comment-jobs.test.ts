@@ -3,11 +3,13 @@ import { describe, it, expect } from "vitest";
 import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutcome";
 
 import {
+  buildArticleListCommentJobs,
   buildBothCommentJobs,
   buildUrlCommentJobs,
   commentSummary,
   commentsAllOk,
   parseCafeArticleUrl,
+  topNArticles,
 } from "./comment-jobs";
 
 describe("parseCafeArticleUrl", () => {
@@ -101,6 +103,76 @@ describe("buildUrlCommentJobs", () => {
     );
     expect(jobs[0]?.accountId).toBe("a5");
     expect(jobs[5]?.accountId).toBe("a10");
+  });
+});
+
+describe("topNArticles", () => {
+  const article = (articleId: number) => ({ articleId });
+
+  it("takes the first N articles in list order", () => {
+    const arts = [article(1), article(2), article(3), article(4), article(5)];
+    expect(topNArticles(arts, 3).map((a) => a.articleId)).toEqual([1, 2, 3]);
+  });
+
+  it("returns only what's available when the list is shorter than N", () => {
+    const arts = [article(1), article(2)];
+    expect(topNArticles(arts, 5).map((a) => a.articleId)).toEqual([1, 2]);
+  });
+
+  it("returns an empty list for N <= 0 or an empty source", () => {
+    expect(topNArticles([article(1)], 0)).toEqual([]);
+    expect(topNArticles([], 5)).toEqual([]);
+  });
+});
+
+describe("buildArticleListCommentJobs", () => {
+  const article = (articleId: number) => ({ articleId });
+
+  it("produces one job per (top-N article × comment) for each account", () => {
+    const jobs = buildArticleListCommentJobs(
+      ["a5", "a10"],
+      111,
+      [article(1000), article(1001), article(1002)],
+      2,
+      ["좋네요", "추가매수"],
+    );
+    // 2 accounts × 2 articles × 2 comments = 8 jobs
+    expect(jobs).toHaveLength(8);
+    expect(jobs[0]).toEqual({
+      accountId: "a5",
+      cafeId: 111,
+      articleId: 1000,
+      content: "좋네요",
+    });
+    expect(jobs.every((j) => j.cafeId === 111)).toBe(true);
+    // every targeted article is one of the top-2
+    expect(new Set(jobs.map((j) => j.articleId))).toEqual(
+      new Set([1000, 1001]),
+    );
+  });
+
+  it("falls back to available articles when fewer than N exist", () => {
+    const jobs = buildArticleListCommentJobs(["a5"], 222, [article(2000)], 5, [
+      "댓글",
+    ]);
+    // only 1 article available though N=5 → 1 account × 1 article × 1 comment
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toEqual({
+      accountId: "a5",
+      cafeId: 222,
+      articleId: 2000,
+      content: "댓글",
+    });
+  });
+
+  it("is empty when there are no articles, accounts, or comments", () => {
+    expect(buildArticleListCommentJobs([], 1, [article(1)], 3, ["x"])).toEqual(
+      [],
+    );
+    expect(buildArticleListCommentJobs(["a"], 1, [], 3, ["x"])).toEqual([]);
+    expect(buildArticleListCommentJobs(["a"], 1, [article(1)], 3, [])).toEqual(
+      [],
+    );
   });
 });
 

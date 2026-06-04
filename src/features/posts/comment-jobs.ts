@@ -103,6 +103,42 @@ export function buildUrlCommentJobs(
 }
 
 /**
+ * Take the top-N entries of a latest/popular article list, preserving the
+ * backend's order. Graceful fallback: when the list has fewer than N (or N <= 0)
+ * only the available entries are returned — never throws or pads.
+ */
+export function topNArticles<T>(articles: T[], n: number): T[] {
+  if (n <= 0) return [];
+  return articles.slice(0, n);
+}
+
+/**
+ * `comment` + `latest`/`popular` mode: comment on the top-N articles of a cafe's
+ * latest/popular list. Produces one job per (account × top-N article × comment),
+ * all aimed at the same numeric `cafeId`. The article count is bounded by what
+ * the list actually returned (fewer than `count` → use what's available).
+ */
+export function buildArticleListCommentJobs(
+  accountIds: string[],
+  cafeId: number,
+  articles: { articleId: number }[],
+  count: number,
+  comments: string[],
+): CommentJob[] {
+  const targets = topNArticles(articles, count);
+  return accountIds.flatMap((accountId) =>
+    targets.flatMap((a) =>
+      comments.map((content) => ({
+        accountId,
+        cafeId,
+        articleId: a.articleId,
+        content,
+      })),
+    ),
+  );
+}
+
+/**
  * Human "댓글 N/M건" summary of one account's comment outcomes, for folding into
  * a result row. `null` outcomes (the whole call rejected) read as "댓글 실패".
  */
