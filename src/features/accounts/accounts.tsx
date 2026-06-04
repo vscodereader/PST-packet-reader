@@ -18,7 +18,7 @@ import {
   UnstyledButton,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { save } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { STATUS_ACCOUNT, STATUS_ACCOUNT_ORDER } from "@/shared/data/config";
@@ -485,9 +485,27 @@ export function Accounts({ go }: { go: GoFn }) {
             size="sm"
             variant="default"
             leftSection={<Icon.inbox size={16} />}
-            onClick={() =>
-              toast("엑셀(.xlsx) 파일에서 계정을 가져왔어요", "green")
-            }
+            onClick={async () => {
+              const path = await open({
+                multiple: false,
+                filters: [{ name: "Excel", extensions: ["xlsx"] }],
+              });
+              if (typeof path !== "string") return;
+              try {
+                const summary = await ipc.excel.importAccounts(path);
+                setRows(await ipc.accounts.list());
+                toast(
+                  `${summary.imported}건 가져옴${summary.skipped ? `, ${summary.skipped}건 건너뜀` : ""}`,
+                  "green",
+                );
+              } catch (err) {
+                toast(
+                  "가져오기 실패: " +
+                    (err instanceof Error ? err.message : String(err)),
+                  "red",
+                );
+              }
+            }}
           >
             엑셀 가져오기
           </Button>

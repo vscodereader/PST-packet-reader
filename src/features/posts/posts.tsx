@@ -15,6 +15,7 @@ import {
   Title,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 
 import { KIND, KIND_ICON, STATUS_LABEL } from "@/shared/data/config";
@@ -106,13 +107,43 @@ export function Posts({ go }: { go: GoFn }) {
             작성한 글·댓글을 모아두고, 원하는 글을 골라 여러 계정에 게시하세요.
           </Text>
         </Box>
-        <Button
-          size="sm"
-          leftSection={<Icon.pencil size={18} />}
-          onClick={openNew}
-        >
-          글쓰기
-        </Button>
+        <Group gap="xs">
+          <Button
+            size="sm"
+            variant="default"
+            leftSection={<Icon.inbox size={16} />}
+            onClick={async () => {
+              const path = await open({
+                multiple: false,
+                filters: [{ name: "Excel", extensions: ["xlsx"] }],
+              });
+              if (typeof path !== "string") return;
+              try {
+                const summary = await ipc.excel.importPosts(path);
+                setPosts(await ipc.posts.list());
+                toast(
+                  `${summary.imported}건 가져옴${summary.skipped ? `, ${summary.skipped}건 건너뜀` : ""}`,
+                  "green",
+                );
+              } catch (err) {
+                toast(
+                  "가져오기 실패: " +
+                    (err instanceof Error ? err.message : String(err)),
+                  "red",
+                );
+              }
+            }}
+          >
+            엑셀 가져오기
+          </Button>
+          <Button
+            size="sm"
+            leftSection={<Icon.pencil size={18} />}
+            onClick={openNew}
+          >
+            글쓰기
+          </Button>
+        </Group>
       </Group>
 
       <Group justify="space-between" mb={18} wrap="wrap">

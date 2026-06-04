@@ -6,6 +6,7 @@ import type { Band } from "@/shared/bindings/Band";
 import type { Cafe } from "@/shared/bindings/Cafe";
 import type { DashStat } from "@/shared/bindings/DashStat";
 import type { EnvironmentStatus } from "@/shared/bindings/EnvironmentStatus";
+import type { ImportSummary } from "@/shared/bindings/ImportSummary";
 import type { LibraryPost } from "@/shared/bindings/LibraryPost";
 import type { LogBatch } from "@/shared/bindings/LogBatch";
 import type { QueueNowItem } from "@/shared/bindings/QueueNowItem";
@@ -19,6 +20,7 @@ export type {
   Cafe,
   DashStat,
   EnvironmentStatus,
+  ImportSummary,
   LibraryPost,
   LogBatch,
   QueueNowItem,
@@ -146,12 +148,16 @@ export const ipc = {
     publishNow: (request: ForumPublishRequest) =>
       call<ForumPublishResult[]>("run_forum_publish_now", { request }),
   },
-  // 엑셀(.xlsx) 내보내기 — Rust에서 파일 쓰기, 프론트에서 경로 공급.
+  // 엑셀(.xlsx) 내보내기/가져오기 — Rust에서 파일 처리, 프론트에서 경로 공급.
   excel: {
     exportAccounts: (path: string) =>
       call<void>("export_accounts_xlsx", { path }),
     exportActivity: (path: string) =>
       call<void>("export_activity_xlsx", { path }),
+    importAccounts: (path: string) =>
+      call<ImportSummary>("import_accounts_xlsx", { path }),
+    importPosts: (path: string) =>
+      call<ImportSummary>("import_posts_xlsx", { path }),
   },
   // 네이버 로그인 자동화(CDP). 계정 ID/PW로 로그인해 쿠키를 저장한다.
   auth: {

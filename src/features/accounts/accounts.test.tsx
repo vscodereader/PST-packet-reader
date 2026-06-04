@@ -256,14 +256,47 @@ describe("Accounts", () => {
     }
   });
 
-  it("fires excel import action (stub, no dialog)", async () => {
+  it("fires excel import — opens open dialog and calls importAccounts", async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(open).mockResolvedValueOnce("/tmp/계정.xlsx");
+    vi.mocked(ipcBackend).mockClear();
+    await renderAccounts();
+    await userEvent.click(
+      screen.getByRole("button", { name: /엑셀 가져오기/ }),
+    );
+    expect(vi.mocked(open)).toHaveBeenCalledWith(
+      expect.objectContaining({ multiple: false }),
+    );
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(ipcBackend)
+          .mock.calls.some((c) => c[0] === "import_accounts_xlsx"),
+      ).toBe(true),
+    );
+    await waitFor(() =>
+      expect(notifShow).toHaveBeenCalledWith(
+        expect.objectContaining({
+          color: "green",
+          message: expect.stringContaining("가져옴"),
+        }),
+      ),
+    );
+  });
+
+  it("does not invoke import when open dialog is cancelled", async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(open).mockResolvedValueOnce(null);
+    vi.mocked(ipcBackend).mockClear();
     await renderAccounts();
     await userEvent.click(
       screen.getByRole("button", { name: /엑셀 가져오기/ }),
     );
     expect(
-      screen.getByRole("heading", { name: "계정 관리" }),
-    ).toBeInTheDocument();
+      vi
+        .mocked(ipcBackend)
+        .mock.calls.some((c) => c[0] === "import_accounts_xlsx"),
+    ).toBe(false);
   });
 
   it("adds a tag through the tag cell popover", async () => {

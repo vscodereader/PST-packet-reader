@@ -1015,6 +1015,11 @@ export const invoke = vi.fn(
       case "export_activity_xlsx":
         return undefined;
 
+      // --- 엑셀 가져오기 (모킹 — canned summary 반환) ----------------------
+      case "import_accounts_xlsx":
+      case "import_posts_xlsx":
+        return { imported: 2, skipped: 0, errors: [] };
+
       // --- 네이버 로그인 자동화 (모킹) -------------------------------------
       case "bootstrap_runtime":
         return {};
