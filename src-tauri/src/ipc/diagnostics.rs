@@ -334,6 +334,10 @@ mod tests {
         assert_eq!(status, back);
     }
 
+    // CHROME_PATH(프로세스 전역 env)를 probe_chrome 실행 내내 고정하려면 await 너머로
+    // ENV_LOCK 을 들고 있어야 한다. probe_chrome 은 ENV_LOCK 을 다시 잡지 않으므로
+    // 데드락 위험이 없는 의도된 보유라, 이 테스트에 한해 린트를 허용한다.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn probe_chrome_keeps_installed_true_when_version_unreadable() {
         // CHROME_PATH 가 존재하면 installed=true 이지만, 옆에 버전 폴더가 없으면
