@@ -165,8 +165,14 @@ pub async fn resolve_cafe(input: String, account_id: String) -> Result<Cafe, Res
 
     let orchestrator = CafeOrchestrator::new();
     let cafe_id = orchestrator.resolve_cafe_id(&input, cookie).await?;
-    let info = orchestrator.fetch_cafe_info(cafe_id, cookie).await?;
-    let menus = orchestrator.list_boards(cafe_id, cookie).await?;
+    // 카페 정보·게시판 목록 조회는 둘 다 cafe_id에만 의존하고 서로 독립적이라
+    // 동시에 보낸다(순차 시 왕복 2회 → 1회).
+    let (info, menus) = tokio::join!(
+        orchestrator.fetch_cafe_info(cafe_id, cookie),
+        orchestrator.list_boards(cafe_id, cookie),
+    );
+    let info = info?;
+    let menus = menus?;
 
     Ok(assemble_cafe(input, cafe_id, info.cafe_name, &menus))
 }
