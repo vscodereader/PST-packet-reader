@@ -40,3 +40,13 @@ src-tauri/binaries/
 
 # Brainstorming visual-companion mockups
 .superpowers/
+
+# 개인 메모 — GitHub에 올리지 않음 (본인 확인/정리용 노트)
+/scratch/
+notes/
+*.local.md
+NOTES.md
+NOTES.local.md
+TODO.local.md
+메모.md
+정리.md
