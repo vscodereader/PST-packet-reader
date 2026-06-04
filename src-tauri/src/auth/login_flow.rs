@@ -173,13 +173,23 @@ fn run_inner(
         ));
     }
 
-    // 자격증명을 실제 키 이벤트로 채운다. 3회 재시도 후에도 필드가 비어 있으면(일시적
-    // 렌더/타이밍 문제) type_into가 false를 돌려준다. 이때 빈/부분 자격증명으로 로그인
-    // 버튼을 누르면 결과가 #err_common/타임아웃으로 분류돼 일시적 타이핑 실패가 영구
-    // BadCredentials/Error로 둔갑한다. 그래서 클릭하지 않고 명확한 입력 실패로 중단한다.
-    if !type_into(client, "#id", id)? || !type_into(client, "#pw", pw)? {
+    // 사람처럼 천천히, 폼 스크립트가 자리잡을 시간을 두고 입력한다:
+    // 로그인 폼이 뜬 뒤 2초 대기 → 아이디 입력 → 1초 대기 → 비밀번호 입력.
+    // 3회 재시도 후에도 필드가 비어 있으면(일시적 렌더/타이밍 문제) type_into가 false를
+    // 돌려준다. 빈/부분 자격증명으로 로그인 버튼을 누르면 결과가 #err_common/타임아웃으로
+    // 분류돼 일시적 타이핑 실패가 영구 BadCredentials/Error로 둔갑하므로, 클릭하지 않고
+    // 명확한 입력 실패로 중단한다.
+    sleep(Duration::from_secs(2));
+    if !type_into(client, "#id", id)? {
         return Ok(LoginOutcome::Error(
-            "로그인 폼 자동 입력에 실패했습니다(필드가 비어 로그인을 중단). 잠시 후 다시 시도하세요."
+            "로그인 폼 자동 입력에 실패했습니다(아이디 칸이 비어 로그인을 중단). 잠시 후 다시 시도하세요."
+                .to_owned(),
+        ));
+    }
+    sleep(Duration::from_secs(1));
+    if !type_into(client, "#pw", pw)? {
+        return Ok(LoginOutcome::Error(
+            "로그인 폼 자동 입력에 실패했습니다(비밀번호 칸이 비어 로그인을 중단). 잠시 후 다시 시도하세요."
                 .to_owned(),
         ));
     }
@@ -238,8 +248,8 @@ fn run_inner(
     }
 }
 
-// 로그인 폼(#id/#pw)이 나타나고 입력 가능해질 때까지 기다린 뒤, 폼 스크립트가 자리잡도록
-// 잠깐 안정화 시간을 준다. 이 대기 없이 곧장 타이핑하면 자동 입력이 빈 화면에 헛쳐진다.
+// 로그인 폼(#id/#pw)이 나타나고 입력 가능해질 때까지 기다린다. 폼 스크립트가 자리잡도록
+// 주는 안정화 대기(2초)는 호출부(run_inner)에서 아이디 입력 직전에 둔다.
 fn wait_for_login_form(client: &mut CdpClient) -> bool {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -247,7 +257,6 @@ fn wait_for_login_form(client: &mut CdpClient) -> bool {
             .evaluate_bool("!!document.querySelector('#id') && !!document.querySelector('#pw')")
             .unwrap_or(false);
         if ready {
-            sleep(Duration::from_millis(1500));
             return true;
         }
         if Instant::now() >= deadline {
