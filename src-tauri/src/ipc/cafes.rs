@@ -14,9 +14,10 @@ use ts_rs::TS;
 use crate::auth::read_account_cookies;
 use crate::naver_cafe::post::cookie_header_from_storage_state;
 use crate::naver_cafe::{
-    run_comment_jobs as run_comment_jobs_internal, run_post_jobs as run_jobs, CafeOrchestrator,
-    CommentJob, CommentJobReport, ErrorEnvelope, JobReport, JoinedCafe, Menu,
-    NaverCafeCommonErrorData, PostJob, CODE_NO_COOKIES,
+    fetch_article_list_for_account, run_comment_jobs as run_comment_jobs_internal,
+    run_post_jobs as run_jobs, ArticleListResponse, CafeOrchestrator, CommentJob, CommentJobReport,
+    ErrorEnvelope, JobReport, JoinedCafe, Menu, NaverCafeCommonErrorData, PostJob, SortBy,
+    CODE_NO_COOKIES,
 };
 use crate::store::JsonStore;
 
@@ -201,6 +202,48 @@ pub async fn list_joined_cafes(
         .await
 }
 
+/// Map the UI's `sortBy` string into the backend [`SortBy`] enum.
+///
+/// Accepts the camelCase serde forms ("latest"/"popular"). Unknown values
+/// return `Err` so the caller can surface an `INVALID_SORT_BY` error rather
+/// than silently defaulting. Returns the lightweight unit error to keep the
+/// large [`ErrorEnvelope`] off this helper's `Result` (clippy::result_large_err).
+fn parse_sort_by(sort_by: &str) -> Result<SortBy, ()> {
+    match sort_by {
+        "latest" => Ok(SortBy::Latest),
+        "popular" => Ok(SortBy::Popular),
+        _ => Err(()),
+    }
+}
+
+/// Build the `INVALID_SORT_BY` error envelope for an unrecognized sort value.
+fn invalid_sort_by_error(sort_by: &str) -> ErrorEnvelope<NaverCafeCommonErrorData> {
+    ErrorEnvelope {
+        trace_id: String::new(),
+        code: "INVALID_SORT_BY".to_string(),
+        message: format!(
+            "정렬 기준 '{}'을(를) 인식하지 못했습니다. latest 또는 popular여야 합니다.",
+            sort_by
+        ),
+        error_data: None,
+    }
+}
+
+/// List a cafe's articles (latest / popular) for the given account.
+///
+/// Reads `accountId`'s stored session cookie and queries the article-list API,
+/// sorted by `sortBy` ("latest" | "popular"). Cookie values never appear in the
+/// returned error.
+#[tauri::command]
+pub async fn list_cafe_articles(
+    cafe_id: String,
+    sort_by: String,
+    account_id: String,
+) -> Result<ArticleListResponse, ErrorEnvelope<NaverCafeCommonErrorData>> {
+    let sort = parse_sort_by(&sort_by).map_err(|()| invalid_sort_by_error(&sort_by))?;
+    fetch_article_list_for_account(&cafe_id, sort, &account_id).await
+}
+
 /// Slim per-job result returned to the UI — exactly what the publish modal
 /// renders. The rich internal `JobReport`/`PostError` stays backend-only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -349,6 +392,48 @@ mod tests {
                 error_data: None,
             }),
         }
+    }
+
+    #[test]
+    fn parse_sort_by_accepts_latest_and_popular() {
+        assert_eq!(parse_sort_by("latest").unwrap(), SortBy::Latest);
+        assert_eq!(parse_sort_by("popular").unwrap(), SortBy::Popular);
+    }
+
+    #[test]
+    fn parse_sort_by_rejects_unknown() {
+        assert!(
+            parse_sort_by("trending").is_err(),
+            "알 수 없는 값은 Err여야 함"
+        );
+    }
+
+    #[test]
+    fn invalid_sort_by_error_carries_code() {
+        let err = invalid_sort_by_error("trending");
+        assert_eq!(err.code, "INVALID_SORT_BY");
+        assert!(err.message.contains("trending"));
+    }
+
+    #[tokio::test]
+    async fn list_cafe_articles_with_unknown_sort_returns_invalid_sort_by() {
+        let err = list_cafe_articles("31732304".into(), "trending".into(), "acc".into())
+            .await
+            .expect_err("잘못된 정렬은 Err여야 함");
+        assert_eq!(err.code, "INVALID_SORT_BY");
+    }
+
+    #[tokio::test]
+    async fn list_cafe_articles_without_session_returns_no_cookies() {
+        // 정렬은 유효하지만 쿠키 없는 계정 → NO_COOKIES (네트워크 미발생).
+        let err = list_cafe_articles(
+            "31732304".into(),
+            "latest".into(),
+            "no-such-account-xyz".into(),
+        )
+        .await
+        .expect_err("쿠키 없는 계정은 Err여야 함");
+        assert_eq!(err.code, CODE_NO_COOKIES);
     }
 
     #[tokio::test]
