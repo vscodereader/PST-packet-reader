@@ -5,7 +5,9 @@ use std::path::Path;
 
 use tauri::{AppHandle, Builder, Manager, Runtime};
 
-use crate::ipc::{accounts, activity, bands, cafes, log_batches, posts, queue, stats, stocks};
+use crate::ipc::{
+    accounts, activity, bands, cafes, diagnostics, log_batches, posts, queue, stats, stocks,
+};
 use crate::store::JsonStore;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -82,6 +84,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         log_batches::list_log_batches,
         cafes::list_cafes,
         bands::list_bands,
+        diagnostics::get_environment_status,
         bootstrap_runtime,
         save_accounts,
         enqueue_cookie_refresh,

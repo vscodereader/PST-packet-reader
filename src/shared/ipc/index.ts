@@ -5,6 +5,7 @@ import type { ActivityItem } from "@/shared/bindings/ActivityItem";
 import type { Band } from "@/shared/bindings/Band";
 import type { Cafe } from "@/shared/bindings/Cafe";
 import type { DashStat } from "@/shared/bindings/DashStat";
+import type { EnvironmentStatus } from "@/shared/bindings/EnvironmentStatus";
 import type { LibraryPost } from "@/shared/bindings/LibraryPost";
 import type { LogBatch } from "@/shared/bindings/LogBatch";
 import type { QueueNowItem } from "@/shared/bindings/QueueNowItem";
@@ -17,6 +18,7 @@ export type {
   Band,
   Cafe,
   DashStat,
+  EnvironmentStatus,
   LibraryPost,
   LogBatch,
   QueueNowItem,
@@ -72,4 +74,8 @@ export const ipc = {
   logBatches: { list: () => call<LogBatch[]>("list_log_batches") },
   cafes: { list: () => call<Cafe[]>("list_cafes") },
   bands: { list: () => call<Band[]>("list_bands") },
+  diagnostics: {
+    /** Probe Chrome install/version + ADB device connection (UI 새로고침). */
+    getStatus: () => call<EnvironmentStatus>("get_environment_status"),
+  },
 };

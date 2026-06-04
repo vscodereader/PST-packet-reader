@@ -1,4 +1,5 @@
 import {
+  ActionIcon,
   Badge,
   Box,
   Button,
@@ -15,10 +16,12 @@ import {
   TextInput,
   ThemeIcon,
   Title,
+  Tooltip,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
+import type { EnvironmentStatus } from "@/shared/bindings/EnvironmentStatus";
 import { ACTIVE_PLATFORMS, KIND } from "@/shared/data/config";
 import { batchStatus } from "@/shared/data/helpers";
 import type { BatchItem, LogBatch, LogFilter } from "@/shared/data/types";
@@ -229,8 +232,22 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
   );
   const [logBatches, setLogBatches] = useState<LogBatch[]>([]);
   const [activity, setActivity] = useState<SystemRow[]>([]);
+  const [env, setEnv] = useState<EnvironmentStatus | null>(null);
+  const [envLoading, setEnvLoading] = useState(false);
+
+  // Re-probe the live environment (Chrome/ADB) from the 새로고침 button. The
+  // loading flag drives the button spinner; the initial probe runs in the effect
+  // below (async setState only, to avoid synchronous setState in an effect).
+  const refreshEnv = useCallback(() => {
+    setEnvLoading(true);
+    void ipc.diagnostics
+      .getStatus()
+      .then(setEnv)
+      .finally(() => setEnvLoading(false));
+  }, []);
 
   useEffect(() => {
+    void ipc.diagnostics.getStatus().then(setEnv);
     void ipc.logBatches.list().then(setLogBatches);
     void ipc.activity.list().then((items) =>
       setActivity(
@@ -316,6 +333,36 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
     },
     { t: "성공", v: okCount, color: "green", ic: "checkCircle" as const },
     { t: "실패 포함", v: failCount, color: "red", ic: "alert" as const },
+  ];
+
+  // Chrome/ADB 진단 카드용 표시값. env가 아직 없으면 "확인 중".
+  // (옵셔널 필드는 ts-rs상 `string | null`이라 null 기준으로 분기한다.)
+  const chrome = env?.chrome ?? null;
+  const chromeCard = !chrome
+    ? { color: "gray", label: "확인 중", detail: "상태를 불러오는 중…" }
+    : chrome.installed
+      ? {
+          color: "green",
+          label: "설치됨",
+          detail:
+            chrome.version != null ? `버전 ${chrome.version}` : "버전 미상",
+        }
+      : {
+          color: "red",
+          label: "미설치",
+          detail: chrome.error ?? "Chrome을 찾을 수 없습니다",
+        };
+
+  const adb = env?.adb ?? null;
+  const adbCard = !adb
+    ? { color: "gray", label: "확인 중", detail: "상태를 불러오는 중…" }
+    : adb.connected
+      ? { color: "green", label: "연결됨", detail: "디바이스 감지됨" }
+      : { color: "gray", label: "미연결", detail: "감지된 디바이스 없음" };
+
+  const envCards = [
+    { t: "Chrome", ic: "globe" as const, ...chromeCard },
+    { t: "ADB", ic: "bolt" as const, ...adbCard },
   ];
 
   return (
@@ -410,6 +457,56 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
                   </Text>
                   <Text fz={12.5} c="dimmed" fw={600} mt={4}>
                     {s.t}
+                  </Text>
+                </Box>
+              </Group>
+            </Card>
+          );
+        })}
+      </SimpleGrid>
+
+      <Group justify="space-between" align="center" mb={10}>
+        <Text fz={13} fw={700} c="dimmed">
+          환경 상태
+        </Text>
+        <Tooltip label="다시 확인" withArrow>
+          <ActionIcon
+            variant="subtle"
+            color="gray"
+            aria-label="환경 상태 새로고침"
+            loading={envLoading}
+            onClick={refreshEnv}
+          >
+            <Icon.refresh size={16} />
+          </ActionIcon>
+        </Tooltip>
+      </Group>
+
+      <SimpleGrid cols={2} spacing={14} mb={22}>
+        {envCards.map((c) => {
+          const I = Icon[c.ic];
+          return (
+            <Card key={c.t} withBorder padding="md" radius="md">
+              <Group gap={13} wrap="nowrap">
+                <ThemeIcon
+                  size={40}
+                  radius="md"
+                  variant="light"
+                  color={c.color}
+                >
+                  <I size={21} />
+                </ThemeIcon>
+                <Box style={{ minWidth: 0 }}>
+                  <Group gap={8} wrap="nowrap">
+                    <Text fz={14} fw={800} lh={1}>
+                      {c.t}
+                    </Text>
+                    <Badge size="sm" color={c.color} variant="light">
+                      {c.label}
+                    </Badge>
+                  </Group>
+                  <Text fz={12.5} c="dimmed" fw={600} mt={5} truncate>
+                    {c.detail}
                   </Text>
                 </Box>
               </Group>

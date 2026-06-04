@@ -11,6 +11,7 @@ mod util;
 use tauri::{AppHandle, Runtime};
 
 pub use accounts::{read_account_cookies, save_accounts_file};
+pub use adb::probe_adb_connection;
 pub use error::OrchestratorError;
 pub use paths::{app_data_root, paths_for_root};
 pub use queue::{enqueue_accounts, get_queue_status, QueueState};

@@ -11,6 +11,17 @@ pub async fn assert_adb_device() -> Result<(), OrchestratorError> {
     Ok(())
 }
 
+/// 진단용: ADB 디바이스가 연결되어 있는지 부작용 없이 확인한다.
+///
+/// `autodetect` 는 동기 USB 스캔이라 블로킹되므로 `spawn_blocking` 으로 감싼다.
+/// 연결만 확인하고 디바이스를 즉시 해제하며, shell 명령(비행기 모드 등)은
+/// 호출하지 않는다 — 상태 조회 전용이라 부작용이 없어야 한다.
+pub async fn probe_adb_connection() -> Result<(), OrchestratorError> {
+    tokio::task::spawn_blocking(|| connect_device().map(|_device| ()))
+        .await
+        .map_err(|e| OrchestratorError::CommandFailed(format!("adb probe join error: {e}")))?
+}
+
 /// 비행기 모드를 켬과 끔으로 토글하여 IP 변경을 유도한다.
 pub async fn toggle_airplane_mode() -> Result<(), OrchestratorError> {
     let mut device = connect_device()?;

@@ -96,4 +96,28 @@ describe("Notifications", () => {
     await pickOption(1, "밴드");
     expect(screen.getByRole("heading", { name: "알림" })).toBeInTheDocument();
   });
+
+  it("shows Chrome version and ADB connection from the environment probe", async () => {
+    renderLog();
+    // Chrome card: installed + version from the SEED env status.
+    expect(await screen.findByText("버전 125.0.6422.142")).toBeInTheDocument();
+    expect(screen.getByText("설치됨")).toBeInTheDocument();
+    // ADB card: connected.
+    expect(screen.getByText("연결됨")).toBeInTheDocument();
+  });
+
+  it("re-probes the environment when the 새로고침 button is clicked", async () => {
+    const { invoke } = await import("@/test/ipc");
+    renderLog();
+    await screen.findByText("설치됨"); // initial probe resolved
+    const calls = () =>
+      vi
+        .mocked(invoke)
+        .mock.calls.filter((c) => c[0] === "get_environment_status").length;
+    const before = calls();
+    await userEvent.click(
+      screen.getByRole("button", { name: "환경 상태 새로고침" }),
+    );
+    expect(calls()).toBeGreaterThan(before);
+  });
 });

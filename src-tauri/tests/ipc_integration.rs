@@ -84,6 +84,19 @@ fn every_list_command_returns_its_seeded_collection() {
 }
 
 #[test]
+fn get_environment_status_returns_chrome_and_adb_state() {
+    let (app, _dir) = mock_app();
+    let wv = main_webview(&app);
+
+    // Always resolves (never throws) and carries both probes' state, even on a
+    // CI host with no Chrome and no ADB device (both report false).
+    let out = invoke_ok(&wv, "get_environment_status", json!({}));
+
+    assert!(out["chrome"]["installed"].is_boolean(), "chrome: {out}");
+    assert!(out["adb"]["connected"].is_boolean(), "adb: {out}");
+}
+
+#[test]
 fn greet_command_round_trips_the_name() {
     let (app, _dir) = mock_app();
     let wv = main_webview(&app);
