@@ -279,6 +279,77 @@ fn wait_for_login_form(client: &mut CdpClient) -> bool {
     }
 }
 
+// 한 글자에 대응하는 US 키보드 물리키 정보. 합성 키 이벤트에 실제 브라우저와 동일한
+// `code`·`windowsVirtualKeyCode`를 채워, DOM `event.keyCode`가 0이 되지 않게 한다.
+struct KeyInfo {
+    code: String,
+    vk: u32,
+    shift: bool,
+}
+
+// 문자를 US 키보드 배열의 (code, windowsVirtualKeyCode, Shift 필요 여부)로 매핑한다(순수 함수).
+// 알파벳/숫자/비밀번호에 흔한 기호를 덮는다. 미지의 문자는 vk=0·code="" 로 떨어뜨려도
+// keyDown의 `text`가 글자 입력을 담당하므로 값 자체는 들어간다(베스트에포트).
+fn key_info(ch: char) -> KeyInfo {
+    if ch.is_ascii_alphabetic() {
+        let upper = ch.to_ascii_uppercase();
+        return KeyInfo {
+            code: format!("Key{upper}"),
+            vk: upper as u32,
+            shift: ch.is_ascii_uppercase(),
+        };
+    }
+    if ch.is_ascii_digit() {
+        return KeyInfo {
+            code: format!("Digit{ch}"),
+            vk: ch as u32,
+            shift: false,
+        };
+    }
+    // (code, windowsVirtualKeyCode, shift) — Shift+숫자 기호와 OEM 구두점.
+    let (code, vk, shift): (&str, u32, bool) = match ch {
+        ')' => ("Digit0", 0x30, true),
+        '!' => ("Digit1", 0x31, true),
+        '@' => ("Digit2", 0x32, true),
+        '#' => ("Digit3", 0x33, true),
+        '$' => ("Digit4", 0x34, true),
+        '%' => ("Digit5", 0x35, true),
+        '^' => ("Digit6", 0x36, true),
+        '&' => ("Digit7", 0x37, true),
+        '*' => ("Digit8", 0x38, true),
+        '(' => ("Digit9", 0x39, true),
+        ' ' => ("Space", 0x20, false),
+        '-' => ("Minus", 0xBD, false),
+        '_' => ("Minus", 0xBD, true),
+        '=' => ("Equal", 0xBB, false),
+        '+' => ("Equal", 0xBB, true),
+        '[' => ("BracketLeft", 0xDB, false),
+        '{' => ("BracketLeft", 0xDB, true),
+        ']' => ("BracketRight", 0xDD, false),
+        '}' => ("BracketRight", 0xDD, true),
+        '\\' => ("Backslash", 0xDC, false),
+        '|' => ("Backslash", 0xDC, true),
+        ';' => ("Semicolon", 0xBA, false),
+        ':' => ("Semicolon", 0xBA, true),
+        '\'' => ("Quote", 0xDE, false),
+        '"' => ("Quote", 0xDE, true),
+        ',' => ("Comma", 0xBC, false),
+        '<' => ("Comma", 0xBC, true),
+        '.' => ("Period", 0xBE, false),
+        '>' => ("Period", 0xBE, true),
+        '/' => ("Slash", 0xBF, false),
+        '?' => ("Slash", 0xBF, true),
+        '`' => ("Backquote", 0xC0, false),
+        '~' => ("Backquote", 0xC0, true),
+        _ => ("", 0, false),
+    };
+    KeyInfo {
+        code: code.to_owned(),
+        vk,
+        shift,
+    }
+}
+
 // 선택자에 포커스한 뒤 한 글자씩 실제 키 이벤트로 입력한다(keydown 후킹 암호화 대응).
 // 입력 후 필드 값 길이를 확인해, 비어 있으면(타이밍/렌더 문제로 헛친 경우) 최대 3회 재시도한다.
 // 채워졌으면 `Ok(true)`, 3회 후에도 비어 있으면 `Ok(false)`를 반환해 호출자가 판단하게 한다.
@@ -295,16 +366,36 @@ fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<bool,
 
         for ch in text.chars() {
             let s = ch.to_string();
-            // 대문자는 Shift 모디파이어(8)와 함께 보낸다. Shift 없이 대문자를 보내면 네이버가
-            // "Shift 안 눌렀는데 대문자 → Caps Lock 켜짐"으로 오판해 경고를 띄운다.
-            let modifiers = if ch.is_uppercase() { 8 } else { 0 };
+            let k = key_info(ch);
+            // 실제 브라우저와 동일하게 code·windowsVirtualKeyCode·nativeVirtualKeyCode를 채운다.
+            // 이게 없으면 DOM `event.keyCode`가 0이라, 네이버 default_ecc.js의 keydown 암호화
+            // 훅/봇탐지가 합성 입력으로 판단 → eccpw가 깨지고 캡차/수동입력을 요구한다(패킷
+            // 분석상 캡처된 성공 로그인은 NNB 쿠키만·bvsd 빈 채로도 즉시 성공했다).
+            // Shift는 대문자뿐 아니라 Shift로 입력하는 기호(!@#$ 등)에도 일반화한다. Shift 없이
+            // 대문자를 보내면 네이버가 "Caps Lock 켜짐"으로 오판해 경고를 띄우는 문제도 함께 막는다.
+            let modifiers = if k.shift { 8 } else { 0 };
             client.call(
                 "Input.dispatchKeyEvent",
-                json!({ "type": "keyDown", "text": s, "key": s, "modifiers": modifiers }),
+                json!({
+                    "type": "keyDown",
+                    "text": s,
+                    "key": s,
+                    "code": k.code,
+                    "windowsVirtualKeyCode": k.vk,
+                    "nativeVirtualKeyCode": k.vk,
+                    "modifiers": modifiers,
+                }),
             )?;
             client.call(
                 "Input.dispatchKeyEvent",
-                json!({ "type": "keyUp", "key": s, "modifiers": modifiers }),
+                json!({
+                    "type": "keyUp",
+                    "key": s,
+                    "code": k.code,
+                    "windowsVirtualKeyCode": k.vk,
+                    "nativeVirtualKeyCode": k.vk,
+                    "modifiers": modifiers,
+                }),
             )?;
         }
 
@@ -524,6 +615,63 @@ mod tests {
             decide_loop_step(None, Signal::Challenge(ChallengeKind::Otp), true),
             LoopDecision::KeepWaiting(None)
         );
+    }
+
+    // --- key_info: 합성 키 이벤트가 실제 브라우저 keyCode와 일치하는지 ---
+
+    #[test]
+    fn key_info_lowercase_letter_has_keycode_without_shift() {
+        let k = key_info('a');
+        assert_eq!(k.code, "KeyA");
+        assert_eq!(k.vk, 0x41); // VK_A == 'A'
+        assert!(!k.shift);
+    }
+
+    #[test]
+    fn key_info_uppercase_letter_sends_shift() {
+        let k = key_info('A');
+        assert_eq!(k.code, "KeyA");
+        assert_eq!(k.vk, 0x41); // 대문자도 물리키는 'A'(=0x41)
+        assert!(k.shift);
+    }
+
+    #[test]
+    fn key_info_digit_has_keycode() {
+        let k = key_info('7');
+        assert_eq!(k.code, "Digit7");
+        assert_eq!(k.vk, 0x37); // '7'
+        assert!(!k.shift);
+    }
+
+    #[test]
+    fn key_info_shifted_symbol_maps_to_base_digit_with_shift() {
+        // '!' 는 Shift+1 → 물리키는 Digit1, vk 는 '1'(=0x31), shift=true.
+        let bang = key_info('!');
+        assert_eq!(bang.code, "Digit1");
+        assert_eq!(bang.vk, 0x31);
+        assert!(bang.shift);
+        // '@' 는 Shift+2.
+        let at = key_info('@');
+        assert_eq!(at.code, "Digit2");
+        assert!(at.shift);
+    }
+
+    #[test]
+    fn key_info_oem_punctuation_has_nonzero_keycode() {
+        for ch in ['-', '_', '.', '/', ';', '\'', '=', '+'] {
+            assert_ne!(key_info(ch).vk, 0, "{ch} 의 vk 가 0이면 안 된다");
+        }
+        assert!(key_info('_').shift);
+        assert!(!key_info('-').shift);
+    }
+
+    #[test]
+    fn key_info_unknown_char_is_best_effort_zero() {
+        // 한글 등 매핑 없는 문자는 vk=0·code="" — text 가 입력을 담당한다.
+        let k = key_info('가');
+        assert_eq!(k.vk, 0);
+        assert_eq!(k.code, "");
+        assert!(!k.shift);
     }
 
     #[test]
