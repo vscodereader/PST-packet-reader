@@ -106,6 +106,24 @@ describe("Notifications", () => {
     expect(screen.getByText("연결됨")).toBeInTheDocument();
   });
 
+  it("surfaces the real ADB error reason on the card when not connected", async () => {
+    const { invoke } = await import("@/test/ipc");
+    // The first invoke on mount is diagnostics.getStatus — return a not-connected
+    // ADB with a concrete error; later mount calls fall through to the default mock.
+    vi.mocked(invoke).mockImplementationOnce(async () => ({
+      chrome: {
+        installed: true,
+        path: "/x/chrome",
+        version: "149.0",
+        error: null,
+      },
+      adb: { connected: false, error: "adb: Device busy" },
+    }));
+    renderLog();
+    expect(await screen.findByText(/Device busy/)).toBeInTheDocument();
+    expect(screen.getByText("미연결")).toBeInTheDocument();
+  });
+
   it("re-probes the environment when the 새로고침 button is clicked", async () => {
     const { invoke } = await import("@/test/ipc");
     renderLog();

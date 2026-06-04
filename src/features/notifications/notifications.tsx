@@ -358,7 +358,12 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
     ? { color: "gray", label: "확인 중", detail: "상태를 불러오는 중…" }
     : adb.connected
       ? { color: "green", label: "연결됨", detail: "디바이스 감지됨" }
-      : { color: "gray", label: "미연결", detail: "감지된 디바이스 없음" };
+      : {
+          color: "gray",
+          label: "미연결",
+          // 백엔드가 원인별로 변환한 사용자용 안내 문구를 노출(개발자용 원문 아님).
+          detail: adb.error ?? "감지된 디바이스 없음",
+        };
 
   const envCards = [
     { t: "Chrome", ic: "globe" as const, ...chromeCard },
@@ -505,9 +510,12 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
                       {c.label}
                     </Badge>
                   </Group>
-                  <Text fz={12.5} c="dimmed" fw={600} mt={5} truncate>
-                    {c.detail}
-                  </Text>
+                  {/* 한 줄로 잘리므로, 전체 사유(특히 에러)는 hover 툴팁으로. */}
+                  <Tooltip label={c.detail} multiline maw={460} withArrow>
+                    <Text fz={12.5} c="dimmed" fw={600} mt={5} truncate>
+                      {c.detail}
+                    </Text>
+                  </Tooltip>
                 </Box>
               </Group>
             </Card>

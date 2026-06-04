@@ -92,6 +92,9 @@ pub const ADB_AIRPLANE_ENABLE_SECS: u64 = 2;
 pub const ADB_INTERNET_POLL_INTERVAL_MS: u64 = 1_000;
 pub const ADB_INTERNET_TIMEOUT_SECS: u64 = 30;
 pub const ADB_INTERNET_PING_HOST: &str = "8.8.8.8";
+/// 진단용 USB 디바이스 스캔(autodetect)이 드라이버 문제 등으로 멈추는 것을 막는
+/// 상한. 정상이면 거의 즉시 끝나므로 넉넉히 잡는다(초과 시 "지연" 안내로 반환).
+pub const ADB_PROBE_TIMEOUT_SECS: u64 = 10;
 
 // 쿠키 저장 확인
 pub const COOKIE_WRITE_POLL_INTERVAL_MS: u64 = 200;
