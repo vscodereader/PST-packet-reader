@@ -319,18 +319,28 @@ fn save_accounts(accounts: Vec<auth::Account>) -> Result<Vec<auth::Account>, Str
 fn enqueue_cookie_refresh<R: Runtime>(
     app: tauri::AppHandle<R>,
     state: tauri::State<'_, auth::QueueState>,
+    activity: tauri::State<'_, JsonStore<ipc::activity::ActivityItem>>,
     account_ids: Vec<String>,
     headless: Option<bool>,
     use_adb: Option<bool>,
 ) -> Result<auth::QueueStatus, String> {
-    auth::enqueue_accounts(
+    let n = account_ids.len();
+    let result = auth::enqueue_accounts(
         &state,
         app,
         account_ids,
         headless.unwrap_or(false),
         use_adb.unwrap_or(false),
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    if n > 0 {
+        ipc::activity::record(
+            activity.inner(),
+            ipc::activity::ActivityType::Info,
+            format!("계정 {n}개 로그인 시작"),
+        );
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -348,9 +358,18 @@ fn get_account_cookies(account_id: String) -> Result<Option<serde_json::Value>, 
 #[tauri::command]
 fn export_accounts_xlsx(
     store: tauri::State<'_, JsonStore<ipc::accounts::Account>>,
+    activity: tauri::State<'_, JsonStore<ipc::activity::ActivityItem>>,
     path: String,
 ) -> Result<(), String> {
-    excel::write_accounts_xlsx(&path, &store.snapshot())
+    let accounts = store.snapshot();
+    let n = accounts.len();
+    excel::write_accounts_xlsx(&path, &accounts)?;
+    ipc::activity::record(
+        activity.inner(),
+        ipc::activity::ActivityType::Info,
+        format!("계정 {n}건을 엑셀로 내보냈어요"),
+    );
+    Ok(())
 }
 
 #[tauri::command]
@@ -359,7 +378,13 @@ fn export_activity_xlsx(
     logs: tauri::State<'_, JsonStore<ipc::log_batches::LogBatch>>,
     path: String,
 ) -> Result<(), String> {
-    excel::write_activity_xlsx(&path, &logs.snapshot(), &activity.snapshot())
+    excel::write_activity_xlsx(&path, &logs.snapshot(), &activity.snapshot())?;
+    ipc::activity::record(
+        activity.inner(),
+        ipc::activity::ActivityType::Info,
+        "알림 내역을 엑셀로 내보냈어요",
+    );
+    Ok(())
 }
 
 #[tauri::command]

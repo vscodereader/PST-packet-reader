@@ -6,6 +6,8 @@
 //! argument deserialization get exercised end to end. No webview rendering,
 //! USB/ADB device, or naver-login sidecar is involved.
 
+use std::sync::Mutex;
+
 use serde_json::{json, Value};
 use tauri::ipc::{CallbackFn, InvokeBody};
 use tauri::test::{
@@ -16,6 +18,12 @@ use tauri::{App, WebviewWindow, WebviewWindowBuilder};
 use tempfile::TempDir;
 
 use pstmacro_lib::{manage_stores, register_handlers};
+
+/// Mutex serialising tests that mutate the `LOCALAPPDATA` environment variable.
+/// Because `std::env::set_var` is process-wide, parallel tests that set this
+/// variable concurrently will race. Holding this mutex for the duration of any
+/// such test prevents that.
+static LOCALAPPDATA_LOCK: Mutex<()> = Mutex::new(());
 
 /// Builds a mock app carrying the production command surface and a fresh
 /// seeded store set rooted at a temp dir. The returned [`TempDir`] guard must
@@ -236,8 +244,10 @@ fn account_mutation_appends_to_activity_feed() {
 #[test]
 fn auth_commands_operate_against_a_temp_app_data_root() {
     // The auth commands resolve their paths from LOCALAPPDATA; point it at a
-    // temp dir so the test never touches the real user data directory. This is
-    // the only test that mutates the env var, so no lock is needed.
+    // temp dir so the test never touches the real user data directory.
+    // Hold the process-wide lock so this test doesn't race with other tests
+    // that also mutate LOCALAPPDATA.
+    let _guard = LOCALAPPDATA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let data = tempfile::tempdir().expect("temp LOCALAPPDATA");
     std::env::set_var("LOCALAPPDATA", data.path());
 
@@ -270,6 +280,126 @@ fn auth_commands_operate_against_a_temp_app_data_root() {
         json!({ "accountIds": [], "headless": true, "useAdb": false }),
     );
     assert!(enqueued["jobs"].is_array(), "queue status: {enqueued}");
+
+    std::env::remove_var("LOCALAPPDATA");
+}
+
+#[test]
+fn export_accounts_xlsx_appends_to_activity_feed() {
+    let (app, _dir) = mock_app();
+    let wv = main_webview(&app);
+
+    // Activity feed starts empty.
+    let before = invoke_ok(&wv, "list_activity", json!({}));
+    assert_eq!(array(&before).len(), 0, "activity should start empty");
+
+    // Export to a temp xlsx path.
+    let out_path = std::env::temp_dir().join("test_export_accounts.xlsx");
+    let result = invoke(
+        &wv,
+        "export_accounts_xlsx",
+        json!({ "path": out_path.to_str().unwrap() }),
+    );
+    assert!(
+        result.is_ok(),
+        "export_accounts_xlsx should succeed: {result:?}"
+    );
+
+    // The output file must exist.
+    assert!(
+        out_path.exists(),
+        "exported xlsx file should exist at {out_path:?}"
+    );
+    let _ = std::fs::remove_file(&out_path);
+
+    // The activity feed should contain an entry with "내보냈어요".
+    let after = invoke_ok(&wv, "list_activity", json!({}));
+    let found = array(&after)
+        .iter()
+        .any(|item| item["text"].as_str().unwrap_or("").contains("내보냈어요"));
+    assert!(
+        found,
+        "activity feed should contain '내보냈어요'; got: {after}"
+    );
+}
+
+#[test]
+fn export_activity_xlsx_appends_to_activity_feed() {
+    let (app, _dir) = mock_app();
+    let wv = main_webview(&app);
+
+    // Activity feed starts empty.
+    let before = invoke_ok(&wv, "list_activity", json!({}));
+    assert_eq!(array(&before).len(), 0, "activity should start empty");
+
+    // Export to a temp xlsx path.
+    let out_path = std::env::temp_dir().join("test_export_activity.xlsx");
+    let result = invoke(
+        &wv,
+        "export_activity_xlsx",
+        json!({ "path": out_path.to_str().unwrap() }),
+    );
+    assert!(
+        result.is_ok(),
+        "export_activity_xlsx should succeed: {result:?}"
+    );
+
+    // The output file must exist.
+    assert!(
+        out_path.exists(),
+        "exported xlsx file should exist at {out_path:?}"
+    );
+    let _ = std::fs::remove_file(&out_path);
+
+    // The activity feed should now contain an entry with "내보냈어요".
+    let after = invoke_ok(&wv, "list_activity", json!({}));
+    let found = array(&after)
+        .iter()
+        .any(|item| item["text"].as_str().unwrap_or("").contains("내보냈어요"));
+    assert!(
+        found,
+        "activity feed should contain '내보냈어요'; got: {after}"
+    );
+}
+
+#[test]
+fn enqueue_cookie_refresh_appends_login_start_to_activity_feed() {
+    // Point LOCALAPPDATA at a temp dir to avoid touching real user data.
+    // Hold the process-wide lock so this test doesn't race with other tests
+    // that also mutate LOCALAPPDATA.
+    let _guard = LOCALAPPDATA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let data = tempfile::tempdir().expect("temp LOCALAPPDATA");
+    std::env::set_var("LOCALAPPDATA", data.path());
+
+    let (app, _dir) = mock_app();
+    let wv = main_webview(&app);
+
+    // Bootstrap the runtime so account dirs exist (enqueue relies on them).
+    invoke_ok(&wv, "bootstrap_runtime", json!({}));
+
+    // Activity feed starts empty.
+    let before = invoke_ok(&wv, "list_activity", json!({}));
+    assert_eq!(array(&before).len(), 0, "activity should start empty");
+
+    // Enqueue a login for one fake account. The background worker will try and
+    // fail a real browser login, but we don't await it — we only care that the
+    // "로그인 시작" activity row was appended synchronously by the command itself.
+    invoke_ok(
+        &wv,
+        "enqueue_cookie_refresh",
+        json!({ "accountIds": ["fake_login"], "headless": true, "useAdb": false }),
+    );
+
+    // Check for "로그인 시작" in the activity feed. The worker may append more
+    // rows asynchronously, so we assert CONTAINS rather than exact count.
+    let after = invoke_ok(&wv, "list_activity", json!({}));
+    let found = array(&after)
+        .iter()
+        .any(|item| item["text"].as_str().unwrap_or("").contains("로그인 시작"));
+    assert!(
+        found,
+        "activity feed should contain '로그인 시작'; got: {after}"
+    );
 
     std::env::remove_var("LOCALAPPDATA");
 }
