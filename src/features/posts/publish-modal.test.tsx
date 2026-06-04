@@ -392,6 +392,13 @@ describe("PublishModal", () => {
       sortBy: "popular",
       accountId: "money_lab",
     });
+    // …and the popular ORDER must propagate into the built jobs: the mock
+    // reverses for popular, so top-1 is 8009 (not latest's 8000). This fails if
+    // a regression takes the latest slice / ignores the returned order.
+    const call = ipcBackend.mock.calls.find((c) => c[0] === "run_comment_jobs");
+    expect(call).toBeDefined();
+    const jobs = (call![1] as { jobs: { articleId: number }[] }).jobs;
+    expect(jobs.map((j) => j.articleId)).toEqual([8009]);
   });
 
   it("falls back to the available articles when the list has fewer than N", async () => {

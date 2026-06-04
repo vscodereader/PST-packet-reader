@@ -1004,9 +1004,20 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         naverJobs.map(async (j) => {
           const cafeId = naverPicks[j.key]?.cafeId;
           if (!cafeId) return [];
+          // Surface a fetch failure as a toast so it's distinguishable from a
+          // cafe that genuinely has no articles — both otherwise read as the
+          // benign "댓글 없음" row, hiding session/network errors.
           const list = await ipc.cafes
             .listArticles(cafeId, sortBy, j.loginId)
-            .catch(() => null);
+            .catch((err) => {
+              notifications.show({
+                message: `${j.loginId} ${
+                  sortBy === "popular" ? "인기글" : "최신글"
+                } 목록을 불러오지 못했어요: ${errText(err)}`,
+                color: "red",
+              });
+              return null;
+            });
           if (!list) return [];
           return buildArticleListCommentJobs(
             [j.loginId],
