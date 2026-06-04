@@ -1,17 +1,29 @@
-// Chrome — 표준 설치 위치(64비트/32비트). 사용자 단위 설치는 LOCALAPPDATA 로 별도 구성.
+// Chrome — Windows 표준 설치 위치(64비트/32비트). 사용자 단위 설치는 LOCALAPPDATA 로 별도 구성.
+#[cfg(target_os = "windows")]
 pub const CHROME_PATH_WINDOWS: &str = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+#[cfg(target_os = "windows")]
 pub const CHROME_PATH_WINDOWS_X86: &str =
     "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe";
-pub const CHROME_PATH_WSL: &str = "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe";
-pub const CHROME_PATH_WSL_X86: &str =
-    "/mnt/c/Program Files (x86)/Google/Chrome/Application/chrome.exe";
+
+// Linux/WSL에서 CDP 로그인이 띄울 시스템 Chrome/Chromium 후보 경로들입니다.
+// (Linux 빌드는 Windows용 chrome.exe를 실행할 수 없으므로 네이티브 Linux 브라우저가 필요합니다.)
+#[cfg(not(target_os = "windows"))]
+pub const CHROME_PATHS_LINUX: &[&str] = &[
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/opt/google/chrome/chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+];
 
 /// 실행 환경에 맞는 Chrome 경로를 반환한다.
 ///
 /// 우선순위:
 ///   1. `CHROME_PATH` 환경 변수 — 설정됐으면 최우선(파일이 없으면 명확한 오류).
 ///   2. 플랫폼별 표준 설치 후보들을 순서대로 탐색해 존재하는 첫 경로.
-///      (64비트 → 32비트 → 사용자 단위 설치 `%LOCALAPPDATA%`)
+///      - Windows: 64비트 → 32비트 → 사용자 단위 설치(`%LOCALAPPDATA%`)
+///      - Linux/WSL: 시스템 Chrome/Chromium(`/usr/bin/google-chrome` 등). CDP 로그인은
+///        Linux 프로세스에서 브라우저를 구동하므로 네이티브 Linux 브라우저가 필요하다.
 ///
 /// 어느 것도 못 찾으면, 확인한 후보 목록을 담은 `Err`를 반환한다.
 pub fn chrome_path() -> Result<String, String> {
@@ -44,37 +56,21 @@ fn resolve_first_existing(candidates: &[String]) -> Result<String, String> {
         .join("\n");
     Err(format!(
         "Chrome을 찾을 수 없습니다. 다음 경로를 확인했습니다:\n{checked}\n\
-         다른 경로에 설치된 경우 환경변수 CHROME_PATH에 chrome.exe 전체 경로를 지정하세요."
+         다른 경로에 설치된 경우 환경변수 CHROME_PATH에 실행 파일 전체 경로를 지정하세요."
     ))
 }
 
-/// 현재 프로세스가 WSL에서 도는지 판별한다(`/proc/version` 에 "microsoft" 포함).
-fn is_wsl() -> bool {
-    std::fs::read_to_string("/proc/version")
-        .map(|v| v.to_lowercase().contains("microsoft"))
-        .unwrap_or(false)
-}
-
-/// 플랫폼에 맞는 Chrome 표준 설치 후보 경로들을 우선순위 순으로 모은다.
+/// Windows 표준 Chrome 후보 경로들을 우선순위 순으로 모은다.
+/// (64비트 → 32비트 → 사용자 단위 설치 `%LOCALAPPDATA%`)
+#[cfg(target_os = "windows")]
 fn chrome_candidates() -> Vec<String> {
-    chrome_candidates_for(is_wsl())
-}
-
-/// 후보 경로 구성 로직(테스트용으로 `is_wsl` 을 주입받는 순수 함수).
-fn chrome_candidates_for(is_wsl: bool) -> Vec<String> {
-    let mut candidates = if is_wsl {
-        vec![CHROME_PATH_WSL.to_string(), CHROME_PATH_WSL_X86.to_string()]
-    } else {
-        vec![
-            CHROME_PATH_WINDOWS.to_string(),
-            CHROME_PATH_WINDOWS_X86.to_string(),
-        ]
-    };
+    let mut candidates = vec![
+        CHROME_PATH_WINDOWS.to_string(),
+        CHROME_PATH_WINDOWS_X86.to_string(),
+    ];
 
     // 사용자 단위 설치(관리자 권한 없이 설치하면 여기로 감):
     //   %LOCALAPPDATA%\Google\Chrome\Application\chrome.exe
-    // WSL에서는 LOCALAPPDATA 가 WSL에서 읽히는 경로여야 실제로 매칭된다(앱의 다른
-    // 경로 처리와 동일한 전제).
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         let user_chrome = std::path::Path::new(&local)
             .join("Google")
@@ -85,6 +81,12 @@ fn chrome_candidates_for(is_wsl: bool) -> Vec<String> {
     }
 
     candidates
+}
+
+/// Linux/WSL의 시스템 Chrome/Chromium 후보 경로들(CDP 로그인이 구동할 네이티브 브라우저).
+#[cfg(not(target_os = "windows"))]
+fn chrome_candidates() -> Vec<String> {
+    CHROME_PATHS_LINUX.iter().map(|p| p.to_string()).collect()
 }
 
 // ADB
@@ -132,8 +134,20 @@ mod tests {
         let err = chrome_path().unwrap_err();
         assert!(err.contains("파일이 없습니다"), "unexpected error: {err}");
 
+        // 미설정이면 플랫폼 기본 후보들을 탐색해 폴백한다. 결과는 호스트에 Chrome이
+        // 설치돼 있는지에 따라 달라지므로, 호스트에 의존하지 않는 불변식만 검증한다:
+        // 성공하면 그 경로는 실제로 존재하고, 실패하면 탐색한 후보를 안내하는 오류를 낸다.
         std::env::remove_var("CHROME_PATH");
-        // 미설정 시의 후보 폴백은 호스트 의존적이므로 resolve_first_existing 테스트로 검증.
+        match chrome_path() {
+            Ok(path) => assert!(
+                std::path::Path::new(&path).exists(),
+                "폴백 경로가 존재하지 않습니다: {path}"
+            ),
+            Err(err) => assert!(
+                err.contains("Chrome을 찾을 수 없습니다"),
+                "unexpected error: {err}"
+            ),
+        }
     }
 
     #[test]
@@ -165,34 +179,22 @@ mod tests {
         );
     }
 
-    #[test]
-    fn chrome_candidates_list_standard_locations_in_priority_order() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("LOCALAPPDATA");
-
-        // WSL: /mnt/c 경로, 64비트 → 32비트 순.
-        let wsl = chrome_candidates_for(true);
-        assert_eq!(wsl, vec![CHROME_PATH_WSL, CHROME_PATH_WSL_X86]);
-
-        // Windows: C:\ 경로, 64비트 → 32비트 순.
-        let win = chrome_candidates_for(false);
-        assert_eq!(win, vec![CHROME_PATH_WINDOWS, CHROME_PATH_WINDOWS_X86]);
-    }
-
+    // Windows 후보 구성은 cfg(windows)에서만 컴파일되므로, 해당 타깃 빌드에서만 검증한다.
+    // (실 배포 타깃이 Windows 인스톨러라, 사용자 단위 설치 폴백이 후보에 붙는지 보장.)
+    #[cfg(target_os = "windows")]
     #[test]
     fn chrome_candidates_append_user_install_when_localappdata_set() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("LOCALAPPDATA", "/tmp/localappdata");
+        std::env::set_var("LOCALAPPDATA", "C:\\Users\\test\\AppData\\Local");
 
-        let candidates = chrome_candidates_for(true);
+        let candidates = chrome_candidates();
 
         std::env::remove_var("LOCALAPPDATA");
 
-        // 표준 2개 뒤에 사용자 설치 후보가 마지막으로 붙는다.
+        // 표준 2개(64/32비트) 뒤에 사용자 설치 후보가 마지막으로 붙는다.
         assert_eq!(candidates.len(), 3);
         let user = candidates.last().unwrap();
         assert!(user.contains("Google"));
         assert!(user.ends_with("chrome.exe"));
-        assert!(user.starts_with("/tmp/localappdata"));
     }
 }

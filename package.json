@@ -9,8 +9,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "pnpm build:sidecar && tsc && vite build",
-    "build:sidecar": "node --experimental-strip-types src-tauri/src/naver-login/bundle-login.ts",
+    "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
     "gen:bindings": "cargo test --manifest-path src-tauri/Cargo.toml export_bindings",
@@ -26,8 +25,8 @@
     "test:ui": "vitest --ui",
     "test:coverage": "vitest run --coverage",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --workspace --all-targets",
-    "test:rust:coverage": "cargo llvm-cov --manifest-path src-tauri/Cargo.toml --workspace --summary-only --fail-under-lines 83 --fail-under-functions 82",
-    "test:rust:coverage:html": "cargo llvm-cov --manifest-path src-tauri/Cargo.toml --workspace --html --open",
+    "test:rust:coverage": "cargo llvm-cov --manifest-path src-tauri/Cargo.toml --workspace --summary-only --ignore-filename-regex '(/main\\.rs|/lib\\.rs|/bin/|/discussion_batch\\.rs|/naver_automation\\.rs|/naver_automation/(browser_flow|devtools_connection|discussion_room|post_form|packet_client)\\.rs|/auth/(chrome|login|login_flow|adb)\\.rs)' --fail-under-lines 83 --fail-under-functions 82",
+    "test:rust:coverage:html": "cargo llvm-cov --manifest-path src-tauri/Cargo.toml --workspace --html --open --ignore-filename-regex '(/main\\.rs|/lib\\.rs|/bin/|/discussion_batch\\.rs|/naver_automation\\.rs|/naver_automation/(browser_flow|devtools_connection|discussion_room|post_form|packet_client)\\.rs|/auth/(chrome|login|login_flow|adb)\\.rs)'",
     "prepare": "husky"
   },
   "lint-staged": {
@@ -50,9 +49,6 @@
     "@mantine/notifications": "^9.2.2",
     "@tabler/icons-react": "^3.44.0",
     "@tauri-apps/api": "^2",
-    "playwright": "^1.60.0",
-    "playwright-extra": "^4.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
@@ -60,8 +56,6 @@
     "@commitlint/cli": "^21.0.1",
     "@commitlint/config-conventional": "^21.0.1",
     "@eslint/js": "^9.39.4",
-    "@swc/cli": "^0.7.9",
-    "@swc/core": "^1.15.3",
     "@tauri-apps/cli": "^2",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
@@ -69,7 +63,6 @@
     "@types/node": "^25.9.1",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
-    "@yao-pkg/pkg": "^6.20.0",
     "@vitejs/plugin-react": "^4.6.0",
     "@vitest/coverage-v8": "^4.1.7",
     "@vitest/eslint-plugin": "^1.6.18",

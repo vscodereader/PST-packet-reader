@@ -410,6 +410,16 @@ function newScheduledId(): string {
   return "qs" + Date.now();
 }
 
+/**
+ * Fallback Chrome DevTools endpoint, used ONLY when the backend command isn't
+ * available (browser preview / Vitest). The authoritative endpoint comes from
+ * the backend (`ipc.forum.endpoint()` → `forum_endpoint`), so the port is not a
+ * hardcoded frontend constant in the real app.
+ */
+function fallbackEndpoint(): { host: string; port: number } {
+  return { host: "127.0.0.1", port: 9222 };
+}
+
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
 /** Current date/time as the picker's `{ date, time }` strings (minute precision). */
@@ -467,8 +477,18 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [linkOverride, setLinkOverride] = useState("");
   const [showPreview, setShowPreview] = useState(false);
   const [flow, setFlow] = useState<null | "running" | PublishResult[]>(null);
+  // 게시 엔드포인트는 백엔드가 단일 출처. 받아오기 전/실패 시엔 폴백을 쓴다(브라우저·테스트).
+  const [endpoint, setEndpoint] = useState<{ host: string; port: number }>(
+    fallbackEndpoint,
+  );
 
   useEffect(() => {
+    void ipc.forum
+      .endpoint()
+      .then(setEndpoint)
+      .catch(() => {
+        /* 비-Tauri 환경: 폴백 유지 */
+      });
     void ipc.accounts.list().then((a) => {
       setAccounts(a);
       const firstUsable = a.find((x) => x.status !== "error");
@@ -561,22 +581,86 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     setFlow("running");
     const action =
       mode === "comment" ? "댓글" : mode === "both" ? "글+댓글" : "글";
-    window.setTimeout(() => {
-      setFlow(
-        jobs.map((j) => {
-          const ok = Math.random() > 0.1;
-          return {
-            ...j,
-            ok,
-            msg: ok
-              ? when === "schedule"
-                ? `${action} 예약 완료`
-                : `${action} 게시 완료`
-              : "게시 실패 — 잠시 후 재시도",
-          };
-        }),
-      );
-    }, 2000);
+
+    // 예약은 이미 큐에 추가됐으므로 엔진을 돌리지 않고 완료 표시만 한다.
+    if (when === "schedule") {
+      window.setTimeout(() => {
+        setFlow(
+          jobs.map((j) => ({ ...j, ok: true, msg: `${action} 예약 완료` })),
+        );
+      }, 1200);
+      return;
+    }
+
+    // 즉시 게시: 종목토론방(forum)은 패킷 게시 엔진을 호출한다. 네이버 카페/밴드는
+    // 아직 엔진 미구현이라 기존 표시 흐름을 유지한다(후속 작업).
+    const ep = endpoint;
+    const forumJobs = jobs.filter((j) => j.platform === "forum");
+    const otherJobs = jobs.filter((j) => j.platform !== "forum");
+    const firstComment = (doc.comments ?? []).find((c) => c.trim()) ?? "";
+
+    const byAccount = new Map<string, typeof forumJobs>();
+    forumJobs.forEach((j) => {
+      const list = byAccount.get(j.loginId) ?? [];
+      list.push(j);
+      byAccount.set(j.loginId, list);
+    });
+
+    const forumWork = Promise.all(
+      [...byAccount.entries()].map(([loginId, accJobs]) =>
+        ipc.forum
+          .publishNow({
+            host: ep.host,
+            port: ep.port,
+            // 계정 loginId로 저장된 로그인 쿠키를 사용한다.
+            accountId: loginId,
+            runPost: mode === "post" || mode === "both",
+            runComment: mode === "comment" || mode === "both",
+            title: doc.title,
+            body: doc.body ?? "",
+            comment: firstComment,
+            stocks: accJobs.map((j) => ({
+              name: j.targetName,
+              code: j.code ?? "",
+              link: "",
+            })),
+          })
+          .then((results) => {
+            // 엔진이 결과를 비워(빈 배열·누락) 돌려줄 수 있으므로 방어적으로 다룬다.
+            const list = Array.isArray(results) ? results : [];
+            // 결과는 code가 아니라 보낸 순서(인덱스)로 매칭한다. 백엔드(run_forum_publish)는
+            // 보낸 stocks 순서대로 결과를 돌려주므로, 같은 code가 두 번 들어가도 두 행이 첫
+            // 결과에 묶여 두 번째 종목의 실제 결과(성공 중복/실패 은폐)가 가려지지 않는다.
+            return accJobs.map((j, i) => {
+              const r = list[i];
+              return {
+                ...j,
+                ok: r?.ok ?? false,
+                msg: r?.message ?? "결과 없음",
+              };
+            });
+          })
+          .catch((err: unknown) =>
+            accJobs.map((j) => ({
+              ...j,
+              ok: false,
+              msg: err instanceof Error ? err.message : String(err),
+            })),
+          ),
+      ),
+    );
+
+    void forumWork.then((forumArr) => {
+      const otherResults = otherJobs.map((j) => {
+        const ok = Math.random() > 0.1;
+        return {
+          ...j,
+          ok,
+          msg: ok ? `${action} 게시 완료` : "게시 실패 — 잠시 후 재시도",
+        };
+      });
+      setFlow([...forumArr.flat(), ...otherResults]);
+    });
   };
 
   const doPublish = () => {

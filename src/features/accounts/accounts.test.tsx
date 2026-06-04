@@ -3,13 +3,20 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
-import { resetIpc } from "@/test/ipc";
+import { invoke as ipcBackend, resetIpc, setLoginOutcomes } from "@/test/ipc";
 import { pickOption } from "@/test/select";
 
 import { Accounts } from "./accounts";
 
 vi.mock("@tauri-apps/api/core", async () => ({
   invoke: (await import("@/test/ipc")).invoke,
+}));
+
+// 테스트는 <Notifications/> 없이 렌더하므로 토스트가 DOM에 뜨지 않는다.
+// notifications.show를 스파이로 대체해 토스트(성공/실패/오류)를 단언한다.
+const { notifShow } = vi.hoisted(() => ({ notifShow: vi.fn() }));
+vi.mock("@mantine/notifications", () => ({
+  notifications: { show: notifShow },
 }));
 
 async function renderAccounts(go = vi.fn()) {
@@ -29,6 +36,7 @@ describe("Accounts", () => {
   // pristine 15-account dataset.
   beforeEach(() => {
     resetIpc();
+    notifShow.mockClear();
   });
 
   it("renders the title and first page of accounts (10 rows)", async () => {
@@ -224,5 +232,138 @@ describe("Accounts", () => {
     expect(
       screen.getByRole("heading", { name: "계정 관리" }),
     ).toBeInTheDocument();
+  });
+
+  it("runs naver login for the selected account", async () => {
+    await renderAccounts();
+    vi.mocked(ipcBackend).mockClear();
+
+    // checkbox[0] is the header select-all; [1] is the first data row (a1).
+    const checkboxes = screen.getAllByRole("checkbox");
+    await userEvent.click(checkboxes[1]!);
+    await userEvent.click(screen.getByRole("button", { name: /선택 로그인/ }));
+
+    // saves the auth account (keyed by loginId) and enqueues a cookie refresh.
+    await waitFor(() =>
+      expect(ipcBackend).toHaveBeenCalledWith("enqueue_cookie_refresh", {
+        accountIds: ["invest_king7"],
+        headless: false,
+        useAdb: false,
+      }),
+    );
+
+    // the 2s status poll fires and reconciles the result back to the account
+    // as active (not merely "update_account was called").
+    await waitFor(
+      () => {
+        const call = vi
+          .mocked(ipcBackend)
+          .mock.calls.find((c) => c[0] === "update_account");
+        expect(call).toBeTruthy();
+        expect(
+          (call![1] as { account: { status: string } }).account.status,
+        ).toBe("active");
+      },
+      { timeout: 4000 },
+    );
+    // a green success toast fires for the account.
+    expect(notifShow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        color: "green",
+        message: expect.stringContaining("로그인 성공"),
+      }),
+    );
+  });
+
+  it("marks the account as error and red-toasts on a failed login", async () => {
+    await renderAccounts();
+    // Simulate the auth queue reporting a failure for this account.
+    setLoginOutcomes({
+      invest_king7: {
+        status: "error",
+        message: "아이디 또는 비밀번호가 올바르지 않습니다.",
+      },
+    });
+    vi.mocked(ipcBackend).mockClear();
+
+    const checkboxes = screen.getAllByRole("checkbox");
+    await userEvent.click(checkboxes[1]!);
+    await userEvent.click(screen.getByRole("button", { name: /선택 로그인/ }));
+
+    // failure branch: red toast carrying "로그인 실패 — ".
+    await waitFor(
+      () =>
+        expect(notifShow).toHaveBeenCalledWith(
+          expect.objectContaining({
+            color: "red",
+            message: expect.stringContaining("로그인 실패 — "),
+          }),
+        ),
+      { timeout: 4000 },
+    );
+    // and the row is persisted as error.
+    const call = vi
+      .mocked(ipcBackend)
+      .mock.calls.find((c) => c[0] === "update_account");
+    expect(call).toBeTruthy();
+    expect((call![1] as { account: { status: string } }).account.status).toBe(
+      "error",
+    );
+  });
+
+  it("stops the spinner and red-toasts when the status poll itself errors", async () => {
+    await renderAccounts();
+    const realInvoke = vi.mocked(ipcBackend).getMockImplementation()! as (
+      cmd: string,
+      args?: Record<string, unknown>,
+    ) => Promise<unknown>;
+    // Make only the status poll reject; everything else keeps working.
+    vi.mocked(ipcBackend).mockImplementation((cmd, args) =>
+      cmd === "get_queue_status"
+        ? Promise.reject(new Error("큐 상태 조회 실패"))
+        : realInvoke(cmd, args),
+    );
+    try {
+      const checkboxes = screen.getAllByRole("checkbox");
+      await userEvent.click(checkboxes[1]!);
+      await userEvent.click(
+        screen.getByRole("button", { name: /선택 로그인/ }),
+      );
+
+      // .catch branch: red toast (previously the spinner just stopped silently).
+      await waitFor(
+        () =>
+          expect(notifShow).toHaveBeenCalledWith(
+            expect.objectContaining({
+              color: "red",
+              message: expect.stringContaining("로그인 상태 확인 중 오류"),
+            }),
+          ),
+        { timeout: 4000 },
+      );
+    } finally {
+      vi.mocked(ipcBackend).mockImplementation(realInvoke);
+    }
+  });
+
+  it("warns when no selected account has an id and password", async () => {
+    await renderAccounts();
+    // Clear the first row's login id so it becomes an invalid login target.
+    await userEvent.click(screen.getByText("invest_king7"));
+    const idInput = screen.getByDisplayValue("invest_king7");
+    await userEvent.clear(idInput);
+    await userEvent.tab();
+
+    const checkboxes = screen.getAllByRole("checkbox");
+    await userEvent.click(checkboxes[1]!);
+    vi.mocked(ipcBackend).mockClear();
+    await userEvent.click(screen.getByRole("button", { name: /선택 로그인/ }));
+
+    // No id → nothing is enqueued.
+    expect(
+      vi
+        .mocked(ipcBackend)
+        .mock.calls.some((c) => c[0] === "enqueue_cookie_refresh"),
+    ).toBe(false);
   });
 });

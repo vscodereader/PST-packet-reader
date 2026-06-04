@@ -119,7 +119,10 @@ async fn worker_loop<R: Runtime>(state: QueueState, app: AppHandle<R>) {
                     .iter_mut()
                     .find(|j| j.account_id == job.account_id && j.started_at == job.started_at)
                 {
-                    existing.status = QueueJobStatus::Expired;
+                    // 상태는 Running으로 유지하고 메시지만 바꾼다. 여기서 Expired로 바꾸면
+                    // 프론트 폴링이 "갱신 중인 일시적 Expired"를 "갱신 완료(성공)"로 오인해
+                    // 로그인 성공 토스트를 띄우고 폴링을 일찍 멈춘다. Expired는 process_account
+                    // 가 끝난 뒤(아래) 종료 상태로만 쓴다.
                     existing.message = "expired; refreshing".to_string();
                 }
                 push_log(&mut inner, format!("{}: cookie expired", job.account_id));

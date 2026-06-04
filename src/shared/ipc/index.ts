@@ -26,6 +26,61 @@ export type {
   Stock,
 };
 
+/** A forum (종목토론방) target for the packet posting engine. */
+export interface ForumStock {
+  name: string;
+  code: string;
+  link: string;
+}
+
+/** "지금 바로 게시 + 종목토론방" request for the packet posting engine. */
+export interface ForumPublishRequest {
+  host: string;
+  port: number;
+  /** Account loginId; selects the saved login cookies (cookies/{loginId}.json). */
+  accountId: string;
+  runPost: boolean;
+  runComment: boolean;
+  title: string;
+  body: string;
+  comment: string;
+  stocks: ForumStock[];
+}
+
+/** Per-stock result of a forum publish. */
+export interface ForumPublishResult {
+  code: string;
+  name: string;
+  ok: boolean;
+  message: string;
+}
+
+/** A naver-login account (auth module): keyed by loginId so cookies land at cookies/{loginId}.json. */
+export interface AuthAccount {
+  id: string;
+  password: string;
+  label: string;
+}
+
+export type LoginJobStatus =
+  | "pending"
+  | "expired"
+  | "running"
+  | "success"
+  | "failed";
+
+export interface LoginJob {
+  accountId: string;
+  status: LoginJobStatus;
+  message: string;
+}
+
+export interface LoginQueueStatus {
+  isRunning: boolean;
+  currentAccountId: string | null;
+  jobs: LoginJob[];
+}
+
 /** Thin typed wrapper around a single Tauri command channel. */
 function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   return invoke<T>(cmd, args);
@@ -79,5 +134,25 @@ export const ipc = {
     getStatus: () => call<EnvironmentStatus>("get_environment_status"),
     /** Chrome 미설치 안내 카드의 "설치 페이지 열기" — 공식 다운로드 페이지를 기본 브라우저로 연다. */
     openChromeDownload: () => call<void>("open_chrome_download"),
+  },
+  // 종목토론방(forum) 즉시 게시 — 네이버 증권 토론방 패킷 게시 엔진 호출.
+  forum: {
+    /** 게시 엔진이 붙을 Chrome DevTools 엔드포인트. 백엔드가 단일 출처(프론트 상수 아님). */
+    endpoint: () => call<{ host: string; port: number }>("forum_endpoint"),
+    publishNow: (request: ForumPublishRequest) =>
+      call<ForumPublishResult[]>("run_forum_publish_now", { request }),
+  },
+  // 네이버 로그인 자동화(CDP). 계정 ID/PW로 로그인해 쿠키를 저장한다.
+  auth: {
+    bootstrap: () => call<unknown>("bootstrap_runtime"),
+    saveAccounts: (accounts: AuthAccount[]) =>
+      call<AuthAccount[]>("save_accounts", { accounts }),
+    enqueueLogin: (accountIds: string[], headless = false) =>
+      call<LoginQueueStatus>("enqueue_cookie_refresh", {
+        accountIds,
+        headless,
+        useAdb: false,
+      }),
+    queueStatus: () => call<LoginQueueStatus>("get_queue_status"),
   },
 };
