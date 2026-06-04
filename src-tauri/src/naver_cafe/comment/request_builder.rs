@@ -14,6 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::models::{CommentRequest, ReplyRequest};
+use crate::naver_cafe::headers::cafe_write_headers;
 
 // ---------------------------------------------------------------------------
 // 상수
@@ -21,12 +22,6 @@ use super::models::{CommentRequest, ReplyRequest};
 
 /// 댓글/대댓글 등록 API 호스트.
 pub const API_HOST: &str = "apis.naver.com";
-
-/// Origin 헤더 값 — 패킷 캡처에서 확인된 값.
-const ORIGIN: &str = "https://cafe.naver.com";
-
-/// `x-cafe-product` 헤더 값. 대댓글 캡처에서 확인됨.
-pub const CAFE_PRODUCT_PC: &str = "pc";
 
 /// `requestFrom` 폼 필드 고정값 — 패킷 캡처에서 확인된 값(`A`).
 pub const REQUEST_FROM: &str = "A";
@@ -141,32 +136,16 @@ pub fn comment_reply_path() -> &'static str {
 /// - `sec-fetch-site: same-site` / `sec-fetch-mode: cors` / `sec-fetch-dest: empty`
 /// - `accept-language: ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7`
 ///
+/// 공통 위장 헤더는 [`cafe_write_headers`]에서 채우고, 여기서는 댓글용
+/// `Content-Type`(폼 인코딩)과 게시글 읽기 `Referer`만 정한다.
+///
 /// ℹ️ `content-length`, `User-Agent`, 가상 헤더(`:method` 등)는 포함하지 않는다 —
 /// reqwest 또는 상위 레이어가 처리한다.
 pub fn comment_headers(cafe_id: &str, article_id: &str) -> Vec<(String, String)> {
-    vec![
-        (
-            "Content-Type".to_string(),
-            "application/x-www-form-urlencoded".to_string(),
-        ),
-        (
-            "Accept".to_string(),
-            "application/json, text/plain, */*".to_string(),
-        ),
-        ("Origin".to_string(), ORIGIN.to_string()),
-        (
-            "Referer".to_string(),
-            format!("https://cafe.naver.com/ca-fe/cafes/{cafe_id}/articles/{article_id}"),
-        ),
-        ("x-cafe-product".to_string(), CAFE_PRODUCT_PC.to_string()),
-        ("sec-fetch-site".to_string(), "same-site".to_string()),
-        ("sec-fetch-mode".to_string(), "cors".to_string()),
-        ("sec-fetch-dest".to_string(), "empty".to_string()),
-        (
-            "accept-language".to_string(),
-            "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7".to_string(),
-        ),
-    ]
+    cafe_write_headers(
+        "application/x-www-form-urlencoded",
+        format!("https://cafe.naver.com/ca-fe/cafes/{cafe_id}/articles/{article_id}"),
+    )
 }
 
 // ---------------------------------------------------------------------------
