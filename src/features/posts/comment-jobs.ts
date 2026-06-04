@@ -41,9 +41,11 @@ export function parseCafeArticleUrl(
   }
 
   for (const c of candidates) {
-    // Copied-URL form (primary): clubid/articleid, once `=` is decoded.
-    const club = c.match(/clubid=(\d+)/i);
-    const art = c.match(/articleid=(\d+)/i);
+    // Copied-URL form (primary): clubid/articleid, once `=` is decoded. The `\b`
+    // anchors stop substring params (relatedarticleid, subclubid, m_clubid) from
+    // matching the trailing `clubid`/`articleid` and yielding the wrong ids.
+    const club = c.match(/\bclubid=(\d+)/i);
+    const art = c.match(/\barticleid=(\d+)/i);
     if (club && art) {
       const cafeId = Number(club[1]);
       const articleId = Number(art[1]);

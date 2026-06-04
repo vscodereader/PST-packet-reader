@@ -36,6 +36,16 @@ describe("parseCafeArticleUrl", () => {
     ).toEqual({ cafeId: 31732304, articleId: 9 });
   });
 
+  it("ignores substring params (relatedarticleid/subclubid) and picks the real ids", () => {
+    // Unanchored regexes would match the trailing 'articleid'/'clubid' of these
+    // params first and extract 999/7 instead of the real ids.
+    expect(
+      parseCafeArticleUrl(
+        "https://cafe.naver.com/ArticleRead.nhn?relatedarticleid=999&subclubid=7&clubid=31732304&articleid=12345",
+      ),
+    ).toEqual({ cafeId: 31732304, articleId: 12345 });
+  });
+
   it("returns null for non-article or empty input", () => {
     expect(
       parseCafeArticleUrl("https://cafe.naver.com/bluegrayoc3uc"),
