@@ -12,6 +12,11 @@ vi.mock("@tauri-apps/api/core", async () => ({
   invoke: (await import("@/test/ipc")).invoke,
 }));
 
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  save: vi.fn().mockResolvedValue("/tmp/알림.xlsx"),
+  open: vi.fn().mockResolvedValue(null),
+}));
+
 function renderLog(filter: LogFilter | null = null) {
   render(
     <MantineProvider>
@@ -52,10 +57,17 @@ describe("Notifications", () => {
     expect(screen.getByText(/NaverAuthError/)).toBeInTheDocument();
   });
 
-  it("fires the export action", async () => {
+  it("fires the export action — calls save dialog and exportActivity", async () => {
+    const { invoke } = await import("@/test/ipc");
+    const { save } = await import("@tauri-apps/plugin-dialog");
     renderLog();
     await userEvent.click(screen.getByRole("button", { name: /내보내기/ }));
-    expect(screen.getByRole("heading", { name: "알림" })).toBeInTheDocument();
+    expect(vi.mocked(save)).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultPath: "알림.xlsx" }),
+    );
+    expect(
+      vi.mocked(invoke).mock.calls.some((c) => c[0] === "export_activity_xlsx"),
+    ).toBe(true);
   });
 
   it("clears the account filter", async () => {

@@ -18,6 +18,7 @@ import {
   UnstyledButton,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
+import { save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { STATUS_ACCOUNT, STATUS_ACCOUNT_ORDER } from "@/shared/data/config";
@@ -494,7 +495,15 @@ export function Accounts({ go }: { go: GoFn }) {
             size="sm"
             variant="default"
             leftSection={<Icon.download size={16} />}
-            onClick={() => toast("현재 계정 목록을 엑셀로 내보냈어요", "green")}
+            onClick={async () => {
+              const path = await save({
+                defaultPath: "계정.xlsx",
+                filters: [{ name: "Excel", extensions: ["xlsx"] }],
+              });
+              if (!path) return;
+              await ipc.excel.exportAccounts(path);
+              toast("현재 계정 목록을 엑셀로 내보냈어요", "green");
+            }}
           >
             내보내기
           </Button>

@@ -19,6 +19,7 @@ import {
   Tooltip,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
+import { save } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useState } from "react";
 
 import type { EnvironmentStatus } from "@/shared/bindings/EnvironmentStatus";
@@ -404,12 +405,18 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
           size="sm"
           variant="default"
           leftSection={<Icon.download size={16} />}
-          onClick={() =>
+          onClick={async () => {
+            const path = await save({
+              defaultPath: "알림.xlsx",
+              filters: [{ name: "Excel", extensions: ["xlsx"] }],
+            });
+            if (!path) return;
+            await ipc.excel.exportActivity(path);
             notifications.show({
               message: "알림 내역을 엑셀로 내보냈어요",
               color: "green",
-            })
-          }
+            });
+          }}
         >
           내보내기
         </Button>

@@ -12,6 +12,11 @@ vi.mock("@tauri-apps/api/core", async () => ({
   invoke: (await import("@/test/ipc")).invoke,
 }));
 
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  save: vi.fn().mockResolvedValue("/tmp/계정.xlsx"),
+  open: vi.fn().mockResolvedValue(null),
+}));
+
 // 테스트는 <Notifications/> 없이 렌더하므로 토스트가 DOM에 뜨지 않는다.
 // notifications.show를 스파이로 대체해 토스트(성공/실패/오류)를 단언한다.
 const { notifShow } = vi.hoisted(() => ({ notifShow: vi.fn() }));
@@ -190,12 +195,26 @@ describe("Accounts", () => {
     expect(within(row).getByText("ik7!naver22")).toBeInTheDocument();
   });
 
-  it("fires excel import and export actions", async () => {
+  it("fires excel export — opens save dialog and calls exportAccounts", async () => {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(ipcBackend).mockClear();
+    await renderAccounts();
+    await userEvent.click(screen.getByRole("button", { name: /내보내기/ }));
+    expect(vi.mocked(save)).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultPath: "계정.xlsx" }),
+    );
+    expect(
+      vi
+        .mocked(ipcBackend)
+        .mock.calls.some((c) => c[0] === "export_accounts_xlsx"),
+    ).toBe(true);
+  });
+
+  it("fires excel import action (stub, no dialog)", async () => {
     await renderAccounts();
     await userEvent.click(
       screen.getByRole("button", { name: /엑셀 가져오기/ }),
     );
-    await userEvent.click(screen.getByRole("button", { name: /내보내기/ }));
     expect(
       screen.getByRole("heading", { name: "계정 관리" }),
     ).toBeInTheDocument();
