@@ -1,4 +1,5 @@
 mod ipc;
+mod logging;
 mod store;
 mod util;
 
@@ -14,6 +15,7 @@ use crate::store::JsonStore;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 pub mod auth;
+pub mod naver_cafe;
 // 네이버 증권 토론방 패킷 게시 엔진.
 pub mod discussion_batch;
 pub mod naver_automation;
@@ -167,9 +169,20 @@ async fn run_forum_publish_now<R: Runtime>(
     let (run_post, run_comment) = (request.run_post, request.run_comment);
     let app_for_job = app.clone();
     let results =
-        tauri::async_runtime::spawn_blocking(move || run_forum_publish(request, app_for_job))
-            .await
-            .map_err(|error| format!("게시 실행 스레드 오류: {error}"))?;
+        tauri::async_runtime::spawn_blocking(move || -> Result<Vec<ForumPublishResult>, String> {
+            // 게시용 Chrome을 앱이 직접 디버그 포트로 띄운다(헤드리스). 사용자가 따로
+            // `--remote-debugging-port`로 Chrome을 실행할 필요가 없다. 게시가 끝나면
+            // 핸들이 Drop되며 Chrome을 종료한다. (로그인과 같은 런처 재사용)
+            let chrome = auth::launch_debug_chrome(true).map_err(|error| error.to_string())?;
+            let mut request = request;
+            request.host = FORUM_DEVTOOLS_HOST.to_owned();
+            request.port = chrome.port;
+            let results = run_forum_publish(request, app_for_job);
+            drop(chrome);
+            Ok(results)
+        })
+        .await
+        .map_err(|error| format!("게시 실행 스레드 오류: {error}"))??;
 
     let at = util::now_ms();
     let batch = build_publish_batch(&title, run_post, run_comment, &account_id, at, &results);
@@ -445,6 +458,11 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         stats::list_stats,
         log_batches::list_log_batches,
         cafes::list_cafes,
+        cafes::resolve_cafe,
+        cafes::upsert_cafe,
+        cafes::run_post_jobs,
+        cafes::run_comment_jobs,
+        cafes::list_joined_cafes,
         bands::list_bands,
         diagnostics::get_environment_status,
         diagnostics::open_chrome_download,
@@ -522,6 +540,12 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
+            // 로그는 도메인 데이터와 같은 앱 데이터 디렉터리(<app_data>/logs)에 남긴다.
+            logging::init_file_logging(&dir.join("logs"));
+            tracing::info!(
+                version = env!("CARGO_PKG_VERSION"),
+                "pstmacro backend starting"
+            );
             manage_stores(app.handle(), &dir)?;
             Ok(())
         })

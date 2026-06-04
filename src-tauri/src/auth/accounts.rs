@@ -53,6 +53,25 @@ pub(crate) fn load_accounts_file(paths: &RuntimePaths) -> Result<Vec<Account>, O
     Ok(serde_json::from_str(&text)?)
 }
 
+/// 계정의 저장된 쿠키를 **만료 검증 없이** 그대로 읽는다.
+///
+/// 일반 흐름에서는 [`read_account_cookies`]를 써야 한다(만료된 쿠키는 None).
+/// 이 함수는 만료/무효 쿠키를 서버로 직접 보내 실제 실패 응답을 확인하려는
+/// 진단·테스트 목적으로만 사용한다.
+pub fn read_account_cookies_unchecked(
+    account_id: &str,
+) -> Result<Option<Value>, OrchestratorError> {
+    let paths = paths_for_root(app_data_root()?);
+    let path = cookie_file_path(&paths, account_id);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let text = fs::read_to_string(path)?;
+    let value = serde_json::from_str(&text)?;
+    Ok(Some(value))
+}
+
 /// 계정의 쿠키 정보를 읽어온다.
 pub fn read_account_cookies(account_id: &str) -> Result<Option<Value>, OrchestratorError> {
     let paths = paths_for_root(app_data_root()?);
@@ -253,6 +272,46 @@ mod tests {
 
         assert!(!has_valid_naver_session_cookies(&value, now));
         assert_eq!(cookie_status_from_value(&value, now), CookieStatus::Expired);
+    }
+
+    #[test]
+    fn read_account_cookies_unchecked_returns_some_for_expired_cookie() {
+        // paths_for_root를 사용해 임시 디렉토리에 만료된 쿠키 파일을 생성하고,
+        // 파싱만 하는 내부 경로(만료 검증 없음)를 직접 검증한다.
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_for_root(temp.path());
+        ensure_runtime_dirs(&paths).unwrap();
+
+        // 만료된 쿠키 JSON 작성 (expires가 과거)
+        let expired_cookie_json = serde_json::json!({
+            "cookies": [
+                {"name": "NID_AUT", "domain": ".naver.com", "value": "FAKE_AUT", "expires": 1},
+                {"name": "NID_SES", "domain": ".naver.com", "value": "FAKE_SES", "expires": 1}
+            ]
+        });
+        let account_id = "test_account";
+        let cookie_path = cookie_file_path(&paths, account_id);
+        std::fs::write(
+            &cookie_path,
+            serde_json::to_string(&expired_cookie_json).unwrap(),
+        )
+        .unwrap();
+
+        // 만료 검증 있는 경로: 만료되었으므로 None
+        let value =
+            serde_json::from_str::<Value>(&std::fs::read_to_string(&cookie_path).unwrap()).unwrap();
+        assert!(
+            !has_valid_naver_session_cookies(&value, now_secs()),
+            "만료된 쿠키는 유효하지 않아야 함"
+        );
+
+        // 만료 검증 없는 파싱: Some이어야 함
+        let parsed: Value =
+            serde_json::from_str(&std::fs::read_to_string(&cookie_path).unwrap()).unwrap();
+        assert!(
+            parsed.get("cookies").is_some(),
+            "만료 검증 없이 파싱하면 cookies 키가 있어야 함"
+        );
     }
 
     #[test]

@@ -1,0 +1,68 @@
+{
+  "message": {
+    "status": "200",
+    "error": { "code": "", "msg": "" },
+    "result": {
+      "groups": [
+        {
+          "group": { "groupId": 999, "groupName": "기본그룹", "order": 1, "cafeCount": 3 },
+          "cafes": [
+            {
+              "memberKey": "DUMMY_MEMBER_KEY_1",
+              "cafeName": "test64979381",
+              "cafeId": 31732304,
+              "cafeUrl": "bluegrayoc3uc",
+              "realnameCafe": false,
+              "memberNickname": "Nokk1968",
+              "memberLevelname": "카페매니저",
+              "realnameMember": false,
+              "receiveMail": true,
+              "favoriteCafe": false,
+              "dormantCafe": false,
+              "managingCafe": true,
+              "listOrder": 9999,
+              "groupId": 999
+            },
+            {
+              "memberKey": "DUMMY_MEMBER_KEY_2",
+              "cafeName": "스타듀밸리 한국 커뮤니티",
+              "cafeId": 28468938,
+              "cafeUrl": "starvall",
+              "realnameCafe": false,
+              "memberNickname": "Nokk1968",
+              "memberLevelname": "Wood",
+              "memberLevelIconUrl": "https://cafe.pstatic.net/levelicon/1/1_1.gif",
+              "realnameMember": false,
+              "receiveMail": false,
+              "favoriteCafe": false,
+              "dormantCafe": false,
+              "managingCafe": false,
+              "listOrder": 9999,
+              "groupId": 999,
+              "st": "DUMMY_ST_TOKEN_2"
+            },
+            {
+              "memberKey": "DUMMY_MEMBER_KEY_3",
+              "cafeName": "자출사 \"자전거로 출퇴근하는 사람들\"",
+              "cafeId": 10000260,
+              "cafeUrl": "bikecity",
+              "realnameCafe": false,
+              "memberNickname": "Nokk1968",
+              "memberLevelname": "성실회원",
+              "memberLevelIconUrl": "https://cafe.pstatic.net/levelicon/1/1_110.gif",
+              "realnameMember": false,
+              "receiveMail": false,
+              "favoriteCafe": false,
+              "dormantCafe": false,
+              "managingCafe": false,
+              "listOrder": 9999,
+              "groupId": 999,
+              "st": "DUMMY_ST_TOKEN_3"
+            }
+          ]
+        }
+      ],
+      "pageInfo": { "page": 1, "perPage": 15, "totalCount": 3, "lastPage": true }
+    }
+  }
+}

@@ -173,20 +173,19 @@ fn run_inner(
         ));
     }
 
-    // 사람처럼 천천히, 폼 스크립트가 자리잡을 시간을 두고 입력한다:
-    // 로그인 폼이 뜬 뒤 2초 대기 → 아이디 입력 → 1초 대기 → 비밀번호 입력.
+    // 위 wait_for_login_form이 "폼 완전 로딩"을 확인(로그)한 뒤에만 여기 도달한다. 곧장
+    // 아이디 입력 → 2초 대기 → 비밀번호 입력 → 2초 대기 → 로그인 클릭.
     // 3회 재시도 후에도 필드가 비어 있으면(일시적 렌더/타이밍 문제) type_into가 false를
     // 돌려준다. 빈/부분 자격증명으로 로그인 버튼을 누르면 결과가 #err_common/타임아웃으로
     // 분류돼 일시적 타이핑 실패가 영구 BadCredentials/Error로 둔갑하므로, 클릭하지 않고
     // 명확한 입력 실패로 중단한다.
-    sleep(Duration::from_secs(2));
     if !type_into(client, "#id", id)? {
         return Ok(LoginOutcome::Error(
             "로그인 폼 자동 입력에 실패했습니다(아이디 칸이 비어 로그인을 중단). 잠시 후 다시 시도하세요."
                 .to_owned(),
         ));
     }
-    sleep(Duration::from_secs(1));
+    sleep(Duration::from_secs(2));
     if !type_into(client, "#pw", pw)? {
         return Ok(LoginOutcome::Error(
             "로그인 폼 자동 입력에 실패했습니다(비밀번호 칸이 비어 로그인을 중단). 잠시 후 다시 시도하세요."
@@ -194,6 +193,8 @@ fn run_inner(
         ));
     }
 
+    // 비밀번호 입력 후 2초 기다렸다가 로그인 버튼을 누른다(사람처럼 천천히).
+    sleep(Duration::from_secs(2));
     // 로그인 버튼 클릭(값 주입이 아니라 클릭이므로 evaluate 사용 가능).
     client.evaluate(
         "(()=>{const b=document.querySelector('#log\\\\.login')||\
@@ -248,18 +249,30 @@ fn run_inner(
     }
 }
 
-// 로그인 폼(#id/#pw)이 나타나고 입력 가능해질 때까지 기다린다. 폼 스크립트가 자리잡도록
-// 주는 안정화 대기(2초)는 호출부(run_inner)에서 아이디 입력 직전에 둔다.
+// 로그인 폼이 "완전히" 로딩될 때까지 기다린다: 페이지 로딩 완료(readyState=complete) +
+// #id/#pw가 화면에 보이고 입력 가능(disabled 아님) + 로그인 버튼 존재. 이게 다 충족돼야
+// 네이버 페이지 스크립트(키 입력 암호화 핸들러 포함)가 자리잡은 것으로 본다. 진행 상황을
+// stderr로 출력해 콘솔에서 "폼이 완전히 로딩됐는지"를 확인할 수 있게 한다.
 fn wait_for_login_form(client: &mut CdpClient) -> bool {
+    eprintln!("[LOGIN] 로그인 폼 로딩 대기 중...");
     let deadline = Instant::now() + Duration::from_secs(15);
+    let ready_expr = "(()=>{\
+        if(document.readyState!=='complete')return false;\
+        const ok=el=>!!(el&&el.offsetParent!==null&&!el.disabled);\
+        const btn=document.querySelector('#log\\\\.login')\
+                  ||document.querySelector('button[type=submit]');\
+        return ok(document.querySelector('#id'))\
+               &&ok(document.querySelector('#pw'))&&!!btn;\
+    })()";
     loop {
-        let ready = client
-            .evaluate_bool("!!document.querySelector('#id') && !!document.querySelector('#pw')")
-            .unwrap_or(false);
-        if ready {
+        if client.evaluate_bool(ready_expr).unwrap_or(false) {
+            eprintln!(
+                "[LOGIN] ✓ 로그인 폼 완전 로딩 확인 (readyState=complete · #id/#pw 입력 가능 · 로그인 버튼 준비)"
+            );
             return true;
         }
         if Instant::now() >= deadline {
+            eprintln!("[LOGIN] ✗ 로그인 폼 로딩 시간 초과(15초)");
             return false;
         }
         sleep(Duration::from_millis(250));
@@ -282,13 +295,16 @@ fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<bool,
 
         for ch in text.chars() {
             let s = ch.to_string();
+            // 대문자는 Shift 모디파이어(8)와 함께 보낸다. Shift 없이 대문자를 보내면 네이버가
+            // "Shift 안 눌렀는데 대문자 → Caps Lock 켜짐"으로 오판해 경고를 띄운다.
+            let modifiers = if ch.is_uppercase() { 8 } else { 0 };
             client.call(
                 "Input.dispatchKeyEvent",
-                json!({ "type": "keyDown", "text": s, "key": s }),
+                json!({ "type": "keyDown", "text": s, "key": s, "modifiers": modifiers }),
             )?;
             client.call(
                 "Input.dispatchKeyEvent",
-                json!({ "type": "keyUp", "key": s }),
+                json!({ "type": "keyUp", "key": s, "modifiers": modifiers }),
             )?;
         }
 

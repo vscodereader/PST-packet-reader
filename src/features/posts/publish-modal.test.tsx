@@ -106,6 +106,59 @@ describe("PublishModal", () => {
     vi.restoreAllMocks();
   });
 
+  it("publishes naver jobs through the real run_post_jobs command", async () => {
+    renderPublish();
+    // Swap the preselected forum account for a naver one. Selecting it loads
+    // that account's joined cafes; picking a cafe resolves its boards (first
+    // board auto-selected), which drives a real backend publish.
+    await userEvent.click(await screen.findByText("invest_king7"));
+    await userEvent.click(screen.getByText("money_lab"));
+    await screen.findByPlaceholderText("가입 카페 선택");
+    await pickOption(0, "주식투자연구소 카페");
+    // boards resolve and the first board is auto-selected → the naver job
+    // becomes valid, so the publish button's count ticks up to 1.
+    await userEvent.click(
+      await screen.findByRole(
+        "button",
+        { name: /^게시 \(1\)/ },
+        { timeout: 3000 },
+      ),
+    );
+    // The result row renders "{loginId} · {msg}" in one node, so match loosely.
+    expect(
+      await screen.findByText(/글 게시 완료/, undefined, { timeout: 3000 }),
+    ).toBeInTheDocument();
+    expect(ipcBackend).toHaveBeenCalledWith(
+      "run_post_jobs",
+      expect.objectContaining({
+        jobs: [
+          expect.objectContaining({
+            // 백엔드는 쿠키 파일 키(loginId)로 계정을 찾는다 — UI 고유 id("a5")가 아니다.
+            accountId: "money_lab",
+            cafe: "11111111",
+            menuId: 1,
+            boardType: "L",
+          }),
+        ],
+      }),
+    );
+  });
+
+  it("loads an account's joined cafes when a naver account is selected", async () => {
+    renderPublish();
+    await userEvent.click(await screen.findByText("money_lab"));
+    // The joined-cafe loader populates the per-account cafe select.
+    await screen.findByPlaceholderText("가입 카페 선택");
+    // 가입 카페는 쿠키 파일 키(loginId)로 조회해야 한다 — UI 고유 id("a5")로 조회하면
+    // 백엔드가 쿠키 파일을 못 찾아 빈 목록을 돌려준다(회귀: 가입 카페가 안 뜨던 버그).
+    expect(ipcBackend).toHaveBeenCalledWith("list_joined_cafes", {
+      accountId: "money_lab",
+    });
+    expect(ipcBackend).not.toHaveBeenCalledWith("list_joined_cafes", {
+      accountId: "a5",
+    });
+  });
+
   it("deselects an account when its row is clicked again", async () => {
     renderPublish();
     expect(await screen.findByText("1개")).toBeInTheDocument();
@@ -167,16 +220,120 @@ describe("PublishModal", () => {
     expect(scheduled.some((q) => q.title === postDoc.title)).toBe(true);
   });
 
-  it("changes the cafe, board, and band destinations", async () => {
-    renderPublish();
+  it("comments on the just-posted article in 'both' mode", async () => {
+    const bothDoc: LibraryPost = {
+      id: "lb",
+      title: "실적 점검 + 댓글",
+      kind: "both",
+      updated: "방금 전",
+      words: 100,
+      status: "ready",
+      excerpt: "요약",
+      body: "<p>본문</p>",
+      comments: ["좋네요"],
+    };
+    renderPublish({ doc: bothDoc });
+    await userEvent.click(await screen.findByText("invest_king7")); // drop forum
+    await userEvent.click(screen.getByText("money_lab")); // a5 naver
+    await screen.findByPlaceholderText("가입 카페 선택");
+    await pickOption(0, "주식투자연구소 카페");
     await userEvent.click(
-      await screen.findByRole("button", { name: /보이는 계정 전체/ }),
+      await screen.findByRole(
+        "button",
+        { name: /^게시 \(1\)/ },
+        { timeout: 3000 },
+      ),
     );
-    await screen.findByText("14개");
-    // DestinationPicker selects in order: cafe, board, band
+    // post lands first…
+    expect(ipcBackend).toHaveBeenCalledWith("run_post_jobs", expect.anything());
+    // …then a comment on that article (articleId 1000 from the mock, cafeId from
+    // the picked joined cafe) is posted.
+    expect(ipcBackend).toHaveBeenCalledWith(
+      "run_comment_jobs",
+      expect.objectContaining({
+        jobs: [
+          expect.objectContaining({
+            accountId: "money_lab",
+            cafeId: 11111111,
+            articleId: 1000,
+            content: "좋네요",
+          }),
+        ],
+      }),
+    );
+  });
+
+  it("comments on a pasted article URL in 'comment' mode", async () => {
+    const commentDoc: LibraryPost = {
+      id: "lc",
+      title: "URL 댓글 세트",
+      kind: "comment",
+      updated: "방금 전",
+      words: 30,
+      status: "ready",
+      excerpt: "요약",
+      commentTarget: "url",
+      commentUrl: "https://cafe.naver.com/ca-fe/cafes/31732304/articles/9",
+      comments: ["댓글1", "댓글2"],
+    };
+    renderPublish({ doc: commentDoc });
+    await userEvent.click(await screen.findByText("invest_king7")); // drop forum
+    await userEvent.click(screen.getByText("money_lab")); // a5 naver
+    // No board pick needed in comment mode — the job is the account itself.
+    await userEvent.click(
+      await screen.findByRole(
+        "button",
+        { name: /^게시 \(1\)/ },
+        { timeout: 3000 },
+      ),
+    );
+    expect(ipcBackend).toHaveBeenCalledWith(
+      "run_comment_jobs",
+      expect.objectContaining({
+        jobs: [
+          expect.objectContaining({
+            accountId: "money_lab",
+            cafeId: 31732304,
+            articleId: 9,
+            content: "댓글1",
+          }),
+          expect.objectContaining({
+            accountId: "money_lab",
+            cafeId: 31732304,
+            articleId: 9,
+            content: "댓글2",
+          }),
+        ],
+      }),
+    );
+  });
+
+  it("picks a per-account cafe/board and the band destination", async () => {
+    renderPublish();
+    // Add a naver and a band account alongside the default forum one.
+    await userEvent.click(await screen.findByText("money_lab")); // a5 naver
+    await userEvent.click(screen.getByText("value_invest")); // a7 band
+    await screen.findByPlaceholderText("가입 카페 선택");
+    // naver row exposes cafe (0) + board (1); band card adds the band select (2)
     await pickOption(0, "개미투자 카페");
-    await pickOption(1, "종목추천");
+    // forum (a1) + band (a7) = 2 jobs; the naver job lands once its first board
+    // is auto-selected, bringing the total to 3.
+    await screen.findByRole(
+      "button",
+      { name: /^게시 \(3\)/ },
+      { timeout: 3000 },
+    );
+    await pickOption(1, "공지사항");
     await pickOption(2, "단타클럽 BAND");
-    expect(screen.getByText("게시 설정")).toBeInTheDocument();
+    // Mantine Select keeps a hidden duplicate input, so assert on the visible
+    // listbox inputs in order: cafe, board, band.
+    const combos = [
+      ...document.querySelectorAll<HTMLInputElement>(
+        'input[aria-haspopup="listbox"]',
+      ),
+    ];
+    expect(combos[0]).toHaveValue("개미투자 카페");
+    expect(combos[1]).toHaveValue("공지사항");
+    expect(combos[2]).toHaveValue("단타클럽 BAND");
   });
 });

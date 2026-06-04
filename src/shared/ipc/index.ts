@@ -4,11 +4,16 @@ import type { Account } from "@/shared/bindings/Account";
 import type { ActivityItem } from "@/shared/bindings/ActivityItem";
 import type { Band } from "@/shared/bindings/Band";
 import type { Cafe } from "@/shared/bindings/Cafe";
+import type { CommentJob } from "@/shared/bindings/CommentJob";
+import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutcome";
 import type { DashStat } from "@/shared/bindings/DashStat";
 import type { EnvironmentStatus } from "@/shared/bindings/EnvironmentStatus";
 import type { ImportSummary } from "@/shared/bindings/ImportSummary";
+import type { JoinedCafe } from "@/shared/bindings/JoinedCafe";
 import type { LibraryPost } from "@/shared/bindings/LibraryPost";
 import type { LogBatch } from "@/shared/bindings/LogBatch";
+import type { PostJob } from "@/shared/bindings/PostJob";
+import type { PublishOutcome } from "@/shared/bindings/PublishOutcome";
 import type { QueueNowItem } from "@/shared/bindings/QueueNowItem";
 import type { QueueScheduledItem } from "@/shared/bindings/QueueScheduledItem";
 import type { Stock } from "@/shared/bindings/Stock";
@@ -18,11 +23,16 @@ export type {
   ActivityItem,
   Band,
   Cafe,
+  CommentJob,
+  CommentPublishOutcome,
   DashStat,
   EnvironmentStatus,
   ImportSummary,
+  JoinedCafe,
   LibraryPost,
   LogBatch,
+  PostJob,
+  PublishOutcome,
   QueueNowItem,
   QueueScheduledItem,
   Stock,
@@ -133,7 +143,35 @@ export const ipc = {
   },
   stats: { list: () => call<DashStat[]>("list_stats") },
   logBatches: { list: () => call<LogBatch[]>("list_log_batches") },
-  cafes: { list: () => call<Cafe[]>("list_cafes") },
+  cafes: {
+    list: () => call<Cafe[]>("list_cafes"),
+    /**
+     * Resolve a cafe reference (URL/slug/numeric) into a registrable cafe,
+     * using `accountId`'s session cookie. Rejects with the backend's error
+     * envelope (`{ code, message }`) on failure. Backs "+ 카페 추가".
+     */
+    resolve: (input: string, accountId: string) =>
+      call<Cafe>("resolve_cafe", { input, accountId }),
+    /** Persist a resolved cafe (upsert by cafeId); returns the updated list. */
+    upsert: (cafe: Cafe) => call<Cafe[]>("upsert_cafe", { cafe }),
+    /** Run publish jobs sequentially; returns one slim outcome per job. */
+    runPostJobs: (jobs: PostJob[]) =>
+      call<PublishOutcome[]>("run_post_jobs", { jobs }),
+    /**
+     * Run comment jobs sequentially; returns one slim outcome per job. Each job
+     * targets a numeric `cafeId`/`articleId` (from a just-posted article or a
+     * parsed URL); one job failing does not stop the rest.
+     */
+    runCommentJobs: (jobs: CommentJob[]) =>
+      call<CommentPublishOutcome[]>("run_comment_jobs", { jobs }),
+    /**
+     * List every cafe `accountId` has joined (crawled across all pages),
+     * using its session cookie. Rejects with the backend's error envelope
+     * on failure. Backs an account-driven "가입 카페 자동 로드" flow.
+     */
+    listJoined: (accountId: string) =>
+      call<JoinedCafe[]>("list_joined_cafes", { accountId }),
+  },
   bands: { list: () => call<Band[]>("list_bands") },
   diagnostics: {
     /** Probe Chrome install/version + ADB device connection (UI 새로고침). */

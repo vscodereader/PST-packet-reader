@@ -82,7 +82,6 @@ fn every_list_command_returns_its_seeded_collection() {
         "list_queue_scheduled",
         "list_stocks",
         "list_stats",
-        "list_cafes",
         "list_bands",
     ] {
         let out = invoke_ok(&wv, cmd, json!({}));
@@ -95,6 +94,22 @@ fn every_list_command_returns_its_seeded_collection() {
         let out = invoke_ok(&wv, cmd, json!({}));
         let _ = array(&out); // panics if not an array
     }
+}
+
+// `list_cafes` is intentionally NOT in the seeded-collection loop above: since
+// #67, cafes are registered by the user (via discovery), so the default seed is
+// empty (see `cafes::seed` + its `seed_is_empty_until_user_registers` unit test).
+// We still verify the command is wired and returns a JSON array.
+#[test]
+fn list_cafes_returns_an_array_with_no_seed() {
+    let (app, _dir) = mock_app();
+    let wv = main_webview(&app);
+
+    let out = invoke_ok(&wv, "list_cafes", json!({}));
+    assert!(
+        array(&out).is_empty(),
+        "cafes seed should start empty: {out}"
+    );
 }
 
 #[test]
