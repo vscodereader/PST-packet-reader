@@ -103,6 +103,63 @@ fn truncate_body(raw: String) -> String {
     }
 }
 
+/// reqwest 전송/본문 읽기 오류를 [`PostError`]로 변환한다. 쿠키 값은 포함하지 않는다.
+fn transport_error(e: reqwest::Error) -> PostError {
+    let retryable = e.is_timeout() || e.is_connect();
+    ErrorEnvelope {
+        trace_id: String::new(),
+        code: CODE_HTTP_TRANSPORT_ERROR.to_string(),
+        message: format!("HTTP 전송 오류가 발생했습니다: {}", e),
+        error_data: Some(PostErrorData {
+            cafe: NaverCafeCommonErrorData {
+                target: None,
+                http_status: None,
+                api_error_code: None,
+                api_error_message: None,
+                retryable,
+            },
+            menu_id: None,
+            subject: None,
+            validation_errors: vec![],
+        }),
+    }
+}
+
+/// 실측 캡처된 글 작성 실패 스키마([`NaverApiErrorBody`]: `{"error":{errorCode,message,more}}`)를
+/// [`PostError`]로 변환한다. non-2xx 응답과 "200 OK + 에러 본문" 양쪽에서 공용으로 쓴다
+/// (`retryable`만 호출부가 정한다). 쿠키/세션 값은 절대 포함되지 않는다.
+fn api_error_from_body(
+    code: &str,
+    message: String,
+    status: u16,
+    error_body: NaverApiErrorBody,
+    retryable: bool,
+) -> PostError {
+    let trace_id = error_body
+        .error
+        .more
+        .as_ref()
+        .and_then(|m| m.request_id.clone())
+        .unwrap_or_default();
+    ErrorEnvelope {
+        trace_id,
+        code: code.to_string(),
+        message,
+        error_data: Some(PostErrorData {
+            cafe: NaverCafeCommonErrorData {
+                target: None,
+                http_status: Some(status),
+                api_error_code: Some(error_body.error.error_code),
+                api_error_message: Some(error_body.error.message),
+                retryable,
+            },
+            menu_id: None,
+            subject: None,
+            validation_errors: vec![],
+        }),
+    }
+}
+
 /// non-2xx 응답 시 `PostError`를 생성한다.
 ///
 /// 실측 캡처된 실패 스키마(`{"error":{"errorCode","message","more":{"requestId"}}}`)로
@@ -120,29 +177,7 @@ fn make_non_2xx_error(
 ) -> PostError {
     // 실측 캡처된 스키마로 파싱 시도
     if let Some(error_body) = NaverApiErrorBody::parse(&raw_body) {
-        let trace_id = error_body
-            .error
-            .more
-            .as_ref()
-            .and_then(|m| m.request_id.clone())
-            .unwrap_or_default();
-        return ErrorEnvelope {
-            trace_id,
-            code: code.to_string(),
-            message,
-            error_data: Some(PostErrorData {
-                cafe: NaverCafeCommonErrorData {
-                    target: None,
-                    http_status: Some(status),
-                    api_error_code: Some(error_body.error.error_code),
-                    api_error_message: Some(error_body.error.message),
-                    retryable,
-                },
-                menu_id: None,
-                subject: None,
-                validation_errors: vec![],
-            }),
-        };
+        return api_error_from_body(code, message, status, error_body, retryable);
     }
 
     // 알 수 없는 형태 폴백: 원본 바디를 그대로 보존
@@ -254,31 +289,17 @@ impl CafeHttpClient {
             req = req.header("Cookie", cookie);
         }
 
-        let response = req.json(body).send().await.map_err(|e| {
-            let retryable = e.is_timeout() || e.is_connect();
-            ErrorEnvelope {
-                trace_id: String::new(),
-                code: CODE_HTTP_TRANSPORT_ERROR.to_string(),
-                message: format!("HTTP 전송 오류가 발생했습니다: {}", e),
-                error_data: Some(PostErrorData {
-                    cafe: NaverCafeCommonErrorData {
-                        target: None,
-                        http_status: None,
-                        api_error_code: None,
-                        api_error_message: None,
-                        retryable,
-                    },
-                    menu_id: None,
-                    subject: None,
-                    validation_errors: vec![],
-                }),
-            }
-        })?;
+        let response = req.json(body).send().await.map_err(transport_error)?;
 
         let status = response.status();
         let status_code = status.as_u16();
 
-        let raw_body = response.text().await.unwrap_or_default();
+        // 본문 읽기 실패는 전송 오류로 다룬다(빈 문자열로 뭉개면 재시도 가능한 네트워크
+        // 오류가 비재시도 파싱 오류로 둔갑한다).
+        let raw_body = match response.text().await {
+            Ok(body) => body,
+            Err(e) => return Err(transport_error(e)),
+        };
 
         if !status.is_success() {
             let retryable = status_code >= 500;
@@ -292,15 +313,29 @@ impl CafeHttpClient {
             ));
         }
 
-        parse_article_register(&raw_body).map_err(|_| {
-            make_parse_error(
-                CODE_REGISTER_PARSE_ERROR,
-                "게시글 등록 응답을 파싱하지 못했습니다. 실제 응답 형태는 errorData.cafe.apiErrorMessage를 확인하세요."
-                    .to_string(),
-                status_code,
-                raw_body,
-            )
-        })
+        // 2xx 성공 형태로 파싱되면 반환한다. 네이버는 "200 OK + 에러 본문"을 보내기도 하므로,
+        // 성공 형태가 아니면 실패 스키마(errorCode/message/requestId)를 한 번 더 해석해 실제
+        // 사유를 surface하고, 그래도 아니면 파싱 실패로 보고한다.
+        match parse_article_register(&raw_body) {
+            Ok(result) => Ok(result),
+            Err(_) => Err(match NaverApiErrorBody::parse(&raw_body) {
+                Some(error_body) => api_error_from_body(
+                    CODE_REGISTER_HTTP_ERROR,
+                    "게시글 등록 요청이 실패했습니다. 오류 응답은 errorData.cafe.apiErrorMessage를 확인하세요."
+                        .to_string(),
+                    status_code,
+                    error_body,
+                    false,
+                ),
+                None => make_parse_error(
+                    CODE_REGISTER_PARSE_ERROR,
+                    "게시글 등록 응답을 파싱하지 못했습니다. 실제 응답 형태는 errorData.cafe.apiErrorMessage를 확인하세요."
+                        .to_string(),
+                    status_code,
+                    raw_body,
+                ),
+            }),
+        }
     }
 }
 
@@ -714,6 +749,35 @@ mod tests {
             "원본 바디가 캡처되어야 함: {}",
             captured_body
         );
+    }
+
+    #[tokio::test]
+    async fn post_article_200_with_error_body_surfaces_error_code() {
+        // 네이버는 "200 OK + 에러 본문"을 보내기도 한다. 성공 형태가 아니면 실패 스키마로
+        // 해석해 errorCode/message/requestId를 드러내야 한다(generic 파싱 실패로 뭉개지 않는다).
+        let server = MockServer::start().await;
+        let real_body = r#"{"error":{"errorCode":"10404","message":"Page Not Found","more":{"requestId":"cf4ee2db355d4584b6e0add8f8743048"}}}"#;
+        Mock::given(method("POST"))
+            .and(path(expected_path()))
+            .respond_with(ResponseTemplate::new(200).set_body_string(real_body))
+            .mount(&server)
+            .await;
+
+        let client = CafeHttpClient::with_base_url(server.uri());
+        let err = client
+            .post_article(cafe_id(), menu_id(), board_type(), &dummy_body(), None)
+            .await
+            .expect_err("200+에러 본문은 Err여야 함");
+
+        assert_eq!(err.code, CODE_REGISTER_HTTP_ERROR);
+        assert_eq!(
+            err.trace_id, "cf4ee2db355d4584b6e0add8f8743048",
+            "200+에러 본문에서도 requestId가 trace_id에 매핑되어야 함"
+        );
+        let cafe = &err.error_data.expect("errorData가 없음").cafe;
+        assert_eq!(cafe.http_status, Some(200));
+        assert_eq!(cafe.api_error_code.as_deref(), Some("10404"));
+        assert!(!cafe.retryable, "200+에러는 재시도 불가");
     }
 
     // ------------------------------------------------------------------

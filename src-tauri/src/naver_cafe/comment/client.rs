@@ -127,6 +127,34 @@ fn transport_error(
     }
 }
 
+/// 실측 댓글 실패 스키마([`CommentApiFailure`]: `errorCode`/`reason`)를 [`CommentError`]로
+/// 변환한다. non-2xx 응답과 "200 OK + 에러 본문" 양쪽에서 공용으로 쓴다(`retryable`만 호출부가
+/// 정한다). 쿠키/세션 값은 절대 포함되지 않는다.
+fn api_failure_error(
+    status: u16,
+    failure: CommentApiFailure,
+    retryable: bool,
+    article_id: &str,
+    ref_comment_id: Option<&str>,
+) -> CommentError {
+    ErrorEnvelope {
+        trace_id: String::new(),
+        code: CODE_COMMENT_HTTP_ERROR.to_string(),
+        message: "댓글 등록 요청이 실패했습니다. 상세는 errorData.cafe를 확인하세요.".to_string(),
+        error_data: Some(error_data(
+            article_id,
+            ref_comment_id,
+            NaverCafeCommonErrorData {
+                target: None,
+                http_status: Some(status),
+                api_error_code: Some(failure.error_code),
+                api_error_message: Some(failure.reason),
+                retryable,
+            },
+        )),
+    }
+}
+
 /// non-2xx 응답 시 [`CommentError`]를 생성한다.
 ///
 /// 실측 댓글 실패 스키마([`CommentApiFailure`])로 파싱을 시도한다:
@@ -142,23 +170,7 @@ fn make_non_2xx_error(
     ref_comment_id: Option<&str>,
 ) -> CommentError {
     if let Some(failure) = CommentApiFailure::parse(&raw_body) {
-        return ErrorEnvelope {
-            trace_id: String::new(),
-            code: CODE_COMMENT_HTTP_ERROR.to_string(),
-            message: "댓글 등록 요청이 실패했습니다. 상세는 errorData.cafe를 확인하세요."
-                .to_string(),
-            error_data: Some(error_data(
-                article_id,
-                ref_comment_id,
-                NaverCafeCommonErrorData {
-                    target: None,
-                    http_status: Some(status),
-                    api_error_code: Some(failure.error_code),
-                    api_error_message: Some(failure.reason),
-                    retryable,
-                },
-            )),
-        };
+        return api_failure_error(status, failure, retryable, article_id, ref_comment_id);
     }
 
     // 알 수 없는 형태 폴백: 원본 바디 보존
@@ -309,7 +321,12 @@ impl CafeCommentClient {
 
         let status = response.status();
         let status_code = status.as_u16();
-        let raw_body = response.text().await.unwrap_or_default();
+        // 본문 읽기 실패는 전송(transport) 오류로 다룬다 — 빈 문자열로 뭉개면 재시도 가능한
+        // 네트워크 오류가 비재시도 파싱 오류로 둔갑한다.
+        let raw_body = match response.text().await {
+            Ok(body) => body,
+            Err(e) => return Err(transport_error(article_id, ref_comment_id, e)),
+        };
 
         if !status.is_success() {
             let retryable = status_code >= 500;
@@ -322,8 +339,18 @@ impl CafeCommentClient {
             ));
         }
 
-        parse_comment_result(&raw_body)
-            .map_err(|_| make_parse_error(status_code, raw_body, article_id, ref_comment_id))
+        // 2xx 성공 형태로 파싱되면 그대로 반환한다. 네이버는 "200 OK + 에러 본문"을 보내기도
+        // 하므로, 성공 형태가 아니면 실패 스키마(errorCode/reason)를 한 번 더 해석해 실제
+        // 사유를 surface하고, 그래도 아니면 파싱 실패로 보고한다.
+        match parse_comment_result(&raw_body) {
+            Ok(result) => Ok(result),
+            Err(_) => Err(match CommentApiFailure::parse(&raw_body) {
+                Some(failure) => {
+                    api_failure_error(status_code, failure, false, article_id, ref_comment_id)
+                }
+                None => make_parse_error(status_code, raw_body, article_id, ref_comment_id),
+            }),
+        }
     }
 }
 
@@ -554,5 +581,33 @@ mod tests {
             captured.contains(r#"{"unexpected":true}"#),
             "원본 바디 보존: {captured}"
         );
+    }
+
+    #[tokio::test]
+    async fn post_comment_200_with_error_body_surfaces_error_code() {
+        // 네이버는 "200 OK + 에러 본문"을 보내기도 한다. 성공 형태가 아니면 실패 스키마로
+        // 해석해 errorCode/reason을 드러내야 한다(generic 파싱 실패로 뭉개지 않는다).
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(comment_post_path()))
+            .respond_with(ResponseTemplate::new(200).set_body_string(REAL_FAILURE))
+            .mount(&server)
+            .await;
+
+        let client = CafeCommentClient::with_base_url(server.uri());
+        let err = client
+            .post_comment(&comment_req(), None)
+            .await
+            .expect_err("200+에러 본문은 Err여야 함");
+
+        assert_eq!(err.code, CODE_COMMENT_HTTP_ERROR);
+        let cafe = &err.error_data.expect("errorData가 없음").cafe;
+        assert_eq!(cafe.http_status, Some(200));
+        assert_eq!(cafe.api_error_code.as_deref(), Some("4003"));
+        assert_eq!(
+            cafe.api_error_message.as_deref(),
+            Some("삭제되었거나 존재하지 않는 게시글입니다.")
+        );
+        assert!(!cafe.retryable, "200+에러는 재시도 불가");
     }
 }
