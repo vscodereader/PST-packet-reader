@@ -12,6 +12,16 @@ import {
   parseCafeArticleUrl,
 } from "./comment-jobs";
 
+/**
+ * Deterministic RNG stub yielding the given values in order (cycling). Lets a
+ * test force an exact Fisher–Yates permutation, proving a builder actually
+ * routes through the shuffle rather than dealing comments in input order.
+ */
+function seqRng(values: number[]): () => number {
+  let i = 0;
+  return () => values[i++ % values.length] ?? 0;
+}
+
 describe("mulberry32", () => {
   it("is deterministic for a fixed seed", () => {
     const a = mulberry32(123);
@@ -191,6 +201,19 @@ describe("buildBothCommentJobs", () => {
     expect(first).toEqual(second);
   });
 
+  it("routes through the shuffle (rng reverses the pool, not raw input order)", () => {
+    // rng=[0] reverses a 2-element Fisher–Yates: pool ["x","y"] → ["y","x"].
+    // So a5 must get "y" (shuffled), NOT "x" (raw input order) — this fails if a
+    // regression drops distributeComments and deals comments in input order.
+    const posted = [
+      { accountId: "a5", cafeId: 111, articleId: 1000 },
+      { accountId: "a6", cafeId: 222, articleId: 1001 },
+    ];
+    const jobs = buildBothCommentJobs(posted, ["x", "y"], { rng: seqRng([0]) });
+    expect(jobs[0]?.content).toBe("y");
+    expect(jobs[1]?.content).toBe("x");
+  });
+
   it("is empty when there are no posts or no comments", () => {
     expect(buildBothCommentJobs([], ["x"])).toEqual([]);
     expect(
@@ -229,6 +252,20 @@ describe("buildUrlCommentJobs", () => {
       rng: mulberry32(42),
     });
     expect(first).toEqual(second);
+  });
+
+  it("routes through the shuffle (rng reverses the pool, not raw input order)", () => {
+    // rng=[0, 0.5] reverses a 3-element Fisher–Yates: ["c1","c2","c3"] → ["c3","c2","c1"].
+    // a5 must get "c3" (shuffled), NOT "c1" (raw input order) — guards against a
+    // regression that bypasses distributeComments and assigns comments[i] directly.
+    const jobs = buildUrlCommentJobs(
+      ["a5", "a10"],
+      { cafeId: 31732304, articleId: 9 },
+      ["c1", "c2", "c3"],
+      { rng: seqRng([0, 0.5]) },
+    );
+    expect(jobs[0]?.content).toBe("c3");
+    expect(jobs[1]?.content).toBe("c2");
   });
 });
 

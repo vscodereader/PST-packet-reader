@@ -53,14 +53,13 @@ function shuffle<T>(items: readonly T[], rng: Rng): T[] {
   const out = items.slice();
   for (let i = out.length - 1; i > 0; i--) {
     const j = Math.floor(rng() * (i + 1));
-    // both indices are in-bounds (0..i), but noUncheckedIndexedAccess still
-    // types these as T | undefined — capture then guard before swapping.
-    const a = out[i];
-    const b = out[j];
-    if (a !== undefined && b !== undefined) {
-      out[i] = b;
-      out[j] = a;
-    }
+    // i ∈ [1, len-1] and j ∈ [0, i] are provably in-bounds, so the swap must
+    // ALWAYS happen — skipping it on a (type-only) `undefined` would bias the
+    // permutation. The non-null assertions are sound given those bounds and
+    // keep the shuffle unbiased even if reused with a nullable element type.
+    const tmp = out[i]!;
+    out[i] = out[j]!;
+    out[j] = tmp;
   }
   return out;
 }
