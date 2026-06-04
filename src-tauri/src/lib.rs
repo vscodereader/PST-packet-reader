@@ -104,15 +104,85 @@ fn forum_endpoint() -> ForumEndpoint {
     }
 }
 
+fn build_publish_batch(
+    title: &str,
+    run_post: bool,
+    run_comment: bool,
+    account_id: &str,
+    at: i64,
+    results: &[ForumPublishResult],
+) -> ipc::log_batches::LogBatch {
+    use ipc::accounts::PlatformId;
+    use ipc::log_batches::{BatchItem, BatchItemStatus, LogBatch};
+    use ipc::posts::ModeValue;
+    let kind = if run_post && run_comment {
+        ModeValue::Both
+    } else if run_comment {
+        ModeValue::Comment
+    } else {
+        ModeValue::Post
+    };
+    let items = results
+        .iter()
+        .map(|r| BatchItem {
+            platform: PlatformId::Forum,
+            target: r.name.clone(),
+            code: Some(r.code.clone()),
+            board: None,
+            login_id: account_id.to_owned(),
+            status: if r.ok {
+                BatchItemStatus::Success
+            } else {
+                BatchItemStatus::Fail
+            },
+            msg: r.message.clone(),
+            trace: if r.ok { None } else { Some(r.message.clone()) },
+        })
+        .collect();
+    LogBatch {
+        id: format!("lb-{at}"),
+        title: title.to_owned(),
+        kind,
+        at,
+        state: None,
+        items,
+    }
+}
+
 // 사수 UI(publish-modal)의 "지금 바로 게시 + 종목토론방"이 호출하는 command입니다.
 #[tauri::command]
 async fn run_forum_publish_now<R: Runtime>(
     app: tauri::AppHandle<R>,
     request: ForumPublishRequest,
 ) -> Result<Vec<ForumPublishResult>, String> {
-    tauri::async_runtime::spawn_blocking(move || run_forum_publish(request, app))
-        .await
-        .map_err(|error| format!("게시 실행 스레드 오류: {error}"))
+    let title = request.title.clone();
+    let account_id = request.account_id.clone();
+    let (run_post, run_comment) = (request.run_post, request.run_comment);
+    let app_for_job = app.clone();
+    let results =
+        tauri::async_runtime::spawn_blocking(move || run_forum_publish(request, app_for_job))
+            .await
+            .map_err(|error| format!("게시 실행 스레드 오류: {error}"))?;
+
+    let at = util::now_ms();
+    let batch = build_publish_batch(&title, run_post, run_comment, &account_id, at, &results);
+    let ok = results.iter().filter(|r| r.ok).count();
+    let logs = app.state::<JsonStore<ipc::log_batches::LogBatch>>();
+    logs.mutate(|mut v| {
+        v.insert(0, batch);
+        v
+    });
+    let activity = app.state::<JsonStore<ipc::activity::ActivityItem>>();
+    ipc::activity::record(
+        activity.inner(),
+        if ok == results.len() {
+            ipc::activity::ActivityType::Success
+        } else {
+            ipc::activity::ActivityType::Error
+        },
+        format!("'{title}' 게시 — {}곳 중 {ok}곳 성공", results.len()),
+    );
+    Ok(results)
 }
 
 #[cfg(target_os = "windows")]
@@ -376,6 +446,40 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_publish_batch_maps_results_to_items() {
+        let results = vec![
+            ForumPublishResult {
+                code: "005930".into(),
+                name: "삼성전자".into(),
+                ok: true,
+                message: "게시 완료".into(),
+            },
+            ForumPublishResult {
+                code: "000660".into(),
+                name: "SK하이닉스".into(),
+                ok: false,
+                message: "로그인 만료".into(),
+            },
+        ];
+        let b = build_publish_batch(
+            "실적 정리",
+            true,
+            false,
+            "invest_king7",
+            1_700_000_000_000,
+            &results,
+        );
+        assert_eq!(b.items.len(), 2);
+        assert_eq!(b.title, "실적 정리");
+        assert!(matches!(b.kind, ipc::posts::ModeValue::Post));
+        assert!(matches!(
+            b.items[0].status,
+            ipc::log_batches::BatchItemStatus::Success
+        ));
+        assert_eq!(b.items[1].trace.as_deref(), Some("로그인 만료"));
+    }
 
     #[test]
     fn greet_includes_name() {
