@@ -246,6 +246,18 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
       .finally(() => setEnvLoading(false));
   }, []);
 
+  // Chrome 미설치 카드의 "설치 페이지 열기" — 공식 다운로드 페이지를 기본 브라우저로
+  // 연다. 열기에 실패해도(드문 경우) 사용자가 막히지 않도록 직접 접속할 주소를 안내.
+  const openChromeInstall = useCallback(() => {
+    void ipc.diagnostics.openChromeDownload().catch(() => {
+      notifications.show({
+        message:
+          "브라우저를 열지 못했어요. google.com/chrome 에서 직접 설치해 주세요.",
+        color: "red",
+      });
+    });
+  }, []);
+
   useEffect(() => {
     void ipc.diagnostics.getStatus().then(setEnv);
     void ipc.logBatches.list().then(setLogBatches);
@@ -337,8 +349,18 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
 
   // Chrome/ADB 진단 카드용 표시값. env가 아직 없으면 "확인 중".
   // (옵셔널 필드는 ts-rs상 `string | null`이라 null 기준으로 분기한다.)
+  // action: 사용자가 바로 취할 조치 버튼(Chrome 미설치 → 설치 페이지).
+  // warning: 이 상태가 자동화에 끼치는 영향 경고(ADB 미연결 → IP 변경 불가).
+  type EnvCard = {
+    color: string;
+    label: string;
+    detail: string;
+    action?: { label: string; onClick: () => void };
+    warning?: string;
+  };
+
   const chrome = env?.chrome ?? null;
-  const chromeCard = !chrome
+  const chromeCard: EnvCard = !chrome
     ? { color: "gray", label: "확인 중", detail: "상태를 불러오는 중…" }
     : chrome.installed
       ? {
@@ -351,10 +373,12 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
           color: "red",
           label: "미설치",
           detail: chrome.error ?? "Chrome을 찾을 수 없습니다",
+          // 자동화는 Chrome 으로 로그인하므로, 미설치 시 설치 페이지로 유도한다.
+          action: { label: "설치 페이지 열기", onClick: openChromeInstall },
         };
 
   const adb = env?.adb ?? null;
-  const adbCard = !adb
+  const adbCard: EnvCard = !adb
     ? { color: "gray", label: "확인 중", detail: "상태를 불러오는 중…" }
     : adb.connected
       ? { color: "green", label: "연결됨", detail: "디바이스 감지됨" }
@@ -363,6 +387,9 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
           label: "미연결",
           // 백엔드가 원인별로 변환한 사용자용 안내 문구를 노출(개발자용 원문 아님).
           detail: adb.error ?? "감지된 디바이스 없음",
+          // 미연결 자체는 정상(회색)이지만, IP 로테이션이 막히는 영향은 별도 경고한다.
+          warning:
+            "기기 미연결 상태에서는 IP 변경(로테이션)이 동작하지 않습니다.\n휴대폰을 USB로 연결하고 USB 디버깅을 켜 주세요.",
         };
 
   const envCards = [
@@ -516,6 +543,36 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
                       {c.detail}
                     </Text>
                   </Tooltip>
+                  {/* 상태가 자동화에 끼치는 영향 경고(ADB 미연결 → IP 변경 불가). */}
+                  {c.warning && (
+                    <Group gap={6} mt={8} wrap="nowrap" align="flex-start">
+                      <Icon.alert
+                        size={14}
+                        color="var(--mantine-color-orange-6)"
+                        style={{ flexShrink: 0, marginTop: 1 }}
+                      />
+                      <Text
+                        fz={11.5}
+                        c="orange.8"
+                        fw={600}
+                        style={{ whiteSpace: "pre-line" }}
+                      >
+                        {c.warning}
+                      </Text>
+                    </Group>
+                  )}
+                  {/* 바로 취할 조치 버튼(Chrome 미설치 → 설치 페이지 열기). */}
+                  {c.action && (
+                    <Button
+                      size="compact-xs"
+                      variant="light"
+                      mt={10}
+                      leftSection={<Icon.arrowUpRight size={13} />}
+                      onClick={c.action.onClick}
+                    >
+                      {c.action.label}
+                    </Button>
+                  )}
                 </Box>
               </Group>
             </Card>

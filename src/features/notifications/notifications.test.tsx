@@ -138,4 +138,43 @@ describe("Notifications", () => {
     );
     expect(calls()).toBeGreaterThan(before);
   });
+
+  it("guides to the Chrome install page when Chrome is missing", async () => {
+    const { invoke } = await import("@/test/ipc");
+    // First mount invoke is diagnostics.getStatus — report Chrome as missing.
+    vi.mocked(invoke).mockImplementationOnce(async () => ({
+      chrome: {
+        installed: false,
+        path: null,
+        version: null,
+        error: "Chrome 브라우저가 설치되어 있지 않습니다.",
+      },
+      adb: { connected: true, error: null },
+    }));
+    renderLog();
+    // The 미설치 card surfaces an action button that opens the download page.
+    await userEvent.click(
+      await screen.findByRole("button", { name: /설치 페이지 열기/ }),
+    );
+    expect(
+      vi.mocked(invoke).mock.calls.some((c) => c[0] === "open_chrome_download"),
+    ).toBe(true);
+  });
+
+  it("warns that IP rotation is unavailable while ADB is not connected", async () => {
+    const { invoke } = await import("@/test/ipc");
+    vi.mocked(invoke).mockImplementationOnce(async () => ({
+      chrome: {
+        installed: true,
+        path: "/x/chrome",
+        version: "149.0",
+        error: null,
+      },
+      adb: { connected: false, error: "감지된 디바이스 없음" },
+    }));
+    renderLog();
+    expect(
+      await screen.findByText(/IP 변경\(로테이션\)이 동작하지 않습니다/),
+    ).toBeInTheDocument();
+  });
 });

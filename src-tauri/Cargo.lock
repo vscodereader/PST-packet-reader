@@ -2692,6 +2692,7 @@ name = "pstmacro"
 version = "0.1.0"
 dependencies = [
  "adb_client",
+ "open",
  "serde",
  "serde_json",
  "tauri",

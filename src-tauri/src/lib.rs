@@ -85,6 +85,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         cafes::list_cafes,
         bands::list_bands,
         diagnostics::get_environment_status,
+        diagnostics::open_chrome_download,
         bootstrap_runtime,
         save_accounts,
         enqueue_cookie_refresh,

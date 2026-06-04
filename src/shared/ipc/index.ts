@@ -77,5 +77,7 @@ export const ipc = {
   diagnostics: {
     /** Probe Chrome install/version + ADB device connection (UI 새로고침). */
     getStatus: () => call<EnvironmentStatus>("get_environment_status"),
+    /** Chrome 미설치 안내 카드의 "설치 페이지 열기" — 공식 다운로드 페이지를 기본 브라우저로 연다. */
+    openChromeDownload: () => call<void>("open_chrome_download"),
   },
 };

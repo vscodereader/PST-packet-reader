@@ -195,6 +195,20 @@ pub async fn get_environment_status() -> EnvironmentStatus {
     EnvironmentStatus { chrome, adb }
 }
 
+/// Chrome 공식 다운로드 페이지. 미설치 안내 카드의 "설치 페이지 열기" 버튼이 연다.
+const CHROME_DOWNLOAD_URL: &str = "https://www.google.com/chrome/";
+
+/// Chrome 공식 다운로드 페이지를 사용자의 기본 브라우저로 연다.
+///
+/// 미설치 카드에서 호출한다. 여는 URL 은 위 상수로 고정돼 있어 임의 URL 을 열 수
+/// 없다(프론트에서 주소를 받지 않음). 브라우저를 띄우는 즉시 반환(detached)하며,
+/// 실패 시 개발자용 원문 대신 사용자용 문구로 변환해 돌려준다.
+#[tauri::command]
+pub fn open_chrome_download() -> Result<(), String> {
+    open::that_detached(CHROME_DOWNLOAD_URL)
+        .map_err(|e| format!("브라우저를 여는 중 문제가 발생했습니다: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,6 +346,14 @@ mod tests {
         assert!(json.contains("\"connected\":false"));
         let back: EnvironmentStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(status, back);
+    }
+
+    #[test]
+    fn chrome_download_url_points_at_the_official_install_page() {
+        // 미설치 안내 버튼이 여는 주소 — 반드시 https 공식 도메인이어야 한다
+        // (오타·잘못된 도메인으로 사용자를 엉뚱한 곳에 보내지 않도록 고정 검증).
+        assert!(CHROME_DOWNLOAD_URL.starts_with("https://"));
+        assert!(CHROME_DOWNLOAD_URL.contains("google.com/chrome"));
     }
 
     // CHROME_PATH(프로세스 전역 env)를 probe_chrome 실행 내내 고정하려면 await 너머로
