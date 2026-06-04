@@ -220,7 +220,21 @@ mod tests {
 
         use calamine::{open_workbook, Reader, Xlsx};
         let mut wb: Xlsx<_> = open_workbook(&path).unwrap();
-        assert!(wb.worksheet_range("게시 배치").is_ok());
+
+        // 게시 배치 시트 셀 값 검증
+        let batch_sheet = wb.worksheet_range("게시 배치").unwrap();
+        let brows: Vec<_> = batch_sheet.rows().collect();
+        assert_eq!(brows[0][1].to_string(), "제목"); // header col 1
+        assert_eq!(brows[0][3].to_string(), "대상"); // header col 3
+        assert_eq!(brows[1][1].to_string(), "실적 정리"); // title
+        assert_eq!(brows[1][2].to_string(), "forum"); // platform (Forum)
+        assert_eq!(brows[1][3].to_string(), "삼성전자"); // 대상
+        assert_eq!(brows[1][4].to_string(), "005930"); // 코드
+        assert_eq!(brows[1][5].to_string(), "invest_king7"); // 계정
+        assert_eq!(brows[1][6].to_string(), "성공"); // 상태 (item_status_str Success)
+        assert_eq!(brows[1][7].to_string(), "게시 완료"); // 메시지
+
+        // 시스템 활동 시트 검증
         let sys = wb.worksheet_range("시스템 활동").unwrap();
         let rows: Vec<_> = sys.rows().collect();
         assert_eq!(rows[1][2].to_string(), "종목 12개 크롤링");

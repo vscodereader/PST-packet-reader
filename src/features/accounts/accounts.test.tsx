@@ -210,6 +210,19 @@ describe("Accounts", () => {
     ).toBe(true);
   });
 
+  it("does not invoke export when save dialog is cancelled", async () => {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(save).mockResolvedValueOnce(null);
+    vi.mocked(ipcBackend).mockClear();
+    await renderAccounts();
+    await userEvent.click(screen.getByRole("button", { name: /내보내기/ }));
+    expect(
+      vi
+        .mocked(ipcBackend)
+        .mock.calls.some((c) => c[0] === "export_accounts_xlsx"),
+    ).toBe(false);
+  });
+
   it("fires excel import action (stub, no dialog)", async () => {
     await renderAccounts();
     await userEvent.click(

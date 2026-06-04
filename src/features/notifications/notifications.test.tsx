@@ -70,6 +70,18 @@ describe("Notifications", () => {
     ).toBe(true);
   });
 
+  it("does not invoke export when save dialog is cancelled", async () => {
+    const { invoke } = await import("@/test/ipc");
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(save).mockResolvedValueOnce(null);
+    vi.mocked(invoke).mockClear();
+    renderLog();
+    await userEvent.click(screen.getByRole("button", { name: /내보내기/ }));
+    expect(
+      vi.mocked(invoke).mock.calls.some((c) => c[0] === "export_activity_xlsx"),
+    ).toBe(false);
+  });
+
   it("clears the account filter", async () => {
     renderLog({ loginId: "value_pick", platform: "forum" });
     await userEvent.click(screen.getByRole("button", { name: /필터 해제/ }));
