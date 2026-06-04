@@ -47,6 +47,8 @@ pub(crate) fn launch(headless: bool) -> Result<ChromeHandle, OrchestratorError> 
     let mut args = vec![
         "--remote-debugging-port=0",
         profile_arg.as_str(),
+        // 시크릿(incognito) 창으로 띄운다 — 계정마다 깨끗한 세션으로 로그인.
+        "--incognito",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-quic",

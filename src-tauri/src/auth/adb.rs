@@ -23,17 +23,52 @@ pub async fn probe_adb_connection() -> Result<(), OrchestratorError> {
 }
 
 /// 비행기 모드를 켬과 끔으로 토글하여 IP 변경을 유도한다.
-/// 진행 상황을 stderr로 출력해 `pnpm tauri dev` 콘솔에서 토글 여부를 확인할 수 있게 한다.
+/// 토글 전후의 외부 IP를 stderr로 출력해 `pnpm tauri dev` 콘솔에서 IP 회전 여부를
+/// 직접 눈으로 확인할 수 있게 한다. (Samsung One UI는 `cmd connectivity airplane-mode`로
+/// 토글해도 상단 버튼에 불이 안 들어올 수 있으나, IP가 바뀌면 라디오는 실제로 순환한 것.)
 pub async fn toggle_airplane_mode() -> Result<(), OrchestratorError> {
+    let before = fetch_external_ip().await;
     let mut device = connect_device()?;
-    eprintln!("[ADB] ✈ 비행기모드 ON — IP 회전 시작");
+    eprintln!("[ADB] ✈ 비행기모드 ON");
     run_shell_command(&mut device, "cmd connectivity airplane-mode enable")?;
     sleep(Duration::from_secs(config::ADB_AIRPLANE_ENABLE_SECS)).await;
     eprintln!("[ADB] ✈ 비행기모드 OFF — 인터넷 복구 대기");
     run_shell_command(&mut device, "cmd connectivity airplane-mode disable")?;
     wait_for_internet_connection(&mut device).await?;
-    eprintln!("[ADB] ✓ 인터넷 복구됨 — IP 회전 완료");
+    let after = fetch_external_ip().await;
+
+    eprintln!("[ADB] ─────────── IP 회전 결과 ───────────");
+    eprintln!("[ADB]   기존 IP: {before}");
+    eprintln!("[ADB]   바뀐 IP: {after}");
+    if before.starts_with('(') || after.starts_with('(') {
+        eprintln!("[ADB]   (IP 확인 실패 — PC 인터넷/테더링 확인)");
+    } else if before == after {
+        eprintln!(
+            "[ADB]   ⚠ IP가 그대로 — USB 테더링이 PC 기본 경로인지 / 통신사 CGNAT인지 확인 필요"
+        );
+    } else {
+        eprintln!("[ADB]   ✓ IP 변경됨!");
+    }
+    eprintln!("[ADB] ────────────────────────────────────");
     Ok(())
+}
+
+/// PC의 현재 외부 IP를 조회한다(USB 테더링이면 = 폰 모바일 IP). best-effort.
+/// blocking reqwest를 async 런타임에서 직접 호출하면 패닉하므로 spawn_blocking으로 감싼다.
+async fn fetch_external_ip() -> String {
+    tokio::task::spawn_blocking(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .ok()
+            .and_then(|client| client.get("https://api.ipify.org").send().ok())
+            .and_then(|response| response.text().ok())
+            .map(|text| text.trim().to_owned())
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| "(확인 실패)".to_owned())
+    })
+    .await
+    .unwrap_or_else(|_| "(확인 실패)".to_owned())
 }
 
 fn connect_device() -> Result<ADBUSBDevice, OrchestratorError> {

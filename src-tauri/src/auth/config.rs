@@ -90,7 +90,7 @@ fn chrome_candidates() -> Vec<String> {
 }
 
 // ADB
-pub const ADB_AIRPLANE_ENABLE_SECS: u64 = 2;
+pub const ADB_AIRPLANE_ENABLE_SECS: u64 = 1;
 pub const ADB_INTERNET_POLL_INTERVAL_MS: u64 = 1_000;
 pub const ADB_INTERNET_TIMEOUT_SECS: u64 = 30;
 pub const ADB_INTERNET_PING_HOST: &str = "8.8.8.8";
