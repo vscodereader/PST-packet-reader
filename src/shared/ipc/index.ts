@@ -146,6 +146,13 @@ export const ipc = {
     publishNow: (request: ForumPublishRequest) =>
       call<ForumPublishResult[]>("run_forum_publish_now", { request }),
   },
+  // 엑셀(.xlsx) 내보내기 — Rust에서 파일 쓰기, 프론트에서 경로 공급.
+  excel: {
+    exportAccounts: (path: string) =>
+      call<void>("export_accounts_xlsx", { path }),
+    exportActivity: (path: string) =>
+      call<void>("export_activity_xlsx", { path }),
+  },
   // 네이버 로그인 자동화(CDP). 계정 ID/PW로 로그인해 쿠키를 저장한다.
   auth: {
     bootstrap: () => call<unknown>("bootstrap_runtime"),

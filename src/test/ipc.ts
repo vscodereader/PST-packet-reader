@@ -1010,6 +1010,11 @@ export const invoke = vi.fn(
         );
       }
 
+      // --- 엑셀 내보내기 (모킹 — 실제 파일 쓰기 없이 성공 반환) -----------
+      case "export_accounts_xlsx":
+      case "export_activity_xlsx":
+        return undefined;
+
       // --- 네이버 로그인 자동화 (모킹) -------------------------------------
       case "bootstrap_runtime":
         return {};
