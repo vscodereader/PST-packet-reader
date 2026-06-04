@@ -77,11 +77,13 @@
 **recorder API (Rust)**
 
 - `activity.rs`에 추가:
+
   ```rust
   pub fn record(store: &JsonStore<ActivityItem>, ty: ActivityType, text: impl Into<String>);
   ```
 
   - 새 `ActivityItem { id: uuid-ish, type, text, at: now_ms() }`를 **맨 앞에** prepend, 최대 보관 건수(예: 500) 초과 시 오래된 것 truncate.
+
 - 범용 커맨드 `append_activity(ty, text)` — 프론트/worker 종료 등 백엔드-only 핸들러가 아닌 흐름에서 호출.
 - 시각 유틸 `now_ms()` (epoch ms) 공통 헬퍼.
 
@@ -128,7 +130,7 @@
   - 시트 ①「게시 배치」: batch별 flatten — 시각 / 제목 / 종류 / 플랫폼 / 대상 / 코드 / 계정 / 상태 / 메시지.
   - 시트 ②「시스템 활동」: 시각 / 유형 / 내용.
 - `export_accounts_xlsx(path: String) -> Result<(), String>`
-  - 컬럼: loginId / platform / status / tags(쉼표 결합) / last. (pw는 **제외** — 보안.)
+  - 컬럼: loginId / pw / platform / status / tags(쉼표 결합) / last. (**pw 포함** — 백업/재가져오기 round-trip 지원. 가져오기 필수 컬럼과 대칭.)
 
 **프론트 흐름**
 
