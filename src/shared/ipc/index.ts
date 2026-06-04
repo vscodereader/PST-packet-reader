@@ -129,6 +129,8 @@ export const ipc = {
   bands: { list: () => call<Band[]>("list_bands") },
   // 종목토론방(forum) 즉시 게시 — 네이버 증권 토론방 패킷 게시 엔진 호출.
   forum: {
+    /** 게시 엔진이 붙을 Chrome DevTools 엔드포인트. 백엔드가 단일 출처(프론트 상수 아님). */
+    endpoint: () => call<{ host: string; port: number }>("forum_endpoint"),
     publishNow: (request: ForumPublishRequest) =>
       call<ForumPublishResult[]>("run_forum_publish_now", { request }),
   },

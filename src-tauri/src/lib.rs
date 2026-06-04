@@ -80,6 +80,27 @@ async fn run_naver_discussion_batch<R: Runtime>(
         .map_err(|error| format!("배치 실행 스레드 오류: {error}"))?
 }
 
+// 패킷 게시 엔진이 붙는 로컬 Chrome DevTools 엔드포인트의 단일 출처(백엔드 소유).
+// 포트를 프론트엔드 상수로 두지 않고 command로 노출해, 프론트는 이 값을 받아 쓴다.
+const FORUM_DEVTOOLS_HOST: &str = "127.0.0.1";
+const FORUM_DEVTOOLS_PORT: u16 = 9222;
+
+/// 패킷 게시 엔진이 붙을 Chrome DevTools 엔드포인트(host/port).
+#[derive(serde::Serialize)]
+struct ForumEndpoint {
+    host: String,
+    port: u16,
+}
+
+/// 프론트엔드(publish-modal)가 게시 엔드포인트를 백엔드에서 받아오도록 노출하는 command.
+#[tauri::command]
+fn forum_endpoint() -> ForumEndpoint {
+    ForumEndpoint {
+        host: FORUM_DEVTOOLS_HOST.to_owned(),
+        port: FORUM_DEVTOOLS_PORT,
+    }
+}
+
 // 사수 UI(publish-modal)의 "지금 바로 게시 + 종목토론방"이 호출하는 command입니다.
 #[tauri::command]
 async fn run_forum_publish_now<R: Runtime>(
@@ -265,6 +286,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         search_stocks,
         open_incognito_chrome,
         run_naver_discussion_batch,
+        forum_endpoint,
         run_forum_publish_now,
     ])
 }

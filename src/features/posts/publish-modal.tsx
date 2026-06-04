@@ -411,12 +411,12 @@ function newScheduledId(): string {
 }
 
 /**
- * Default Chrome DevTools endpoint for the packet engine (hidden from users).
- * The app talks to a local Chrome on 127.0.0.1:9222. (For WSL dev, forward the
- * Windows Chrome debug port to localhost rather than hardcoding a host IP — the
- * WSL2 host address changes per machine/reboot.)
+ * Fallback Chrome DevTools endpoint, used ONLY when the backend command isn't
+ * available (browser preview / Vitest). The authoritative endpoint comes from
+ * the backend (`ipc.forum.endpoint()` → `forum_endpoint`), so the port is not a
+ * hardcoded frontend constant in the real app.
  */
-function defaultEndpoint(): { host: string; port: number } {
+function fallbackEndpoint(): { host: string; port: number } {
   return { host: "127.0.0.1", port: 9222 };
 }
 
@@ -477,8 +477,18 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [linkOverride, setLinkOverride] = useState("");
   const [showPreview, setShowPreview] = useState(false);
   const [flow, setFlow] = useState<null | "running" | PublishResult[]>(null);
+  // 게시 엔드포인트는 백엔드가 단일 출처. 받아오기 전/실패 시엔 폴백을 쓴다(브라우저·테스트).
+  const [endpoint, setEndpoint] = useState<{ host: string; port: number }>(
+    fallbackEndpoint,
+  );
 
   useEffect(() => {
+    void ipc.forum
+      .endpoint()
+      .then(setEndpoint)
+      .catch(() => {
+        /* 비-Tauri 환경: 폴백 유지 */
+      });
     void ipc.accounts.list().then((a) => {
       setAccounts(a);
       const firstUsable = a.find((x) => x.status !== "error");
@@ -584,7 +594,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
 
     // 즉시 게시: 종목토론방(forum)은 패킷 게시 엔진을 호출한다. 네이버 카페/밴드는
     // 아직 엔진 미구현이라 기존 표시 흐름을 유지한다(후속 작업).
-    const ep = defaultEndpoint();
+    const ep = endpoint;
     const forumJobs = jobs.filter((j) => j.platform === "forum");
     const otherJobs = jobs.filter((j) => j.platform !== "forum");
     const firstComment = (doc.comments ?? []).find((c) => c.trim()) ?? "";
@@ -618,8 +628,11 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
           .then((results) => {
             // 엔진이 결과를 비워(빈 배열·누락) 돌려줄 수 있으므로 방어적으로 다룬다.
             const list = Array.isArray(results) ? results : [];
-            return accJobs.map((j) => {
-              const r = list.find((x) => x.code === (j.code ?? ""));
+            // 결과는 code가 아니라 보낸 순서(인덱스)로 매칭한다. 백엔드(run_forum_publish)는
+            // 보낸 stocks 순서대로 결과를 돌려주므로, 같은 code가 두 번 들어가도 두 행이 첫
+            // 결과에 묶여 두 번째 종목의 실제 결과(성공 중복/실패 은폐)가 가려지지 않는다.
+            return accJobs.map((j, i) => {
+              const r = list[i];
               return {
                 ...j,
                 ok: r?.ok ?? false,

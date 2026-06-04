@@ -950,6 +950,10 @@ export const invoke = vi.fn(
         return clone(state.queueNow);
       }
 
+      // --- forum 게시 엔드포인트 (백엔드 소유) -----------------------------
+      case "forum_endpoint":
+        return { host: "127.0.0.1", port: 9222 };
+
       // --- forum 즉시 게시 (엔진 호출 모킹) ---------------------------------
       // 실제 백엔드는 패킷 게시를 수행한다. 테스트에서는 기존 목업과 동일하게
       // Math.random으로 성공/실패를 정하고, "게시하는 중" 상태가 보이도록 약간 지연한다.
