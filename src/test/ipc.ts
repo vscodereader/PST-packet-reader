@@ -1,10 +1,16 @@
 import { vi } from "vitest";
 
+import type { CommentJob } from "@/shared/bindings/CommentJob";
+import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutcome";
 import type { EnvironmentStatus } from "@/shared/bindings/EnvironmentStatus";
+import type { JoinedCafe } from "@/shared/bindings/JoinedCafe";
+import type { PostJob } from "@/shared/bindings/PostJob";
+import type { PublishOutcome } from "@/shared/bindings/PublishOutcome";
 import type {
   Account,
   ActivityItem,
   Band,
+  Board,
   Cafe,
   DashStat,
   LibraryPost,
@@ -262,14 +268,62 @@ const SEED_STOCKS: Stock[] = [
   },
 ];
 
+const board = (name: string, menuId: number, boardType = "L"): Board => ({
+  name,
+  menuId,
+  boardType,
+});
+
 const SEED_CAFES: Cafe[] = [
   {
     name: "주식투자연구소 카페",
-    boards: ["종목분석", "자유게시판", "질문/답변"],
+    cafeRef: "cafe.naver.com/stocklab",
+    cafeId: 11111111,
+    boards: [
+      board("종목분석", 1),
+      board("자유게시판", 2),
+      board("질문/답변", 3),
+    ],
   },
-  { name: "개미투자 카페", boards: ["자유게시판", "정보 공유", "종목추천"] },
-  { name: "가치투자랩 카페", boards: ["공지사항", "종목토론", "자유게시판"] },
+  {
+    name: "개미투자 카페",
+    cafeRef: "cafe.naver.com/antinvest",
+    cafeId: 22222222,
+    boards: [
+      board("자유게시판", 1),
+      board("정보 공유", 2),
+      board("종목추천", 3),
+    ],
+  },
 ];
+
+const joinedCafe = (
+  cafeId: number,
+  cafeName: string,
+  cafeUrl: string,
+  levelname = "정회원",
+): JoinedCafe => ({
+  cafeId,
+  cafeName,
+  cafeUrl,
+  memberNickname: "회원",
+  memberLevelname: levelname,
+  managingCafe: false,
+  dormantCafe: false,
+});
+
+// Joined cafes per naver account — keyed by accountId so the publish modal's
+// account-driven loader returns a different list for each account.
+// 백엔드 계약상 가입 카페는 계정의 `loginId`(쿠키 파일 키)로 조회된다 — UI 내부
+// 고유 id(a5 등)가 아니다. 시드도 loginId로 키한다.
+const SEED_JOINED: Record<string, JoinedCafe[]> = {
+  money_lab: [
+    joinedCafe(11111111, "주식투자연구소 카페", "stocklab", "카페매니저"),
+    joinedCafe(22222222, "개미투자 카페", "antinvest"),
+  ],
+  insight_note: [joinedCafe(33333333, "가치투자 모임", "valueclub")],
+  cafe_master9: [joinedCafe(44444444, "차트분석 카페", "chartlab")],
+};
 
 const SEED_BANDS: Band[] = [
   { name: "가치투자모임 BAND" },
@@ -821,6 +875,7 @@ interface IpcState {
   posts: LibraryPost[];
   queueNow: QueueNowItem[];
   queueScheduled: QueueScheduledItem[];
+  cafes: Cafe[];
 }
 
 let state: IpcState;
@@ -847,6 +902,7 @@ export function resetIpc(): void {
     posts: clone(SEED_LIBRARY),
     queueNow: clone(SEED_QUEUE_NOW),
     queueScheduled: clone(SEED_QUEUE_SCHEDULED),
+    cafes: clone(SEED_CAFES),
   };
   loginJobIds = [];
   loginOutcomes = {};
@@ -884,7 +940,50 @@ export const invoke = vi.fn(
       case "list_log_batches":
         return clone(SEED_LOG_BATCHES);
       case "list_cafes":
-        return clone(SEED_CAFES);
+        return clone(state.cafes);
+      case "resolve_cafe": {
+        const input = args!.input as string;
+        const resolved: Cafe = {
+          name: `해석된 카페 (${input})`,
+          cafeRef: input,
+          cafeId: 31732304,
+          boards: [board("자유게시판", 1), board("공지사항", 2)],
+        };
+        return clone(resolved);
+      }
+      case "upsert_cafe": {
+        const cafe = args!.cafe as Cafe;
+        const i = state.cafes.findIndex((c) => c.cafeId === cafe.cafeId);
+        if (i >= 0) state.cafes[i] = cafe;
+        else state.cafes = [cafe, ...state.cafes];
+        return clone(state.cafes);
+      }
+      case "list_joined_cafes": {
+        const accountId = args!.accountId as string;
+        return clone(SEED_JOINED[accountId] ?? []);
+      }
+      case "run_post_jobs": {
+        const jobs = args!.jobs as PostJob[];
+        const outcomes: PublishOutcome[] = jobs.map((j, i) => ({
+          accountId: j.accountId,
+          cafe: j.cafe,
+          menuId: j.menuId,
+          success: true,
+          articleId: 1000 + i,
+        }));
+        return clone(outcomes);
+      }
+      case "run_comment_jobs": {
+        const jobs = args!.jobs as CommentJob[];
+        const outcomes: CommentPublishOutcome[] = jobs.map((j, i) => ({
+          accountId: j.accountId,
+          cafeId: j.cafeId,
+          articleId: j.articleId,
+          success: true,
+          commentId: 2000 + i,
+        }));
+        return clone(outcomes);
+      }
       case "list_bands":
         return clone(SEED_BANDS);
       case "get_environment_status":

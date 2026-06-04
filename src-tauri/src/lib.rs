@@ -1,4 +1,5 @@
 mod ipc;
+mod logging;
 mod store;
 
 use std::path::{Path, PathBuf};
@@ -13,6 +14,7 @@ use crate::store::JsonStore;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 pub mod auth;
+pub mod naver_cafe;
 // 네이버 증권 토론방 패킷 게시 엔진.
 pub mod discussion_batch;
 pub mod naver_automation;
@@ -288,6 +290,11 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         stats::list_stats,
         log_batches::list_log_batches,
         cafes::list_cafes,
+        cafes::resolve_cafe,
+        cafes::upsert_cafe,
+        cafes::run_post_jobs,
+        cafes::run_comment_jobs,
+        cafes::list_joined_cafes,
         bands::list_bands,
         diagnostics::get_environment_status,
         diagnostics::open_chrome_download,
@@ -360,6 +367,12 @@ pub fn run() {
     register_handlers(tauri::Builder::default())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
+            // 로그는 도메인 데이터와 같은 앱 데이터 디렉터리(<app_data>/logs)에 남긴다.
+            logging::init_file_logging(&dir.join("logs"));
+            tracing::info!(
+                version = env!("CARGO_PKG_VERSION"),
+                "pstmacro backend starting"
+            );
             manage_stores(app.handle(), &dir)?;
             Ok(())
         })
