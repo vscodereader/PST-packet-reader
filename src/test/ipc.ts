@@ -824,6 +824,7 @@ interface IpcState {
   posts: LibraryPost[];
   queueNow: QueueNowItem[];
   queueScheduled: QueueScheduledItem[];
+  activity: ActivityItem[];
 }
 
 let state: IpcState;
@@ -850,6 +851,7 @@ export function resetIpc(): void {
     posts: clone(SEED_LIBRARY),
     queueNow: clone(SEED_QUEUE_NOW),
     queueScheduled: clone(SEED_QUEUE_SCHEDULED),
+    activity: clone(SEED_ACTIVITY),
   };
   loginJobIds = [];
   loginOutcomes = {};
@@ -881,7 +883,16 @@ export const invoke = vi.fn(
       case "list_stocks":
         return clone(SEED_STOCKS);
       case "list_activity":
-        return clone(SEED_ACTIVITY);
+        return clone(state.activity);
+      case "append_activity": {
+        state.activity.unshift({
+          id: `ac-${state.activity.length}`,
+          type: args!.kind as "success" | "error" | "info",
+          text: args!.text as string,
+          at: NOW_BASE,
+        });
+        return undefined;
+      }
       case "list_stats":
         return clone(SEED_STATS);
       case "list_log_batches":

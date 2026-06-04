@@ -214,6 +214,21 @@ fn parse_automation_target(target: Option<String>) -> Result<AutomationTarget, S
 }
 
 #[tauri::command]
+fn append_activity(
+    activity: tauri::State<'_, JsonStore<ipc::activity::ActivityItem>>,
+    kind: String,
+    text: String,
+) {
+    use ipc::activity::ActivityType;
+    let ty = match kind.as_str() {
+        "success" => ActivityType::Success,
+        "error" => ActivityType::Error,
+        _ => ActivityType::Info,
+    };
+    ipc::activity::record(activity.inner(), ty, text);
+}
+
+#[tauri::command]
 async fn bootstrap_runtime() -> Result<auth::RuntimePaths, String> {
     auth::bootstrap_runtime().await.map_err(|e| e.to_string())
 }
@@ -275,6 +290,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         queue::promote_queue_scheduled,
         stocks::list_stocks,
         activity::list_activity,
+        append_activity,
         stats::list_stats,
         log_batches::list_log_batches,
         cafes::list_cafes,

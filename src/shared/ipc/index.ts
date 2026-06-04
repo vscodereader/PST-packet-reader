@@ -124,7 +124,11 @@ export const ipc = {
       call<QueueNowItem[]>("promote_queue_scheduled", { id }),
   },
   stocks: { list: () => call<Stock[]>("list_stocks") },
-  activity: { list: () => call<ActivityItem[]>("list_activity") },
+  activity: {
+    list: () => call<ActivityItem[]>("list_activity"),
+    append: (kind: "success" | "error" | "info", text: string) =>
+      call<void>("append_activity", { kind, text }),
+  },
   stats: { list: () => call<DashStat[]>("list_stats") },
   logBatches: { list: () => call<LogBatch[]>("list_log_batches") },
   cafes: { list: () => call<Cafe[]>("list_cafes") },
