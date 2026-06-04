@@ -186,7 +186,7 @@ fn run_inner(
                 .to_owned(),
         ));
     }
-    sleep(Duration::from_secs(1));
+    sleep(Duration::from_secs(2));
     if !type_into(client, "#pw", pw)? {
         return Ok(LoginOutcome::Error(
             "로그인 폼 자동 입력에 실패했습니다(비밀번호 칸이 비어 로그인을 중단). 잠시 후 다시 시도하세요."
@@ -194,6 +194,8 @@ fn run_inner(
         ));
     }
 
+    // 비밀번호 입력 후 2초 기다렸다가 로그인 버튼을 누른다(사람처럼 천천히).
+    sleep(Duration::from_secs(2));
     // 로그인 버튼 클릭(값 주입이 아니라 클릭이므로 evaluate 사용 가능).
     client.evaluate(
         "(()=>{const b=document.querySelector('#log\\\\.login')||\
@@ -282,13 +284,16 @@ fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<bool,
 
         for ch in text.chars() {
             let s = ch.to_string();
+            // 대문자는 Shift 모디파이어(8)와 함께 보낸다. Shift 없이 대문자를 보내면 네이버가
+            // "Shift 안 눌렀는데 대문자 → Caps Lock 켜짐"으로 오판해 경고를 띄운다.
+            let modifiers = if ch.is_uppercase() { 8 } else { 0 };
             client.call(
                 "Input.dispatchKeyEvent",
-                json!({ "type": "keyDown", "text": s, "key": s }),
+                json!({ "type": "keyDown", "text": s, "key": s, "modifiers": modifiers }),
             )?;
             client.call(
                 "Input.dispatchKeyEvent",
-                json!({ "type": "keyUp", "key": s }),
+                json!({ "type": "keyUp", "key": s, "modifiers": modifiers }),
             )?;
         }
 
