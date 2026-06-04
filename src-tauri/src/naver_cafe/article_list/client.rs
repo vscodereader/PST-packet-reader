@@ -131,7 +131,24 @@ impl ArticleListClient {
 
         let status = response.status();
         let status_code = status.as_u16();
-        let raw_body = response.text().await.unwrap_or_default();
+        // 본문 읽기 실패는 일시적 네트워크 오류일 수 있다 — 빈 문자열로 삼키면
+        // 재시도 불가한 PARSE_ERROR로 둔갑하므로 전송 오류로 보존한다.
+        let raw_body = response.text().await.map_err(|e| {
+            let retryable = e.is_timeout() || e.is_connect();
+            tracing::warn!(error = %e, "게시글 목록 응답 본문 읽기 오류");
+            ErrorEnvelope {
+                trace_id: String::new(),
+                code: "ARTICLE_LIST_TRANSPORT_ERROR".to_string(),
+                message: format!("HTTP 응답 본문을 읽지 못했습니다: {}", e),
+                error_data: Some(NaverCafeCommonErrorData {
+                    target: None,
+                    http_status: Some(status_code),
+                    api_error_code: None,
+                    api_error_message: None,
+                    retryable,
+                }),
+            }
+        })?;
 
         if !status.is_success() {
             tracing::warn!(status = status_code, "게시글 목록 조회 HTTP 오류");

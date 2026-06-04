@@ -106,11 +106,14 @@ pub(crate) struct ArticleListMessage {
 pub(crate) struct ArticleListResult {
     #[serde(default)]
     pub article_list: Vec<ArticleItem>,
+    // 빈 게시판은 pageInfo를 생략한 200을 줄 수 있다 — 누락 시 기본값(last_page=false)으로
+    // 처리해 정상적인 빈 목록을 스푸리어스 PARSE_ERROR로 둔갑시키지 않는다.
+    #[serde(default)]
     pub page_info: PageInfo,
 }
 
 /// 페이지 정보.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PageInfo {
     pub last_page: bool,
@@ -121,9 +124,14 @@ pub(crate) struct PageInfo {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ArticleItem {
     pub article_id: u64,
+    // 표시 전용 문자열 필드는 블라인드/탈퇴 글·공지 등에서 누락될 수 있다 — 한 글의
+    // 누락이 페이지 전체 역직렬화를 실패시키지 않도록 기본값(빈 문자열)을 허용한다.
+    #[serde(default)]
     pub subject: String,
+    #[serde(default)]
     pub writer_nickname: String,
     pub menu_id: u64,
+    #[serde(default)]
     pub menu_name: String,
     #[serde(default)]
     pub comment_count: u64,
@@ -275,5 +283,29 @@ mod tests {
         assert_eq!(article.comment_count, 0);
         assert_eq!(article.read_count, 0);
         assert_eq!(article.like_count, 0);
+    }
+
+    #[test]
+    fn article_item_tolerates_missing_display_fields() {
+        // 블라인드/탈퇴 글은 writerNickname 등 표시 문자열을 생략할 수 있다 —
+        // 한 글의 누락이 파싱을 실패시키면 안 된다(빈 문자열로 처리).
+        let raw = r#"{ "articleId": 9, "menuId": 1 }"#;
+        let item: ArticleItem =
+            serde_json::from_str(raw).expect("표시 필드가 없어도 파싱 성공해야 함");
+        assert_eq!(item.article_id, 9);
+        assert_eq!(item.subject, "");
+        assert_eq!(item.writer_nickname, "");
+        assert_eq!(item.menu_name, "");
+    }
+
+    #[test]
+    fn result_tolerates_missing_page_info() {
+        // 빈 게시판은 pageInfo를 생략한 200을 줄 수 있다 — 정상적인 빈 목록으로 처리.
+        let raw = r#"{ "message": { "result": { "articleList": [] } } }"#;
+        let envelope: ArticleListEnvelope =
+            serde_json::from_str(raw).expect("pageInfo가 없어도 파싱 성공해야 함");
+        let response = envelope.into_response();
+        assert!(response.articles.is_empty(), "빈 목록이어야 함");
+        assert!(!response.last_page, "기본 last_page는 false여야 함");
     }
 }
