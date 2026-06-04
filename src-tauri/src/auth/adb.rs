@@ -23,12 +23,16 @@ pub async fn probe_adb_connection() -> Result<(), OrchestratorError> {
 }
 
 /// 비행기 모드를 켬과 끔으로 토글하여 IP 변경을 유도한다.
+/// 진행 상황을 stderr로 출력해 `pnpm tauri dev` 콘솔에서 토글 여부를 확인할 수 있게 한다.
 pub async fn toggle_airplane_mode() -> Result<(), OrchestratorError> {
     let mut device = connect_device()?;
+    eprintln!("[ADB] ✈ 비행기모드 ON — IP 회전 시작");
     run_shell_command(&mut device, "cmd connectivity airplane-mode enable")?;
     sleep(Duration::from_secs(config::ADB_AIRPLANE_ENABLE_SECS)).await;
+    eprintln!("[ADB] ✈ 비행기모드 OFF — 인터넷 복구 대기");
     run_shell_command(&mut device, "cmd connectivity airplane-mode disable")?;
     wait_for_internet_connection(&mut device).await?;
+    eprintln!("[ADB] ✓ 인터넷 복구됨 — IP 회전 완료");
     Ok(())
 }
 
