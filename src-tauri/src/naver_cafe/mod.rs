@@ -3,6 +3,8 @@
 // 발화한다. 에러를 Box 로 감싸는 대신(API 표면 변경) 모듈 전체에서 이 린트를 허용한다.
 #![allow(clippy::result_large_err)]
 
+use std::sync::OnceLock;
+
 pub mod cafe_ref;
 pub mod comment;
 pub mod error;
@@ -12,6 +14,18 @@ pub mod models;
 pub mod orchestrator;
 pub mod post;
 pub mod response;
+
+/// 프로세스 전역 공용 reqwest 클라이언트를 반환한다.
+///
+/// 하위 카페 클라이언트들이 매 IPC 호출마다 `reqwest::Client::new()`로 새 클라이언트를
+/// 만들면, 그때마다 커넥션 풀이 비어 있어 TLS 핸드셰이크를 새로 한다. `reqwest::Client`는
+/// 내부가 `Arc`라 `clone`이 저렴하고 재사용을 전제로 설계됐으므로, 전역 하나를 공유해
+/// keep-alive 커넥션을 호출·배치 간에 재활용한다. base_url은 클라이언트마다 따로 보관하므로
+/// 하나의 클라이언트로 모든 호스트(실서버·wiremock)에 안전하게 요청할 수 있다.
+pub(crate) fn shared_http_client() -> reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new).clone()
+}
 
 pub use cafe_ref::{
     cafe_gate_info_path, cafe_home_path, parse_cafe_id, parse_cafe_ref, parse_club_id_from_html,

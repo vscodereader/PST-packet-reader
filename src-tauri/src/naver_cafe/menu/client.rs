@@ -105,7 +105,7 @@ impl CafeMenuClient {
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
-            http: reqwest::Client::new(),
+            http: crate::naver_cafe::shared_http_client(),
         }
     }
 
