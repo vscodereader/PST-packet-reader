@@ -12,6 +12,7 @@ use super::{
     models::PostRequest,
     smart_editor::{build_content_json_string, IdProvider},
 };
+use crate::naver_cafe::headers::cafe_write_headers;
 
 // ---------------------------------------------------------------------------
 // 상수
@@ -19,15 +20,6 @@ use super::{
 
 /// 게시글 등록 API 호스트.
 pub const API_HOST: &str = "apis.cafe.naver.com";
-
-/// Origin 헤더 값 — 패킷 캡처에서 확인된 값.
-const ORIGIN: &str = "https://cafe.naver.com";
-
-/// `x-cafe-product` 헤더 값.
-///
-/// `apis.cafe.naver.com/editor/*` 에디터 서비스가 이 헤더를 요구하며,
-/// 없으면 errorCode 10404(Page Not Found) 또는 11001을 반환한다.
-pub const CAFE_PRODUCT_PC: &str = "pc";
 
 // ---------------------------------------------------------------------------
 // 요청 바디 모델
@@ -158,37 +150,24 @@ pub fn article_post_path(cafe_id: &str, menu_id: u64) -> String {
 /// - `Referer: https://cafe.naver.com/ca-fe/cafes/{cafeId}/articles/write?boardType={boardType}`
 ///   - `board_type`은 선택된 게시판의 레이아웃 유형([`Menu::board_type`](crate::naver_cafe::menu::Menu))이다.
 ///     일반 게시판은 보통 `"L"`(리스트형)이지만 게시판마다 다를 수 있다.
-/// - `x-cafe-product: pc`  ← 에디터 서비스 필수 헤더 ([`CAFE_PRODUCT_PC`] 참조)
+/// - `x-cafe-product: pc`  ← 에디터 서비스 필수 헤더 (`headers::CAFE_PRODUCT_PC`)
 /// - `sec-fetch-site: same-site`
 /// - `sec-fetch-mode: cors`
 /// - `sec-fetch-dest: empty`
 /// - `accept-language: ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7`
 ///
+/// 공통 위장 헤더는 [`cafe_write_headers`]에서 채우고, 여기서는 글 작성용
+/// `Content-Type`(JSON)과 글쓰기 `Referer`만 정한다.
+///
 /// ℹ️ `accept-encoding`, `content-length`, 가상 헤더(`:method` 등), `User-Agent`는
 /// 포함하지 않는다 — reqwest 또는 상위 레이어가 처리한다.
 pub fn article_post_headers(cafe_id: &str, board_type: &str) -> Vec<(String, String)> {
-    vec![
-        ("Content-Type".to_string(), "application/json".to_string()),
-        (
-            "Accept".to_string(),
-            "application/json, text/plain, */*".to_string(),
+    cafe_write_headers(
+        "application/json",
+        format!(
+            "https://cafe.naver.com/ca-fe/cafes/{cafe_id}/articles/write?boardType={board_type}"
         ),
-        ("Origin".to_string(), ORIGIN.to_string()),
-        (
-            "Referer".to_string(),
-            format!(
-                "https://cafe.naver.com/ca-fe/cafes/{cafe_id}/articles/write?boardType={board_type}"
-            ),
-        ),
-        ("x-cafe-product".to_string(), CAFE_PRODUCT_PC.to_string()),
-        ("sec-fetch-site".to_string(), "same-site".to_string()),
-        ("sec-fetch-mode".to_string(), "cors".to_string()),
-        ("sec-fetch-dest".to_string(), "empty".to_string()),
-        (
-            "accept-language".to_string(),
-            "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7".to_string(),
-        ),
-    ]
+    )
 }
 
 // ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@
 //! 쿠키 헤더 값은 사용자의 인증 자격 증명이다. 이 모듈은 쿠키 값을
 //! 로그, 에러 메시지, `Debug` 출력에 절대 포함하지 않는다.
 
-use crate::naver_cafe::error::ErrorEnvelope;
+use crate::naver_cafe::error::{http_error_envelope, ErrorEnvelope};
 use crate::naver_cafe::{
     cafe_ref::models::{CafeGateInfoResponse, CafeInfoView, CafeRefError},
     error::NaverCafeCommonErrorData,
@@ -49,43 +49,12 @@ pub fn cafe_gate_info_path(cafe_id: u64) -> String {
 ///
 /// 쿠키/세션 값은 절대 이 오류에 포함되지 않는다.
 fn make_http_error(status: u16, raw_body: String) -> CafeRefError {
-    let retryable = status >= 500;
-
-    if let Some(error_body) = NaverApiErrorBody::parse(&raw_body) {
-        let trace_id = error_body
-            .error
-            .more
-            .as_ref()
-            .and_then(|m| m.request_id.clone())
-            .unwrap_or_default();
-        return ErrorEnvelope {
-            trace_id,
-            code: "CAFE_REF_HTTP_ERROR".to_string(),
-            message: "카페 정보 조회 요청이 실패했습니다.".to_string(),
-            error_data: Some(NaverCafeCommonErrorData {
-                target: None,
-                http_status: Some(status),
-                api_error_code: Some(error_body.error.error_code),
-                api_error_message: Some(error_body.error.message),
-                retryable,
-            }),
-        };
-    }
-
-    // 알 수 없는 형태 폴백
-    let api_error_message = truncate_body(raw_body);
-    ErrorEnvelope {
-        trace_id: String::new(),
-        code: "CAFE_REF_HTTP_ERROR".to_string(),
-        message: "카페 정보 조회 요청이 실패했습니다.".to_string(),
-        error_data: Some(NaverCafeCommonErrorData {
-            target: None,
-            http_status: Some(status),
-            api_error_code: None,
-            api_error_message: Some(api_error_message),
-            retryable,
-        }),
-    }
+    http_error_envelope(
+        status,
+        raw_body,
+        "CAFE_REF_HTTP_ERROR",
+        "카페 정보 조회 요청이 실패했습니다.",
+    )
 }
 
 // ---------------------------------------------------------------------------

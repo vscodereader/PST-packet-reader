@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::models::CafeTarget;
+use super::response::{truncate_body, NaverApiErrorBody};
 
 /// 공통 오류 봉투 — 모든 네이버 카페 오류 응답을 감싼다.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -40,6 +41,54 @@ pub struct ValidationError {
     pub field: String,
     /// 실패 이유 메시지.
     pub message: String,
+}
+
+/// non-2xx 네이버 카페 응답을 [`NaverCafeCommonErrorData`]를 담은 [`ErrorEnvelope`]로
+/// 환원한다. `code`/`message`만 도메인별로 다르고 나머지는 동일하던 로직을 한곳에 모은 것.
+///
+/// 실측 실패 스키마([`NaverApiErrorBody`]: `{"error":{errorCode,message,more}}`)로
+/// 파싱되면 `api_error_code`/`api_error_message`와 `requestId`→`trace_id`를 채우고,
+/// 아니면 원본 바디(최대 2000자)를 `api_error_message`에 담는다. `retryable`은
+/// `status >= 500`. 쿠키/세션 값은 절대 포함되지 않는다(원본 바디는 truncate만 거친다).
+pub fn http_error_envelope(
+    status: u16,
+    raw_body: String,
+    code: &str,
+    message: &str,
+) -> ErrorEnvelope<NaverCafeCommonErrorData> {
+    let retryable = status >= 500;
+    if let Some(error_body) = NaverApiErrorBody::parse(&raw_body) {
+        let trace_id = error_body
+            .error
+            .more
+            .as_ref()
+            .and_then(|m| m.request_id.clone())
+            .unwrap_or_default();
+        return ErrorEnvelope {
+            trace_id,
+            code: code.to_string(),
+            message: message.to_string(),
+            error_data: Some(NaverCafeCommonErrorData {
+                target: None,
+                http_status: Some(status),
+                api_error_code: Some(error_body.error.error_code),
+                api_error_message: Some(error_body.error.message),
+                retryable,
+            }),
+        };
+    }
+    ErrorEnvelope {
+        trace_id: String::new(),
+        code: code.to_string(),
+        message: message.to_string(),
+        error_data: Some(NaverCafeCommonErrorData {
+            target: None,
+            http_status: Some(status),
+            api_error_code: None,
+            api_error_message: Some(truncate_body(raw_body)),
+            retryable,
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -129,5 +178,30 @@ mod tests {
         let json = serde_json::to_string(&original).expect("직렬화 실패");
         let restored: ValidationError = serde_json::from_str(&json).expect("역직렬화 실패");
         assert_eq!(original, restored);
+    }
+
+    const REAL_FAILURE_JSON: &str = r#"{"error":{"errorCode":"10404","message":"Page Not Found","more":{"requestId":"cf4ee2db355d4584b6e0add8f8743048"}}}"#;
+
+    #[test]
+    fn http_error_envelope_fills_code_message_and_trace_from_real_failure() {
+        let env = http_error_envelope(500, REAL_FAILURE_JSON.to_string(), "X_HTTP_ERROR", "실패");
+        assert_eq!(env.code, "X_HTTP_ERROR");
+        assert_eq!(env.message, "실패");
+        assert_eq!(env.trace_id, "cf4ee2db355d4584b6e0add8f8743048");
+        let data = env.error_data.expect("error_data 없음");
+        assert_eq!(data.http_status, Some(500));
+        assert_eq!(data.api_error_code.as_deref(), Some("10404"));
+        assert_eq!(data.api_error_message.as_deref(), Some("Page Not Found"));
+        assert!(data.retryable, "5xx는 retryable이어야 함");
+    }
+
+    #[test]
+    fn http_error_envelope_falls_back_to_truncated_body_on_unknown_shape() {
+        let env = http_error_envelope(404, "not json".to_string(), "X_HTTP_ERROR", "실패");
+        assert_eq!(env.trace_id, "", "파싱 실패 시 trace_id는 비어 있음");
+        let data = env.error_data.expect("error_data 없음");
+        assert!(data.api_error_code.is_none());
+        assert_eq!(data.api_error_message.as_deref(), Some("not json"));
+        assert!(!data.retryable, "4xx는 retryable이 아니어야 함");
     }
 }
