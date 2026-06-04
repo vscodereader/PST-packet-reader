@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::ipc::activity::{record, ActivityType};
 use crate::store::JsonStore;
 
 /// Mirrors the TS `PlatformId` literal union. `lowercase` keeps the JSON wire
@@ -118,6 +119,20 @@ pub fn seed() -> Vec<Account> {
 }
 
 // ---------------------------------------------------------------------------
+// Activity message builders (pure, unit-tested).
+// ---------------------------------------------------------------------------
+
+pub fn added_msg(login_id: &str) -> String {
+    format!("계정 {login_id} 추가됨")
+}
+pub fn updated_msg(login_id: &str) -> String {
+    format!("계정 {login_id} 수정됨")
+}
+pub fn deleted_msg(n: usize) -> String {
+    format!("계정 {n}건 삭제됨")
+}
+
+// ---------------------------------------------------------------------------
 // Tauri commands — each mutation persists (via JsonStore) and returns the full
 // updated list so the frontend can replace its state in one step.
 // ---------------------------------------------------------------------------
@@ -128,24 +143,39 @@ pub fn list_accounts(store: tauri::State<'_, JsonStore<Account>>) -> Vec<Account
 }
 
 #[tauri::command]
-pub fn add_account(store: tauri::State<'_, JsonStore<Account>>, account: Account) -> Vec<Account> {
-    store.mutate(|accounts| apply_add(accounts, account))
+pub fn add_account(
+    store: tauri::State<'_, JsonStore<Account>>,
+    activity: tauri::State<'_, JsonStore<crate::ipc::activity::ActivityItem>>,
+    account: Account,
+) -> Vec<Account> {
+    let login = account.login_id.clone();
+    let next = store.mutate(|accounts| apply_add(accounts, account));
+    record(activity.inner(), ActivityType::Success, added_msg(&login));
+    next
 }
 
 #[tauri::command]
 pub fn update_account(
     store: tauri::State<'_, JsonStore<Account>>,
+    activity: tauri::State<'_, JsonStore<crate::ipc::activity::ActivityItem>>,
     account: Account,
 ) -> Vec<Account> {
-    store.mutate(|accounts| apply_update(accounts, account))
+    let login = account.login_id.clone();
+    let next = store.mutate(|accounts| apply_update(accounts, account));
+    record(activity.inner(), ActivityType::Info, updated_msg(&login));
+    next
 }
 
 #[tauri::command]
 pub fn delete_accounts(
     store: tauri::State<'_, JsonStore<Account>>,
+    activity: tauri::State<'_, JsonStore<crate::ipc::activity::ActivityItem>>,
     ids: Vec<String>,
 ) -> Vec<Account> {
-    store.mutate(|accounts| apply_delete(accounts, &ids))
+    let n = ids.len();
+    let next = store.mutate(|accounts| apply_delete(accounts, &ids));
+    record(activity.inner(), ActivityType::Info, deleted_msg(n));
+    next
 }
 
 #[cfg(test)]
@@ -162,6 +192,13 @@ mod tests {
             last: "—".into(),
             tags: vec![],
         }
+    }
+
+    #[test]
+    fn account_event_messages() {
+        assert_eq!(added_msg("invest_king7"), "계정 invest_king7 추가됨");
+        assert_eq!(updated_msg("invest_king7"), "계정 invest_king7 수정됨");
+        assert_eq!(deleted_msg(3), "계정 3건 삭제됨");
     }
 
     #[test]
