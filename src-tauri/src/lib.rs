@@ -8,7 +8,8 @@ use std::process::Command;
 use tauri::{AppHandle, Builder, Manager, Runtime};
 
 use crate::ipc::{
-    accounts, activity, bands, cafes, diagnostics, log_batches, posts, queue, stats, stocks,
+    accounts, activity, bands, cafes, diagnostics, excel, log_batches, posts, queue, stats,
+    stocks,
 };
 use crate::store::JsonStore;
 
@@ -345,6 +346,23 @@ fn get_account_cookies(account_id: String) -> Result<Option<serde_json::Value>, 
     auth::read_account_cookies(&account_id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn export_accounts_xlsx(
+    store: tauri::State<'_, JsonStore<ipc::accounts::Account>>,
+    path: String,
+) -> Result<(), String> {
+    excel::write_accounts_xlsx(&path, &store.snapshot())
+}
+
+#[tauri::command]
+fn export_activity_xlsx(
+    activity: tauri::State<'_, JsonStore<ipc::activity::ActivityItem>>,
+    logs: tauri::State<'_, JsonStore<ipc::log_batches::LogBatch>>,
+    path: String,
+) -> Result<(), String> {
+    excel::write_activity_xlsx(&path, &logs.snapshot(), &activity.snapshot())
+}
+
 /// Registers every IPC command handler on the builder.
 ///
 /// Extracted from [`run`] so integration tests can mount the exact same
@@ -386,6 +404,8 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         run_naver_discussion_batch,
         forum_endpoint,
         run_forum_publish_now,
+        export_accounts_xlsx,
+        export_activity_xlsx,
     ])
 }
 
