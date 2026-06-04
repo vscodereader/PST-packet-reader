@@ -580,4 +580,313 @@ mod tests {
         assert!(next.iter().any(|p| p.title == "실적 정리 (1)"));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ── Enum-string mappers ───────────────────────────────────────────────
+
+    #[test]
+    fn platform_str_all_arms() {
+        assert_eq!(platform_str(&PlatformId::Forum), "forum");
+        assert_eq!(platform_str(&PlatformId::Naver), "naver");
+        assert_eq!(platform_str(&PlatformId::Band), "band");
+        assert_eq!(platform_str(&PlatformId::Instagram), "instagram");
+        assert_eq!(platform_str(&PlatformId::Threads), "threads");
+    }
+
+    #[test]
+    fn status_str_all_arms() {
+        assert_eq!(status_str(&AccountStatus::New), "new");
+        assert_eq!(status_str(&AccountStatus::Active), "active");
+        assert_eq!(status_str(&AccountStatus::Error), "error");
+    }
+
+    #[test]
+    fn activity_type_str_all_arms() {
+        use crate::ipc::activity::ActivityType;
+        assert_eq!(activity_type_str(&ActivityType::Success), "성공");
+        assert_eq!(activity_type_str(&ActivityType::Error), "실패");
+        assert_eq!(activity_type_str(&ActivityType::Info), "정보");
+    }
+
+    #[test]
+    fn item_status_str_all_arms() {
+        use crate::ipc::log_batches::BatchItemStatus;
+        assert_eq!(item_status_str(&BatchItemStatus::Success), "성공");
+        assert_eq!(item_status_str(&BatchItemStatus::Fail), "실패");
+        assert_eq!(item_status_str(&BatchItemStatus::Running), "처리중");
+        assert_eq!(item_status_str(&BatchItemStatus::Waiting), "대기");
+    }
+
+    // ── Parser helpers ────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_platform_all_values() {
+        assert_eq!(parse_platform("forum"), Some(PlatformId::Forum));
+        assert_eq!(parse_platform("naver"), Some(PlatformId::Naver));
+        assert_eq!(parse_platform("band"), Some(PlatformId::Band));
+        assert_eq!(parse_platform("instagram"), Some(PlatformId::Instagram));
+        assert_eq!(parse_platform("threads"), Some(PlatformId::Threads));
+    }
+
+    #[test]
+    fn parse_platform_case_insensitive() {
+        assert_eq!(parse_platform("FORUM"), Some(PlatformId::Forum));
+        assert_eq!(parse_platform("Naver"), Some(PlatformId::Naver));
+        assert_eq!(parse_platform("  Band  "), Some(PlatformId::Band));
+    }
+
+    #[test]
+    fn parse_platform_unknown_returns_none() {
+        assert_eq!(parse_platform("twitter"), None);
+        assert_eq!(parse_platform(""), None);
+        assert_eq!(parse_platform("kakao"), None);
+    }
+
+    #[test]
+    fn parse_kind_all_branches() {
+        assert_eq!(parse_kind("comment"), ModeValue::Comment);
+        assert_eq!(parse_kind("both"), ModeValue::Both);
+        // "post" maps to the default arm which returns ModeValue::Post
+        assert_eq!(parse_kind("post"), ModeValue::Post);
+        // unknown value → default (Post)
+        assert_eq!(parse_kind("unknown"), ModeValue::Post);
+        assert_eq!(parse_kind(""), ModeValue::Post);
+        // case-insensitive
+        assert_eq!(parse_kind("COMMENT"), ModeValue::Comment);
+        assert_eq!(parse_kind("  Both  "), ModeValue::Both);
+    }
+
+    #[test]
+    fn header_index_found_not_found_and_case_insensitive() {
+        let headers = vec![
+            "LoginId".to_string(),
+            "PW".to_string(),
+            "Platform".to_string(),
+        ];
+        // exact case-insensitive match
+        assert_eq!(header_index(&headers, "loginId"), Some(0));
+        assert_eq!(header_index(&headers, "pw"), Some(1));
+        assert_eq!(header_index(&headers, "platform"), Some(2));
+        // not found
+        assert_eq!(header_index(&headers, "tags"), None);
+        assert_eq!(header_index(&headers, ""), None);
+        // case variations
+        assert_eq!(header_index(&headers, "LOGINID"), Some(0));
+    }
+
+    // ── import_accounts error/edge paths ─────────────────────────────────
+
+    #[test]
+    fn import_accounts_empty_sheet_error() {
+        let dir = std::env::temp_dir().join("pstmacro_imp_acct_empty");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("empty.xlsx");
+        {
+            let mut wb = Workbook::new();
+            // create a worksheet with no rows at all
+            let _s = wb.add_worksheet().set_name("계정").unwrap();
+            wb.save(&path).unwrap();
+        }
+        let result = import_accounts(path.to_str().unwrap(), vec![]);
+        assert!(result.is_err(), "empty sheet must return Err");
+        assert_eq!(result.unwrap_err(), "시트가 비어 있습니다");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_accounts_missing_required_column_error() {
+        let dir = std::env::temp_dir().join("pstmacro_imp_acct_noheader");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("noheader.xlsx");
+        {
+            let mut wb = Workbook::new();
+            let s = wb.add_worksheet().set_name("계정").unwrap();
+            // only "loginId" and "platform" — no "pw" column
+            for (c, h) in ["loginId", "platform"].iter().enumerate() {
+                s.write_string(0, c as u16, *h).unwrap();
+            }
+            s.write_string(1, 0, "user1").unwrap();
+            s.write_string(1, 1, "forum").unwrap();
+            wb.save(&path).unwrap();
+        }
+        let result = import_accounts(path.to_str().unwrap(), vec![]);
+        assert!(result.is_err(), "missing pw column must return Err");
+        assert_eq!(
+            result.unwrap_err(),
+            "필수 컬럼(loginId/pw/platform)이 없습니다"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_accounts_duplicate_preserves_existing_id() {
+        let dir = std::env::temp_dir().join("pstmacro_imp_acct_dup_id");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("dup.xlsx");
+        {
+            let mut wb = Workbook::new();
+            let s = wb.add_worksheet().set_name("계정").unwrap();
+            for (c, h) in ["loginId", "pw", "platform"].iter().enumerate() {
+                s.write_string(0, c as u16, *h).unwrap();
+            }
+            s.write_string(1, 0, "existing_user").unwrap();
+            s.write_string(1, 1, "newpw").unwrap();
+            s.write_string(1, 2, "naver").unwrap();
+            wb.save(&path).unwrap();
+        }
+        // Pre-existing account with a different opaque id (uuid-style)
+        let existing = vec![Account {
+            id: "opaque-uuid-123".into(),
+            platform: PlatformId::Forum,
+            login_id: "existing_user".into(),
+            pw: "oldpw".into(),
+            status: AccountStatus::Active,
+            last: "—".into(),
+            tags: vec![],
+        }];
+        let (next, summary) = import_accounts(path.to_str().unwrap(), existing).unwrap();
+        assert_eq!(summary.imported, 1);
+        let updated = next.iter().find(|a| a.login_id == "existing_user").unwrap();
+        // The existing opaque id must be preserved, NOT replaced by loginId
+        assert_eq!(
+            updated.id, "opaque-uuid-123",
+            "existing account id must be preserved on update"
+        );
+        // The new password should have been applied
+        assert_eq!(updated.pw, "newpw");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_accounts_within_file_duplicate_adds_error() {
+        let dir = std::env::temp_dir().join("pstmacro_imp_acct_infile_dup");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("infiledup.xlsx");
+        {
+            let mut wb = Workbook::new();
+            let s = wb.add_worksheet().set_name("계정").unwrap();
+            for (c, h) in ["loginId", "pw", "platform"].iter().enumerate() {
+                s.write_string(0, c as u16, *h).unwrap();
+            }
+            // Same loginId appears twice in the import file
+            s.write_string(1, 0, "dup_user").unwrap();
+            s.write_string(1, 1, "pw1").unwrap();
+            s.write_string(1, 2, "band").unwrap();
+            s.write_string(2, 0, "dup_user").unwrap();
+            s.write_string(2, 1, "pw2").unwrap();
+            s.write_string(2, 2, "band").unwrap();
+            wb.save(&path).unwrap();
+        }
+        let (_, summary) = import_accounts(path.to_str().unwrap(), vec![]).unwrap();
+        // Both rows count as imported (the second overwrites the first)
+        assert_eq!(summary.imported, 2);
+        // The within-file duplicate must push an error message
+        assert!(
+            !summary.errors.is_empty(),
+            "within-file duplicate must push an error"
+        );
+        assert!(
+            summary.errors.iter().any(|e| e.contains("중복")),
+            "error must mention '중복'"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── import_posts error/edge paths ─────────────────────────────────────
+
+    #[test]
+    fn import_posts_empty_sheet_error() {
+        let dir = std::env::temp_dir().join("pstmacro_imp_post_empty");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("empty.xlsx");
+        {
+            let mut wb = Workbook::new();
+            let _s = wb.add_worksheet().set_name("게시글").unwrap();
+            wb.save(&path).unwrap();
+        }
+        let result = import_posts(path.to_str().unwrap(), vec![]);
+        assert!(result.is_err(), "empty sheet must return Err");
+        assert_eq!(result.unwrap_err(), "시트가 비어 있습니다");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_posts_missing_required_column_error() {
+        let dir = std::env::temp_dir().join("pstmacro_imp_post_noheader");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("noheader.xlsx");
+        {
+            let mut wb = Workbook::new();
+            let s = wb.add_worksheet().set_name("게시글").unwrap();
+            // only "title" — no "body" column
+            s.write_string(0, 0, "title").unwrap();
+            s.write_string(1, 0, "some title").unwrap();
+            wb.save(&path).unwrap();
+        }
+        let result = import_posts(path.to_str().unwrap(), vec![]);
+        assert!(result.is_err(), "missing body column must return Err");
+        assert_eq!(result.unwrap_err(), "필수 컬럼(title/body)이 없습니다");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_posts_skips_empty_title_or_body() {
+        let dir = std::env::temp_dir().join("pstmacro_imp_post_skip");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("skip.xlsx");
+        {
+            let mut wb = Workbook::new();
+            let s = wb.add_worksheet().set_name("게시글").unwrap();
+            for (c, h) in ["title", "body"].iter().enumerate() {
+                s.write_string(0, c as u16, *h).unwrap();
+            }
+            // row 1: valid
+            s.write_string(1, 0, "정상 제목").unwrap();
+            s.write_string(1, 1, "정상 본문").unwrap();
+            // row 2: empty title → skip
+            s.write_string(2, 1, "본문만 있음").unwrap();
+            // row 3: empty body → skip
+            s.write_string(3, 0, "제목만 있음").unwrap();
+            wb.save(&path).unwrap();
+        }
+        let (next, summary) = import_posts(path.to_str().unwrap(), vec![]).unwrap();
+        assert_eq!(summary.imported, 1, "only one valid row");
+        assert_eq!(summary.skipped, 2, "two rows must be skipped");
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].title, "정상 제목");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_posts_kind_column_parsed_correctly() {
+        let dir = std::env::temp_dir().join("pstmacro_imp_post_kind");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("kind.xlsx");
+        {
+            let mut wb = Workbook::new();
+            let s = wb.add_worksheet().set_name("게시글").unwrap();
+            for (c, h) in ["title", "body", "kind"].iter().enumerate() {
+                s.write_string(0, c as u16, *h).unwrap();
+            }
+            s.write_string(1, 0, "코멘트 글").unwrap();
+            s.write_string(1, 1, "본문 코멘트").unwrap();
+            s.write_string(1, 2, "comment").unwrap();
+            s.write_string(2, 0, "둘다 글").unwrap();
+            s.write_string(2, 1, "본문 둘다").unwrap();
+            s.write_string(2, 2, "both").unwrap();
+            wb.save(&path).unwrap();
+        }
+        let (next, summary) = import_posts(path.to_str().unwrap(), vec![]).unwrap();
+        assert_eq!(summary.imported, 2);
+        // inserted in reverse (insert at 0), so next[0] is row 2 (both), next[1] is row 1 (comment)
+        let kinds: Vec<&ModeValue> = next.iter().map(|p| &p.kind).collect();
+        assert!(
+            kinds.contains(&&ModeValue::Comment),
+            "comment kind must be parsed"
+        );
+        assert!(
+            kinds.contains(&&ModeValue::Both),
+            "both kind must be parsed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
