@@ -441,6 +441,7 @@ pub fn manage_stores<R: Runtime>(app: &AppHandle<R>, dir: &Path) -> std::io::Res
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     register_handlers(tauri::Builder::default())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             manage_stores(app.handle(), &dir)?;
