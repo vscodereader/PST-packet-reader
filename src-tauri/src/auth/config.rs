@@ -1,6 +1,17 @@
 // Chrome
+#[cfg(target_os = "windows")]
 pub const CHROME_PATH_WINDOWS: &str = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
-pub const CHROME_PATH_WSL: &str = "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe";
+
+// Linux/WSL에서 CDP 로그인이 띄울 시스템 Chrome/Chromium 후보 경로들입니다.
+// (Linux 빌드는 Windows용 chrome.exe를 실행할 수 없으므로 네이티브 Linux 브라우저가 필요합니다.)
+#[cfg(not(target_os = "windows"))]
+pub const CHROME_PATHS_LINUX: &[&str] = &[
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/opt/google/chrome/chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+];
 
 /// 실행 환경에 맞는 Chrome 경로를 반환한다.
 ///
@@ -16,23 +27,23 @@ pub fn chrome_path() -> Result<String, String> {
         ));
     }
 
-    let is_wsl = std::fs::read_to_string("/proc/version")
-        .map(|v| v.to_lowercase().contains("microsoft"))
-        .unwrap_or(false);
-    let default_path = if is_wsl {
-        CHROME_PATH_WSL
-    } else {
-        CHROME_PATH_WINDOWS
-    };
+    // Windows 빌드는 Windows Chrome을, Linux/WSL 빌드는 Linux Chrome을 찾습니다.
+    #[cfg(target_os = "windows")]
+    let candidates: &[&str] = &[CHROME_PATH_WINDOWS];
+    #[cfg(not(target_os = "windows"))]
+    let candidates: &[&str] = CHROME_PATHS_LINUX;
 
-    if std::path::Path::new(default_path).exists() {
-        Ok(default_path.to_string())
-    } else {
-        Err(format!(
-            "Chrome을 찾을 수 없습니다: {default_path}\n\
-             다른 경로에 설치된 경우 환경변수 CHROME_PATH에 chrome.exe 전체 경로를 지정하세요."
-        ))
-    }
+    candidates
+        .iter()
+        .find(|path| std::path::Path::new(path).exists())
+        .map(|path| path.to_string())
+        .ok_or_else(|| {
+            format!(
+                "Chrome을 찾을 수 없습니다(확인한 경로: {}).\n\
+                 다른 경로에 설치된 경우 환경변수 CHROME_PATH에 실행 파일 전체 경로를 지정하세요.",
+                candidates.join(", ")
+            )
+        })
 }
 
 // ADB
@@ -77,8 +88,21 @@ mod tests {
         let err = chrome_path().unwrap_err();
         assert!(err.contains("파일이 없습니다"), "unexpected error: {err}");
 
-        // 미설정이면 플랫폼 기본값으로 폴백 — 테스트 호스트(Linux)엔 없으므로 오류.
+        // 미설정이면 플랫폼 기본 후보들을 탐색해 폴백한다. CDP 로그인 전환 이후
+        // Linux/WSL 빌드는 시스템 Chrome(`/usr/bin/google-chrome` 등)을 찾으므로,
+        // 결과는 호스트에 Chrome이 설치돼 있는지에 따라 달라진다. 따라서 호스트에
+        // 의존하지 않는 불변식만 검증한다: 성공하면 그 경로는 실제로 존재하고,
+        // 실패하면 탐색한 후보들을 안내하는 오류 메시지를 낸다.
         std::env::remove_var("CHROME_PATH");
-        assert!(chrome_path().is_err());
+        match chrome_path() {
+            Ok(path) => assert!(
+                std::path::Path::new(&path).exists(),
+                "폴백 경로가 존재하지 않습니다: {path}"
+            ),
+            Err(err) => assert!(
+                err.contains("Chrome을 찾을 수 없습니다"),
+                "unexpected error: {err}"
+            ),
+        }
     }
 }

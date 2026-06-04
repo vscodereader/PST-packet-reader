@@ -18,12 +18,29 @@ pub(crate) enum CookieStatus {
 }
 
 /// 계정 정보를 파일에 저장한다.
+///
+/// 파일을 통째로 덮어쓰지 않고 기존 계정과 **병합(upsert)** 한다. 선택한 일부 계정만
+/// 넘겨도(예: 10개 중 2개만 로그인) 나머지 계정이 디스크와 큐 워커 조회에서 사라지지
+/// 않도록, 같은 `id`는 갱신하고 새 `id`만 추가한다.
 pub fn save_accounts_file(accounts: &[Account]) -> Result<Vec<Account>, OrchestratorError> {
     let paths = paths_for_root(app_data_root()?);
     ensure_runtime_dirs(&paths)?;
-    let json = serde_json::to_string_pretty(accounts)?;
+    let merged = merge_accounts(load_accounts_file(&paths)?, accounts);
+    let json = serde_json::to_string_pretty(&merged)?;
     fs::write(&paths.accounts_file, json)?;
-    Ok(accounts.to_vec())
+    Ok(merged)
+}
+
+/// 기존 계정 목록에 들어온 계정을 병합한다(같은 `id`는 갱신, 새 `id`는 추가). 순수 함수.
+fn merge_accounts(mut existing: Vec<Account>, incoming: &[Account]) -> Vec<Account> {
+    for account in incoming {
+        if let Some(slot) = existing.iter_mut().find(|a| a.id == account.id) {
+            *slot = account.clone();
+        } else {
+            existing.push(account.clone());
+        }
+    }
+    existing
 }
 
 /// 파일에서 계정 정보를 읽어온다.
@@ -163,6 +180,33 @@ fn cookie_is_unexpired(cookie: &Value, now_secs: u64) -> bool {
 mod tests {
     use super::*;
     use crate::auth::paths::{ensure_runtime_dirs, paths_for_root};
+
+    fn account(id: &str, pw: &str) -> Account {
+        Account {
+            id: id.to_string(),
+            password: pw.to_string(),
+            label: id.to_string(),
+        }
+    }
+
+    #[test]
+    fn merge_accounts_upserts_without_dropping_others() {
+        // 기존 3개 중 1개만(갱신된 비번으로) 넘겨도 나머지 2개가 보존되어야 한다.
+        let existing = vec![account("a", "1"), account("b", "2"), account("c", "3")];
+        let merged = merge_accounts(existing, &[account("b", "new")]);
+
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged.iter().find(|a| a.id == "b").unwrap().password, "new");
+        assert!(merged.iter().any(|a| a.id == "a"));
+        assert!(merged.iter().any(|a| a.id == "c"));
+    }
+
+    #[test]
+    fn merge_accounts_appends_new_ids() {
+        let merged = merge_accounts(vec![account("a", "1")], &[account("z", "9")]);
+        assert_eq!(merged.len(), 2);
+        assert!(merged.iter().any(|a| a.id == "z"));
+    }
 
     #[test]
     fn account_json_round_trips() {
