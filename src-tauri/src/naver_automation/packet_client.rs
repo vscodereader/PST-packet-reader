@@ -17,12 +17,26 @@ const STOCK_ORIGIN: &str = "https://stock.naver.com";
 const M_STOCK_ORIGIN: &str = "https://m.stock.naver.com";
 const CBOX_ORIGIN: &str = "https://apis.naver.com";
 const STATIC_NID_ORIGIN: &str = "https://static.nid.naver.com";
+// 각 요청의 대상 호스트(쿠키를 호스트별로 스코핑하는 데 쓴다).
+const STOCK_HOST: &str = "stock.naver.com";
+const M_STOCK_HOST: &str = "m.stock.naver.com";
+const CBOX_HOST: &str = "apis.naver.com";
+const STATIC_NID_HOST: &str = "static.nid.naver.com";
 const DEFAULT_REFERER: &str = "https://stock.naver.com/discussion";
 const DEFAULT_PROFILE_INTRODUCTION: &str = "2222";
 
+// Chrome에서 수거한 쿠키 한 개(도메인까지 보존). 이름만으로 합치면 서브도메인별
+// host-scoped 동일 이름 쿠키(NNB, 서비스별 세션/CSRF 등)가 last-write-wins로 뭉개져
+// 호스트 간에 누출되므로, (domain, name)으로 구분해 둔다.
+struct NaverCookie {
+    domain: String,
+    name: String,
+    value: String,
+}
+
 pub(super) struct NaverPacketClient {
     client: Client,
-    cookie_header: String,
+    cookies: Vec<NaverCookie>,
     user_agent: String,
 }
 
@@ -66,7 +80,7 @@ impl CdpClient {
                 ]
             }),
         )?;
-        let mut cookies = BTreeMap::new();
+        let mut cookies: Vec<NaverCookie> = Vec::new();
 
         for cookie in result
             .get("cookies")
@@ -86,21 +100,21 @@ impl CdpClient {
                 .unwrap_or_default();
 
             if domain.contains("naver.com") || domain.contains("pstatic.net") {
-                cookies.insert(name.to_owned(), value.to_owned());
+                cookies.push(NaverCookie {
+                    domain: domain.to_owned(),
+                    name: name.to_owned(),
+                    value: value.to_owned(),
+                });
             }
         }
 
-        if !cookies.contains_key("NID_AUT") || !cookies.contains_key("NID_SES") {
+        let has = |name: &str| cookies.iter().any(|c| c.name == name);
+        if !has("NID_AUT") || !has("NID_SES") {
             return Err(AutomationError::new(
                 "Chrome에서 네이버 로그인 쿠키를 찾지 못했습니다. 로그인 후 다시 실행하세요.",
             ));
         }
 
-        let cookie_header = cookies
-            .into_iter()
-            .map(|(name, value)| format!("{name}={value}"))
-            .collect::<Vec<_>>()
-            .join("; ");
         let user_agent = self.evaluate_string("navigator.userAgent")?;
         let client = Client::builder()
             .timeout(Duration::from_secs(20))
@@ -112,7 +126,7 @@ impl CdpClient {
 
         Ok(NaverPacketClient {
             client,
-            cookie_header,
+            cookies,
             user_agent,
         })
     }
@@ -126,7 +140,7 @@ impl NaverPacketClient {
         let response_text = self
             .client
             .get(url)
-            .headers(self.static_headers(DEFAULT_REFERER)?)
+            .headers(self.static_headers(STATIC_NID_HOST, DEFAULT_REFERER)?)
             .send()
             .map_err(|error| AutomationError::new(format!("getProfile 패킷 전송 실패: {error}")))
             .and_then(|response| response_text(response, "getProfile"))?;
@@ -294,7 +308,7 @@ impl NaverPacketClient {
             .put(format!(
                 "{STOCK_ORIGIN}/api/community/profile/users/{profile_id}"
             ))
-            .headers(self.stock_json_headers(referer)?)
+            .headers(self.stock_json_headers(STOCK_HOST, referer)?)
             .json(&payload)
             .send()
             .map_err(|error| {
@@ -338,7 +352,7 @@ impl NaverPacketClient {
         let response_text = self
             .client
             .post(format!("{M_STOCK_ORIGIN}/front-api/discussion/add"))
-            .headers(self.json_headers(page_url)?)
+            .headers(self.json_headers(M_STOCK_HOST, page_url)?)
             .json(&payload)
             .send()
             .map_err(|error| AutomationError::new(format!("글쓰기 add 패킷 전송 실패: {error}")))?
@@ -398,7 +412,7 @@ impl NaverPacketClient {
         let response_text = self
             .client
             .get(format!("{STOCK_ORIGIN}{path}"))
-            .headers(self.stock_json_headers(referer)?)
+            .headers(self.stock_json_headers(STOCK_HOST, referer)?)
             .send()
             .map_err(|error| AutomationError::new(format!("{label} GET 패킷 전송 실패: {error}")))
             .and_then(|response| response_text(response, label))?;
@@ -413,7 +427,7 @@ impl NaverPacketClient {
             .post(format!(
                 "{STOCK_ORIGIN}/api/community/profile/users/nickname/recommend"
             ))
-            .headers(self.stock_json_headers(referer)?)
+            .headers(self.stock_json_headers(STOCK_HOST, referer)?)
             .json(&json!({ "unusedNickname": "" }))
             .send()
             .map_err(|error| AutomationError::new(format!("닉네임 추천 패킷 전송 실패: {error}")))
@@ -437,7 +451,7 @@ impl NaverPacketClient {
             .post(format!(
                 "{STOCK_ORIGIN}/api/community/profile/users/introduction/validate"
             ))
-            .headers(self.stock_json_headers(referer)?)
+            .headers(self.stock_json_headers(STOCK_HOST, referer)?)
             .json(&json!({ "targetValue": DEFAULT_PROFILE_INTRODUCTION }))
             .send()
             .map_err(|error| {
@@ -471,7 +485,7 @@ impl NaverPacketClient {
             .post(format!(
                 "{CBOX_ORIGIN}/commentBox/cbox/web_naver_create_json.json?ticket=finance&templateId=community&pool=cbox12&_cv="
             ))
-            .headers(self.form_headers(page_url)?)
+            .headers(self.form_headers(CBOX_HOST, page_url)?)
             .body(form_body)
             .send()
             .map_err(|error| AutomationError::new(format!("댓글 생성 패킷 전송 실패: {error}")))?
@@ -520,7 +534,7 @@ impl NaverPacketClient {
         let response_text = self
             .client
             .post(form_url)
-            .headers(self.json_headers(page_url)?)
+            .headers(self.json_headers(M_STOCK_HOST, page_url)?)
             .send()
             .map_err(|error| AutomationError::new(format!("글쓰기 form 패킷 전송 실패: {error}")))?
             .error_for_status()
@@ -578,7 +592,7 @@ impl NaverPacketClient {
             .get(format!(
                 "{CBOX_ORIGIN}/commentBox/cbox/web_naver_token_json.json?{query}"
             ))
-            .headers(self.json_headers(page_url)?)
+            .headers(self.json_headers(CBOX_HOST, page_url)?)
             .send()
             .map_err(|error| AutomationError::new(format!("댓글 토큰 패킷 전송 실패: {error}")))?
             .error_for_status()
@@ -599,9 +613,14 @@ impl NaverPacketClient {
             })
     }
 
+    // 대상 호스트에 적용되는 쿠키만 골라 Cookie 헤더를 만드는 함수입니다.
+    fn cookie_header_for(&self, host: &str) -> String {
+        build_cookie_header(&self.cookies, host)
+    }
+
     // m.stock.naver.com JSON 요청에 사용하는 공통 헤더를 만드는 함수입니다.
-    fn json_headers(&self, referer: &str) -> AutomationResult<HeaderMap> {
-        let mut headers = self.base_headers(referer, "same-site")?;
+    fn json_headers(&self, host: &str, referer: &str) -> AutomationResult<HeaderMap> {
+        let mut headers = self.base_headers(host, referer, "same-site")?;
         headers.insert(
             ACCEPT,
             HeaderValue::from_static("application/json, text/plain, */*"),
@@ -610,22 +629,22 @@ impl NaverPacketClient {
     }
 
     // stock.naver.com JSON API 요청에 사용하는 공통 헤더를 만드는 함수입니다.
-    fn stock_json_headers(&self, referer: &str) -> AutomationResult<HeaderMap> {
-        let mut headers = self.base_headers(referer, "same-origin")?;
+    fn stock_json_headers(&self, host: &str, referer: &str) -> AutomationResult<HeaderMap> {
+        let mut headers = self.base_headers(host, referer, "same-origin")?;
         headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
         Ok(headers)
     }
 
     // static.nid.naver.com getProfile 요청에 사용하는 공통 헤더를 만드는 함수입니다.
-    fn static_headers(&self, referer: &str) -> AutomationResult<HeaderMap> {
-        let mut headers = self.base_headers(referer, "same-site")?;
+    fn static_headers(&self, host: &str, referer: &str) -> AutomationResult<HeaderMap> {
+        let mut headers = self.base_headers(host, referer, "same-site")?;
         headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
         Ok(headers)
     }
 
     // apis.naver.com 댓글 form-urlencoded 요청에 사용하는 공통 헤더를 만드는 함수입니다.
-    fn form_headers(&self, referer: &str) -> AutomationResult<HeaderMap> {
-        let mut headers = self.json_headers(referer)?;
+    fn form_headers(&self, host: &str, referer: &str) -> AutomationResult<HeaderMap> {
+        let mut headers = self.json_headers(host, referer)?;
         headers.insert(
             CONTENT_TYPE,
             HeaderValue::from_static("application/x-www-form-urlencoded; charset=UTF-8"),
@@ -636,6 +655,7 @@ impl NaverPacketClient {
     // User-Agent, Cookie, Referer 등 패킷 재현에 공통으로 필요한 헤더를 조립하는 함수입니다.
     fn base_headers(
         &self,
+        host: &str,
         referer: &str,
         sec_fetch_site: &'static str,
     ) -> AutomationResult<HeaderMap> {
@@ -643,7 +663,10 @@ impl NaverPacketClient {
         headers.insert(ORIGIN, HeaderValue::from_static(STOCK_ORIGIN));
         headers.insert(REFERER, header_value(referer, "referer")?);
         headers.insert(USER_AGENT, header_value(&self.user_agent, "user-agent")?);
-        headers.insert(COOKIE, header_value(&self.cookie_header, "cookie")?);
+        headers.insert(
+            COOKIE,
+            header_value(&self.cookie_header_for(host), "cookie")?,
+        );
         headers.insert(
             ACCEPT_LANGUAGE,
             HeaderValue::from_static("ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"),
@@ -1079,6 +1102,36 @@ fn header_value(value: &str, label: &str) -> AutomationResult<HeaderValue> {
         .map_err(|error| AutomationError::new(format!("{label} 헤더 값 생성 실패: {error}")))
 }
 
+// 대상 호스트에 적용되는 쿠키만 골라 "name=value; ..." Cookie 헤더를 만드는 함수입니다.
+// (domain, name)으로 구분하고, 같은 이름이 겹치면 host-only 쿠키가 도메인 쿠키를 이깁니다.
+fn build_cookie_header(cookies: &[NaverCookie], host: &str) -> String {
+    let mut applicable: Vec<&NaverCookie> = cookies
+        .iter()
+        .filter(|cookie| cookie_applies_to_host(&cookie.domain, host))
+        .collect();
+    // 도메인 쿠키(앞에 '.')를 먼저, host-only 쿠키를 나중에 둬 last-wins로 host-only가 이기게 한다.
+    applicable.sort_by_key(|cookie| u8::from(!cookie.domain.starts_with('.')));
+
+    let mut by_name: BTreeMap<&str, &str> = BTreeMap::new();
+    for cookie in applicable {
+        by_name.insert(cookie.name.as_str(), cookie.value.as_str());
+    }
+    by_name
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+// 쿠키 도메인이 대상 호스트에 적용되는지 판단하는 함수입니다. 앞에 '.'가 있으면 도메인
+// 쿠키(서브도메인 포함), 없으면 host-only 쿠키(정확히 그 호스트만)입니다.
+fn cookie_applies_to_host(domain: &str, host: &str) -> bool {
+    match domain.strip_prefix('.') {
+        Some(base) => host == base || host.ends_with(&format!(".{base}")),
+        None => host == domain,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -1086,6 +1139,48 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    fn cookie(domain: &str, name: &str, value: &str) -> NaverCookie {
+        NaverCookie {
+            domain: domain.to_owned(),
+            name: name.to_owned(),
+            value: value.to_owned(),
+        }
+    }
+
+    #[test]
+    fn cookie_applies_to_host_respects_domain_vs_host_scope() {
+        // 도메인 쿠키(앞에 '.')는 서브도메인까지 적용된다.
+        assert!(cookie_applies_to_host(".naver.com", "stock.naver.com"));
+        assert!(cookie_applies_to_host(".naver.com", "apis.naver.com"));
+        // host-only 쿠키는 정확히 그 호스트만.
+        assert!(cookie_applies_to_host("stock.naver.com", "stock.naver.com"));
+        assert!(!cookie_applies_to_host(
+            "stock.naver.com",
+            "m.stock.naver.com"
+        ));
+        assert!(!cookie_applies_to_host("stock.naver.com", "apis.naver.com"));
+    }
+
+    #[test]
+    fn build_cookie_header_scopes_host_only_cookies_per_host() {
+        // 같은 이름 NNB가 도메인 전역(.naver.com)과 host-only(stock.naver.com) 둘 다 존재.
+        let cookies = vec![
+            cookie(".naver.com", "NID_AUT", "aut"),
+            cookie(".naver.com", "NNB", "global"),
+            cookie("stock.naver.com", "NNB", "stockonly"),
+        ];
+
+        let stock = build_cookie_header(&cookies, "stock.naver.com");
+        // stock.naver.com에는 host-only 값이 우선 적용된다.
+        assert!(stock.contains("NNB=stockonly"));
+        assert!(stock.contains("NID_AUT=aut"));
+
+        let apis = build_cookie_header(&cookies, "apis.naver.com");
+        // apis.naver.com에는 stock host-only 쿠키가 새지 않고 전역 값만 적용된다.
+        assert!(apis.contains("NNB=global"));
+        assert!(!apis.contains("stockonly"));
+    }
 
     #[test]
     fn strip_jsonp_extracts_get_profile_payload() {
