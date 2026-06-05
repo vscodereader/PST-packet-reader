@@ -19,11 +19,16 @@ const HEADLESS_TIMEOUT: Duration = Duration::from_secs(40);
 const HEADED_TIMEOUT: Duration = Duration::from_secs(180);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-// 봇탐지(ncaptcha) 완화용 스텔스 스크립트. 페이지 스크립트보다 먼저 모든 새 문서에서 실행되어
-// CDP 제어 흔적인 `navigator.webdriver` 를 가린다(undefined). Chrome 실행 플래그
-// `--disable-blink-features=AutomationControlled` 와 belt-and-suspenders로 함께 둔다.
-// 헤드리스 모드에서도 webdriver 플래그가 노출되므로 JS로 한 번 더 덮는다.
-const STEALTH_INIT_JS: &str = "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});";
+// 봇탐지(ncaptcha/wtm) 완화용 스텔스 스크립트. 페이지 스크립트보다 먼저 모든 새 문서에서
+// 실행되어 CDP 제어 흔적인 `navigator.webdriver` 를 일반 크롬과 동일한 값으로 맞춘다.
+//
+// 네이버 안티봇 번들(wtm.pstatic.net)의 검사는
+//   getWebdriver(){ return void 0!==navigator.webdriver ? Boolean(navigator.webdriver).toString() : "" }
+// 형태다. 일반(비자동화) 크롬은 `navigator.webdriver === false` 라 "false"를 보고한다. 따라서
+// `undefined`(필드 없음)로 두면 오히려 일반 크롬과 달라지므로, 정확히 `false`로 맞춘다.
+// Chrome 실행 플래그 `--disable-blink-features=AutomationControlled` 가 headed에선 네이티브로
+// false를 주지만, 헤드리스에선 webdriver가 노출될 수 있어 JS로 한 번 더 false로 덮는다.
+const STEALTH_INIT_JS: &str = "Object.defineProperty(navigator,'webdriver',{get:()=>false});";
 
 /// 챌린지(추가 인증) 종류.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
