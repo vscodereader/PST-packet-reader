@@ -76,12 +76,18 @@ async fn main() {
     }
 
     let cafe_id = require_numeric(&args, "--cafe", "PSTMACRO_LIVE_CAFE_ID", "카페 숫자 ID");
-    let article_id = require_numeric(&args, "--article", "PSTMACRO_LIVE_ARTICLE_ID", "게시글 숫자 ID");
+    let article_id = require_numeric(
+        &args,
+        "--article",
+        "PSTMACRO_LIVE_ARTICLE_ID",
+        "게시글 숫자 ID",
+    );
 
     // 각 항목: "id" 또는 "id=쿠키경로.json" (쉼표 구분).
-    let accounts: Vec<(String, Option<String>)> = pick(&args, "--accounts", "PSTMACRO_LIVE_ACCOUNTS")
-        .map(|s| parse_accounts(&s))
-        .unwrap_or_default();
+    let accounts: Vec<(String, Option<String>)> =
+        pick(&args, "--accounts", "PSTMACRO_LIVE_ACCOUNTS")
+            .map(|s| parse_accounts(&s))
+            .unwrap_or_default();
     if accounts.is_empty() {
         eprintln!("계정이 필요합니다 (--accounts 'a=/tmp/a.json,b' — id 또는 id=경로)");
         print_usage();
@@ -118,7 +124,11 @@ async fn main() {
     );
     println!(
         "시드: {used_seed}{}",
-        if seed.is_some() { " (고정)" } else { " (wall-clock)" }
+        if seed.is_some() {
+            " (고정)"
+        } else {
+            " (wall-clock)"
+        }
     );
     println!(
         "타깃 {} 계정 × 댓글 풀 {}개 → 카페 {cafe_id} / 글 {article_id} 에 계정마다 1개 배정:",
@@ -135,7 +145,9 @@ async fn main() {
     println!();
 
     if !commit {
-        println!("DRY-RUN: 아무것도 게시하지 않았습니다. 실제로 작성하려면 --commit 을 추가하세요.");
+        println!(
+            "DRY-RUN: 아무것도 게시하지 않았습니다. 실제로 작성하려면 --commit 을 추가하세요."
+        );
         println!("(주의: --commit 은 실제 네이버 카페에 댓글을 작성합니다)");
         return;
     }
@@ -181,7 +193,12 @@ async fn main() {
                 );
             }
             // CommentError 에는 code/message 만 — 쿠키 값은 절대 포함되지 않는다.
-            Err(e) => println!("  [{}] account={id:<16} ❌ {}: {}", i + 1, e.code, e.message),
+            Err(e) => println!(
+                "  [{}] account={id:<16} ❌ {}: {}",
+                i + 1,
+                e.code,
+                e.message
+            ),
         }
     }
     println!();
@@ -209,7 +226,8 @@ fn parse_accounts(s: &str) -> Vec<(String, Option<String>)> {
 fn load_cookies(account_id: &str, path: Option<&str>) -> Result<Value, String> {
     match path {
         Some(p) => {
-            let text = fs::read_to_string(p).map_err(|e| format!("쿠키 파일을 읽지 못함({p}): {e}"))?;
+            let text =
+                fs::read_to_string(p).map_err(|e| format!("쿠키 파일을 읽지 못함({p}): {e}"))?;
             serde_json::from_str(&text).map_err(|e| format!("쿠키 JSON 파싱 실패({p}): {e}"))
         }
         None => match read_account_cookies_unchecked(account_id) {
@@ -259,7 +277,9 @@ fn print_usage() {
     eprintln!("  시드고정: ... --seed 7");
     eprintln!("  COMMIT:   ... --commit   (실제 게시!)");
     eprintln!();
-    eprintln!("  --accounts 항목: 'id'(폴더 조회) 또는 'id=쿠키경로.json'(파일 직접) 혼용, 쉼표 구분.");
+    eprintln!(
+        "  --accounts 항목: 'id'(폴더 조회) 또는 'id=쿠키경로.json'(파일 직접) 혼용, 쉼표 구분."
+    );
     eprintln!("  --cafe/--article 는 숫자 ID. --content 는 '|' 구분.");
     eprintln!();
     eprintln!("주의: --commit 은 실제 카페에 댓글을 작성합니다. 본인 테스트 카페에만 사용하세요.");
