@@ -38,8 +38,9 @@ fn attempt(id: &str, pw: &str, headless: bool) -> Result<LoginOutcome, Orchestra
     let handle = chrome::launch(headless)?;
     let mut client = CdpClient::connect_to_existing_chrome("127.0.0.1", handle.port)
         .map_err(|error| OrchestratorError::CommandFailed(error.to_string()))?;
+    // 로그인은 Runtime.enable 을 켜지 않는다(CDP 탐지 누출 방지). Page 도메인만 활성화.
     client
-        .enable()
+        .enable_page_only()
         .map_err(|error| OrchestratorError::CommandFailed(error.to_string()))?;
 
     // headed(=!headless)면 사용자가 캡차/2차 인증을 직접 풀 동안 기다린다.
