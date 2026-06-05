@@ -43,6 +43,13 @@ export interface Stock {
   chg: number;
 }
 
+/** A live Naver stock-search result (backend `search_stocks` → `StockCandidate`). */
+export interface StockCandidate {
+  name: string;
+  code: string;
+  link: string;
+}
+
 export type AccountStatus = "new" | "active" | "error";
 
 export interface Account {

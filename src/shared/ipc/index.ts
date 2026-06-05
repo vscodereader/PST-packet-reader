@@ -17,6 +17,7 @@ import type { PublishOutcome } from "@/shared/bindings/PublishOutcome";
 import type { QueueNowItem } from "@/shared/bindings/QueueNowItem";
 import type { QueueScheduledItem } from "@/shared/bindings/QueueScheduledItem";
 import type { Stock } from "@/shared/bindings/Stock";
+import type { StockCandidate } from "@/shared/data/types";
 
 export type {
   Account,
@@ -135,7 +136,11 @@ export const ipc = {
     promote: (id: string) =>
       call<QueueNowItem[]>("promote_queue_scheduled", { id }),
   },
-  stocks: { list: () => call<Stock[]>("list_stocks") },
+  stocks: {
+    list: () => call<Stock[]>("list_stocks"),
+    search: (query: string) =>
+      call<StockCandidate[]>("search_stocks", { query }),
+  },
   activity: {
     list: () => call<ActivityItem[]>("list_activity"),
     append: (kind: "success" | "error" | "info", text: string) =>

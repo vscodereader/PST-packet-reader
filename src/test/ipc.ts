@@ -938,6 +938,21 @@ export const invoke = vi.fn(
       // --- read-only domains -------------------------------------------------
       case "list_stocks":
         return clone(SEED_STOCKS);
+      case "search_stocks": {
+        const query = ((args?.query as string | undefined) ?? "").trim();
+        const candidates = SEED_STOCKS.map((s) => ({
+          name: s.name,
+          code: s.code,
+          link: "",
+        }));
+        return clone(
+          query
+            ? candidates.filter(
+                (c) => c.name.includes(query) || c.code.includes(query),
+              )
+            : candidates,
+        );
+      }
       case "list_activity":
         return clone(state.activity);
       case "append_activity": {
