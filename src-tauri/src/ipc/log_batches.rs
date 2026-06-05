@@ -10,6 +10,10 @@ use super::accounts::PlatformId;
 use super::posts::ModeValue;
 use crate::store::JsonStore;
 
+/// Retain only the most recent N publish batches (mirrors `activity::MAX_ACTIVITY`)
+/// so `log-batches.json` can't grow unbounded across months of publishing.
+pub const MAX_LOG_BATCHES: usize = 500;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "lowercase")]

@@ -60,7 +60,11 @@ fn write_json<T: Serialize>(path: &Path, items: &[T]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let data = serde_json::to_string_pretty(items).unwrap_or_else(|_| "[]".into());
+    // Propagate serialization errors instead of writing "[]" — overwriting a good
+    // on-disk file with an empty array on a transient serde failure would be
+    // silent, permanent data loss. On error the existing file is left untouched.
+    let data = serde_json::to_string_pretty(items)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(path, data)
 }
 

@@ -50,7 +50,9 @@ fn stat(key: &str, label: &str, value: StatValue, sub: &str, icon: &str, color: 
 /// midnight; acceptable for a soft dashboard count, and avoids a TZ dependency.
 fn is_today(at: i64) -> bool {
     let now = crate::util::now_ms();
-    now - at < 86_400_000
+    // Range-check guards against future-dated batches (clock skew): a future `at`
+    // makes `now - at` negative, which would otherwise pass the upper bound.
+    (0..86_400_000).contains(&(now - at))
 }
 
 /// Derive the four dashboard tiles from the live domain data.
@@ -214,6 +216,14 @@ mod tests {
                 code: None,
             }],
         }
+    }
+
+    #[test]
+    fn is_today_excludes_old_and_future_dated_batches() {
+        let now = crate::util::now_ms();
+        assert!(is_today(now - 60_000)); // 1 min ago → today
+        assert!(!is_today(now - 25 * 3_600_000)); // 25h ago → not today
+        assert!(!is_today(now + 3_600_000)); // 1h in the future (clock skew) → not today
     }
 
     #[test]
