@@ -406,7 +406,8 @@ describe("PublishModal", () => {
     // regression takes the latest slice / ignores the returned order.
     const call = ipcBackend.mock.calls.find((c) => c[0] === "run_comment_jobs");
     expect(call).toBeDefined();
-    const req = (call?.[1] as { req: { targets: { articleId: number }[] } }).req;
+    const req = (call?.[1] as { req: { targets: { articleId: number }[] } })
+      .req;
     expect(req.targets.map((t) => t.articleId)).toEqual([8009]);
   });
 
@@ -439,7 +440,8 @@ describe("PublishModal", () => {
     );
     const call = ipcBackend.mock.calls.find((c) => c[0] === "run_comment_jobs");
     expect(call).toBeDefined();
-    const req = (call?.[1] as { req: { targets: { articleId: number }[] } }).req;
+    const req = (call?.[1] as { req: { targets: { articleId: number }[] } })
+      .req;
     // 2 available articles → 2 targets (not 5).
     expect(req.targets).toHaveLength(2);
     expect([...new Set(req.targets.map((t) => t.articleId))].sort()).toEqual([
