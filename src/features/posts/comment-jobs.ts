@@ -63,6 +63,16 @@ export function parseCafeArticleUrl(
 }
 
 /**
+ * Take the top-N entries of a latest/popular article list, preserving the
+ * backend's order. Graceful fallback: when the list has fewer than N (or N <= 0)
+ * only the available entries are returned — never throws or pads.
+ */
+export function topNArticles<T>(articles: T[], n: number): T[] {
+  if (n <= 0) return [];
+  return articles.slice(0, n);
+}
+
+/**
  * Human "댓글 N/M건" summary of one account's comment outcomes, for folding into
  * a result row. `null` outcomes (the whole call rejected) read as "댓글 실패".
  */

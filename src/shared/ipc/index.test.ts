@@ -83,6 +83,13 @@ describe("ipc facade", () => {
     expect(mockInvoke).toHaveBeenCalledWith("list_joined_cafes", {
       accountId: "acc1",
     });
+    // 최신글/인기글 목록: cafeId는 백엔드 계약상 문자열로 직렬화한다.
+    await ipc.cafes.listArticles(31732304, "popular", "acc1");
+    expect(mockInvoke).toHaveBeenCalledWith("list_cafe_articles", {
+      cafeId: "31732304",
+      sortBy: "popular",
+      accountId: "acc1",
+    });
   });
 
   it("read-only channels each invoke their list command", async () => {

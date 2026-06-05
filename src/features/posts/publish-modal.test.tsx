@@ -1,10 +1,10 @@
 import { MantineProvider } from "@mantine/core";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 
 import type { LibraryPost } from "@/shared/data/types";
-import { invoke as ipcBackend } from "@/test/ipc";
+import { invoke as ipcBackend, resetIpc } from "@/test/ipc";
 import { pickOption } from "@/test/select";
 
 import { PublishModal } from "./publish-modal";
@@ -35,6 +35,14 @@ function renderPublish(over: Partial<Parameters<typeof PublishModal>[0]> = {}) {
 }
 
 describe("PublishModal", () => {
+  // The shared in-memory IPC mock is module-level; reset its fixtures and clear
+  // recorded calls between tests so `mock.calls.find(...)` never matches a stale
+  // call from an earlier test (e.g. the latest/popular comment-job assertions).
+  beforeEach(() => {
+    resetIpc();
+    ipcBackend.mockClear();
+  });
+
   it("renders 게시 설정 with the document title", async () => {
     renderPublish();
     const dialog = await screen.findByRole("dialog");
@@ -311,6 +319,134 @@ describe("PublishModal", () => {
       }),
     );
     expect(req.comments).toEqual(["댓글1", "댓글2"]);
+  });
+
+  it("comments on the top-N latest articles in 'comment' + 'latest' mode", async () => {
+    const latestDoc: LibraryPost = {
+      id: "ll",
+      title: "최신글 댓글 세트",
+      kind: "comment",
+      updated: "방금 전",
+      words: 30,
+      status: "ready",
+      excerpt: "요약",
+      commentTarget: "latest",
+      comments: ["댓글1", "댓글2"],
+    };
+    renderPublish({ doc: latestDoc });
+    await userEvent.click(await screen.findByText("invest_king7")); // drop forum
+    await userEvent.click(screen.getByText("money_lab")); // a5 naver
+    await screen.findByPlaceholderText("가입 카페 선택");
+    // 주식투자연구소 카페 (cafeId 11111111) has 10 latest articles in the mock.
+    await pickOption(0, "주식투자연구소 카페");
+    // Pick top-3 articles via the count segmented control.
+    await userEvent.click(await screen.findByRole("radio", { name: "3" }));
+    await userEvent.click(
+      await screen.findByRole(
+        "button",
+        { name: /^게시 \(1\)/ },
+        { timeout: 3000 },
+      ),
+    );
+    // Distribution moved to the backend (issue #98): the top-3 latest articles
+    // become 3 targets (articleId 8000..8002 from the mock), all for the picked
+    // cafe; the backend deals one comment from the pool to each.
+    const call = ipcBackend.mock.calls.find((c) => c[0] === "run_comment_jobs");
+    expect(call).toBeDefined();
+    const req = (
+      call?.[1] as {
+        req: {
+          targets: { accountId: string; cafeId: number; articleId: number }[];
+          comments: string[];
+        };
+      }
+    ).req;
+    expect(req.targets).toHaveLength(3);
+    expect(req.targets.every((t) => t.cafeId === 11111111)).toBe(true);
+    expect(req.targets.every((t) => t.accountId === "money_lab")).toBe(true);
+    expect([...new Set(req.targets.map((t) => t.articleId))].sort()).toEqual([
+      8000, 8001, 8002,
+    ]);
+    expect(req.comments).toEqual(["댓글1", "댓글2"]);
+  });
+
+  it("queries the popular list when commentTarget is 'popular'", async () => {
+    const popularDoc: LibraryPost = {
+      id: "lp",
+      title: "인기글 댓글 세트",
+      kind: "comment",
+      updated: "방금 전",
+      words: 30,
+      status: "ready",
+      excerpt: "요약",
+      commentTarget: "popular",
+      commentCount: 1,
+      comments: ["좋아요"],
+    };
+    renderPublish({ doc: popularDoc });
+    await userEvent.click(await screen.findByText("invest_king7"));
+    await userEvent.click(screen.getByText("money_lab"));
+    await screen.findByPlaceholderText("가입 카페 선택");
+    await pickOption(0, "주식투자연구소 카페");
+    await userEvent.click(
+      await screen.findByRole(
+        "button",
+        { name: /^게시 \(1\)/ },
+        { timeout: 3000 },
+      ),
+    );
+    // The article-list query uses the 'popular' sort.
+    expect(ipcBackend).toHaveBeenCalledWith("list_cafe_articles", {
+      cafeId: "11111111",
+      sortBy: "popular",
+      accountId: "money_lab",
+    });
+    // …and the popular ORDER must propagate into the targets: the mock reverses
+    // for popular, so top-1 is 8009 (not latest's 8000). This fails if a
+    // regression takes the latest slice / ignores the returned order.
+    const call = ipcBackend.mock.calls.find((c) => c[0] === "run_comment_jobs");
+    expect(call).toBeDefined();
+    const req = (call?.[1] as { req: { targets: { articleId: number }[] } })
+      .req;
+    expect(req.targets.map((t) => t.articleId)).toEqual([8009]);
+  });
+
+  it("falls back to the available articles when the list has fewer than N", async () => {
+    const latestDoc: LibraryPost = {
+      id: "lf",
+      title: "최신글 폴백",
+      kind: "comment",
+      updated: "방금 전",
+      words: 30,
+      status: "ready",
+      excerpt: "요약",
+      commentTarget: "latest",
+      commentCount: 5,
+      comments: ["댓글"],
+    };
+    renderPublish({ doc: latestDoc });
+    await userEvent.click(await screen.findByText("invest_king7"));
+    await userEvent.click(screen.getByText("money_lab"));
+    await screen.findByPlaceholderText("가입 카페 선택");
+    // 개미투자 카페 (cafeId 22222222) only has 2 articles in the mock, fewer
+    // than the requested N=5 — only those two should become targets.
+    await pickOption(0, "개미투자 카페");
+    await userEvent.click(
+      await screen.findByRole(
+        "button",
+        { name: /^게시 \(1\)/ },
+        { timeout: 3000 },
+      ),
+    );
+    const call = ipcBackend.mock.calls.find((c) => c[0] === "run_comment_jobs");
+    expect(call).toBeDefined();
+    const req = (call?.[1] as { req: { targets: { articleId: number }[] } })
+      .req;
+    // 2 available articles → 2 targets (not 5).
+    expect(req.targets).toHaveLength(2);
+    expect([...new Set(req.targets.map((t) => t.articleId))].sort()).toEqual([
+      7000, 7001,
+    ]);
   });
 
   it("picks a per-account cafe/board and the band destination", async () => {

@@ -49,6 +49,7 @@ import {
   commentSummary,
   commentsAllOk,
   parseCafeArticleUrl,
+  topNArticles,
 } from "./comment-jobs";
 import { PreviewModal } from "./preview-modal";
 import { htmlToText, unreadyNaverAccountIds } from "./publish-helpers";
@@ -600,6 +601,10 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [date, setDate] = useState(() => nowParts().date);
   const [time, setTime] = useState(() => nowParts().time);
   const [acctFilter, setAcctFilter] = useState<"all" | PlatformId>("all");
+  // 댓글 대상 글 개수(최신글/인기글). 문서의 commentCount를 초기값으로, 없으면 1.
+  const [commentCount, setCommentCount] = useState(() =>
+    [1, 3, 5, 10].includes(doc?.commentCount ?? 0) ? doc!.commentCount! : 1,
+  );
   const [linkOverride, setLinkOverride] = useState("");
   const [showPreview, setShowPreview] = useState(false);
   const [flow, setFlow] = useState<null | "running" | PublishResult[]>(null);
@@ -702,9 +707,11 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const mode = doc.kind;
   const comments = (doc.comments ?? []).filter(Boolean);
   const commentTargetMode = doc.commentTarget ?? "latest";
-  // Phase 1 wires two comment targets: the just-posted article (`both`) and a
-  // pasted article URL (`comment` + url). latest/popular need a board-listing
-  // backend (Phase 2) and are not posted yet.
+  // Three comment targets are wired: a pasted article URL (`url`), and the cafe's
+  // latest/popular lists (`latest`/`popular`) fetched via list_cafe_articles —
+  // the top-N (`commentCount`) of that list become the targets at publish time.
+  const isListTarget =
+    commentTargetMode === "latest" || commentTargetMode === "popular";
   const urlTarget =
     commentTargetMode === "url" ? parseCafeArticleUrl(doc.commentUrl) : null;
   const toggle = (id: string) =>
@@ -828,15 +835,18 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     } else if (a.platform === "naver") {
       if (mode === "comment") {
         // Comment-only: the target is the URL / latest / popular, not a board
-        // pick. One job per selected account.
+        // pick. One job per selected account. latest/popular still need the
+        // account's picked cafe (the list is fetched from it), so skip accounts
+        // that haven't chosen a cafe yet — same silent-partial guard as posts.
+        if (isListTarget && !naverPicks[aid]) return;
         const targetName =
           commentTargetMode === "url"
             ? urlTarget
               ? `게시글 #${urlTarget.articleId}`
               : "URL 미설정"
             : commentTargetMode === "popular"
-              ? "인기글"
-              : "최신글";
+              ? `인기글 ${commentCount}건`
+              : `최신글 ${commentCount}건`;
         jobs.push({
           key: aid,
           platform: "naver",
@@ -870,10 +880,16 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     }
   });
   const targetsOk = !selPlatforms.includes("forum") || stockCodes.length > 0;
-  // Comment-only mode needs comments and a resolved target. Phase 1 only resolves
-  // the `url` target; latest/popular are Phase 2, so they can't publish yet.
+  // Comment-only mode needs comments and a resolved target. `url` resolves to a
+  // single article; latest/popular resolve to a cafe whose list is fetched at
+  // publish time, so they're ready once every selected naver account has picked
+  // a cafe (the list source) — top-N extraction handles short lists gracefully.
+  const listTargetReady =
+    selectedNaver.length > 0 && selectedNaver.every((a) => !!naverPicks[a.id]);
   const commentReady =
-    mode !== "comment" || (comments.length > 0 && urlTarget !== null);
+    mode !== "comment" ||
+    (comments.length > 0 &&
+      (isListTarget ? listTargetReady : urlTarget !== null));
   // 게시판이 아직 안 정해진 네이버 계정은 job 생성에서 빠진다. 이들이 있으면 게시를
   // 막아 "일부만 올라가고 나머지는 결과에도 안 뜨는" 조용한 부분 게시를 방지한다.
   const naverNotReady = unreadyNaverAccountIds(
@@ -960,25 +976,66 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     );
   };
 
-  // comment-only (url target): comment on the parsed article with each account.
+  // comment-only: build the comment jobs from the chosen target, then run them.
+  //  • url            → the single parsed article, shared by every account.
+  //  • latest/popular → each account's picked cafe is queried for its
+  //                     latest/popular list, and the top-N (commentCount)
+  //                     articles become that account's targets (fewer than N →
+  //                     only what the list returned).
   const runNaverComments = async (
     naverJobs: PublishJob[],
   ): Promise<PublishResult[]> => {
     if (!naverJobs.length) return [];
-    if (!urlTarget || comments.length === 0) {
+    if (comments.length === 0 || (!isListTarget && !urlTarget)) {
       return naverJobs.map((j) => ({
         ...j,
         ok: false,
-        msg: "댓글 대상 URL 또는 댓글 내용이 없어요",
+        msg: "댓글 대상 또는 댓글 내용이 없어요",
       }));
     }
-    // Each account comments on the same parsed article; the backend shuffles
-    // `comments` and deals one per account (issue #98).
-    const targets = naverJobs.map((j) => ({
-      accountId: j.loginId,
-      cafeId: urlTarget.cafeId,
-      articleId: urlTarget.articleId,
-    }));
+    // Resolve the comment targets, then let the backend shuffle `comments` and
+    // deal one per target (issue #98). url → the single parsed article shared by
+    // every account; latest/popular → each account's cafe list, top-N as targets.
+    let targets: { accountId: string; cafeId: number; articleId: number }[];
+    if (isListTarget) {
+      const sortBy = commentTargetMode === "popular" ? "popular" : "latest";
+      // Per account: fetch its cafe's list and take the top-N. A failed/empty
+      // fetch yields no targets for that account (it then reads as "댓글 없음").
+      const perAccount = await Promise.all(
+        naverJobs.map(async (j) => {
+          const cafeId = naverPicks[j.key]?.cafeId;
+          if (!cafeId) return [];
+          // Surface a fetch failure as a toast so it's distinguishable from a
+          // cafe that genuinely has no articles — both otherwise read as the
+          // benign "댓글 없음" row, hiding session/network errors.
+          const list = await ipc.cafes
+            .listArticles(cafeId, sortBy, j.loginId)
+            .catch((err) => {
+              notifications.show({
+                message: `${j.loginId} ${
+                  sortBy === "popular" ? "인기글" : "최신글"
+                } 목록을 불러오지 못했어요: ${errText(err)}`,
+                color: "red",
+              });
+              return null;
+            });
+          if (!list) return [];
+          return topNArticles(list.articles, commentCount).map((a) => ({
+            accountId: j.loginId,
+            cafeId,
+            articleId: a.articleId,
+          }));
+        }),
+      );
+      targets = perAccount.flat();
+    } else {
+      targets = naverJobs.map((j) => ({
+        accountId: j.loginId,
+        cafeId: urlTarget!.cafeId,
+        articleId: urlTarget!.articleId,
+      }));
+    }
+
     const couts = await ipc.cafes
       .runCommentJobs({ targets, comments })
       .catch((): null => null);
@@ -1302,6 +1359,38 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
               onRefreshJoined={refreshJoined}
             />
           </>
+        )}
+
+        {mode === "comment" && isListTarget && selectedNaver.length > 0 && (
+          <Box mt={22}>
+            <Group gap={7} mb={10}>
+              <Icon.target size={17} color="var(--mantine-color-gray-6)" />
+              <Text fz={13.5} fw={700}>
+                Comment targets
+              </Text>
+              <Badge size="sm" variant="light" color="blue">
+                {commentTargetMode === "popular" ? "Popular" : "Latest"}
+              </Badge>
+            </Group>
+            <Text fz={12} c="dimmed" mb={8}>
+              Comment on the top N{" "}
+              {commentTargetMode === "popular" ? "popular" : "latest"} articles
+              of each selected cafe.
+            </Text>
+            <SegmentedControl
+              fullWidth
+              size="sm"
+              value={String(commentCount)}
+              onChange={(v) => setCommentCount(Number(v))}
+              data={[
+                { value: "1", label: "1" },
+                { value: "3", label: "3" },
+                { value: "5", label: "5" },
+                { value: "10", label: "10" },
+              ]}
+              aria-label="comment article count"
+            />
+          </Box>
         )}
 
         {showTokens && (

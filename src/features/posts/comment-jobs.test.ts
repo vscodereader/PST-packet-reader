@@ -6,6 +6,7 @@ import {
   commentSummary,
   commentsAllOk,
   parseCafeArticleUrl,
+  topNArticles,
 } from "./comment-jobs";
 
 // 댓글 분배(mulberry32/distributeComments)는 백엔드로 이전됨(이슈 #98). 결정성·
@@ -54,6 +55,25 @@ describe("parseCafeArticleUrl", () => {
     ).toBeNull();
     expect(parseCafeArticleUrl("")).toBeNull();
     expect(parseCafeArticleUrl(undefined)).toBeNull();
+  });
+});
+
+describe("topNArticles", () => {
+  const article = (articleId: number) => ({ articleId });
+
+  it("takes the first N articles in list order", () => {
+    const arts = [article(1), article(2), article(3), article(4), article(5)];
+    expect(topNArticles(arts, 3).map((a) => a.articleId)).toEqual([1, 2, 3]);
+  });
+
+  it("returns only what's available when the list is shorter than N", () => {
+    const arts = [article(1), article(2)];
+    expect(topNArticles(arts, 5).map((a) => a.articleId)).toEqual([1, 2]);
+  });
+
+  it("returns an empty list for N <= 0 or an empty source", () => {
+    expect(topNArticles([article(1)], 0)).toEqual([]);
+    expect(topNArticles([], 5)).toEqual([]);
   });
 });
 
