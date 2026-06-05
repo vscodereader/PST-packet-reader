@@ -261,6 +261,24 @@ impl CdpClient {
         Ok(())
     }
 
+    // 로그인 전용 CDP 셋업: Page 도메인만 켜고 **Runtime.enable 은 호출하지 않는다.**
+    //
+    // Runtime.enable 은 콘솔 인자 직렬화 경로를 활성화해, 페이지가 Error 객체의 `stack`
+    // 게터나 `Symbol.toPrimitive`/`toString` 트랩으로 "이 브라우저는 CDP(DevTools)로 제어
+    // 중"임을 탐지하게 만든다(네이버 봇탐지 번들 wtm.pstatic.net 에 `.stack`·
+    // `Symbol.toPrimitive`·`console` 시그니처가 실재한다). 이 CDP 탐지는 navigator.webdriver·
+    // 타이핑·마우스와 무관하게 곧장 봇으로 판정해 보안문자를 띄우는 가장 강한 신호다.
+    //
+    // 로그인 시퀀스는 Runtime.evaluate·Network.getCookies·Input.dispatchKeyEvent/MouseEvent·
+    // Page.navigate·Page.addScriptToEvaluateOnNewDocument 만 쓰며, 이들은 Runtime.enable
+    // 없이도 동작한다. 따라서 탐지 표면을 줄이려 로그인에선 Runtime 도메인을 켜지 않는다.
+    // (다운스트림 글쓰기/댓글의 `enable()`은 이벤트가 필요할 수 있어 그대로 둔다.)
+    pub(crate) fn enable_page_only(&mut self) -> AutomationResult<()> {
+        self.call("Page.enable", json!({}))
+            .map_err(|error| AutomationError::new(format!("Page.enable 실패: {error}")))?;
+        Ok(())
+    }
+
     // 로그인 자동화가 저장한 계정 쿠키를 Chrome 세션에 주입하는 함수입니다.
     // 이렇게 하면 사용자가 수동 로그인하지 않아도 Chrome이 로그인된 상태가 되고,
     // 이후 기존 글쓰기/댓글 흐름이 그대로 동작합니다.
