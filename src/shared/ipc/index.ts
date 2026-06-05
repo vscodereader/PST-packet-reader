@@ -206,6 +206,9 @@ export const ipc = {
       call<LoginQueueStatus>("enqueue_cookie_refresh", {
         accountIds,
         headless,
+        // IP 로테이션 스위치: false=폰 없이 로그인만(로테이션 안 함). 계정마다 모바일
+        // IP를 바꾸려면 true로 — 단 폰 USB 연결 + PATH에 adb 필요(winget Google.PlatformTools).
+        // 백엔드: src-tauri/src/auth/adb.rs toggle_airplane_mode.
         useAdb: false,
       }),
     queueStatus: () => call<LoginQueueStatus>("get_queue_status"),

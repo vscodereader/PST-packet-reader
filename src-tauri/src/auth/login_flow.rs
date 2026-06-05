@@ -5,7 +5,7 @@
 //! keydown을 후킹해 암호화 페이로드를 만들기 때문에 값만 꽂으면 암호화가 깨진다.
 
 use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
@@ -18,6 +18,17 @@ const HEADLESS_TIMEOUT: Duration = Duration::from_secs(40);
 // 타임아웃) 성공 또는 타임아웃까지 기다린다.
 const HEADED_TIMEOUT: Duration = Duration::from_secs(180);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+// 봇탐지(ncaptcha/wtm) 완화용 스텔스 스크립트. 페이지 스크립트보다 먼저 모든 새 문서에서
+// 실행되어 CDP 제어 흔적인 `navigator.webdriver` 를 일반 크롬과 동일한 값으로 맞춘다.
+//
+// 네이버 안티봇 번들(wtm.pstatic.net)의 검사는
+//   getWebdriver(){ return void 0!==navigator.webdriver ? Boolean(navigator.webdriver).toString() : "" }
+// 형태다. 일반(비자동화) 크롬은 `navigator.webdriver === false` 라 "false"를 보고한다. 따라서
+// `undefined`(필드 없음)로 두면 오히려 일반 크롬과 달라지므로, 정확히 `false`로 맞춘다.
+// Chrome 실행 플래그 `--disable-blink-features=AutomationControlled` 가 headed에선 네이티브로
+// false를 주지만, 헤드리스에선 webdriver가 노출될 수 있어 JS로 한 번 더 false로 덮는다.
+const STEALTH_INIT_JS: &str = "Object.defineProperty(navigator,'webdriver',{get:()=>false});";
 
 /// 챌린지(추가 인증) 종류.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +175,14 @@ fn run_inner(
         ));
     }
 
+    // navigate 전에 스텔스 스크립트를 등록해, 로그인 폼이 로드되며 실행되는 ncaptcha JS가
+    // navigator.webdriver 를 읽기 전에 가려지도록 한다. CDP 호출이 실패해도 로그인 자체는
+    // 진행해야 하므로 best-effort(let _)로 둔다(Page 도메인 미활성 등 환경 차이 흡수).
+    let _ = client.call(
+        "Page.addScriptToEvaluateOnNewDocument",
+        json!({ "source": STEALTH_INIT_JS }),
+    );
+
     client.navigate(LOGIN_URL)?;
     // navigate가 readyState까지 기다려도, 로그인 폼이 렌더되고 네이버의 keydown 암호화
     // 핸들러가 붙기 전에 타이핑하면 글자가 필드에 들어가지 않는다. 폼이 준비될 때까지 기다린다.
@@ -195,11 +214,9 @@ fn run_inner(
 
     // 비밀번호 입력 후 2초 기다렸다가 로그인 버튼을 누른다(사람처럼 천천히).
     sleep(Duration::from_secs(2));
-    // 로그인 버튼 클릭(값 주입이 아니라 클릭이므로 evaluate 사용 가능).
-    client.evaluate(
-        "(()=>{const b=document.querySelector('#log\\\\.login')||\
-         document.querySelector('button[type=submit]');if(b){b.click();return true;}return false;})()",
-    )?;
+    // 로그인 버튼을 사람처럼 좌표 마우스 클릭(JS .click() 대신 진짜 mouse 이벤트). 좌표를 못
+    // 구하면 .click()으로 폴백한다.
+    click_login_button(client)?;
 
     let timeout = if wait_for_human {
         HEADED_TIMEOUT
@@ -279,33 +296,228 @@ fn wait_for_login_form(client: &mut CdpClient) -> bool {
     }
 }
 
-// 선택자에 포커스한 뒤 한 글자씩 실제 키 이벤트로 입력한다(keydown 후킹 암호화 대응).
-// 입력 후 필드 값 길이를 확인해, 비어 있으면(타이밍/렌더 문제로 헛친 경우) 최대 3회 재시도한다.
-// 채워졌으면 `Ok(true)`, 3회 후에도 비어 있으면 `Ok(false)`를 반환해 호출자가 판단하게 한다.
+// 한 글자에 대응하는 US 키보드 물리키 정보. 합성 키 이벤트에 실제 브라우저와 동일한
+// `code`·`windowsVirtualKeyCode`를 채워, DOM `event.keyCode`가 0이 되지 않게 한다.
+struct KeyInfo {
+    code: String,
+    vk: u32,
+    shift: bool,
+}
+
+// 문자를 US 키보드 배열의 (code, windowsVirtualKeyCode, Shift 필요 여부)로 매핑한다(순수 함수).
+// 알파벳/숫자/비밀번호에 흔한 기호를 덮는다. 미지의 문자는 vk=0·code="" 로 떨어뜨려도
+// keyDown의 `text`가 글자 입력을 담당하므로 값 자체는 들어간다(베스트에포트).
+fn key_info(ch: char) -> KeyInfo {
+    if ch.is_ascii_alphabetic() {
+        let upper = ch.to_ascii_uppercase();
+        return KeyInfo {
+            code: format!("Key{upper}"),
+            vk: upper as u32,
+            shift: ch.is_ascii_uppercase(),
+        };
+    }
+    if ch.is_ascii_digit() {
+        return KeyInfo {
+            code: format!("Digit{ch}"),
+            vk: ch as u32,
+            shift: false,
+        };
+    }
+    // (code, windowsVirtualKeyCode, shift) — Shift+숫자 기호와 OEM 구두점.
+    let (code, vk, shift): (&str, u32, bool) = match ch {
+        ')' => ("Digit0", 0x30, true),
+        '!' => ("Digit1", 0x31, true),
+        '@' => ("Digit2", 0x32, true),
+        '#' => ("Digit3", 0x33, true),
+        '$' => ("Digit4", 0x34, true),
+        '%' => ("Digit5", 0x35, true),
+        '^' => ("Digit6", 0x36, true),
+        '&' => ("Digit7", 0x37, true),
+        '*' => ("Digit8", 0x38, true),
+        '(' => ("Digit9", 0x39, true),
+        ' ' => ("Space", 0x20, false),
+        '-' => ("Minus", 0xBD, false),
+        '_' => ("Minus", 0xBD, true),
+        '=' => ("Equal", 0xBB, false),
+        '+' => ("Equal", 0xBB, true),
+        '[' => ("BracketLeft", 0xDB, false),
+        '{' => ("BracketLeft", 0xDB, true),
+        ']' => ("BracketRight", 0xDD, false),
+        '}' => ("BracketRight", 0xDD, true),
+        '\\' => ("Backslash", 0xDC, false),
+        '|' => ("Backslash", 0xDC, true),
+        ';' => ("Semicolon", 0xBA, false),
+        ':' => ("Semicolon", 0xBA, true),
+        '\'' => ("Quote", 0xDE, false),
+        '"' => ("Quote", 0xDE, true),
+        ',' => ("Comma", 0xBC, false),
+        '<' => ("Comma", 0xBC, true),
+        '.' => ("Period", 0xBE, false),
+        '>' => ("Period", 0xBE, true),
+        '/' => ("Slash", 0xBF, false),
+        '?' => ("Slash", 0xBF, true),
+        '`' => ("Backquote", 0xC0, false),
+        '~' => ("Backquote", 0xC0, true),
+        _ => ("", 0, false),
+    };
+    KeyInfo {
+        code: code.to_owned(),
+        vk,
+        shift,
+    }
+}
+
+// 글자 사이 사람 같은 타이핑 지연 범위(ms). ncaptcha/wtm은 정적 지문 외에 키 입력 타이밍도
+// 본다. 단, "한 글자에 8초" 같은 비현실적 지연은 오히려 이상하므로 사람 평균 타속 범위로 고정한다.
+const TYPE_DELAY_MIN_MS: u64 = 60;
+const TYPE_DELAY_MAX_MS: u64 = 180;
+
+// 시드+인덱스로 [MIN, MAX] 범위의 타이핑 지연(ms)을 정하는 순수 함수(splitmix64 혼합).
+// 비결정 API(rand/시계)를 타이핑 루프에서 직접 쓰지 않아 단위 테스트가 가능하고, 범위를
+// clamp하므로 절대 초 단위 지연이 나오지 않는다.
+fn type_delay_ms(seed: u64, index: usize) -> u64 {
+    let mut x = seed ^ (index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^= x >> 31;
+    TYPE_DELAY_MIN_MS + (x % (TYPE_DELAY_MAX_MS - TYPE_DELAY_MIN_MS + 1))
+}
+
+// 타이핑 지연 시드(타이핑 호출마다 한 번 — 실행마다 패턴이 달라지게). 순수 함수 type_delay_ms와
+// 분리해, 테스트는 고정 시드로 검증한다.
+fn jitter_seed() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+// evaluate가 돌려준 `[x, y]`(returnByValue) 배열을 좌표로 파싱한다(없으면 None).
+fn parse_xy(value: &Value) -> Option<(f64, f64)> {
+    let arr = value.as_array()?;
+    Some((arr.first()?.as_f64()?, arr.get(1)?.as_f64()?))
+}
+
+// 셀렉터 요소의 뷰포트 중심 좌표(CSS px)를 구한다. 없거나 크기 0이면 None.
+fn element_center(
+    client: &mut CdpClient,
+    selector: &str,
+) -> Result<Option<(f64, f64)>, AutomationError> {
+    let expr = format!(
+        "(()=>{{const e=document.querySelector('{selector}');\
+         if(!e)return null;const r=e.getBoundingClientRect();\
+         if(r.width<=0||r.height<=0)return null;\
+         return [r.left+r.width/2, r.top+r.height/2];}})()"
+    );
+    Ok(parse_xy(&client.evaluate(&expr)?))
+}
+
+// (x,y)로 마우스를 옮겨 좌클릭한다 — JS .click()/.focus()가 아니라 진짜 mouse 이벤트라
+// 행동 기반 봇탐지(움직임 0)를 완화한다.
+fn mouse_click(client: &mut CdpClient, x: f64, y: f64) -> Result<(), AutomationError> {
+    client.call(
+        "Input.dispatchMouseEvent",
+        json!({ "type": "mouseMoved", "x": x, "y": y, "buttons": 0 }),
+    )?;
+    client.call(
+        "Input.dispatchMouseEvent",
+        json!({ "type": "mousePressed", "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1 }),
+    )?;
+    client.call(
+        "Input.dispatchMouseEvent",
+        json!({ "type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": 1 }),
+    )?;
+    Ok(())
+}
+
+// 셀렉터를 마우스로 클릭(=포커스). 좌표를 못 구하면 false(호출부가 JS focus로 폴백).
+fn mouse_click_selector(client: &mut CdpClient, selector: &str) -> Result<bool, AutomationError> {
+    if let Some((x, y)) = element_center(client, selector)? {
+        mouse_click(client, x, y)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+// 로그인 버튼을 사람처럼 좌표 클릭한다. 좌표를 못 구하면 .click()으로 폴백(클릭 실패가
+// 로그인 자체를 막지 않도록).
+fn click_login_button(client: &mut CdpClient) -> Result<(), AutomationError> {
+    let center = client.evaluate(
+        "(()=>{const b=document.querySelector('#log\\\\.login')||\
+         document.querySelector('button[type=submit]');if(!b)return null;\
+         const r=b.getBoundingClientRect();if(r.width<=0||r.height<=0)return null;\
+         return [r.left+r.width/2, r.top+r.height/2];})()",
+    )?;
+    if let Some((x, y)) = parse_xy(&center) {
+        mouse_click(client, x, y)?;
+    } else {
+        client.evaluate(
+            "(()=>{const b=document.querySelector('#log\\\\.login')||\
+             document.querySelector('button[type=submit]');if(b){b.click();return true;}return false;})()",
+        )?;
+    }
+    Ok(())
+}
+
+// 선택자를 마우스로 클릭해 포커스한 뒤 한 글자씩 실제 키 이벤트로 입력한다(keydown 후킹 암호화
+// 대응). 글자 사이엔 사람 같은 랜덤 지연을 둔다. 입력 후 필드 값 길이를 확인해, 비어 있으면
+// (타이밍/렌더 문제로 헛친 경우) 최대 3회 재시도한다. 채워졌으면 `Ok(true)`, 3회 후에도 비어
+// 있으면 `Ok(false)`를 반환해 호출자가 판단하게 한다.
 fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<bool, AutomationError> {
     let expected = text.chars().count();
+    let seed = jitter_seed();
 
     for _ in 0..3 {
-        // 기존 값 비우고 포커스(재시도 시 중복 입력 방지). 셀렉터는 고정 안전 문자열(#id/#pw).
-        let focus = format!(
+        // 기존 값 비우기(재시도 시 중복 입력 방지). 셀렉터는 고정 안전 문자열(#id/#pw).
+        let clear = format!(
             "(()=>{{const el=document.querySelector('{selector}');\
-             if(el){{el.value='';el.focus();return true;}}return false;}})()"
+             if(el){{el.value='';return true;}}return false;}})()"
         );
-        client.evaluate(&focus)?;
+        client.evaluate(&clear)?;
+        // 포커스는 사람처럼 마우스 클릭으로. 좌표를 못 구하면 JS focus로 폴백.
+        if !mouse_click_selector(client, selector)? {
+            let focus = format!(
+                "(()=>{{const el=document.querySelector('{selector}');\
+                 if(el){{el.focus();return true;}}return false;}})()"
+            );
+            client.evaluate(&focus)?;
+        }
 
-        for ch in text.chars() {
+        for (i, ch) in text.chars().enumerate() {
             let s = ch.to_string();
-            // 대문자는 Shift 모디파이어(8)와 함께 보낸다. Shift 없이 대문자를 보내면 네이버가
-            // "Shift 안 눌렀는데 대문자 → Caps Lock 켜짐"으로 오판해 경고를 띄운다.
-            let modifiers = if ch.is_uppercase() { 8 } else { 0 };
+            let k = key_info(ch);
+            // 실제 브라우저와 동일하게 code·windowsVirtualKeyCode·nativeVirtualKeyCode를 채운다.
+            // 이게 없으면 DOM `event.keyCode`가 0이라, 네이버 default_ecc.js의 keydown 암호화
+            // 훅/봇탐지가 합성 입력으로 판단 → eccpw가 깨지고 캡차/수동입력을 요구한다(패킷
+            // 분석상 캡처된 성공 로그인은 NNB 쿠키만·bvsd 빈 채로도 즉시 성공했다).
+            // Shift는 대문자뿐 아니라 Shift로 입력하는 기호(!@#$ 등)에도 일반화한다. Shift 없이
+            // 대문자를 보내면 네이버가 "Caps Lock 켜짐"으로 오판해 경고를 띄우는 문제도 함께 막는다.
+            let modifiers = if k.shift { 8 } else { 0 };
             client.call(
                 "Input.dispatchKeyEvent",
-                json!({ "type": "keyDown", "text": s, "key": s, "modifiers": modifiers }),
+                json!({
+                    "type": "keyDown",
+                    "text": s,
+                    "key": s,
+                    "code": k.code,
+                    "windowsVirtualKeyCode": k.vk,
+                    "nativeVirtualKeyCode": k.vk,
+                    "modifiers": modifiers,
+                }),
             )?;
             client.call(
                 "Input.dispatchKeyEvent",
-                json!({ "type": "keyUp", "key": s, "modifiers": modifiers }),
+                json!({
+                    "type": "keyUp",
+                    "key": s,
+                    "code": k.code,
+                    "windowsVirtualKeyCode": k.vk,
+                    "nativeVirtualKeyCode": k.vk,
+                    "modifiers": modifiers,
+                }),
             )?;
+            // 글자 사이 사람 같은 지연(60~180ms). 기계처럼 0ms 연타하면 행동 기반 봇탐지에 걸린다.
+            sleep(Duration::from_millis(type_delay_ms(seed, i)));
         }
 
         let got = client
@@ -524,6 +736,113 @@ mod tests {
             decide_loop_step(None, Signal::Challenge(ChallengeKind::Otp), true),
             LoopDecision::KeepWaiting(None)
         );
+    }
+
+    // --- key_info: 합성 키 이벤트가 실제 브라우저 keyCode와 일치하는지 ---
+
+    #[test]
+    fn key_info_lowercase_letter_has_keycode_without_shift() {
+        let k = key_info('a');
+        assert_eq!(k.code, "KeyA");
+        assert_eq!(k.vk, 0x41); // VK_A == 'A'
+        assert!(!k.shift);
+    }
+
+    #[test]
+    fn key_info_uppercase_letter_sends_shift() {
+        let k = key_info('A');
+        assert_eq!(k.code, "KeyA");
+        assert_eq!(k.vk, 0x41); // 대문자도 물리키는 'A'(=0x41)
+        assert!(k.shift);
+    }
+
+    #[test]
+    fn key_info_digit_has_keycode() {
+        let k = key_info('7');
+        assert_eq!(k.code, "Digit7");
+        assert_eq!(k.vk, 0x37); // '7'
+        assert!(!k.shift);
+    }
+
+    #[test]
+    fn key_info_shifted_symbol_maps_to_base_digit_with_shift() {
+        // '!' 는 Shift+1 → 물리키는 Digit1, vk 는 '1'(=0x31), shift=true.
+        let bang = key_info('!');
+        assert_eq!(bang.code, "Digit1");
+        assert_eq!(bang.vk, 0x31);
+        assert!(bang.shift);
+        // '@' 는 Shift+2.
+        let at = key_info('@');
+        assert_eq!(at.code, "Digit2");
+        assert!(at.shift);
+    }
+
+    #[test]
+    fn key_info_oem_punctuation_has_nonzero_keycode() {
+        for ch in ['-', '_', '.', '/', ';', '\'', '=', '+'] {
+            assert_ne!(key_info(ch).vk, 0, "{ch} 의 vk 가 0이면 안 된다");
+        }
+        assert!(key_info('_').shift);
+        assert!(!key_info('-').shift);
+    }
+
+    #[test]
+    fn key_info_unknown_char_is_best_effort_zero() {
+        // 한글 등 매핑 없는 문자는 vk=0·code="" — text 가 입력을 담당한다.
+        let k = key_info('가');
+        assert_eq!(k.vk, 0);
+        assert_eq!(k.code, "");
+        assert!(!k.shift);
+    }
+
+    // --- type_delay_ms: 사람 같은 타이핑 지연(초 단위 절대 금지, 범위 clamp) ---
+
+    #[test]
+    fn type_delay_always_within_human_range() {
+        // 어떤 시드·인덱스든 60~180ms 범위를 벗어나지 않는다(8초 같은 값이 절대 안 나온다).
+        for seed in [0u64, 1, 42, 9_999, u64::MAX, 0x1234_5678_9ABC_DEF0] {
+            for index in 0..64 {
+                let d = type_delay_ms(seed, index);
+                assert!(
+                    (TYPE_DELAY_MIN_MS..=TYPE_DELAY_MAX_MS).contains(&d),
+                    "seed={seed} index={index} d={d} 범위 밖"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn type_delay_varies_by_index_and_seed() {
+        // 모든 글자가 같은 간격이면 기계적 → 인덱스에 따라 값이 달라져야 한다.
+        let by_index: Vec<u64> = (0..16).map(|i| type_delay_ms(7, i)).collect();
+        assert!(
+            by_index
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                > 1,
+            "인덱스에 따라 지연이 전혀 안 변함"
+        );
+        // 시드가 다르면 패턴도 달라져야 한다(실행마다 다른 리듬).
+        assert_ne!(
+            (0..8).map(|i| type_delay_ms(1, i)).collect::<Vec<_>>(),
+            (0..8).map(|i| type_delay_ms(2, i)).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn type_delay_is_deterministic_for_same_input() {
+        // 순수 함수 — 같은 (시드,인덱스)는 항상 같은 값(테스트 가능성).
+        assert_eq!(type_delay_ms(123, 4), type_delay_ms(123, 4));
+    }
+
+    #[test]
+    fn parse_xy_reads_coordinate_array() {
+        assert_eq!(parse_xy(&json!([10.0, 20.5])), Some((10.0, 20.5)));
+        assert_eq!(parse_xy(&json!([3, 4])), Some((3.0, 4.0)));
+        assert_eq!(parse_xy(&Value::Null), None);
+        assert_eq!(parse_xy(&json!([1.0])), None);
+        assert_eq!(parse_xy(&json!("nope")), None);
     }
 
     #[test]

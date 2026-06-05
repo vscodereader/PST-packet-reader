@@ -54,6 +54,10 @@ pub(crate) fn launch(headless: bool) -> Result<ChromeHandle, OrchestratorError> 
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-quic",
+        // 봇탐지(ncaptcha) 완화: CDP 제어 시 Chrome이 navigator.webdriver=true 와
+        // "Chrome이 자동화 소프트웨어의 제어를 받고 있습니다" 신호를 노출하는 것을 끈다.
+        // 실제 키 이벤트(login_flow)만으로는 점수형 캡차를 못 피하므로 자동화 지문도 함께 낮춘다.
+        "--disable-blink-features=AutomationControlled",
         "about:blank",
     ];
     if headless {
