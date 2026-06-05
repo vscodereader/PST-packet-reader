@@ -46,12 +46,10 @@ import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo, PlatformPill } from "@/shared/ui/platform-logo";
 
 import {
-  buildArticleListCommentJobs,
-  buildBothCommentJobs,
-  buildUrlCommentJobs,
   commentSummary,
   commentsAllOk,
   parseCafeArticleUrl,
+  topNArticles,
 } from "./comment-jobs";
 import { PreviewModal } from "./preview-modal";
 import { htmlToText, unreadyNaverAccountIds } from "./publish-helpers";
@@ -959,10 +957,11 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         cafeId: naverPicks[x.j.key]?.cafeId ?? 0,
         articleId: x.out.articleId as number,
       }));
-    const commentJobs = buildBothCommentJobs(posted, comments);
-    if (!commentJobs.length) return postResults;
+    if (posted.length === 0) return postResults;
+    // The backend shuffles `comments` and deals one to each posted article
+    // (issue #98); `posted` already carries {accountId, cafeId, articleId}.
     const couts = await ipc.cafes
-      .runCommentJobs(commentJobs)
+      .runCommentJobs({ targets: posted, comments })
       .catch((): null => null);
     // 글이 올라간 행이라도 그 계정 댓글이 전부 성공해야 "성공"으로 둔다. 일부/전부
     // 실패를 초록 배지로 묻으면(이전 동작) 운영자가 재시도를 안 한다. 건수는 msg에.
@@ -994,12 +993,14 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         msg: "댓글 대상 또는 댓글 내용이 없어요",
       }));
     }
-
-    let commentJobs;
+    // Resolve the comment targets, then let the backend shuffle `comments` and
+    // deal one per target (issue #98). url → the single parsed article shared by
+    // every account; latest/popular → each account's cafe list, top-N as targets.
+    let targets: { accountId: string; cafeId: number; articleId: number }[];
     if (isListTarget) {
       const sortBy = commentTargetMode === "popular" ? "popular" : "latest";
       // Per account: fetch its cafe's list and take the top-N. A failed/empty
-      // fetch yields no jobs for that account (it then reads as "댓글 없음").
+      // fetch yields no targets for that account (it then reads as "댓글 없음").
       const perAccount = await Promise.all(
         naverJobs.map(async (j) => {
           const cafeId = naverPicks[j.key]?.cafeId;
@@ -1019,26 +1020,24 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
               return null;
             });
           if (!list) return [];
-          return buildArticleListCommentJobs(
-            [j.loginId],
+          return topNArticles(list.articles, commentCount).map((a) => ({
+            accountId: j.loginId,
             cafeId,
-            list.articles,
-            commentCount,
-            comments,
-          );
+            articleId: a.articleId,
+          }));
         }),
       );
-      commentJobs = perAccount.flat();
+      targets = perAccount.flat();
     } else {
-      commentJobs = buildUrlCommentJobs(
-        naverJobs.map((j) => j.loginId),
-        urlTarget!,
-        comments,
-      );
+      targets = naverJobs.map((j) => ({
+        accountId: j.loginId,
+        cafeId: urlTarget!.cafeId,
+        articleId: urlTarget!.articleId,
+      }));
     }
 
     const couts = await ipc.cafes
-      .runCommentJobs(commentJobs)
+      .runCommentJobs({ targets, comments })
       .catch((): null => null);
     return naverJobs.map((j) => ({
       ...j,

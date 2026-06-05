@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::auth::read_account_cookies;
+use crate::naver_cafe::distribute::{distribute_comments, mulberry32, seed_from_clock};
 use crate::naver_cafe::post::cookie_header_from_storage_state;
 use crate::naver_cafe::{
     fetch_article_list_for_account, run_comment_jobs as run_comment_jobs_internal,
@@ -343,12 +344,59 @@ fn comment_outcome_from_report(report: &CommentJobReport) -> CommentPublishOutco
     }
 }
 
-/// Run N comment jobs sequentially, returning a slim outcome per job.
+/// One comment destination — the account plus the numeric cafe/article it will
+/// comment on. The comment *text* is not chosen here: the backend deals it from
+/// the pool (see [`run_comment_jobs`]). Comes either from a just-posted article
+/// or a URL the UI parsed.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
+#[serde(rename_all = "camelCase")]
+pub struct CommentDistributionTarget {
+    /// Account the comment runs under (cookie-file lookup key).
+    pub account_id: String,
+    /// Target cafe id. (JS `number`)
+    #[ts(type = "number")]
+    pub cafe_id: u64,
+    /// Target article id the comment attaches to.
+    #[ts(type = "number")]
+    pub article_id: u64,
+}
+
+/// Request for [`run_comment_jobs`]: the destinations plus the comment pool.
+/// The backend shuffles `comments` and deals one to each target (issue #98), so
+/// different accounts post different comments — matching the UI's promise.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
+#[serde(rename_all = "camelCase")]
+pub struct CommentDistributionRequest {
+    /// Where each comment lands (one comment dealt per target).
+    pub targets: Vec<CommentDistributionTarget>,
+    /// The comment text pool to distribute across the targets.
+    pub comments: Vec<String>,
+}
+
+/// Distribute the comment pool across the targets (issue #98), then run the
+/// resulting jobs sequentially, returning a slim outcome per job.
 ///
-/// Each job reads its account's session cookie internally; one job failing does
-/// not stop the rest. Cookie values never appear in any outcome.
+/// The pool is shuffled and dealt one comment per target with a wall-clock-seeded
+/// RNG, so accounts don't all post the same text in the same order. Each job
+/// reads its account's session cookie internally; one job failing does not stop
+/// the rest. Cookie values never appear in any outcome.
 #[tauri::command]
-pub async fn run_comment_jobs(jobs: Vec<CommentJob>) -> Vec<CommentPublishOutcome> {
+pub async fn run_comment_jobs(req: CommentDistributionRequest) -> Vec<CommentPublishOutcome> {
+    let mut rng = mulberry32(seed_from_clock());
+    let contents = distribute_comments(req.targets.len(), &req.comments, &mut rng);
+    let jobs: Vec<CommentJob> = req
+        .targets
+        .into_iter()
+        .zip(contents)
+        .map(|(t, content)| CommentJob {
+            account_id: t.account_id,
+            cafe_id: t.cafe_id,
+            article_id: t.article_id,
+            content,
+        })
+        .collect();
     run_comment_jobs_internal(&jobs)
         .await
         .iter()

@@ -2,13 +2,12 @@
 //! `PlatformId`/`ModeValue` from the accounts/posts modules so the generated TS
 //! bindings stay a single source of truth.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::accounts::PlatformId;
 use super::posts::ModeValue;
+use crate::ipc::activity::{record, ActivityType};
 use crate::store::JsonStore;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -158,24 +157,23 @@ pub fn list_queue_scheduled(
 #[tauri::command]
 pub fn cancel_queue_now(
     store: tauri::State<'_, JsonStore<QueueNowItem>>,
+    activity: tauri::State<'_, JsonStore<crate::ipc::activity::ActivityItem>>,
     id: String,
 ) -> Vec<QueueNowItem> {
-    store.mutate(|items| apply_cancel_now(items, &id))
+    let next = store.mutate(|items| apply_cancel_now(items, &id));
+    record(activity.inner(), ActivityType::Info, "진행 작업 취소됨");
+    next
 }
 
 #[tauri::command]
 pub fn cancel_queue_scheduled(
     store: tauri::State<'_, JsonStore<QueueScheduledItem>>,
+    activity: tauri::State<'_, JsonStore<crate::ipc::activity::ActivityItem>>,
     id: String,
 ) -> Vec<QueueScheduledItem> {
-    store.mutate(|items| apply_cancel_scheduled(items, &id))
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    let next = store.mutate(|items| apply_cancel_scheduled(items, &id));
+    record(activity.inner(), ActivityType::Info, "예약 취소됨");
+    next
 }
 
 /// True if `at` is no earlier than the start of the current minute. Minute
@@ -189,16 +187,24 @@ pub fn is_future_enough(at: i64, now: i64) -> bool {
 #[tauri::command]
 pub fn add_queue_scheduled(
     store: tauri::State<'_, JsonStore<QueueScheduledItem>>,
+    activity: tauri::State<'_, JsonStore<crate::ipc::activity::ActivityItem>>,
     item: QueueScheduledItem,
     at: i64,
 ) -> Result<Vec<QueueScheduledItem>, String> {
-    if !is_future_enough(at, now_ms()) {
+    if !is_future_enough(at, crate::util::now_ms()) {
         return Err("예약 시각이 현재보다 과거입니다".into());
     }
-    Ok(store.mutate(|mut items| {
+    let title = item.title.clone();
+    let next = store.mutate(|mut items| {
         items.push(item);
         items
-    }))
+    });
+    record(
+        activity.inner(),
+        ActivityType::Info,
+        format!("예약 추가됨 — {title}"),
+    );
+    Ok(next)
 }
 
 /// Move a scheduled item into the immediate queue ("즉시 처리"): drop it from the
@@ -207,16 +213,23 @@ pub fn add_queue_scheduled(
 pub fn promote_queue_scheduled(
     now: tauri::State<'_, JsonStore<QueueNowItem>>,
     scheduled: tauri::State<'_, JsonStore<QueueScheduledItem>>,
+    activity: tauri::State<'_, JsonStore<crate::ipc::activity::ActivityItem>>,
     id: String,
 ) -> Vec<QueueNowItem> {
     let found = scheduled.snapshot().into_iter().find(|s| s.id == id);
     match found {
         Some(s) => {
             scheduled.mutate(|items| apply_cancel_scheduled(items, &id));
-            now.mutate(|mut items| {
+            let next = now.mutate(|mut items| {
                 items.push(to_now_item(s));
                 items
-            })
+            });
+            record(
+                activity.inner(),
+                ActivityType::Info,
+                "예약을 즉시 게시로 전환",
+            );
+            next
         }
         None => now.snapshot(),
     }

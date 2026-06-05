@@ -1,15 +1,21 @@
 import { MantineProvider } from "@mantine/core";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 
 import type { LogFilter } from "@/shared/data/types";
+import { ipc } from "@/shared/ipc";
 import { pickOption } from "@/test/select";
 
 import { Notifications } from "./notifications";
 
 vi.mock("@tauri-apps/api/core", async () => ({
   invoke: (await import("@/test/ipc")).invoke,
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  save: vi.fn().mockResolvedValue("/tmp/알림.xlsx"),
+  open: vi.fn().mockResolvedValue(null),
 }));
 
 function renderLog(filter: LogFilter | null = null) {
@@ -21,6 +27,10 @@ function renderLog(filter: LogFilter | null = null) {
 }
 
 describe("Notifications", () => {
+  beforeEach(() => {
+    vi.spyOn(ipc.activity, "append").mockResolvedValue(undefined);
+  });
+
   it("renders the title and a batch entry", async () => {
     renderLog();
     expect(screen.getByRole("heading", { name: "알림" })).toBeInTheDocument();
@@ -52,10 +62,56 @@ describe("Notifications", () => {
     expect(screen.getByText(/NaverAuthError/)).toBeInTheDocument();
   });
 
-  it("fires the export action", async () => {
+  it("fires the export action — calls save dialog and exportActivity", async () => {
+    const { invoke } = await import("@/test/ipc");
+    const { save } = await import("@tauri-apps/plugin-dialog");
     renderLog();
     await userEvent.click(screen.getByRole("button", { name: /내보내기/ }));
-    expect(screen.getByRole("heading", { name: "알림" })).toBeInTheDocument();
+    expect(vi.mocked(save)).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultPath: "알림.xlsx" }),
+    );
+    expect(
+      vi.mocked(invoke).mock.calls.some((c) => c[0] === "export_activity_xlsx"),
+    ).toBe(true);
+  });
+
+  it("does not invoke export when save dialog is cancelled", async () => {
+    const { invoke } = await import("@/test/ipc");
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(save).mockResolvedValueOnce(null);
+    vi.mocked(invoke).mockClear();
+    renderLog();
+    await userEvent.click(screen.getByRole("button", { name: /내보내기/ }));
+    expect(
+      vi.mocked(invoke).mock.calls.some((c) => c[0] === "export_activity_xlsx"),
+    ).toBe(false);
+  });
+
+  it("logs to activity feed when export IPC command rejects", async () => {
+    const { invoke } = await import("@/test/ipc");
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(save).mockResolvedValueOnce("/tmp/알림.xlsx");
+    const realImpl = vi.mocked(invoke).getMockImplementation()! as (
+      cmd: string,
+      args?: Record<string, unknown>,
+    ) => Promise<unknown>;
+    vi.mocked(invoke).mockImplementation((cmd, args) =>
+      cmd === "export_activity_xlsx"
+        ? Promise.reject(new Error("write error"))
+        : realImpl(cmd, args),
+    );
+    try {
+      renderLog();
+      await userEvent.click(screen.getByRole("button", { name: /내보내기/ }));
+      await waitFor(() =>
+        expect(ipc.activity.append).toHaveBeenCalledWith(
+          "error",
+          expect.stringContaining("내보내기"),
+        ),
+      );
+    } finally {
+      vi.mocked(invoke).mockImplementation(realImpl);
+    }
   });
 
   it("clears the account filter", async () => {

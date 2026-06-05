@@ -3,6 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
+import { ipc } from "@/shared/ipc";
 import { invoke as ipcBackend, resetIpc, setLoginOutcomes } from "@/test/ipc";
 import { pickOption } from "@/test/select";
 
@@ -10,6 +11,11 @@ import { Accounts } from "./accounts";
 
 vi.mock("@tauri-apps/api/core", async () => ({
   invoke: (await import("@/test/ipc")).invoke,
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  save: vi.fn().mockResolvedValue("/tmp/계정.xlsx"),
+  open: vi.fn().mockResolvedValue(null),
 }));
 
 // 테스트는 <Notifications/> 없이 렌더하므로 토스트가 DOM에 뜨지 않는다.
@@ -37,6 +43,7 @@ describe("Accounts", () => {
   beforeEach(() => {
     resetIpc();
     notifShow.mockClear();
+    vi.spyOn(ipc.activity, "append").mockResolvedValue(undefined);
   });
 
   it("renders the title and first page of accounts (10 rows)", async () => {
@@ -190,15 +197,171 @@ describe("Accounts", () => {
     expect(within(row).getByText("ik7!naver22")).toBeInTheDocument();
   });
 
-  it("fires excel import and export actions", async () => {
+  it("fires excel export — opens save dialog and calls exportAccounts", async () => {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(ipcBackend).mockClear();
+    await renderAccounts();
+    await userEvent.click(screen.getByRole("button", { name: /내보내기/ }));
+    expect(vi.mocked(save)).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultPath: "계정.xlsx" }),
+    );
+    expect(
+      vi
+        .mocked(ipcBackend)
+        .mock.calls.some((c) => c[0] === "export_accounts_xlsx"),
+    ).toBe(true);
+  });
+
+  it("does not invoke export when save dialog is cancelled", async () => {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(save).mockResolvedValueOnce(null);
+    vi.mocked(ipcBackend).mockClear();
+    await renderAccounts();
+    await userEvent.click(screen.getByRole("button", { name: /내보내기/ }));
+    expect(
+      vi
+        .mocked(ipcBackend)
+        .mock.calls.some((c) => c[0] === "export_accounts_xlsx"),
+    ).toBe(false);
+  });
+
+  it("shows a red error toast when the export IPC command rejects", async () => {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(save).mockResolvedValueOnce("/tmp/계정.xlsx");
+    const realImpl = vi.mocked(ipcBackend).getMockImplementation()! as (
+      cmd: string,
+      args?: Record<string, unknown>,
+    ) => Promise<unknown>;
+    vi.mocked(ipcBackend).mockImplementation((cmd, args) =>
+      cmd === "export_accounts_xlsx"
+        ? Promise.reject(new Error("disk full"))
+        : realImpl(cmd, args),
+    );
+    try {
+      await renderAccounts();
+      await userEvent.click(screen.getByRole("button", { name: /내보내기/ }));
+      await waitFor(() =>
+        expect(notifShow).toHaveBeenCalledWith(
+          expect.objectContaining({
+            color: "red",
+            message: expect.stringContaining("내보내기 실패"),
+          }),
+        ),
+      );
+      expect(notifShow).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining("내보냈어요"),
+        }),
+      );
+      // Also logs to the activity feed with the failure message.
+      await waitFor(() =>
+        expect(ipc.activity.append).toHaveBeenCalledWith(
+          "error",
+          expect.stringContaining("내보내기"),
+        ),
+      );
+    } finally {
+      vi.mocked(ipcBackend).mockImplementation(realImpl);
+    }
+  });
+
+  it("logs to activity feed when import IPC command rejects", async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(open).mockResolvedValueOnce("/tmp/계정.xlsx");
+    const realImpl = vi.mocked(ipcBackend).getMockImplementation()! as (
+      cmd: string,
+      args?: Record<string, unknown>,
+    ) => Promise<unknown>;
+    vi.mocked(ipcBackend).mockImplementation((cmd, args) =>
+      cmd === "import_accounts_xlsx"
+        ? Promise.reject(new Error("corrupt file"))
+        : realImpl(cmd, args),
+    );
+    try {
+      await renderAccounts();
+      await userEvent.click(
+        screen.getByRole("button", { name: /엑셀 가져오기/ }),
+      );
+      await waitFor(() =>
+        expect(ipc.activity.append).toHaveBeenCalledWith(
+          "error",
+          expect.stringContaining("가져오기"),
+        ),
+      );
+    } finally {
+      vi.mocked(ipcBackend).mockImplementation(realImpl);
+    }
+  });
+
+  it("logs to activity feed when login start IPC command rejects", async () => {
+    const realImpl = vi.mocked(ipcBackend).getMockImplementation()! as (
+      cmd: string,
+      args?: Record<string, unknown>,
+    ) => Promise<unknown>;
+    vi.mocked(ipcBackend).mockImplementation((cmd, args) =>
+      cmd === "enqueue_cookie_refresh"
+        ? Promise.reject(new Error("sidecar missing"))
+        : realImpl(cmd, args),
+    );
+    try {
+      await renderAccounts();
+      const checkboxes = screen.getAllByRole("checkbox");
+      await userEvent.click(checkboxes[1]!);
+      await userEvent.click(
+        screen.getByRole("button", { name: /선택 로그인/ }),
+      );
+      await waitFor(() =>
+        expect(ipc.activity.append).toHaveBeenCalledWith(
+          "error",
+          expect.stringContaining("로그인"),
+        ),
+      );
+    } finally {
+      vi.mocked(ipcBackend).mockImplementation(realImpl);
+    }
+  });
+
+  it("fires excel import — opens open dialog and calls importAccounts", async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(open).mockResolvedValueOnce("/tmp/계정.xlsx");
+    vi.mocked(ipcBackend).mockClear();
     await renderAccounts();
     await userEvent.click(
       screen.getByRole("button", { name: /엑셀 가져오기/ }),
     );
-    await userEvent.click(screen.getByRole("button", { name: /내보내기/ }));
+    expect(vi.mocked(open)).toHaveBeenCalledWith(
+      expect.objectContaining({ multiple: false }),
+    );
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(ipcBackend)
+          .mock.calls.some((c) => c[0] === "import_accounts_xlsx"),
+      ).toBe(true),
+    );
+    await waitFor(() =>
+      expect(notifShow).toHaveBeenCalledWith(
+        expect.objectContaining({
+          color: "green",
+          message: expect.stringContaining("가져옴"),
+        }),
+      ),
+    );
+  });
+
+  it("does not invoke import when open dialog is cancelled", async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(open).mockResolvedValueOnce(null);
+    vi.mocked(ipcBackend).mockClear();
+    await renderAccounts();
+    await userEvent.click(
+      screen.getByRole("button", { name: /엑셀 가져오기/ }),
+    );
     expect(
-      screen.getByRole("heading", { name: "계정 관리" }),
-    ).toBeInTheDocument();
+      vi
+        .mocked(ipcBackend)
+        .mock.calls.some((c) => c[0] === "import_accounts_xlsx"),
+    ).toBe(false);
   });
 
   it("adds a tag through the tag cell popover", async () => {

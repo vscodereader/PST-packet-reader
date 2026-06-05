@@ -254,19 +254,23 @@ describe("PublishModal", () => {
     );
     // post lands first…
     expect(ipcBackend).toHaveBeenCalledWith("run_post_jobs", expect.anything());
-    // …then a comment on that article (articleId 1000 from the mock, cafeId from
-    // the picked joined cafe) is posted.
+    // …then a comment request for that article (articleId 1000 from the mock,
+    // cafeId from the picked joined cafe) is sent. The backend now distributes
+    // the comment pool (issue #98), so the front sends the target + pool — the
+    // chosen `content` is no longer decided here.
     expect(ipcBackend).toHaveBeenCalledWith(
       "run_comment_jobs",
       expect.objectContaining({
-        jobs: [
-          expect.objectContaining({
-            accountId: "money_lab",
-            cafeId: 11111111,
-            articleId: 1000,
-            content: "좋네요",
-          }),
-        ],
+        req: expect.objectContaining({
+          targets: [
+            expect.objectContaining({
+              accountId: "money_lab",
+              cafeId: 11111111,
+              articleId: 1000,
+            }),
+          ],
+          comments: ["좋네요"],
+        }),
       }),
     );
   });
@@ -295,25 +299,26 @@ describe("PublishModal", () => {
         { timeout: 3000 },
       ),
     );
-    expect(ipcBackend).toHaveBeenCalledWith(
-      "run_comment_jobs",
+    // Distribution moved to the backend (issue #98): the front just sends one
+    // target per account plus the comment pool; which comment each account gets
+    // is RNG-chosen in Rust, so it's not asserted here.
+    const commentCalls = ipcBackend.mock.calls.filter(
+      (c) => c[0] === "run_comment_jobs",
+    );
+    const call = commentCalls[commentCalls.length - 1];
+    expect(call).toBeDefined();
+    const req = (
+      call?.[1] as { req: { targets: unknown[]; comments: string[] } }
+    ).req;
+    expect(req.targets).toHaveLength(1);
+    expect(req.targets[0]).toEqual(
       expect.objectContaining({
-        jobs: [
-          expect.objectContaining({
-            accountId: "money_lab",
-            cafeId: 31732304,
-            articleId: 9,
-            content: "댓글1",
-          }),
-          expect.objectContaining({
-            accountId: "money_lab",
-            cafeId: 31732304,
-            articleId: 9,
-            content: "댓글2",
-          }),
-        ],
+        accountId: "money_lab",
+        cafeId: 31732304,
+        articleId: 9,
       }),
     );
+    expect(req.comments).toEqual(["댓글1", "댓글2"]);
   });
 
   it("comments on the top-N latest articles in 'comment' + 'latest' mode", async () => {
@@ -343,22 +348,26 @@ describe("PublishModal", () => {
         { timeout: 3000 },
       ),
     );
-    // 3 articles × 2 comments = 6 comment jobs against the latest list
-    // (articleId 8000..8002 from the mock), all for the picked cafe.
+    // Distribution moved to the backend (issue #98): the top-3 latest articles
+    // become 3 targets (articleId 8000..8002 from the mock), all for the picked
+    // cafe; the backend deals one comment from the pool to each.
     const call = ipcBackend.mock.calls.find((c) => c[0] === "run_comment_jobs");
     expect(call).toBeDefined();
-    const jobs = (call![1] as { jobs: unknown[] }).jobs as {
-      accountId: string;
-      cafeId: number;
-      articleId: number;
-      content: string;
-    }[];
-    expect(jobs).toHaveLength(6);
-    expect(jobs.every((j) => j.cafeId === 11111111)).toBe(true);
-    expect(jobs.every((j) => j.accountId === "money_lab")).toBe(true);
-    expect([...new Set(jobs.map((j) => j.articleId))].sort()).toEqual([
+    const req = (
+      call?.[1] as {
+        req: {
+          targets: { accountId: string; cafeId: number; articleId: number }[];
+          comments: string[];
+        };
+      }
+    ).req;
+    expect(req.targets).toHaveLength(3);
+    expect(req.targets.every((t) => t.cafeId === 11111111)).toBe(true);
+    expect(req.targets.every((t) => t.accountId === "money_lab")).toBe(true);
+    expect([...new Set(req.targets.map((t) => t.articleId))].sort()).toEqual([
       8000, 8001, 8002,
     ]);
+    expect(req.comments).toEqual(["댓글1", "댓글2"]);
   });
 
   it("queries the popular list when commentTarget is 'popular'", async () => {
@@ -392,13 +401,13 @@ describe("PublishModal", () => {
       sortBy: "popular",
       accountId: "money_lab",
     });
-    // …and the popular ORDER must propagate into the built jobs: the mock
-    // reverses for popular, so top-1 is 8009 (not latest's 8000). This fails if
-    // a regression takes the latest slice / ignores the returned order.
+    // …and the popular ORDER must propagate into the targets: the mock reverses
+    // for popular, so top-1 is 8009 (not latest's 8000). This fails if a
+    // regression takes the latest slice / ignores the returned order.
     const call = ipcBackend.mock.calls.find((c) => c[0] === "run_comment_jobs");
     expect(call).toBeDefined();
-    const jobs = (call![1] as { jobs: { articleId: number }[] }).jobs;
-    expect(jobs.map((j) => j.articleId)).toEqual([8009]);
+    const req = (call?.[1] as { req: { targets: { articleId: number }[] } }).req;
+    expect(req.targets.map((t) => t.articleId)).toEqual([8009]);
   });
 
   it("falls back to the available articles when the list has fewer than N", async () => {
@@ -430,10 +439,10 @@ describe("PublishModal", () => {
     );
     const call = ipcBackend.mock.calls.find((c) => c[0] === "run_comment_jobs");
     expect(call).toBeDefined();
-    const jobs = (call![1] as { jobs: { articleId: number }[] }).jobs;
-    // 2 available articles × 1 comment = 2 jobs (not 5).
-    expect(jobs).toHaveLength(2);
-    expect([...new Set(jobs.map((j) => j.articleId))].sort()).toEqual([
+    const req = (call?.[1] as { req: { targets: { articleId: number }[] } }).req;
+    // 2 available articles → 2 targets (not 5).
+    expect(req.targets).toHaveLength(2);
+    expect([...new Set(req.targets.map((t) => t.articleId))].sort()).toEqual([
       7000, 7001,
     ]);
   });

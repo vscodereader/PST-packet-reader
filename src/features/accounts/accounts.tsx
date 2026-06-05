@@ -18,6 +18,7 @@ import {
   UnstyledButton,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { STATUS_ACCOUNT, STATUS_ACCOUNT_ORDER } from "@/shared/data/config";
@@ -350,6 +351,13 @@ export function Accounts({ go }: { go: GoFn }) {
     } catch (err) {
       setLoggingIn(false);
       toast(err instanceof Error ? err.message : String(err), "red");
+      ipc.activity
+        .append(
+          "error",
+          "로그인 시작 실패 — " +
+            (err instanceof Error ? err.message : String(err)),
+        )
+        .catch(() => {});
     }
   };
 
@@ -484,9 +492,34 @@ export function Accounts({ go }: { go: GoFn }) {
             size="sm"
             variant="default"
             leftSection={<Icon.inbox size={16} />}
-            onClick={() =>
-              toast("엑셀(.xlsx) 파일에서 계정을 가져왔어요", "green")
-            }
+            onClick={async () => {
+              const path = await open({
+                multiple: false,
+                filters: [{ name: "Excel", extensions: ["xlsx"] }],
+              });
+              if (typeof path !== "string") return;
+              try {
+                const summary = await ipc.excel.importAccounts(path);
+                setRows(await ipc.accounts.list());
+                toast(
+                  `${summary.imported}건 가져옴${summary.skipped ? `, ${summary.skipped}건 건너뜀` : ""}`,
+                  "green",
+                );
+              } catch (err) {
+                toast(
+                  "가져오기 실패: " +
+                    (err instanceof Error ? err.message : String(err)),
+                  "red",
+                );
+                ipc.activity
+                  .append(
+                    "error",
+                    "계정 가져오기 실패 — " +
+                      (err instanceof Error ? err.message : String(err)),
+                  )
+                  .catch(() => {});
+              }
+            }}
           >
             엑셀 가져오기
           </Button>
@@ -494,7 +527,30 @@ export function Accounts({ go }: { go: GoFn }) {
             size="sm"
             variant="default"
             leftSection={<Icon.download size={16} />}
-            onClick={() => toast("현재 계정 목록을 엑셀로 내보냈어요", "green")}
+            onClick={async () => {
+              const path = await save({
+                defaultPath: "계정.xlsx",
+                filters: [{ name: "Excel", extensions: ["xlsx"] }],
+              });
+              if (!path) return;
+              try {
+                await ipc.excel.exportAccounts(path);
+                toast("현재 계정 목록을 엑셀로 내보냈어요", "green");
+              } catch (err) {
+                toast(
+                  "내보내기 실패: " +
+                    (err instanceof Error ? err.message : String(err)),
+                  "red",
+                );
+                ipc.activity
+                  .append(
+                    "error",
+                    "계정 내보내기 실패 — " +
+                      (err instanceof Error ? err.message : String(err)),
+                  )
+                  .catch(() => {});
+              }
+            }}
           >
             내보내기
           </Button>

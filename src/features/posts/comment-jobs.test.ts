@@ -3,14 +3,14 @@ import { describe, it, expect } from "vitest";
 import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutcome";
 
 import {
-  buildArticleListCommentJobs,
-  buildBothCommentJobs,
-  buildUrlCommentJobs,
   commentSummary,
   commentsAllOk,
   parseCafeArticleUrl,
   topNArticles,
 } from "./comment-jobs";
+
+// 댓글 분배(mulberry32/distributeComments)는 백엔드로 이전됨(이슈 #98). 결정성·
+// 경계 케이스 검증은 src-tauri `naver_cafe::distribute`의 Rust 단위 테스트가 담당.
 
 describe("parseCafeArticleUrl", () => {
   it("parses the SPA cafes/{id}/articles/{aid} form", () => {
@@ -58,54 +58,6 @@ describe("parseCafeArticleUrl", () => {
   });
 });
 
-describe("buildBothCommentJobs", () => {
-  it("produces one job per (posted article × comment)", () => {
-    const jobs = buildBothCommentJobs(
-      [
-        { accountId: "a5", cafeId: 111, articleId: 1000 },
-        { accountId: "a6", cafeId: 222, articleId: 1001 },
-      ],
-      ["좋네요", "추가매수"],
-    );
-    expect(jobs).toHaveLength(4);
-    expect(jobs[0]).toEqual({
-      accountId: "a5",
-      cafeId: 111,
-      articleId: 1000,
-      content: "좋네요",
-    });
-    expect(jobs[3]).toEqual({
-      accountId: "a6",
-      cafeId: 222,
-      articleId: 1001,
-      content: "추가매수",
-    });
-  });
-
-  it("is empty when there are no posts or no comments", () => {
-    expect(buildBothCommentJobs([], ["x"])).toEqual([]);
-    expect(
-      buildBothCommentJobs([{ accountId: "a", cafeId: 1, articleId: 2 }], []),
-    ).toEqual([]);
-  });
-});
-
-describe("buildUrlCommentJobs", () => {
-  it("produces one job per (account × comment) at the fixed target", () => {
-    const jobs = buildUrlCommentJobs(
-      ["a5", "a10"],
-      { cafeId: 31732304, articleId: 9 },
-      ["댓글1", "댓글2", "댓글3"],
-    );
-    expect(jobs).toHaveLength(6);
-    expect(jobs.every((j) => j.cafeId === 31732304 && j.articleId === 9)).toBe(
-      true,
-    );
-    expect(jobs[0]?.accountId).toBe("a5");
-    expect(jobs[5]?.accountId).toBe("a10");
-  });
-});
-
 describe("topNArticles", () => {
   const article = (articleId: number) => ({ articleId });
 
@@ -122,57 +74,6 @@ describe("topNArticles", () => {
   it("returns an empty list for N <= 0 or an empty source", () => {
     expect(topNArticles([article(1)], 0)).toEqual([]);
     expect(topNArticles([], 5)).toEqual([]);
-  });
-});
-
-describe("buildArticleListCommentJobs", () => {
-  const article = (articleId: number) => ({ articleId });
-
-  it("produces one job per (top-N article × comment) for each account", () => {
-    const jobs = buildArticleListCommentJobs(
-      ["a5", "a10"],
-      111,
-      [article(1000), article(1001), article(1002)],
-      2,
-      ["좋네요", "추가매수"],
-    );
-    // 2 accounts × 2 articles × 2 comments = 8 jobs
-    expect(jobs).toHaveLength(8);
-    expect(jobs[0]).toEqual({
-      accountId: "a5",
-      cafeId: 111,
-      articleId: 1000,
-      content: "좋네요",
-    });
-    expect(jobs.every((j) => j.cafeId === 111)).toBe(true);
-    // every targeted article is one of the top-2
-    expect(new Set(jobs.map((j) => j.articleId))).toEqual(
-      new Set([1000, 1001]),
-    );
-  });
-
-  it("falls back to available articles when fewer than N exist", () => {
-    const jobs = buildArticleListCommentJobs(["a5"], 222, [article(2000)], 5, [
-      "댓글",
-    ]);
-    // only 1 article available though N=5 → 1 account × 1 article × 1 comment
-    expect(jobs).toHaveLength(1);
-    expect(jobs[0]).toEqual({
-      accountId: "a5",
-      cafeId: 222,
-      articleId: 2000,
-      content: "댓글",
-    });
-  });
-
-  it("is empty when there are no articles, accounts, or comments", () => {
-    expect(buildArticleListCommentJobs([], 1, [article(1)], 3, ["x"])).toEqual(
-      [],
-    );
-    expect(buildArticleListCommentJobs(["a"], 1, [], 3, ["x"])).toEqual([]);
-    expect(buildArticleListCommentJobs(["a"], 1, [article(1)], 3, [])).toEqual(
-      [],
-    );
   });
 });
 

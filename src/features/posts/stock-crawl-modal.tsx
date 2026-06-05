@@ -49,6 +49,7 @@ function StockCrawlModalInner({
       window.clearInterval(iv);
       setFound(stocks.length);
       setPhase("done");
+      void ipc.activity.append("info", `종목 ${stocks.length}개 크롤링`);
     }, 1400);
     return () => {
       window.clearInterval(iv);

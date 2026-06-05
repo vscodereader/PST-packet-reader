@@ -44,12 +44,13 @@ fn stat(key: &str, label: &str, value: StatValue, sub: &str, icon: &str, color: 
     }
 }
 
-/// Mirror the frontend `dayBucket`: treat "오늘 …" and relative recents as today.
-fn is_today(time: &str) -> bool {
-    time.starts_with("오늘")
-        || time.contains("방금")
-        || time.contains("분 전")
-        || time.contains("시간 전")
+/// Counts a batch toward "today" if it landed within the last 24 hours.
+/// NOTE: this is a rolling 24h window, deliberately simpler than the frontend
+/// `dayBucket` (which uses local calendar-midnight). They can differ near
+/// midnight; acceptable for a soft dashboard count, and avoids a TZ dependency.
+fn is_today(at: i64) -> bool {
+    let now = crate::util::now_ms();
+    now - at < 86_400_000
 }
 
 /// Derive the four dashboard tiles from the live domain data.
@@ -76,7 +77,7 @@ pub fn compute(
     // success rate over *resolved* items (success or fail; skip running/대기).
     let (mut posts_done, mut comments_done) = (0u32, 0u32);
     let (mut ok, mut resolved) = (0u32, 0u32);
-    for b in batches.iter().filter(|b| is_today(&b.time)) {
+    for b in batches.iter().filter(|b| is_today(b.at)) {
         for item in &b.items {
             match item.status {
                 BatchItemStatus::Success => {
@@ -179,15 +180,25 @@ mod tests {
         }
     }
 
-    fn batch(kind: ModeValue, time: &str, items: Vec<BatchItem>) -> LogBatch {
+    fn batch(kind: ModeValue, at: i64, items: Vec<BatchItem>) -> LogBatch {
         LogBatch {
             id: "b".into(),
             title: "t".into(),
             kind,
-            time: time.into(),
+            at,
             state: None,
             items,
         }
+    }
+
+    // A "today" timestamp: 30 minutes ago
+    fn today_at() -> i64 {
+        crate::util::now_ms() - 30 * 60_000
+    }
+
+    // A "yesterday" timestamp: 25 hours ago
+    fn yesterday_at() -> i64 {
+        crate::util::now_ms() - 25 * 3_600_000
     }
 
     fn sched() -> QueueScheduledItem {
@@ -232,17 +243,17 @@ mod tests {
             // today: 2 success posts + 1 running (running ignored in rate)
             batch(
                 ModeValue::Post,
-                "방금 전",
+                today_at(),
                 vec![item(Success), item(Running)],
             ),
             // today: 1 success comment + 1 fail
             batch(
                 ModeValue::Comment,
-                "오늘 13:00",
+                today_at(),
                 vec![item(Success), item(Fail)],
             ),
             // yesterday: ignored entirely
-            batch(ModeValue::Post, "어제 20:00", vec![item(Success)]),
+            batch(ModeValue::Post, yesterday_at(), vec![item(Success)]),
         ];
         let stats = compute(&[], &[], &batches);
         // 완료: 1 post + 1 comment = 2 (글 1 · 댓글 1)

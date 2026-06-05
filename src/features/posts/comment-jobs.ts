@@ -1,4 +1,3 @@
-import type { CommentJob } from "@/shared/bindings/CommentJob";
 import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutcome";
 
 /** A resolved numeric comment target — the cafe + article to comment on. */
@@ -64,45 +63,6 @@ export function parseCafeArticleUrl(
 }
 
 /**
- * `both` mode: one comment job per (successfully-posted article × comment).
- *
- * `posted` is the subset of naver posts that succeeded — each carries the
- * account plus the cafe/article the comment should attach to.
- */
-export function buildBothCommentJobs(
-  posted: { accountId: string; cafeId: number; articleId: number }[],
-  comments: string[],
-): CommentJob[] {
-  return posted.flatMap((p) =>
-    comments.map((content) => ({
-      accountId: p.accountId,
-      cafeId: p.cafeId,
-      articleId: p.articleId,
-      content,
-    })),
-  );
-}
-
-/**
- * `comment` + `url` mode: one comment job per (account × comment), all aimed at
- * the same parsed article `target`.
- */
-export function buildUrlCommentJobs(
-  accountIds: string[],
-  target: CommentArticleTarget,
-  comments: string[],
-): CommentJob[] {
-  return accountIds.flatMap((accountId) =>
-    comments.map((content) => ({
-      accountId,
-      cafeId: target.cafeId,
-      articleId: target.articleId,
-      content,
-    })),
-  );
-}
-
-/**
  * Take the top-N entries of a latest/popular article list, preserving the
  * backend's order. Graceful fallback: when the list has fewer than N (or N <= 0)
  * only the available entries are returned — never throws or pads.
@@ -110,32 +70,6 @@ export function buildUrlCommentJobs(
 export function topNArticles<T>(articles: T[], n: number): T[] {
   if (n <= 0) return [];
   return articles.slice(0, n);
-}
-
-/**
- * `comment` + `latest`/`popular` mode: comment on the top-N articles of a cafe's
- * latest/popular list. Produces one job per (account × top-N article × comment),
- * all aimed at the same numeric `cafeId`. The article count is bounded by what
- * the list actually returned (fewer than `count` → use what's available).
- */
-export function buildArticleListCommentJobs(
-  accountIds: string[],
-  cafeId: number,
-  articles: { articleId: number }[],
-  count: number,
-  comments: string[],
-): CommentJob[] {
-  const targets = topNArticles(articles, count);
-  return accountIds.flatMap((accountId) =>
-    targets.flatMap((a) =>
-      comments.map((content) => ({
-        accountId,
-        cafeId,
-        articleId: a.articleId,
-        content,
-      })),
-    ),
-  );
 }
 
 /**

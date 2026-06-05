@@ -6,10 +6,11 @@ import type { Article } from "@/shared/bindings/Article";
 import type { ArticleListResponse } from "@/shared/bindings/ArticleListResponse";
 import type { Band } from "@/shared/bindings/Band";
 import type { Cafe } from "@/shared/bindings/Cafe";
-import type { CommentJob } from "@/shared/bindings/CommentJob";
+import type { CommentDistributionRequest } from "@/shared/bindings/CommentDistributionRequest";
 import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutcome";
 import type { DashStat } from "@/shared/bindings/DashStat";
 import type { EnvironmentStatus } from "@/shared/bindings/EnvironmentStatus";
+import type { ImportSummary } from "@/shared/bindings/ImportSummary";
 import type { JoinedCafe } from "@/shared/bindings/JoinedCafe";
 import type { LibraryPost } from "@/shared/bindings/LibraryPost";
 import type { LogBatch } from "@/shared/bindings/LogBatch";
@@ -27,10 +28,11 @@ export type {
   ArticleListResponse,
   Band,
   Cafe,
-  CommentJob,
+  CommentDistributionRequest,
   CommentPublishOutcome,
   DashStat,
   EnvironmentStatus,
+  ImportSummary,
   JoinedCafe,
   LibraryPost,
   LogBatch,
@@ -140,7 +142,11 @@ export const ipc = {
       call<QueueNowItem[]>("promote_queue_scheduled", { id }),
   },
   stocks: { list: () => call<Stock[]>("list_stocks") },
-  activity: { list: () => call<ActivityItem[]>("list_activity") },
+  activity: {
+    list: () => call<ActivityItem[]>("list_activity"),
+    append: (kind: "success" | "error" | "info", text: string) =>
+      call<void>("append_activity", { kind, text }),
+  },
   stats: { list: () => call<DashStat[]>("list_stats") },
   logBatches: { list: () => call<LogBatch[]>("list_log_batches") },
   cafes: {
@@ -158,12 +164,14 @@ export const ipc = {
     runPostJobs: (jobs: PostJob[]) =>
       call<PublishOutcome[]>("run_post_jobs", { jobs }),
     /**
-     * Run comment jobs sequentially; returns one slim outcome per job. Each job
-     * targets a numeric `cafeId`/`articleId` (from a just-posted article or a
-     * parsed URL); one job failing does not stop the rest.
+     * Distribute the comment pool across the targets (backend shuffles & deals
+     * one comment per target — issue #98), then run the jobs sequentially;
+     * returns one slim outcome per job. Each target carries a numeric
+     * `cafeId`/`articleId` (from a just-posted article or a parsed URL); one job
+     * failing does not stop the rest.
      */
-    runCommentJobs: (jobs: CommentJob[]) =>
-      call<CommentPublishOutcome[]>("run_comment_jobs", { jobs }),
+    runCommentJobs: (req: CommentDistributionRequest) =>
+      call<CommentPublishOutcome[]>("run_comment_jobs", { req }),
     /**
      * List every cafe `accountId` has joined (crawled across all pages),
      * using its session cookie. Rejects with the backend's error envelope
@@ -197,6 +205,17 @@ export const ipc = {
     endpoint: () => call<{ host: string; port: number }>("forum_endpoint"),
     publishNow: (request: ForumPublishRequest) =>
       call<ForumPublishResult[]>("run_forum_publish_now", { request }),
+  },
+  // 엑셀(.xlsx) 내보내기/가져오기 — Rust에서 파일 처리, 프론트에서 경로 공급.
+  excel: {
+    exportAccounts: (path: string) =>
+      call<void>("export_accounts_xlsx", { path }),
+    exportActivity: (path: string) =>
+      call<void>("export_activity_xlsx", { path }),
+    importAccounts: (path: string) =>
+      call<ImportSummary>("import_accounts_xlsx", { path }),
+    importPosts: (path: string) =>
+      call<ImportSummary>("import_posts_xlsx", { path }),
   },
   // 네이버 로그인 자동화(CDP). 계정 ID/PW로 로그인해 쿠키를 저장한다.
   auth: {

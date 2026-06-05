@@ -6,6 +6,7 @@ pub mod activity;
 pub mod bands;
 pub mod cafes;
 pub mod diagnostics;
+pub mod excel;
 pub mod log_batches;
 pub mod posts;
 pub mod queue;
