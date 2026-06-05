@@ -1,25 +1,45 @@
+use std::process::Command;
 use std::time::Duration;
 
-use adb_client::{usb::ADBUSBDevice, ADBDeviceExt};
 use tokio::time::{sleep, Instant};
 
 use super::{config, error::OrchestratorError};
 
+/// 표준 adb CLI 실행 파일. winget `Google.PlatformTools` 설치 시 PATH에 등록된다.
+/// raw-USB(adb_client) 대신 표준 adb 서버를 거치므로, 제조사 ADB 드라이버(삼성 등)
+/// 그대로 동작하며 Windows에서 WinUSB(Zadig) 교체 없이 IP 로테이션이 된다.
+/// (커밋 2075d4e 가 표준 adb→adb_client raw-USB 로 바꾸면서 삼성 폰에서 Access denied 가
+///  났던 것을, 그 이전의 표준 adb CLI 방식으로 되돌린 것이다.)
+const ADB_BIN: &str = "adb";
+
 /// ADB 디바이스가 연결되어 있고 인증되었는지 확인한다.
 pub async fn assert_adb_device() -> Result<(), OrchestratorError> {
-    connect_device()?;
+    if !has_authorized_device(&run_adb(&["devices"])?) {
+        return Err(OrchestratorError::CommandFailed(
+            "ADB 디바이스가 연결되지 않았거나 인증되지 않았습니다 (adb devices에 'device' 없음)"
+                .to_string(),
+        ));
+    }
     Ok(())
 }
 
 /// 진단용: ADB 디바이스가 연결되어 있는지 부작용 없이 확인한다.
 ///
-/// `autodetect` 는 동기 USB 스캔이라 블로킹되므로 `spawn_blocking` 으로 감싼다.
-/// 연결만 확인하고 디바이스를 즉시 해제하며, shell 명령(비행기 모드 등)은
-/// 호출하지 않는다 — 상태 조회 전용이라 부작용이 없어야 한다.
+/// `adb devices` 는 블로킹 프로세스 호출이라 `spawn_blocking` 으로 감싼다.
+/// 연결만 확인하고 shell 명령(비행기 모드 등)은 호출하지 않는다 — 상태 조회 전용이라
+/// 부작용이 없어야 한다.
 pub async fn probe_adb_connection() -> Result<(), OrchestratorError> {
-    tokio::task::spawn_blocking(|| connect_device().map(|_device| ()))
-        .await
-        .map_err(|e| OrchestratorError::CommandFailed(format!("adb probe join error: {e}")))?
+    tokio::task::spawn_blocking(|| {
+        if has_authorized_device(&run_adb(&["devices"])?) {
+            Ok(())
+        } else {
+            Err(OrchestratorError::CommandFailed(
+                "ADB 디바이스가 연결되지 않았거나 인증되지 않았습니다".to_string(),
+            ))
+        }
+    })
+    .await
+    .map_err(|e| OrchestratorError::CommandFailed(format!("adb probe join error: {e}")))?
 }
 
 /// 비행기 모드를 켬과 끔으로 토글하여 IP 변경을 유도한다.
@@ -28,13 +48,12 @@ pub async fn probe_adb_connection() -> Result<(), OrchestratorError> {
 /// 토글해도 상단 버튼에 불이 안 들어올 수 있으나, IP가 바뀌면 라디오는 실제로 순환한 것.)
 pub async fn toggle_airplane_mode() -> Result<(), OrchestratorError> {
     let before = fetch_external_ip().await;
-    let mut device = connect_device()?;
     eprintln!("[ADB] ✈ 비행기모드 ON");
-    run_shell_command(&mut device, "cmd connectivity airplane-mode enable")?;
+    run_adb(&airplane_mode_args(true))?;
     sleep(Duration::from_secs(config::ADB_AIRPLANE_ENABLE_SECS)).await;
     eprintln!("[ADB] ✈ 비행기모드 OFF — 인터넷 복구 대기");
-    run_shell_command(&mut device, "cmd connectivity airplane-mode disable")?;
-    wait_for_internet_connection(&mut device).await?;
+    run_adb(&airplane_mode_args(false))?;
+    wait_for_internet_connection().await?;
     let after = fetch_external_ip().await;
 
     eprintln!("[ADB] ─────────── IP 회전 결과 ───────────");
@@ -51,6 +70,48 @@ pub async fn toggle_airplane_mode() -> Result<(), OrchestratorError> {
     }
     eprintln!("[ADB] ────────────────────────────────────");
     Ok(())
+}
+
+/// `adb devices` 출력에 인증된(`device`) 디바이스가 하나라도 있는지 판별한다.
+/// (`unauthorized`/`offline`/빈 목록은 false)
+fn has_authorized_device(devices_output: &str) -> bool {
+    devices_output
+        .lines()
+        .skip(1)
+        .any(|line| line.split_whitespace().nth(1) == Some("device"))
+}
+
+/// 비행기모드 토글용 adb 인자. enable/disable만 다르다.
+fn airplane_mode_args(enable: bool) -> [&'static str; 5] {
+    [
+        "shell",
+        "cmd",
+        "connectivity",
+        "airplane-mode",
+        if enable { "enable" } else { "disable" },
+    ]
+}
+
+/// 표준 adb CLI를 실행하고 stdout을 반환한다. 실행 실패/비-0 종료는 에러로 변환한다.
+fn run_adb(args: &[&str]) -> Result<String, OrchestratorError> {
+    let output = Command::new(ADB_BIN).args(args).output().map_err(|e| {
+        OrchestratorError::CommandFailed(format!(
+            "adb 실행 실패: {e} — PATH에 adb가 있는지 확인 (winget install Google.PlatformTools)"
+        ))
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            "(stderr 없음)".to_string()
+        } else {
+            stderr
+        };
+        return Err(OrchestratorError::CommandFailed(format!(
+            "adb {} 실패: {detail}",
+            args.join(" ")
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 /// PC의 현재 외부 IP를 조회한다(USB 테더링이면 = 폰 모바일 IP). best-effort.
@@ -71,35 +132,13 @@ async fn fetch_external_ip() -> String {
     .unwrap_or_else(|_| "(확인 실패)".to_owned())
 }
 
-fn connect_device() -> Result<ADBUSBDevice, OrchestratorError> {
-    ADBUSBDevice::autodetect().map_err(OrchestratorError::from)
-}
-
-fn run_shell_command(device: &mut ADBUSBDevice, command: &str) -> Result<(), OrchestratorError> {
-    let mut stdout = Vec::new();
-    let status = device.shell_command(&command, Some(&mut stdout), None)?;
-    if let Some(code) = status {
-        if code != 0 {
-            let output = String::from_utf8_lossy(&stdout).trim().to_string();
-            let message = if output.is_empty() {
-                format!("adb shell `{command}` failed with exit code {code}")
-            } else {
-                format!("adb shell `{command}` failed with exit code {code}: {output}")
-            };
-            return Err(OrchestratorError::CommandFailed(message));
-        }
-    }
-
-    Ok(())
-}
-
-async fn wait_for_internet_connection(device: &mut ADBUSBDevice) -> Result<(), OrchestratorError> {
+async fn wait_for_internet_connection() -> Result<(), OrchestratorError> {
     let timeout = Duration::from_secs(config::ADB_INTERNET_TIMEOUT_SECS);
     let interval = Duration::from_millis(config::ADB_INTERNET_POLL_INTERVAL_MS);
     let deadline = Instant::now() + timeout;
 
     loop {
-        if has_internet_connection(device)? {
+        if has_internet_connection()? {
             return Ok(());
         }
 
@@ -114,33 +153,10 @@ async fn wait_for_internet_connection(device: &mut ADBUSBDevice) -> Result<(), O
     }
 }
 
-fn has_internet_connection(device: &mut ADBUSBDevice) -> Result<bool, OrchestratorError> {
-    let output = run_shell_command_with_stdout(device, &internet_probe_command())?;
+fn has_internet_connection() -> Result<bool, OrchestratorError> {
+    let probe = internet_probe_command();
+    let output = run_adb(&["shell", probe.as_str()])?;
     Ok(output.lines().any(|line| line.trim() == "ok"))
-}
-
-fn run_shell_command_with_stdout(
-    device: &mut ADBUSBDevice,
-    command: &str,
-) -> Result<String, OrchestratorError> {
-    let mut stdout = Vec::new();
-    let status = device.shell_command(&command, Some(&mut stdout), None)?;
-    let output = String::from_utf8_lossy(&stdout).to_string();
-    if let Some(code) = status {
-        if code != 0 {
-            let message = if output.trim().is_empty() {
-                format!("adb shell `{command}` failed with exit code {code}")
-            } else {
-                format!(
-                    "adb shell `{command}` failed with exit code {code}: {}",
-                    output.trim()
-                )
-            };
-            return Err(OrchestratorError::CommandFailed(message));
-        }
-    }
-
-    Ok(output)
 }
 
 fn internet_probe_command() -> String {
@@ -152,19 +168,31 @@ fn internet_probe_command() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::internet_probe_command;
+    use super::{airplane_mode_args, has_authorized_device, internet_probe_command};
 
     #[test]
-    fn airplane_mode_shell_commands_do_not_include_adb_cli_prefix() {
-        let commands = [
-            "cmd connectivity airplane-mode enable",
-            "cmd connectivity airplane-mode disable",
-        ];
+    fn airplane_mode_args_use_cli_shell_form() {
+        assert_eq!(
+            airplane_mode_args(true),
+            ["shell", "cmd", "connectivity", "airplane-mode", "enable"]
+        );
+        assert_eq!(
+            airplane_mode_args(false),
+            ["shell", "cmd", "connectivity", "airplane-mode", "disable"]
+        );
+    }
 
-        for command in commands {
-            assert!(!command.starts_with("adb "));
-            assert!(!command.starts_with("shell "));
-        }
+    #[test]
+    fn has_authorized_device_accepts_only_authorized() {
+        let authorized = "List of devices attached\nR3CN409J22V\tdevice\n";
+        let unauthorized = "List of devices attached\nR3CN409J22V\tunauthorized\n";
+        let offline = "List of devices attached\nR3CN409J22V\toffline\n";
+        let empty = "List of devices attached\n";
+
+        assert!(has_authorized_device(authorized));
+        assert!(!has_authorized_device(unauthorized));
+        assert!(!has_authorized_device(offline));
+        assert!(!has_authorized_device(empty));
     }
 
     #[test]

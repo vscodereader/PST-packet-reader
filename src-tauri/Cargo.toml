@@ -28,7 +28,6 @@ ts-rs = "12"
 serde_urlencoded = "0.7"
 tokio = { version = "1", features = ["full"] }
 thiserror = "1"
-adb_client = { version = "3.2.1", features = ["usb"] }
 # rustls-tls(순수 Rust TLS)로 Windows 크로스 컴파일 시 openssl 시스템 의존을 피한다.
 # gzip 은 #67 가입 카페 목록 응답 해제용, blocking 은 패킷 게시 엔진용.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "gzip"] }
