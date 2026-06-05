@@ -3,12 +3,22 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
-import { resetIpc } from "@/test/ipc";
+import { ipc } from "@/shared/ipc";
+import { invoke as ipcBackend, resetIpc } from "@/test/ipc";
 
 import { Posts } from "./posts";
 
 vi.mock("@tauri-apps/api/core", async () => ({
   invoke: (await import("@/test/ipc")).invoke,
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn().mockResolvedValue(null),
+}));
+
+const { notifShow } = vi.hoisted(() => ({ notifShow: vi.fn() }));
+vi.mock("@mantine/notifications", () => ({
+  notifications: { show: notifShow },
 }));
 
 async function renderPosts(go = vi.fn()) {
@@ -26,6 +36,8 @@ async function renderPosts(go = vi.fn()) {
 describe("Posts", () => {
   beforeEach(() => {
     resetIpc();
+    notifShow.mockClear();
+    vi.spyOn(ipc.activity, "append").mockResolvedValue(undefined);
   });
 
   it("renders the title and the 글쓰기 action", async () => {
@@ -146,5 +158,76 @@ describe("Posts", () => {
     const trashes = await screen.findAllByTitle("삭제");
     await userEvent.click(trashes[0]!);
     expect(screen.getByText(/임시저장 목록/)).toBeInTheDocument();
+  });
+
+  it("fires excel import — opens open dialog and calls importPosts", async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(open).mockResolvedValueOnce("/tmp/게시글.xlsx");
+    vi.mocked(ipcBackend).mockClear();
+    await renderPosts();
+    await userEvent.click(
+      screen.getByRole("button", { name: /엑셀 가져오기/ }),
+    );
+    expect(vi.mocked(open)).toHaveBeenCalledWith(
+      expect.objectContaining({ multiple: false }),
+    );
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(ipcBackend)
+          .mock.calls.some((c) => c[0] === "import_posts_xlsx"),
+      ).toBe(true),
+    );
+    await waitFor(() =>
+      expect(notifShow).toHaveBeenCalledWith(
+        expect.objectContaining({
+          color: "green",
+          message: expect.stringContaining("가져옴"),
+        }),
+      ),
+    );
+  });
+
+  it("does not invoke import when open dialog is cancelled", async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(open).mockResolvedValueOnce(null);
+    vi.mocked(ipcBackend).mockClear();
+    await renderPosts();
+    await userEvent.click(
+      screen.getByRole("button", { name: /엑셀 가져오기/ }),
+    );
+    expect(
+      vi
+        .mocked(ipcBackend)
+        .mock.calls.some((c) => c[0] === "import_posts_xlsx"),
+    ).toBe(false);
+  });
+
+  it("logs to activity feed when import IPC command rejects", async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(open).mockResolvedValueOnce("/tmp/게시글.xlsx");
+    const realImpl = vi.mocked(ipcBackend).getMockImplementation()! as (
+      cmd: string,
+      args?: Record<string, unknown>,
+    ) => Promise<unknown>;
+    vi.mocked(ipcBackend).mockImplementation((cmd, args) =>
+      cmd === "import_posts_xlsx"
+        ? Promise.reject(new Error("parse error"))
+        : realImpl(cmd, args),
+    );
+    try {
+      await renderPosts();
+      await userEvent.click(
+        screen.getByRole("button", { name: /엑셀 가져오기/ }),
+      );
+      await waitFor(() =>
+        expect(ipc.activity.append).toHaveBeenCalledWith(
+          "error",
+          expect.stringContaining("가져오기"),
+        ),
+      );
+    } finally {
+      vi.mocked(ipcBackend).mockImplementation(realImpl);
+    }
   });
 });

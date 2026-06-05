@@ -20,6 +20,9 @@ import type {
   Stock,
 } from "@/shared/data/types";
 
+// Fixed base timestamp for deterministic seed data (2023-11-14T22:13:20.000Z).
+const NOW_BASE = 1_700_000_000_000;
+
 /**
  * In-memory Tauri-IPC backend for tests.
  *
@@ -370,32 +373,32 @@ const SEED_ACTIVITY: ActivityItem[] = [
   {
     id: "ac1",
     type: "success",
-    text: "‘삼성전자 4분기 실적 기대’ 글이 종목토론방에 게시되었습니다",
-    time: "12분 전",
+    text: "’삼성전자 4분기 실적 기대’ 글이 종목토론방에 게시되었습니다",
+    at: NOW_BASE - 12 * 60_000,
   },
   {
     id: "ac2",
     type: "success",
     text: "반도체 코멘트 10종이 2개 계정에 분산 게시되었습니다",
-    time: "1시간 전",
+    at: NOW_BASE - 3_600_000,
   },
   {
     id: "ac3",
     type: "error",
     text: "한미반도체 토론방 계정 게시 실패 — 로그인 세션 만료",
-    time: "2시간 전",
+    at: NOW_BASE - 2 * 3_600_000,
   },
   {
     id: "ac4",
     type: "info",
     text: "종목토론방 12개를 크롤링해 가져왔습니다",
-    time: "3시간 전",
+    at: NOW_BASE - 3 * 3_600_000,
   },
   {
     id: "ac5",
     type: "info",
     text: "엑셀에서 계정 4건을 가져왔습니다",
-    time: "어제",
+    at: NOW_BASE - 26 * 3_600_000,
   },
 ];
 
@@ -675,7 +678,7 @@ const SEED_LOG_BATCHES: LogBatch[] = [
     id: "b0",
     title: "삼성전자 4분기 실적 기대 — 매수 관점 정리",
     kind: "post",
-    time: "방금 전",
+    at: NOW_BASE - 2 * 60_000,
     state: "running",
     items: [
       {
@@ -708,7 +711,7 @@ const SEED_LOG_BATCHES: LogBatch[] = [
     id: "b1",
     title: "5월 이벤트 결과 발표",
     kind: "post",
-    time: "오늘 13:48",
+    at: NOW_BASE - 4 * 3_600_000,
     items: [
       {
         platform: "forum",
@@ -739,7 +742,7 @@ const SEED_LOG_BATCHES: LogBatch[] = [
     id: "b2",
     title: "반도체 흐름 코멘트 10종",
     kind: "comment",
-    time: "오늘 13:42",
+    at: NOW_BASE - 5 * 3_600_000,
     items: [
       {
         platform: "forum",
@@ -765,7 +768,7 @@ const SEED_LOG_BATCHES: LogBatch[] = [
     id: "b3",
     title: "오늘의 특징주 정리",
     kind: "post",
-    time: "오늘 12:15",
+    at: NOW_BASE - 7 * 3_600_000,
     items: [
       {
         platform: "naver",
@@ -781,7 +784,7 @@ const SEED_LOG_BATCHES: LogBatch[] = [
     id: "b4",
     title: "장중 코멘트 세트",
     kind: "comment",
-    time: "오늘 11:30",
+    at: NOW_BASE - 8 * 3_600_000,
     items: [
       {
         platform: "forum",
@@ -805,7 +808,7 @@ const SEED_LOG_BATCHES: LogBatch[] = [
     id: "b5",
     title: "관심 종목 코멘트",
     kind: "comment",
-    time: "어제 19:02",
+    at: NOW_BASE - 25 * 3_600_000,
     items: [
       {
         platform: "naver",
@@ -831,7 +834,7 @@ const SEED_LOG_BATCHES: LogBatch[] = [
     id: "b6",
     title: "차트 관점 분석",
     kind: "post",
-    time: "어제 20:40",
+    at: NOW_BASE - 26 * 3_600_000,
     items: [
       {
         platform: "forum",
@@ -847,7 +850,7 @@ const SEED_LOG_BATCHES: LogBatch[] = [
     id: "b7",
     title: "주간 시장 브리핑",
     kind: "post",
-    time: "5/27 22:30",
+    at: NOW_BASE - 8 * 24 * 3_600_000,
     items: [
       {
         platform: "naver",
@@ -875,6 +878,7 @@ interface IpcState {
   posts: LibraryPost[];
   queueNow: QueueNowItem[];
   queueScheduled: QueueScheduledItem[];
+  activity: ActivityItem[];
   cafes: Cafe[];
 }
 
@@ -902,6 +906,7 @@ export function resetIpc(): void {
     posts: clone(SEED_LIBRARY),
     queueNow: clone(SEED_QUEUE_NOW),
     queueScheduled: clone(SEED_QUEUE_SCHEDULED),
+    activity: clone(SEED_ACTIVITY),
     cafes: clone(SEED_CAFES),
   };
   loginJobIds = [];
@@ -934,7 +939,16 @@ export const invoke = vi.fn(
       case "list_stocks":
         return clone(SEED_STOCKS);
       case "list_activity":
-        return clone(SEED_ACTIVITY);
+        return clone(state.activity);
+      case "append_activity": {
+        state.activity.unshift({
+          id: `ac-${state.activity.length}`,
+          type: args!.kind as "success" | "error" | "info",
+          text: args!.text as string,
+          at: NOW_BASE,
+        });
+        return undefined;
+      }
       case "list_stats":
         return clone(SEED_STATS);
       case "list_log_batches":
@@ -1095,6 +1109,16 @@ export const invoke = vi.fn(
           ),
         );
       }
+
+      // --- 엑셀 내보내기 (모킹 — 실제 파일 쓰기 없이 성공 반환) -----------
+      case "export_accounts_xlsx":
+      case "export_activity_xlsx":
+        return undefined;
+
+      // --- 엑셀 가져오기 (모킹 — canned summary 반환) ----------------------
+      case "import_accounts_xlsx":
+      case "import_posts_xlsx":
+        return { imported: 2, skipped: 0, errors: [] };
 
       // --- 네이버 로그인 자동화 (모킹) -------------------------------------
       case "bootstrap_runtime":

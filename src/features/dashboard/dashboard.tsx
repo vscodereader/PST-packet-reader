@@ -19,7 +19,7 @@ import type { DashStat } from "@/shared/bindings/DashStat";
 import type { LogBatch } from "@/shared/bindings/LogBatch";
 import type { QueueScheduledItem } from "@/shared/bindings/QueueScheduledItem";
 import { PLATFORMS } from "@/shared/data/config";
-import { batchStatus } from "@/shared/data/helpers";
+import { batchStatus, formatRelative } from "@/shared/data/helpers";
 import type { GoFn, PlatformId, ViewId } from "@/shared/data/types";
 import { ipc } from "@/shared/ipc";
 import { Icon } from "@/shared/ui/icons";
@@ -57,7 +57,7 @@ export function Dashboard({ go }: { go: GoFn }) {
             ? ("info" as const)
             : ("error" as const),
       text: b.title,
-      time: b.time,
+      time: formatRelative(b.at),
     };
   });
 

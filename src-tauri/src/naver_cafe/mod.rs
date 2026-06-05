@@ -5,6 +5,7 @@
 
 use std::sync::OnceLock;
 
+pub mod article_list;
 pub mod cafe_ref;
 pub mod comment;
 pub mod distribute;
@@ -29,6 +30,10 @@ pub(crate) fn shared_http_client() -> reqwest::Client {
     CLIENT.get_or_init(reqwest::Client::new).clone()
 }
 
+pub use article_list::{
+    fetch_article_list_for_account, Article, ArticleListClient, ArticleListError,
+    ArticleListResponse, SortBy, ARTICLE_LIST_API_HOST,
+};
 pub use cafe_ref::{
     cafe_gate_info_path, cafe_home_path, parse_cafe_id, parse_cafe_ref, parse_club_id_from_html,
     CafeGateClient, CafeGateInfoResponse, CafeHomeClient, CafeInfoView, CafeRef, CafeRefError,

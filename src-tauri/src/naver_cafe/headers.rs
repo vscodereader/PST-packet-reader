@@ -16,13 +16,14 @@ const ORIGIN: &str = "https://cafe.naver.com";
 /// errorCode 10404(Page Not Found) 또는 11001을 반환한다(댓글 API도 동일 헤더 사용).
 pub(crate) const CAFE_PRODUCT_PC: &str = "pc";
 
-/// 네이버 카페 쓰기 요청 공용 헤더 세트를 반환한다.
+/// 네이버 카페 **읽기**(GET) 요청 공용 헤더 세트를 반환한다.
 ///
-/// `content_type`과 `referer`만 호출부가 정하고, 나머지(Accept·Origin·
-/// x-cafe-product·sec-fetch-*·accept-language)는 공통으로 채운다.
-pub(crate) fn cafe_write_headers(content_type: &str, referer: String) -> Vec<(String, String)> {
+/// `referer`만 호출부가 정하고, 나머지(Accept·Origin·x-cafe-product·sec-fetch-*·
+/// accept-language)는 공통으로 채운다. `cafe-boardlist-api`(최신글)·`cafe2`
+/// 인기글 등 조회 API는 `x-cafe-product: pc`가 없으면 HTTP 500(errorCode 9999)을
+/// 반환하므로(실패킷 확인) 이 헤더가 필수다.
+pub(crate) fn cafe_read_headers(referer: String) -> Vec<(String, String)> {
     vec![
-        ("Content-Type".to_string(), content_type.to_string()),
         (
             "Accept".to_string(),
             "application/json, text/plain, */*".to_string(),
@@ -38,6 +39,16 @@ pub(crate) fn cafe_write_headers(content_type: &str, referer: String) -> Vec<(St
             "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7".to_string(),
         ),
     ]
+}
+
+/// 네이버 카페 쓰기 요청 공용 헤더 세트를 반환한다.
+///
+/// 읽기 헤더([`cafe_read_headers`])에 `Content-Type`만 앞에 더한 형태로,
+/// `content_type`과 `referer`만 호출부가 정한다.
+pub(crate) fn cafe_write_headers(content_type: &str, referer: String) -> Vec<(String, String)> {
+    let mut headers = cafe_read_headers(referer);
+    headers.insert(0, ("Content-Type".to_string(), content_type.to_string()));
+    headers
 }
 
 #[cfg(test)]

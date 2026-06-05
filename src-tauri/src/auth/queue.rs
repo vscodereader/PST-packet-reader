@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 
 use super::{
     accounts::{account_cookie_status_for_app_data, CookieStatus},
@@ -155,6 +155,24 @@ async fn worker_loop<R: Runtime>(state: QueueState, app: AppHandle<R>) {
             }
             push_log(&mut inner, format!("{}: {}", job.account_id, message));
             inner.current_account_id = None;
+        }
+
+        // Log login result to the activity feed.
+        {
+            use crate::ipc::activity::{record, ActivityItem, ActivityType};
+            use crate::store::JsonStore;
+            let activity = app.state::<JsonStore<ActivityItem>>();
+            let (ty, msg) = match status {
+                QueueJobStatus::Success | QueueJobStatus::Expired => (
+                    ActivityType::Success,
+                    format!("계정 {} 로그인 성공", job.account_id),
+                ),
+                _ => (
+                    ActivityType::Error,
+                    format!("계정 {} 로그인 실패 — {message}", job.account_id),
+                ),
+            };
+            record(activity.inner(), ty, msg);
         }
     }
 }

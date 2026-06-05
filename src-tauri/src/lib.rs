@@ -1,6 +1,7 @@
 mod ipc;
 mod logging;
 mod store;
+mod util;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,7 +9,7 @@ use std::process::Command;
 use tauri::{AppHandle, Builder, Manager, Runtime};
 
 use crate::ipc::{
-    accounts, activity, bands, cafes, diagnostics, log_batches, posts, queue, stats, stocks,
+    accounts, activity, bands, cafes, diagnostics, excel, log_batches, posts, queue, stats, stocks,
 };
 use crate::store::JsonStore;
 
@@ -105,26 +106,103 @@ fn forum_endpoint() -> ForumEndpoint {
     }
 }
 
+fn build_publish_batch(
+    title: &str,
+    run_post: bool,
+    run_comment: bool,
+    account_id: &str,
+    at: i64,
+    results: &[ForumPublishResult],
+) -> ipc::log_batches::LogBatch {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use ipc::accounts::PlatformId;
+    use ipc::log_batches::{BatchItem, BatchItemStatus, LogBatch};
+    use ipc::posts::ModeValue;
+
+    static LB_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = LB_SEQ.fetch_add(1, Ordering::Relaxed);
+
+    let kind = if run_post && run_comment {
+        ModeValue::Both
+    } else if run_comment {
+        ModeValue::Comment
+    } else {
+        // (false, false) is rejected upstream; default to Post for a total match.
+        ModeValue::Post
+    };
+    let items = results
+        .iter()
+        .map(|r| BatchItem {
+            platform: PlatformId::Forum,
+            target: r.name.clone(),
+            code: Some(r.code.clone()),
+            board: None,
+            login_id: account_id.to_owned(),
+            status: if r.ok {
+                BatchItemStatus::Success
+            } else {
+                BatchItemStatus::Fail
+            },
+            msg: r.message.clone(),
+            trace: if r.ok { None } else { Some(r.message.clone()) },
+        })
+        .collect();
+    LogBatch {
+        id: format!("lb-{at}-{seq}"),
+        title: title.to_owned(),
+        kind,
+        at,
+        state: None,
+        items,
+    }
+}
+
 // 사수 UI(publish-modal)의 "지금 바로 게시 + 종목토론방"이 호출하는 command입니다.
 #[tauri::command]
 async fn run_forum_publish_now<R: Runtime>(
     app: tauri::AppHandle<R>,
     request: ForumPublishRequest,
 ) -> Result<Vec<ForumPublishResult>, String> {
-    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<ForumPublishResult>, String> {
-        // 게시용 Chrome을 앱이 직접 디버그 포트로 띄운다(헤드리스). 사용자가 따로
-        // `--remote-debugging-port`로 Chrome을 실행할 필요가 없다. 게시가 끝나면
-        // 핸들이 Drop되며 Chrome을 종료한다. (로그인과 같은 런처 재사용)
-        let chrome = auth::launch_debug_chrome(true).map_err(|error| error.to_string())?;
-        let mut request = request;
-        request.host = FORUM_DEVTOOLS_HOST.to_owned();
-        request.port = chrome.port;
-        let results = run_forum_publish(request, app);
-        drop(chrome);
-        Ok(results)
-    })
-    .await
-    .map_err(|error| format!("게시 실행 스레드 오류: {error}"))?
+    let title = request.title.clone();
+    let account_id = request.account_id.clone();
+    let (run_post, run_comment) = (request.run_post, request.run_comment);
+    let app_for_job = app.clone();
+    let results =
+        tauri::async_runtime::spawn_blocking(move || -> Result<Vec<ForumPublishResult>, String> {
+            // 게시용 Chrome을 앱이 직접 디버그 포트로 띄운다(헤드리스). 사용자가 따로
+            // `--remote-debugging-port`로 Chrome을 실행할 필요가 없다. 게시가 끝나면
+            // 핸들이 Drop되며 Chrome을 종료한다. (로그인과 같은 런처 재사용)
+            let chrome = auth::launch_debug_chrome(true).map_err(|error| error.to_string())?;
+            let mut request = request;
+            request.host = FORUM_DEVTOOLS_HOST.to_owned();
+            request.port = chrome.port;
+            let results = run_forum_publish(request, app_for_job);
+            drop(chrome);
+            Ok(results)
+        })
+        .await
+        .map_err(|error| format!("게시 실행 스레드 오류: {error}"))??;
+
+    let at = util::now_ms();
+    let batch = build_publish_batch(&title, run_post, run_comment, &account_id, at, &results);
+    let ok = results.iter().filter(|r| r.ok).count();
+    let logs = app.state::<JsonStore<ipc::log_batches::LogBatch>>();
+    logs.mutate(|mut v| {
+        v.insert(0, batch);
+        v
+    });
+    let activity = app.state::<JsonStore<ipc::activity::ActivityItem>>();
+    ipc::activity::record(
+        activity.inner(),
+        if ok == results.len() {
+            ipc::activity::ActivityType::Success
+        } else {
+            ipc::activity::ActivityType::Error
+        },
+        format!("'{title}' 게시 — {}곳 중 {ok}곳 성공", results.len()),
+    );
+    Ok(results)
 }
 
 #[cfg(target_os = "windows")]
@@ -226,6 +304,21 @@ fn parse_automation_target(target: Option<String>) -> Result<AutomationTarget, S
 }
 
 #[tauri::command]
+fn append_activity(
+    activity: tauri::State<'_, JsonStore<ipc::activity::ActivityItem>>,
+    kind: String,
+    text: String,
+) {
+    use ipc::activity::ActivityType;
+    let ty = match kind.as_str() {
+        "success" => ActivityType::Success,
+        "error" => ActivityType::Error,
+        _ => ActivityType::Info,
+    };
+    ipc::activity::record(activity.inner(), ty, text);
+}
+
+#[tauri::command]
 async fn bootstrap_runtime() -> Result<auth::RuntimePaths, String> {
     auth::bootstrap_runtime().await.map_err(|e| e.to_string())
 }
@@ -239,18 +332,28 @@ fn save_accounts(accounts: Vec<auth::Account>) -> Result<Vec<auth::Account>, Str
 fn enqueue_cookie_refresh<R: Runtime>(
     app: tauri::AppHandle<R>,
     state: tauri::State<'_, auth::QueueState>,
+    activity: tauri::State<'_, JsonStore<ipc::activity::ActivityItem>>,
     account_ids: Vec<String>,
     headless: Option<bool>,
     use_adb: Option<bool>,
 ) -> Result<auth::QueueStatus, String> {
-    auth::enqueue_accounts(
+    let n = account_ids.len();
+    let result = auth::enqueue_accounts(
         &state,
         app,
         account_ids,
         headless.unwrap_or(false),
         use_adb.unwrap_or(false),
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    if n > 0 {
+        ipc::activity::record(
+            activity.inner(),
+            ipc::activity::ActivityType::Info,
+            format!("계정 {n}건 로그인 시작"),
+        );
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -263,6 +366,70 @@ fn get_queue_status(
 #[tauri::command]
 fn get_account_cookies(account_id: String) -> Result<Option<serde_json::Value>, String> {
     auth::read_account_cookies(&account_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn export_accounts_xlsx(
+    store: tauri::State<'_, JsonStore<ipc::accounts::Account>>,
+    activity: tauri::State<'_, JsonStore<ipc::activity::ActivityItem>>,
+    path: String,
+) -> Result<(), String> {
+    let accounts = store.snapshot();
+    let n = accounts.len();
+    excel::write_accounts_xlsx(&path, &accounts)?;
+    ipc::activity::record(
+        activity.inner(),
+        ipc::activity::ActivityType::Info,
+        format!("계정 {n}건을 엑셀로 내보냈어요"),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn export_activity_xlsx(
+    activity: tauri::State<'_, JsonStore<ipc::activity::ActivityItem>>,
+    logs: tauri::State<'_, JsonStore<ipc::log_batches::LogBatch>>,
+    path: String,
+) -> Result<(), String> {
+    excel::write_activity_xlsx(&path, &logs.snapshot(), &activity.snapshot())?;
+    ipc::activity::record(
+        activity.inner(),
+        ipc::activity::ActivityType::Info,
+        "알림 내역을 엑셀로 내보냈어요",
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn import_accounts_xlsx(
+    store: tauri::State<'_, JsonStore<ipc::accounts::Account>>,
+    activity: tauri::State<'_, JsonStore<ipc::activity::ActivityItem>>,
+    path: String,
+) -> Result<ipc::excel::ImportSummary, String> {
+    let (next, summary) = ipc::excel::import_accounts(&path, store.snapshot())?;
+    store.mutate(|_| next.clone());
+    ipc::activity::record(
+        activity.inner(),
+        ipc::activity::ActivityType::Info,
+        format!("엑셀에서 계정 {}건 가져옴", summary.imported),
+    );
+    Ok(summary)
+}
+
+#[tauri::command]
+fn import_posts_xlsx(
+    store: tauri::State<'_, JsonStore<ipc::posts::LibraryPost>>,
+    activity: tauri::State<'_, JsonStore<ipc::activity::ActivityItem>>,
+    path: String,
+) -> Result<ipc::excel::ImportSummary, String> {
+    let (next, summary) = ipc::excel::import_posts(&path, store.snapshot())?;
+    store.mutate(|_| next.clone());
+    ipc::activity::record(
+        activity.inner(),
+        ipc::activity::ActivityType::Info,
+        format!("엑셀에서 게시글 {}건 가져옴", summary.imported),
+    );
+    Ok(summary)
 }
 
 /// Registers every IPC command handler on the builder.
@@ -287,6 +454,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         queue::promote_queue_scheduled,
         stocks::list_stocks,
         activity::list_activity,
+        append_activity,
         stats::list_stats,
         log_batches::list_log_batches,
         cafes::list_cafes,
@@ -295,6 +463,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         cafes::run_post_jobs,
         cafes::run_comment_jobs,
         cafes::list_joined_cafes,
+        cafes::list_cafe_articles,
         bands::list_bands,
         diagnostics::get_environment_status,
         diagnostics::open_chrome_download,
@@ -310,6 +479,10 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         run_naver_discussion_batch,
         forum_endpoint,
         run_forum_publish_now,
+        export_accounts_xlsx,
+        export_activity_xlsx,
+        import_accounts_xlsx,
+        import_posts_xlsx,
     ])
 }
 
@@ -365,6 +538,7 @@ pub fn manage_stores<R: Runtime>(app: &AppHandle<R>, dir: &Path) -> std::io::Res
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     register_handlers(tauri::Builder::default())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             // 로그는 도메인 데이터와 같은 앱 데이터 디렉터리(<app_data>/logs)에 남긴다.
@@ -383,6 +557,40 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_publish_batch_maps_results_to_items() {
+        let results = vec![
+            ForumPublishResult {
+                code: "005930".into(),
+                name: "삼성전자".into(),
+                ok: true,
+                message: "게시 완료".into(),
+            },
+            ForumPublishResult {
+                code: "000660".into(),
+                name: "SK하이닉스".into(),
+                ok: false,
+                message: "로그인 만료".into(),
+            },
+        ];
+        let b = build_publish_batch(
+            "실적 정리",
+            true,
+            false,
+            "invest_king7",
+            1_700_000_000_000,
+            &results,
+        );
+        assert_eq!(b.items.len(), 2);
+        assert_eq!(b.title, "실적 정리");
+        assert!(matches!(b.kind, ipc::posts::ModeValue::Post));
+        assert!(matches!(
+            b.items[0].status,
+            ipc::log_batches::BatchItemStatus::Success
+        ));
+        assert_eq!(b.items[1].trace.as_deref(), Some("로그인 만료"));
+    }
 
     #[test]
     fn greet_includes_name() {

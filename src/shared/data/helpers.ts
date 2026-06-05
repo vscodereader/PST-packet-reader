@@ -42,6 +42,38 @@ export function hasToken(
   return re.test(text);
 }
 
+/** epoch-ms를 "방금/N분 전/N시간 전/어제 HH:mm/M월 D일"로 포맷. */
+export function formatRelative(at: number, now: number = Date.now()): string {
+  const diff = now - at;
+  if (diff < 60_000) return "방금";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}분 전`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}시간 전`;
+  const d = new Date(at);
+  if (dayBucket(at, now) === "어제") {
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    return `어제 ${hh}:${mm}`;
+  }
+  return `${d.getMonth() + 1}월 ${d.getDate()}일`;
+}
+
+/** epoch-ms를 캘린더 날짜 기준 오늘/어제/이전으로 분류. */
+export function dayBucket(
+  at: number,
+  now: number = Date.now(),
+): "오늘" | "어제" | "이전" {
+  const startOf = (ms: number) => {
+    const d = new Date(ms);
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  };
+  const today = startOf(now);
+  const day = 86_400_000;
+  const atDay = startOf(at);
+  if (atDay >= today) return "오늘";
+  if (atDay >= today - day) return "어제";
+  return "이전";
+}
+
 export function batchStatus(
   b: LogBatch,
 ): "running" | "success" | "fail" | "partial" {

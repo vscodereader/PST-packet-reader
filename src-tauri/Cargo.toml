@@ -28,7 +28,6 @@ ts-rs = "12"
 serde_urlencoded = "0.7"
 tokio = { version = "1", features = ["full"] }
 thiserror = "1"
-adb_client = { version = "3.2.1", features = ["usb"] }
 # rustls-tls(순수 Rust TLS)로 Windows 크로스 컴파일 시 openssl 시스템 의존을 피한다.
 # gzip 은 #67 가입 카페 목록 응답 해제용, blocking 은 패킷 게시 엔진용.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "gzip"] }
@@ -39,6 +38,11 @@ open = "5"
 # 네이버 증권 토론방 패킷 게시 엔진(naver_automation/discussion_batch)에서 사용
 tungstenite = "0.21"
 url = "2"
+# 엑셀(.xlsx) 입출력
+rust_xlsxwriter = "0.79"
+calamine = "0.26"
+# 네이티브 파일 다이얼로그
+tauri-plugin-dialog = "2"
 
 [dev-dependencies]
 tempfile = "3"

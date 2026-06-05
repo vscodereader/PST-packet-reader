@@ -24,10 +24,10 @@ pub(crate) struct ChromeHandle {
 
 impl Drop for ChromeHandle {
     fn drop(&mut self) {
-        eprintln!("[CHROME] 창 닫힘 — Chrome 종료 시작...");
+        tracing::info!("[CHROME] 창 닫힘 — Chrome 종료 시작...");
         let _ = self.child.kill();
         let _ = self.child.wait(); // 프로세스가 완전히 종료될 때까지 블로킹한다.
-        eprintln!("[CHROME] ✓ Chrome 프로세스 완전 종료 확인");
+        tracing::info!("[CHROME] ✓ Chrome 프로세스 완전 종료 확인");
         let _ = std::fs::remove_dir_all(&self.user_data_dir);
     }
 }
@@ -54,6 +54,10 @@ pub(crate) fn launch(headless: bool) -> Result<ChromeHandle, OrchestratorError> 
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-quic",
+        // 봇탐지(ncaptcha) 완화: CDP 제어 시 Chrome이 navigator.webdriver=true 와
+        // "Chrome이 자동화 소프트웨어의 제어를 받고 있습니다" 신호를 노출하는 것을 끈다.
+        // 실제 키 이벤트(login_flow)만으로는 점수형 캡차를 못 피하므로 자동화 지문도 함께 낮춘다.
+        "--disable-blink-features=AutomationControlled",
         "about:blank",
     ];
     if headless {
@@ -79,7 +83,7 @@ pub(crate) fn launch(headless: bool) -> Result<ChromeHandle, OrchestratorError> 
     match wait_for_port(&user_data_dir) {
         Ok(port) => {
             handle.port = port;
-            eprintln!("[CHROME] ✓ Chrome 실행 완료 — 디버그 포트 {port} (완전 로딩됨)");
+            tracing::info!("[CHROME] ✓ Chrome 실행 완료 — 디버그 포트 {port} (완전 로딩됨)");
             Ok(handle)
         }
         // handle이 Drop되며 프로세스/임시 디렉토리를 정리한다.

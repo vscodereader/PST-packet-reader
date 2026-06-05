@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::ipc::activity::{record, ActivityType};
 use crate::store::JsonStore;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -157,6 +158,17 @@ pub fn seed() -> Vec<LibraryPost> {
 }
 
 // --------------------------------------------------------------------------
+// Activity message builders (pure, unit-tested).
+// --------------------------------------------------------------------------
+
+pub fn saved_msg(title: &str) -> String {
+    format!("게시글 '{title}' 저장됨")
+}
+pub fn deleted_msg(title: &str) -> String {
+    format!("게시글 '{title}' 삭제됨")
+}
+
+// --------------------------------------------------------------------------
 // Commands
 // --------------------------------------------------------------------------
 
@@ -168,22 +180,53 @@ pub fn list_posts(store: tauri::State<'_, JsonStore<LibraryPost>>) -> Vec<Librar
 #[tauri::command]
 pub fn upsert_post(
     store: tauri::State<'_, JsonStore<LibraryPost>>,
+    activity: tauri::State<'_, JsonStore<crate::ipc::activity::ActivityItem>>,
     post: LibraryPost,
 ) -> Vec<LibraryPost> {
-    store.mutate(|posts| apply_upsert(posts, post))
+    if post.title.trim().is_empty() {
+        record(
+            activity.inner(),
+            ActivityType::Error,
+            "게시글 저장 실패 — 제목이 비어 있습니다",
+        );
+        return store.snapshot();
+    }
+    let title = post.title.clone();
+    let next = store.mutate(|posts| apply_upsert(posts, post));
+    record(activity.inner(), ActivityType::Success, saved_msg(&title));
+    next
 }
 
 #[tauri::command]
 pub fn delete_post(
     store: tauri::State<'_, JsonStore<LibraryPost>>,
+    activity: tauri::State<'_, JsonStore<crate::ipc::activity::ActivityItem>>,
     id: String,
 ) -> Vec<LibraryPost> {
-    store.mutate(|posts| apply_delete(posts, &id))
+    let mut recorded_title = String::new();
+    let next = store.mutate(|posts| {
+        if let Some(p) = posts.iter().find(|p| p.id == id) {
+            recorded_title = p.title.clone();
+        }
+        apply_delete(posts, &id)
+    });
+    record(
+        activity.inner(),
+        ActivityType::Info,
+        deleted_msg(&recorded_title),
+    );
+    next
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn post_event_messages() {
+        assert_eq!(saved_msg("실적 정리"), "게시글 '실적 정리' 저장됨");
+        assert_eq!(deleted_msg("실적 정리"), "게시글 '실적 정리' 삭제됨");
+    }
 
     fn post(id: &str, title: &str) -> LibraryPost {
         LibraryPost {
