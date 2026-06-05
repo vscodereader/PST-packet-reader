@@ -64,6 +64,7 @@
 //! 카페에만 사용하세요.
 //! 보안: 쿠키 값/헤더는 절대 출력하지 않습니다.
 
+use std::collections::HashMap;
 use std::time::Duration;
 use std::{env, fs};
 
@@ -308,6 +309,9 @@ async fn main() {
     let total = plans.len();
     let mut ok_count = 0usize;
     let mut fail_count = 0usize;
+    // 계정별 세션 헤더를 한 번만 계산해 재사용한다(같은 계정이 여러 타깃을 가질 때
+    // 쿠키 파일 중복 I/O 방지). 실패도 캐시해 재시도하지 않는다. 보안: 값은 출력 안 함.
+    let mut header_cache: HashMap<String, Result<String, String>> = HashMap::new();
     for (i, p) in plans.iter().enumerate() {
         // 첫 건 이후에는 도배 차단을 피해 간격을 둔다(orchestrator와 동일).
         if i > 0 {
@@ -320,19 +324,24 @@ async fn main() {
             p.target.account_id,
             p.target.article_id
         );
-        // 쿠키 확보(파일 경로 우선, 없으면 폴더 조회). 보안: 값은 출력하지 않는다.
-        let cookies = match load_cookies(&p.target.account_id, p.target.cookies_path.as_deref()) {
-            Ok(v) => v,
+        // 계정별 쿠키→세션 헤더(파일 경로 우선, 없으면 폴더 조회)를 캐시에서 가져오거나
+        // 최초 1회 계산한다. 보안: 값은 출력하지 않는다.
+        let header = match header_cache
+            .entry(p.target.account_id.clone())
+            .or_insert_with(|| {
+                load_cookies(&p.target.account_id, p.target.cookies_path.as_deref())
+                    .map_err(|e| format!("NO_COOKIES: {e}"))
+                    .and_then(|cookies| {
+                        cookie_header_from_storage_state(&cookies)
+                            .ok_or_else(|| "NO_COOKIES: 네이버 세션 쿠키를 찾지 못함".to_string())
+                    })
+            }) {
+            Ok(h) => h.clone(),
             Err(e) => {
                 fail_count += 1;
-                eprintln!("  실패 {label} ❌ NO_COOKIES: {e}");
+                eprintln!("  실패 {label} ❌ {e}");
                 continue;
             }
-        };
-        let Some(header) = cookie_header_from_storage_state(&cookies) else {
-            fail_count += 1;
-            eprintln!("  실패 {label} ❌ NO_COOKIES: 네이버 세션 쿠키를 찾지 못함");
-            continue;
         };
         let req = CommentRequest {
             cafe_id: cafe_id.clone(),
