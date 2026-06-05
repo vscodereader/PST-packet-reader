@@ -1,6 +1,6 @@
 import { vi } from "vitest";
 
-import type { CommentJob } from "@/shared/bindings/CommentJob";
+import type { CommentDistributionRequest } from "@/shared/bindings/CommentDistributionRequest";
 import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutcome";
 import type { EnvironmentStatus } from "@/shared/bindings/EnvironmentStatus";
 import type { JoinedCafe } from "@/shared/bindings/JoinedCafe";
@@ -988,11 +988,12 @@ export const invoke = vi.fn(
         return clone(outcomes);
       }
       case "run_comment_jobs": {
-        const jobs = args!.jobs as CommentJob[];
-        const outcomes: CommentPublishOutcome[] = jobs.map((j, i) => ({
-          accountId: j.accountId,
-          cafeId: j.cafeId,
-          articleId: j.articleId,
+        // 백엔드가 댓글 풀을 분배하므로(이슈 #98) 목은 타깃마다 성공 1건만 만든다.
+        const req = args!.req as CommentDistributionRequest;
+        const outcomes: CommentPublishOutcome[] = req.targets.map((t, i) => ({
+          accountId: t.accountId,
+          cafeId: t.cafeId,
+          articleId: t.articleId,
           success: true,
           commentId: 2000 + i,
         }));

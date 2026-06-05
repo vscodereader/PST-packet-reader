@@ -246,19 +246,23 @@ describe("PublishModal", () => {
     );
     // post lands first…
     expect(ipcBackend).toHaveBeenCalledWith("run_post_jobs", expect.anything());
-    // …then a comment on that article (articleId 1000 from the mock, cafeId from
-    // the picked joined cafe) is posted.
+    // …then a comment request for that article (articleId 1000 from the mock,
+    // cafeId from the picked joined cafe) is sent. The backend now distributes
+    // the comment pool (issue #98), so the front sends the target + pool — the
+    // chosen `content` is no longer decided here.
     expect(ipcBackend).toHaveBeenCalledWith(
       "run_comment_jobs",
       expect.objectContaining({
-        jobs: [
-          expect.objectContaining({
-            accountId: "money_lab",
-            cafeId: 11111111,
-            articleId: 1000,
-            content: "좋네요",
-          }),
-        ],
+        req: expect.objectContaining({
+          targets: [
+            expect.objectContaining({
+              accountId: "money_lab",
+              cafeId: 11111111,
+              articleId: 1000,
+            }),
+          ],
+          comments: ["좋네요"],
+        }),
       }),
     );
   });
@@ -287,25 +291,26 @@ describe("PublishModal", () => {
         { timeout: 3000 },
       ),
     );
-    expect(ipcBackend).toHaveBeenCalledWith(
-      "run_comment_jobs",
+    // Distribution moved to the backend (issue #98): the front just sends one
+    // target per account plus the comment pool; which comment each account gets
+    // is RNG-chosen in Rust, so it's not asserted here.
+    const commentCalls = ipcBackend.mock.calls.filter(
+      (c) => c[0] === "run_comment_jobs",
+    );
+    const call = commentCalls[commentCalls.length - 1];
+    expect(call).toBeDefined();
+    const req = (
+      call?.[1] as { req: { targets: unknown[]; comments: string[] } }
+    ).req;
+    expect(req.targets).toHaveLength(1);
+    expect(req.targets[0]).toEqual(
       expect.objectContaining({
-        jobs: [
-          expect.objectContaining({
-            accountId: "money_lab",
-            cafeId: 31732304,
-            articleId: 9,
-            content: "댓글1",
-          }),
-          expect.objectContaining({
-            accountId: "money_lab",
-            cafeId: 31732304,
-            articleId: 9,
-            content: "댓글2",
-          }),
-        ],
+        accountId: "money_lab",
+        cafeId: 31732304,
+        articleId: 9,
       }),
     );
+    expect(req.comments).toEqual(["댓글1", "댓글2"]);
   });
 
   it("picks a per-account cafe/board and the band destination", async () => {

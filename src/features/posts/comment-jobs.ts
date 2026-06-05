@@ -1,4 +1,3 @@
-import type { CommentJob } from "@/shared/bindings/CommentJob";
 import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutcome";
 
 /** A resolved numeric comment target — the cafe + article to comment on. */
@@ -61,45 +60,6 @@ export function parseCafeArticleUrl(
   }
 
   return null;
-}
-
-/**
- * `both` mode: one comment job per (successfully-posted article × comment).
- *
- * `posted` is the subset of naver posts that succeeded — each carries the
- * account plus the cafe/article the comment should attach to.
- */
-export function buildBothCommentJobs(
-  posted: { accountId: string; cafeId: number; articleId: number }[],
-  comments: string[],
-): CommentJob[] {
-  return posted.flatMap((p) =>
-    comments.map((content) => ({
-      accountId: p.accountId,
-      cafeId: p.cafeId,
-      articleId: p.articleId,
-      content,
-    })),
-  );
-}
-
-/**
- * `comment` + `url` mode: one comment job per (account × comment), all aimed at
- * the same parsed article `target`.
- */
-export function buildUrlCommentJobs(
-  accountIds: string[],
-  target: CommentArticleTarget,
-  comments: string[],
-): CommentJob[] {
-  return accountIds.flatMap((accountId) =>
-    comments.map((content) => ({
-      accountId,
-      cafeId: target.cafeId,
-      articleId: target.articleId,
-      content,
-    })),
-  );
 }
 
 /**

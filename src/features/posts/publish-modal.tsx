@@ -46,8 +46,6 @@ import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo, PlatformPill } from "@/shared/ui/platform-logo";
 
 import {
-  buildBothCommentJobs,
-  buildUrlCommentJobs,
   commentSummary,
   commentsAllOk,
   parseCafeArticleUrl,
@@ -943,10 +941,11 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         cafeId: naverPicks[x.j.key]?.cafeId ?? 0,
         articleId: x.out.articleId as number,
       }));
-    const commentJobs = buildBothCommentJobs(posted, comments);
-    if (!commentJobs.length) return postResults;
+    if (posted.length === 0) return postResults;
+    // The backend shuffles `comments` and deals one to each posted article
+    // (issue #98); `posted` already carries {accountId, cafeId, articleId}.
     const couts = await ipc.cafes
-      .runCommentJobs(commentJobs)
+      .runCommentJobs({ targets: posted, comments })
       .catch((): null => null);
     // 글이 올라간 행이라도 그 계정 댓글이 전부 성공해야 "성공"으로 둔다. 일부/전부
     // 실패를 초록 배지로 묻으면(이전 동작) 운영자가 재시도를 안 한다. 건수는 msg에.
@@ -973,13 +972,15 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         msg: "댓글 대상 URL 또는 댓글 내용이 없어요",
       }));
     }
-    const commentJobs = buildUrlCommentJobs(
-      naverJobs.map((j) => j.loginId),
-      urlTarget,
-      comments,
-    );
+    // Each account comments on the same parsed article; the backend shuffles
+    // `comments` and deals one per account (issue #98).
+    const targets = naverJobs.map((j) => ({
+      accountId: j.loginId,
+      cafeId: urlTarget.cafeId,
+      articleId: urlTarget.articleId,
+    }));
     const couts = await ipc.cafes
-      .runCommentJobs(commentJobs)
+      .runCommentJobs({ targets, comments })
       .catch((): null => null);
     return naverJobs.map((j) => ({
       ...j,

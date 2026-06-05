@@ -3,12 +3,13 @@ import { describe, it, expect } from "vitest";
 import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutcome";
 
 import {
-  buildBothCommentJobs,
-  buildUrlCommentJobs,
   commentSummary,
   commentsAllOk,
   parseCafeArticleUrl,
 } from "./comment-jobs";
+
+// 댓글 분배(mulberry32/distributeComments)는 백엔드로 이전됨(이슈 #98). 결정성·
+// 경계 케이스 검증은 src-tauri `naver_cafe::distribute`의 Rust 단위 테스트가 담당.
 
 describe("parseCafeArticleUrl", () => {
   it("parses the SPA cafes/{id}/articles/{aid} form", () => {
@@ -53,54 +54,6 @@ describe("parseCafeArticleUrl", () => {
     ).toBeNull();
     expect(parseCafeArticleUrl("")).toBeNull();
     expect(parseCafeArticleUrl(undefined)).toBeNull();
-  });
-});
-
-describe("buildBothCommentJobs", () => {
-  it("produces one job per (posted article × comment)", () => {
-    const jobs = buildBothCommentJobs(
-      [
-        { accountId: "a5", cafeId: 111, articleId: 1000 },
-        { accountId: "a6", cafeId: 222, articleId: 1001 },
-      ],
-      ["좋네요", "추가매수"],
-    );
-    expect(jobs).toHaveLength(4);
-    expect(jobs[0]).toEqual({
-      accountId: "a5",
-      cafeId: 111,
-      articleId: 1000,
-      content: "좋네요",
-    });
-    expect(jobs[3]).toEqual({
-      accountId: "a6",
-      cafeId: 222,
-      articleId: 1001,
-      content: "추가매수",
-    });
-  });
-
-  it("is empty when there are no posts or no comments", () => {
-    expect(buildBothCommentJobs([], ["x"])).toEqual([]);
-    expect(
-      buildBothCommentJobs([{ accountId: "a", cafeId: 1, articleId: 2 }], []),
-    ).toEqual([]);
-  });
-});
-
-describe("buildUrlCommentJobs", () => {
-  it("produces one job per (account × comment) at the fixed target", () => {
-    const jobs = buildUrlCommentJobs(
-      ["a5", "a10"],
-      { cafeId: 31732304, articleId: 9 },
-      ["댓글1", "댓글2", "댓글3"],
-    );
-    expect(jobs).toHaveLength(6);
-    expect(jobs.every((j) => j.cafeId === 31732304 && j.articleId === 9)).toBe(
-      true,
-    );
-    expect(jobs[0]?.accountId).toBe("a5");
-    expect(jobs[5]?.accountId).toBe("a10");
   });
 });
 

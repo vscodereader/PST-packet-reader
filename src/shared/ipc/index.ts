@@ -4,7 +4,7 @@ import type { Account } from "@/shared/bindings/Account";
 import type { ActivityItem } from "@/shared/bindings/ActivityItem";
 import type { Band } from "@/shared/bindings/Band";
 import type { Cafe } from "@/shared/bindings/Cafe";
-import type { CommentJob } from "@/shared/bindings/CommentJob";
+import type { CommentDistributionRequest } from "@/shared/bindings/CommentDistributionRequest";
 import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutcome";
 import type { DashStat } from "@/shared/bindings/DashStat";
 import type { EnvironmentStatus } from "@/shared/bindings/EnvironmentStatus";
@@ -23,7 +23,7 @@ export type {
   ActivityItem,
   Band,
   Cafe,
-  CommentJob,
+  CommentDistributionRequest,
   CommentPublishOutcome,
   DashStat,
   EnvironmentStatus,
@@ -158,12 +158,14 @@ export const ipc = {
     runPostJobs: (jobs: PostJob[]) =>
       call<PublishOutcome[]>("run_post_jobs", { jobs }),
     /**
-     * Run comment jobs sequentially; returns one slim outcome per job. Each job
-     * targets a numeric `cafeId`/`articleId` (from a just-posted article or a
-     * parsed URL); one job failing does not stop the rest.
+     * Distribute the comment pool across the targets (backend shuffles & deals
+     * one comment per target — issue #98), then run the jobs sequentially;
+     * returns one slim outcome per job. Each target carries a numeric
+     * `cafeId`/`articleId` (from a just-posted article or a parsed URL); one job
+     * failing does not stop the rest.
      */
-    runCommentJobs: (jobs: CommentJob[]) =>
-      call<CommentPublishOutcome[]>("run_comment_jobs", { jobs }),
+    runCommentJobs: (req: CommentDistributionRequest) =>
+      call<CommentPublishOutcome[]>("run_comment_jobs", { req }),
     /**
      * List every cafe `accountId` has joined (crawled across all pages),
      * using its session cookie. Rejects with the backend's error envelope
