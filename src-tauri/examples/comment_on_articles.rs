@@ -178,11 +178,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    println!(
-        "조회된 게시글 {}건 (lastPage={})",
-        list.articles.len(),
-        list.last_page
-    );
+    println!("조회된 게시글 {}건", list.articles.len());
     println!();
 
     // --- 3) top-N 선택 (Rust 재구현; TS topNArticles 의 graceful fallback 반영) ---

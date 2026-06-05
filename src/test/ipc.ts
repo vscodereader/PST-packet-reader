@@ -1001,7 +1001,6 @@ export const invoke = vi.fn(
         const articles = sortBy === "popular" ? [...seed].reverse() : seed;
         const response: ArticleListResponse = {
           articles: clone(articles),
-          lastPage: true,
         };
         return clone(response);
       }
