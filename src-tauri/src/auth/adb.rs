@@ -48,27 +48,27 @@ pub async fn probe_adb_connection() -> Result<(), OrchestratorError> {
 /// 토글해도 상단 버튼에 불이 안 들어올 수 있으나, IP가 바뀌면 라디오는 실제로 순환한 것.)
 pub async fn toggle_airplane_mode() -> Result<(), OrchestratorError> {
     let before = fetch_external_ip().await;
-    eprintln!("[ADB] ✈ 비행기모드 ON");
+    tracing::info!("[ADB] ✈ 비행기모드 ON");
     run_adb(&airplane_mode_args(true))?;
     sleep(Duration::from_secs(config::ADB_AIRPLANE_ENABLE_SECS)).await;
-    eprintln!("[ADB] ✈ 비행기모드 OFF — 인터넷 복구 대기");
+    tracing::info!("[ADB] ✈ 비행기모드 OFF — 인터넷 복구 대기");
     run_adb(&airplane_mode_args(false))?;
     wait_for_internet_connection().await?;
     let after = fetch_external_ip().await;
 
-    eprintln!("[ADB] ─────────── IP 회전 결과 ───────────");
-    eprintln!("[ADB]   기존 IP: {before}");
-    eprintln!("[ADB]   바뀐 IP: {after}");
+    tracing::info!("[ADB] ─────────── IP 회전 결과 ───────────");
+    tracing::info!("[ADB]   기존 IP: {before}");
+    tracing::info!("[ADB]   바뀐 IP: {after}");
     if before.starts_with('(') || after.starts_with('(') {
-        eprintln!("[ADB]   (IP 확인 실패 — PC 인터넷/테더링 확인)");
+        tracing::info!("[ADB]   (IP 확인 실패 — PC 인터넷/테더링 확인)");
     } else if before == after {
-        eprintln!(
+        tracing::info!(
             "[ADB]   ⚠ IP가 그대로 — USB 테더링이 PC 기본 경로인지 / 통신사 CGNAT인지 확인 필요"
         );
     } else {
-        eprintln!("[ADB]   ✓ IP 변경됨!");
+        tracing::info!("[ADB]   ✓ IP 변경됨!");
     }
-    eprintln!("[ADB] ────────────────────────────────────");
+    tracing::info!("[ADB] ────────────────────────────────────");
     Ok(())
 }
 

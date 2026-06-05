@@ -271,7 +271,7 @@ fn run_inner(
 // 네이버 페이지 스크립트(키 입력 암호화 핸들러 포함)가 자리잡은 것으로 본다. 진행 상황을
 // stderr로 출력해 콘솔에서 "폼이 완전히 로딩됐는지"를 확인할 수 있게 한다.
 fn wait_for_login_form(client: &mut CdpClient) -> bool {
-    eprintln!("[LOGIN] 로그인 폼 로딩 대기 중...");
+    tracing::info!("[LOGIN] 로그인 폼 로딩 대기 중...");
     let deadline = Instant::now() + Duration::from_secs(15);
     let ready_expr = "(()=>{\
         if(document.readyState!=='complete')return false;\
@@ -283,13 +283,13 @@ fn wait_for_login_form(client: &mut CdpClient) -> bool {
     })()";
     loop {
         if client.evaluate_bool(ready_expr).unwrap_or(false) {
-            eprintln!(
+            tracing::info!(
                 "[LOGIN] ✓ 로그인 폼 완전 로딩 확인 (readyState=complete · #id/#pw 입력 가능 · 로그인 버튼 준비)"
             );
             return true;
         }
         if Instant::now() >= deadline {
-            eprintln!("[LOGIN] ✗ 로그인 폼 로딩 시간 초과(15초)");
+            tracing::info!("[LOGIN] ✗ 로그인 폼 로딩 시간 초과(15초)");
             return false;
         }
         sleep(Duration::from_millis(250));

@@ -48,10 +48,20 @@ pub fn init_file_logging(logs_dir: &Path) {
         .with_target(true)
         .with_writer(non_blocking);
 
+    // 콘솔(stderr) 레이어 — `pnpm tauri dev`에선 터미널에 그대로 보이고, 콘솔이 없는
+    // 릴리즈 exe(`windows_subsystem = "windows"`)에선 detached stderr라 무해하다.
+    // 같은 이벤트가 파일·콘솔 양쪽에 남으므로, exe로 돌려도 `[ADB]`/`[LOGIN]`/`[CHROME]`
+    // 상태 로그를 파일(`logs/pstmacro.log`)에서 확인할 수 있다.
+    let console_layer = fmt::layer()
+        .with_ansi(false)
+        .with_target(false)
+        .with_writer(std::io::stderr);
+
     // try_init: 이미 설치돼 있으면 Err를 반환하므로 무시(중복 초기화 안전).
     let _ = tracing_subscriber::registry()
         .with(env_filter())
         .with(file_layer)
+        .with(console_layer)
         .try_init();
 }
 
