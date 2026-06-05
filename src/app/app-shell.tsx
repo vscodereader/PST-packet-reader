@@ -95,28 +95,50 @@ export function MacroApp() {
   // reflect the current data after adding/deleting accounts/posts/queue items
   // (previously loaded once on mount, so the numbers looked frozen).
   const [counts, setCounts] = useState({ posts: 0, queue: 0, accounts: 0 });
-  const refreshCounts = useCallback(() => {
+  // 알림 안읽음 표시: 가장 최근 알림(activity/log-batches의 at)과, 사용자가 마지막으로
+  // 알림 화면을 본 시각(localStorage)을 비교해 벨의 빨간 점을 켠다.
+  const [latestNotifAt, setLatestNotifAt] = useState(0);
+  const [logSeenAt, setLogSeenAt] = useState<number>(() => {
+    const v = Number(localStorage.getItem("mc-log-seen"));
+    return Number.isFinite(v) ? v : 0;
+  });
+  // markLogSeen=true면(알림 화면을 보는 중) 최신 알림을 "읽음"으로 처리해 벨 점을 끈다.
+  // setState는 effect 본문이 아니라 이 비동기 콜백 안에서만 호출한다.
+  const refreshCounts = useCallback((markLogSeen = false) => {
     void Promise.all([
       ipc.posts.list(),
       ipc.queue.listNow(),
       ipc.queue.listScheduled(),
       ipc.accounts.list(),
-    ]).then(([posts, now, sched, accounts]) =>
+      ipc.activity.list(),
+      ipc.logBatches.list(),
+    ]).then(([posts, now, sched, accounts, activity, batches]) => {
       setCounts({
         posts: posts.length,
         queue: now.length + sched.length,
         accounts: accounts.length,
-      }),
-    );
+      });
+      const latest = Math.max(
+        0,
+        ...activity.map((a) => a.at),
+        ...batches.map((b) => b.at),
+      );
+      setLatestNotifAt(latest);
+      if (markLogSeen) {
+        setLogSeenAt(latest);
+        localStorage.setItem("mc-log-seen", String(latest));
+      }
+    });
   }, []);
+  const hasUnread = latestNotifAt > logSeenAt;
   useEffect(() => {
-    refreshCounts();
+    refreshCounts(localStorage.getItem("mc-view") === "log");
   }, [refreshCounts]);
 
   const go: GoFn = (v, opts) => {
     setView(v);
     localStorage.setItem("mc-view", v);
-    refreshCounts();
+    refreshCounts(v === "log");
     if (v === "log") {
       setLogFilter(opts?.logFilter ?? null);
       setLogNonce((n) => n + 1);
@@ -168,7 +190,7 @@ export function MacroApp() {
             aria-label="사이드바 접기"
           />
           <Box style={{ flex: 1 }} />
-          <Indicator color="red" size={8} offset={4}>
+          <Indicator color="red" size={8} offset={4} disabled={!hasUnread}>
             <ThemeIcon
               variant="subtle"
               color="gray"
