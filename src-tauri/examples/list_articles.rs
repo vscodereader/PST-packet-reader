@@ -3,11 +3,11 @@
 //! 이슈 #96에서 추가한 게시글 목록 모듈([`pstmacro_lib::naver_cafe::article_list`])을
 //! 실제 네이버 카페 API에 대고 실행해, 사람이 직접 결과를 눈으로 확인할 수 있게 한다.
 //!
-//! ⚠️ #96의 엔드포인트/응답 스키마는 **추정값(ASSUMED)** 이다 — 실제 패킷 캡처
-//! 없이 형제 모듈·공개 article-list API 관례로 작성했다. 이 예제가 바로 그 추정을
-//! 실제 네이버 응답에 대고 **검증**하는 도구다. 성공 표가 나오면 스키마가 맞는
-//! 것이고, `ARTICLE_LIST_PARSE_ERROR` / `ARTICLE_LIST_API_ERROR` 등이 나오면
-//! 추정 스키마가 틀렸으니 모듈을 수정해야 한다는 신호다.
+//! #96의 엔드포인트/응답 스키마는 실패킷(2026-06-05)으로 확정했다(최신글=
+//! boardlist-api, 인기글=주간 인기글 V3). 이 예제로 실제 네이버 응답을 계속
+//! 회귀 점검할 수 있다 — 성공 표가 나오면 정상이고,
+//! `ARTICLE_LIST_PARSE_ERROR` / `ARTICLE_LIST_API_ERROR` 등이 나오면 네이버가
+//! 스키마를 바꿨다는 신호다.
 //!
 //! `send_comment`가 `CafeCommentClient`로 실제 전송을 하듯, 이 예제는
 //! [`ArticleListClient`]로 실제 조회만 수행한다(읽기 전용).
@@ -123,8 +123,7 @@ async fn main() {
         SortBy::Popular => "인기글(popular)",
     };
     println!("=== 2) 게시글 목록 조회 — {sort_label} ===");
-    println!("요청: cafeId={cafe_id} sortBy={}", sort_by.as_query_value());
-    println!("⚠️ #96 엔드포인트/스키마는 추정값입니다 — 이 출력으로 실제 응답과 대조하세요.\n");
+    println!("요청: cafeId={cafe_id} ({sort_label})\n");
 
     let client = ArticleListClient::new();
     match client.fetch_article_list(&cafe_id, sort_by, cookie).await {
@@ -133,14 +132,12 @@ async fn main() {
         }
         Err(err) => {
             // ErrorEnvelope: code(ARTICLE_LIST_PARSE_ERROR 등) + message + error_data.
-            // 쿠키/세션 값은 포함되지 않는다. pretty JSON 으로 보여 추정 스키마 진단을 돕는다.
+            // 쿠키/세션 값은 포함되지 않는다. pretty JSON 으로 보여 스키마 진단을 돕는다.
             eprintln!("실패 응답 (쿠키 값은 포함되지 않음):");
             eprintln!("{}", serde_json::to_string_pretty(&err).unwrap_or_default());
             eprintln!();
-            eprintln!(
-                "↑ code 가 ARTICLE_LIST_PARSE_ERROR / ARTICLE_LIST_API_ERROR 라면 #96의 추정"
-            );
-            eprintln!("  엔드포인트/응답 스키마가 실제와 다르다는 신호입니다 — 모듈을 수정하세요.");
+            eprintln!("↑ code 가 ARTICLE_LIST_PARSE_ERROR / ARTICLE_LIST_API_ERROR 라면 네이버가");
+            eprintln!("  엔드포인트/응답 스키마를 바꿨다는 신호입니다 — 모듈을 수정하세요.");
             std::process::exit(1);
         }
     }
@@ -150,11 +147,11 @@ async fn main() {
 fn print_articles(response: &pstmacro_lib::naver_cafe::article_list::ArticleListResponse) {
     let total = response.articles.len();
     if total == 0 {
-        println!("게시글이 없습니다. (lastPage={})", response.last_page);
+        println!("게시글이 없습니다.");
         return;
     }
 
-    println!("게시글 {total}건 (lastPage={}):\n", response.last_page);
+    println!("게시글 {total}건:\n");
     println!(
         "{:>10}  {:<40}  {:<16}  {:<16}  {:>4}/{:>5}/{:>4}",
         "articleId", "subject", "writer", "menu", "댓글", "조회", "좋아요"
@@ -173,10 +170,7 @@ fn print_articles(response: &pstmacro_lib::naver_cafe::article_list::ArticleList
         );
     }
     println!();
-    println!(
-        "총 {total}건, 마지막 페이지 여부(lastPage)={}",
-        response.last_page
-    );
+    println!("총 {total}건");
 }
 
 /// 쿠키 값을 확보한다.
@@ -245,7 +239,4 @@ fn print_usage() {
     eprintln!();
     eprintln!("카페의 게시글 목록(최신글/인기글)을 조회해 표로 출력합니다.");
     eprintln!("읽기 전용 — 게시글/댓글 등 어떤 쓰기 API도 호출하지 않습니다.");
-    eprintln!(
-        "⚠️ #96 엔드포인트/응답 스키마는 추정값 — 이 예제로 실제 네이버 응답과 대조해 검증하세요."
-    );
 }

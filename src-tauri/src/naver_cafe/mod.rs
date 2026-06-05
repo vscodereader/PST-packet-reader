@@ -30,8 +30,8 @@ pub(crate) fn shared_http_client() -> reqwest::Client {
 }
 
 pub use article_list::{
-    article_list_path, fetch_article_list_for_account, Article, ArticleListClient,
-    ArticleListError, ArticleListResponse, SortBy, ARTICLE_LIST_API_HOST,
+    fetch_article_list_for_account, Article, ArticleListClient, ArticleListError,
+    ArticleListResponse, SortBy, ARTICLE_LIST_API_HOST,
 };
 pub use cafe_ref::{
     cafe_gate_info_path, cafe_home_path, parse_cafe_id, parse_cafe_ref, parse_club_id_from_html,

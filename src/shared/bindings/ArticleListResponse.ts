@@ -3,13 +3,12 @@ import type { Article } from "./Article";
 
 /**
  * 게시글 목록 조회 결과 — UI 반환용.
+ *
+ * 실제 응답엔 페이지네이션 정보가 없어(최신글은 단일 페이지, 인기글은 전체
+ * 랭킹) 목록만 담는다.
  */
 export type ArticleListResponse = { 
 /**
  * 조회된 게시글 목록.
  */
-articles: Array<Article>, 
-/**
- * 마지막 페이지 여부.
- */
-lastPage: boolean, };
+articles: Array<Article>, };

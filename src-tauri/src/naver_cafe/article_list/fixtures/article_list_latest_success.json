@@ -1,0 +1,42 @@
+{
+  "result": {
+    "articleList": [
+      {
+        "type": "ARTICLE",
+        "item": {
+          "articleId": 12,
+          "cafeId": 31732304,
+          "refArticleId": 12,
+          "replyArticleCount": 0,
+          "writerInfo": { "memberKey": "euiheo_RNwUYtBYIIVCGVjhmxt2RElNokk1968" },
+          "menuId": 1,
+          "menuName": "자유게시판",
+          "subject": "Hello Java",
+          "summary": "Hello Spring boot",
+          "writeDateTimestamp": 1780551855370,
+          "commentCount": 3,
+          "readCount": 0,
+          "likeCount": 0,
+          "popular": false,
+          "newArticle": true,
+          "self": true
+        }
+      },
+      {
+        "type": "ARTICLE",
+        "item": {
+          "articleId": 11,
+          "cafeId": 31732304,
+          "menuId": 1,
+          "menuName": "자유게시판",
+          "subject": "Hello Rust",
+          "summary": "Hello Vite",
+          "writeDateTimestamp": 1780550400000,
+          "commentCount": 2,
+          "readCount": 0,
+          "likeCount": 0
+        }
+      }
+    ]
+  }
+}

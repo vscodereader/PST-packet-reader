@@ -3,12 +3,13 @@
 /**
  * UI로 반환하는 게시글 1건 (slim).
  *
- * 원본 응답의 다수 필드 중 목록 표시에 필요한 것만 추린다. 작성자 식별용
- * 민감 필드(`memberKey` 등)는 내부 구조체에 선언하지 않아 자동 배제된다.
+ * 최신글·인기글 두 응답을 공통 형태로 합친다. 최신글 응답엔 작성자 닉네임이
+ * 없어(`writerInfo.memberKey`만 존재) `writer_nickname`이 빈 문자열이고,
+ * 인기글 응답엔 게시판 이름이 없어 `menu_name`이 빈 문자열이다.
  */
 export type Article = { 
 /**
- * 숫자 게시글 ID. (JS `number` — [`crate::ipc::cafes::Board`] 참고)
+ * 숫자 게시글 ID — 댓글 대상이 되는 값.
  */
 articleId: number, 
 /**
@@ -16,7 +17,7 @@ articleId: number,
  */
 subject: string, 
 /**
- * 작성자 닉네임.
+ * 작성자 닉네임 (최신글 응답엔 없어 빈 문자열).
  */
 writerNickname: string, 
 /**
@@ -24,7 +25,7 @@ writerNickname: string,
  */
 menuId: number, 
 /**
- * 게시판 이름 (예: "자유게시판").
+ * 게시판 이름 (인기글 응답엔 없어 빈 문자열).
  */
 menuName: string, 
 /**
@@ -36,7 +37,7 @@ commentCount: number,
  */
 readCount: number, 
 /**
- * 좋아요 수.
+ * 좋아요 수 (최신글 `likeCount` / 인기글 `upCount`).
  */
 likeCount: number, 
 /**

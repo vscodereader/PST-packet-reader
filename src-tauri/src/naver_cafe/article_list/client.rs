@@ -1,20 +1,22 @@
 //! 카페 게시글 목록(최신글/인기글) 조회 HTTP 클라이언트.
 //!
-//! reqwest를 사용해 `apis.naver.com`에서 카페의 게시글 목록을 조회한다.
-//! 정렬 기준([`SortBy`])으로 최신글/인기글을 구분한다. 테스트에서는
-//! [`ArticleListClient::with_base_url`]로 wiremock 서버를 주입할 수 있다.
+//! reqwest로 `apis.naver.com`에서 카페 게시글 목록을 조회한다. 최신글과
+//! 인기글은 **호출 API가 다르다**(실패킷 2026-06-05 확정):
+//! - 최신글: `GET /cafe-web/cafe-boardlist-api/v1/cafes/{id}/menus/0/articles?page=1&pageSize=15&sortBy=TIME&viewType=L`
+//! - 인기글: `GET /cafe-web/cafe2/WeeklyPopularArticleListV3.json?cafeId={id}&mobileWeb=true&adUnit=PC_CAFE_BOARD&ad=false`
 //!
-//! ⚠️ 미확인 엔드포인트: 게시글 목록 API의 실제 패킷 캡처가 없어
-//! ([[#96]] 구현 시점) 경로/파라미터를 형제 모듈(menu)과 네이버 카페
-//! 공개 article-list API 관례로 추정했다. 실제 응답으로 검증 후 확정할 것.
+//! 두 API 모두 `x-cafe-product: pc` 헤더가 없으면 HTTP 500(errorCode 9999)을
+//! 반환하므로 [`cafe_read_headers`]로 위장 헤더를 채운다. 테스트에서는
+//! [`ArticleListClient::with_base_url`]로 wiremock 서버를 주입한다.
 //!
 //! # 쿠키 보안
-//! 쿠키 헤더 값은 사용자의 인증 자격 증명이다. 이 모듈은 쿠키 값을
-//! 로그, 에러 메시지, `Debug` 출력에 절대 포함하지 않는다.
+//! 쿠키 헤더 값은 사용자의 인증 자격 증명이다. 이 모듈은 쿠키 값을 로그,
+//! 에러 메시지, `Debug` 출력에 절대 포함하지 않는다.
 
 use crate::naver_cafe::article_list::models::{ArticleListError, ArticleListResponse, SortBy};
-use crate::naver_cafe::article_list::parser::parse_article_list_body;
+use crate::naver_cafe::article_list::parser::{parse_latest_body, parse_popular_body};
 use crate::naver_cafe::error::{http_error_envelope, ErrorEnvelope, NaverCafeCommonErrorData};
+use crate::naver_cafe::headers::cafe_read_headers;
 use crate::naver_cafe::post::BROWSER_USER_AGENT;
 
 // ---------------------------------------------------------------------------
@@ -24,25 +26,46 @@ use crate::naver_cafe::post::BROWSER_USER_AGENT;
 /// 게시글 목록 API 호스트.
 pub const ARTICLE_LIST_API_HOST: &str = "apis.naver.com";
 
-/// 한 페이지당 게시글 수(기본값).
-const DEFAULT_PAGE_SIZE: u32 = 20;
+/// 최신글 한 페이지당 게시글 수(실측값). 기능은 상위 N개(≤10)만 쓰므로 충분하다.
+const DEFAULT_PAGE_SIZE: u32 = 15;
+
+/// 전체글(모든 게시판 통합) 메뉴 ID.
+const ALL_MENU_ID: u32 = 0;
+
+/// 2xx 본문을 [`ArticleListResponse`]로 파싱하는 함수(최신글/인기글별로 다름).
+type ParseFn = fn(u16, String) -> Result<ArticleListResponse, ArticleListError>;
 
 // ---------------------------------------------------------------------------
-// 경로 헬퍼
+// 경로/Referer 헬퍼
 // ---------------------------------------------------------------------------
 
-/// 게시글 목록 API 경로(쿼리 포함)를 반환한다.
-///
-/// ⚠️ 미확인: 경로/파라미터는 추정값이다(모듈 doc 참조). `menuId=0`은
-/// 전체 게시판을 의미하는 관례를 따른다.
-pub fn article_list_path(cafe_id: &str, sort_by: SortBy, page: u32) -> String {
+/// 최신글(boardlist) API 경로(쿼리 포함). `menuId=0`은 전체글.
+fn latest_articles_path(cafe_id: &str, page: u32) -> String {
     format!(
-        "/cafe-web/cafe-articleapi/v2.1/cafes/{}/menus/0/articles?page={}&pageSize={}&sortBy={}",
-        cafe_id,
-        page,
-        DEFAULT_PAGE_SIZE,
-        sort_by.as_query_value()
+        "/cafe-web/cafe-boardlist-api/v1/cafes/{}/menus/{}/articles?page={}&pageSize={}&sortBy=TIME&viewType=L",
+        cafe_id, ALL_MENU_ID, page, DEFAULT_PAGE_SIZE
     )
+}
+
+/// 주간 인기글(totalScore) API 경로(쿼리 포함).
+fn weekly_popular_path(cafe_id: &str) -> String {
+    format!(
+        "/cafe-web/cafe2/WeeklyPopularArticleListV3.json?cafeId={}&mobileWeb=true&adUnit=PC_CAFE_BOARD&ad=false",
+        cafe_id
+    )
+}
+
+/// 최신글 조회 시 Referer.
+fn latest_referer(cafe_id: &str) -> String {
+    format!(
+        "https://cafe.naver.com/f-e/cafes/{}/menus/{}",
+        cafe_id, ALL_MENU_ID
+    )
+}
+
+/// 인기글 조회 시 Referer.
+fn popular_referer(cafe_id: &str) -> String {
+    format!("https://cafe.naver.com/ca-fe/cafes/{}/popular", cafe_id)
 }
 
 /// non-2xx 응답 시 `ArticleListError`를 생성한다(쿠키/세션 값은 절대 포함하지 않는다).
@@ -81,7 +104,7 @@ impl ArticleListClient {
         }
     }
 
-    /// 카페의 게시글 목록을 정렬 기준에 따라 조회한다(첫 페이지).
+    /// 카페의 게시글 목록을 정렬 기준에 따라 조회한다(최신글=1페이지, 인기글=주간).
     ///
     /// # 쿠키 보안
     /// `cookie_header`는 사용자의 인증 자격 증명이며, 이 함수는 해당 값을
@@ -90,7 +113,7 @@ impl ArticleListClient {
     /// # 실패 처리
     /// - Transport 오류 → `ARTICLE_LIST_TRANSPORT_ERROR`
     /// - non-2xx → `ARTICLE_LIST_HTTP_ERROR` (api_error_code/message/trace_id 파싱 시도)
-    /// - 2xx + `{"error":{...}}` 형태 → `ARTICLE_LIST_API_ERROR`
+    /// - 2xx + `{"error":{...}}` → `ARTICLE_LIST_API_ERROR`
     /// - 2xx + 파싱 불가 → `ARTICLE_LIST_PARSE_ERROR`
     pub async fn fetch_article_list(
         &self,
@@ -98,15 +121,26 @@ impl ArticleListClient {
         sort_by: SortBy,
         cookie_header: Option<&str>,
     ) -> Result<ArticleListResponse, ArticleListError> {
-        let path = article_list_path(cafe_id, sort_by, 1);
+        // 정렬 기준에 따라 경로·Referer·성공 파서가 달라진다.
+        let (path, referer, parse): (String, String, ParseFn) = match sort_by {
+            SortBy::Latest => (
+                latest_articles_path(cafe_id, 1),
+                latest_referer(cafe_id),
+                parse_latest_body,
+            ),
+            SortBy::Popular => (
+                weekly_popular_path(cafe_id),
+                popular_referer(cafe_id),
+                parse_popular_body,
+            ),
+        };
         let url = format!("{}{}", self.base_url, path);
 
-        let mut req = self
-            .http
-            .get(&url)
-            .header("Accept", "application/json, text/plain, */*")
-            .header("User-Agent", BROWSER_USER_AGENT);
-
+        let mut req = self.http.get(&url).header("User-Agent", BROWSER_USER_AGENT);
+        // x-cafe-product 등 위장 헤더(없으면 500) — 쿠키 값은 포함되지 않는다.
+        for (name, value) in cafe_read_headers(referer) {
+            req = req.header(name.as_str(), value.as_str());
+        }
         // 보안: Cookie 헤더 값은 로그에 기록하지 않는다.
         if let Some(cookie) = cookie_header {
             req = req.header("Cookie", cookie);
@@ -155,12 +189,8 @@ impl ArticleListClient {
             return Err(make_http_error(status_code, raw_body));
         }
 
-        let response = parse_article_list_body(status_code, raw_body)?;
-        tracing::debug!(
-            count = response.articles.len(),
-            sort_by = sort_by.as_query_value(),
-            "게시글 목록 조회 완료"
-        );
+        let response = parse(status_code, raw_body)?;
+        tracing::debug!(count = response.articles.len(), "게시글 목록 조회 완료");
         Ok(response)
     }
 }
@@ -182,27 +212,33 @@ mod tests {
 
     use super::*;
 
-    const ASSUMED_FIXTURE: &str = include_str!("fixtures/article_list_success.assumed.json");
+    const LATEST_FIXTURE: &str = include_str!("fixtures/article_list_latest_success.json");
+    const POPULAR_FIXTURE: &str = include_str!("fixtures/article_list_popular_success.json");
 
     fn cafe_id() -> &'static str {
         "31732304"
     }
 
-    fn expected_path() -> &'static str {
-        "/cafe-web/cafe-articleapi/v2.1/cafes/31732304/menus/0/articles"
+    fn latest_path() -> &'static str {
+        "/cafe-web/cafe-boardlist-api/v1/cafes/31732304/menus/0/articles"
+    }
+
+    fn popular_path() -> &'static str {
+        "/cafe-web/cafe2/WeeklyPopularArticleListV3.json"
     }
 
     // ------------------------------------------------------------------
-    // 성공 케이스 — 추정 fixture 응답
+    // 최신글 — boardlist 경로 + TIME/viewType 쿼리
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn fetch_article_list_success_returns_articles() {
+    async fn fetch_latest_returns_articles() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path(expected_path()))
+            .and(path(latest_path()))
             .and(query_param("sortBy", "TIME"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(ASSUMED_FIXTURE))
+            .and(query_param("viewType", "L"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(LATEST_FIXTURE))
             .mount(&server)
             .await;
 
@@ -213,46 +249,49 @@ mod tests {
             .expect("성공 응답이어야 함");
 
         assert_eq!(response.articles.len(), 2, "게시글 2건이 반환되어야 함");
-        assert!(response.last_page);
-        assert_eq!(response.articles[0].article_id, 1024);
-        assert_eq!(response.articles[0].subject, "오늘의 공지사항입니다");
+        assert_eq!(response.articles[0].article_id, 12);
+        assert_eq!(response.articles[0].subject, "Hello Java");
     }
 
     // ------------------------------------------------------------------
-    // 정렬 기준이 sortBy 쿼리로 매핑되는지 검증 (인기글)
+    // 인기글 — WeeklyPopular 경로
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn fetch_article_list_popular_sends_like_sort_query() {
+    async fn fetch_popular_hits_weekly_popular_endpoint() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path(expected_path()))
-            .and(query_param("sortBy", "LIKE"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(ASSUMED_FIXTURE))
+            .and(path(popular_path()))
+            .and(query_param("cafeId", cafe_id()))
+            .respond_with(ResponseTemplate::new(200).set_body_string(POPULAR_FIXTURE))
             .mount(&server)
             .await;
 
         let client = ArticleListClient::with_base_url(server.uri());
-        client
+        let response = client
             .fetch_article_list(cafe_id(), SortBy::Popular, None)
             .await
-            .expect("인기글 정렬 매칭 성공해야 함");
+            .expect("인기글 조회 성공해야 함");
+        assert_eq!(response.articles.len(), 2);
+        assert_eq!(response.articles[0].article_id, 3075152);
+        assert_eq!(response.articles[0].writer_nickname, "미여기");
     }
 
     // ------------------------------------------------------------------
-    // 요청 헤더/쿠키 검증
+    // 필수 헤더(x-cafe-product) + 쿠키 전송 검증 (500의 원인이었던 헤더)
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn fetch_article_list_sends_required_headers_and_cookie() {
+    async fn fetch_sends_x_cafe_product_and_cookie() {
         let server = MockServer::start().await;
         // 테스트용 가짜 쿠키 값 (실제 쿠키 아님)
         let fake_cookie = "NID_AUT=FAKE_TEST_VALUE; NID_SES=FAKE_SES_VALUE";
         Mock::given(method("GET"))
-            .and(path(expected_path()))
+            .and(path(latest_path()))
+            .and(header("x-cafe-product", "pc"))
             .and(header_exists("User-Agent"))
             .and(header("Cookie", fake_cookie))
-            .respond_with(ResponseTemplate::new(200).set_body_string(ASSUMED_FIXTURE))
+            .respond_with(ResponseTemplate::new(200).set_body_string(LATEST_FIXTURE))
             .mount(&server)
             .await;
 
@@ -264,15 +303,16 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // non-2xx 오류 — 실측 캡처된 실제 오류 스키마
+    // non-2xx 오류 — 실측 캡처된 실제 오류 스키마(errorCode 9999)
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn fetch_article_list_500_real_error_body_returns_http_error() {
+    async fn fetch_500_real_error_body_returns_http_error() {
         let server = MockServer::start().await;
-        let real_error_body = r#"{"error":{"errorCode":"10404","message":"Page Not Found","more":{"requestId":"cf4ee2db355d4584b6e0add8f8743048"}}}"#;
+        let real_error_body =
+            r#"{"error":{"errorCode":"9999","message":"오류가 발생하였습니다."}}"#;
         Mock::given(method("GET"))
-            .and(path(expected_path()))
+            .and(path(latest_path()))
             .respond_with(ResponseTemplate::new(500).set_body_string(real_error_body))
             .mount(&server)
             .await;
@@ -284,11 +324,10 @@ mod tests {
             .expect_err("500은 Err여야 함");
 
         assert_eq!(err.code, "ARTICLE_LIST_HTTP_ERROR");
-        assert_eq!(err.trace_id, "cf4ee2db355d4584b6e0add8f8743048");
         let data = err.error_data.expect("errorData가 없음");
         assert_eq!(data.http_status, Some(500));
         assert!(data.retryable, "500은 재시도 가능이어야 함");
-        assert_eq!(data.api_error_code.as_deref(), Some("10404"));
+        assert_eq!(data.api_error_code.as_deref(), Some("9999"));
     }
 
     // ------------------------------------------------------------------
@@ -296,11 +335,11 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn fetch_article_list_200_with_error_body_returns_api_error() {
+    async fn fetch_200_with_error_body_returns_api_error() {
         let server = MockServer::start().await;
         let error_body = r#"{"error":{"errorCode":"40004","message":"카페를 찾을 수 없습니다"}}"#;
         Mock::given(method("GET"))
-            .and(path(expected_path()))
+            .and(path(latest_path()))
             .respond_with(ResponseTemplate::new(200).set_body_string(error_body))
             .mount(&server)
             .await;
@@ -321,10 +360,10 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn fetch_article_list_unparseable_2xx_returns_parse_error() {
+    async fn fetch_unparseable_2xx_returns_parse_error() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path(expected_path()))
+            .and(path(latest_path()))
             .respond_with(ResponseTemplate::new(200).set_body_string("<html>not json</html>"))
             .mount(&server)
             .await;
@@ -342,7 +381,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn fetch_article_list_transport_error_when_server_down() {
+    async fn fetch_transport_error_when_server_down() {
         // 존재하지 않는 포트로 전송 → 연결 오류
         let client = ArticleListClient::with_base_url("http://127.0.0.1:1");
         let err = client

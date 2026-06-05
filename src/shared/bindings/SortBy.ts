@@ -3,6 +3,7 @@
 /**
  * 게시글 목록 정렬 기준 — 최신글 / 인기글.
  *
- * API 쿼리 파라미터 `sortBy`로 매핑된다(최신글=`TIME`, 인기글=`LIKE`).
+ * 둘은 호출하는 API 자체가 다르다(최신글=boardlist, 인기글=주간 인기글 V3).
+ * 인기글의 "댓글 TOP / 좋아요 TOP"은 추후 변형으로 확장할 수 있다.
  */
 export type SortBy = "latest" | "popular";

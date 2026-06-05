@@ -1,0 +1,54 @@
+{
+  "message": {
+    "result": {
+      "articleList": [
+        {
+          "statDate": "2026060424",
+          "cafeId": 10000260,
+          "articleId": 3075152,
+          "subject": "아이들에게 써벨로 S5란?",
+          "nickname": "미여기",
+          "memberKey": "Vnec4McVUz5EqWZPeJnEmbDZWNPW3Ek7ctJDpeSHj68",
+          "maskedMemberId": "nick****",
+          "self": false,
+          "memberLevel": 120,
+          "commentCount": 37,
+          "menuId": 3,
+          "menuType": "B",
+          "boardType": "L",
+          "newArticle": true,
+          "openArticle": true,
+          "readCount": 613,
+          "upCount": 20,
+          "writeDateTimestamp": 1780577357980,
+          "lastCommentDateTimestamp": 1780624845476,
+          "refArticleId": 3075152,
+          "totalScore": 3418
+        },
+        {
+          "statDate": "2026060424",
+          "cafeId": 10000260,
+          "articleId": 3075140,
+          "subject": "평지 항속할때 케이던스 얼마정도 유지 하시나요?",
+          "nickname": "소박한파주직장인",
+          "memberKey": "PA1QZQyxne21kQdhF_PaTQ",
+          "maskedMemberId": "gg****",
+          "self": false,
+          "commentCount": 15,
+          "imageCount": 0,
+          "menuId": 184,
+          "menuType": "B",
+          "boardType": "L",
+          "newArticle": true,
+          "openArticle": true,
+          "readCount": 430,
+          "upCount": 0,
+          "writeDateTimestamp": 1780573644027,
+          "lastCommentDateTimestamp": 1780626690943,
+          "refArticleId": 3075140,
+          "totalScore": 2544
+        }
+      ]
+    }
+  }
+}
