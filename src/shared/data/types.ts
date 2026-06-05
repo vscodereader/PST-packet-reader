@@ -146,6 +146,8 @@ export interface BatchItem {
 export interface LogBatch {
   id: string;
   title: string;
+  body?: string;
+  comment?: string;
   kind: ModeValue;
   at: number;
   state?: "running";

@@ -3,6 +3,8 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
+import { ipc } from "@/shared/ipc";
+
 import { MacroApp } from "./app-shell";
 
 vi.mock("@tauri-apps/api/core", async () => ({
@@ -40,6 +42,16 @@ describe("MacroApp", () => {
     await userEvent.click(navButton(/글 관리/));
     expect(screen.getByPlaceholderText("제목 검색")).toBeInTheDocument();
     expect(localStorage.getItem("mc-view")).toBe("posts");
+  });
+
+  it("글 관리 badge counts only non-draft posts", async () => {
+    const posts = await ipc.posts.list();
+    const expected = posts.filter((p) => p.status !== "draft").length;
+    // 시드에 draft가 있어야 의미 있는 검증(배지 = 전체가 아니라 draft 제외)
+    expect(expected).toBeLessThan(posts.length);
+    renderApp();
+    const btn = navButton(/글 관리/);
+    expect(await within(btn).findByText(String(expected))).toBeInTheDocument();
   });
 
   it("navigates to 게시 큐", async () => {
