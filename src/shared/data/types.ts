@@ -104,7 +104,7 @@ export interface ActivityItem {
   id: string;
   type: "success" | "error" | "info";
   text: string;
-  time: string;
+  at: number;
 }
 
 export interface QueueLocation {
@@ -147,7 +147,7 @@ export interface LogBatch {
   id: string;
   title: string;
   kind: ModeValue;
-  time: string;
+  at: number;
   state?: "running";
   items: BatchItem[];
 }

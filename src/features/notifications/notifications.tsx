@@ -19,21 +19,16 @@ import {
   Tooltip,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
+import { save } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useState } from "react";
 
 import type { EnvironmentStatus } from "@/shared/bindings/EnvironmentStatus";
 import { ACTIVE_PLATFORMS, KIND } from "@/shared/data/config";
-import { batchStatus } from "@/shared/data/helpers";
+import { batchStatus, dayBucket, formatRelative } from "@/shared/data/helpers";
 import type { BatchItem, LogBatch, LogFilter } from "@/shared/data/types";
 import { ipc } from "@/shared/ipc";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo } from "@/shared/ui/platform-logo";
-
-function dayBucket(time: string): "오늘" | "어제" | "이전" {
-  if (/^어제/.test(time)) return "어제";
-  if (/^오늘/.test(time) || /방금|분 전|시간 전/.test(time)) return "오늘";
-  return "이전";
-}
 
 const BATCH_STATUS: Record<string, { t: string; c: string }> = {
   running: { t: "처리중", c: "blue" },
@@ -195,7 +190,7 @@ function BatchRow({
           {bs.t}
         </Badge>
         <Text fz={12} c="dimmed" w={70} ta="right" style={{ flexShrink: 0 }}>
-          {batch.time.replace(/^(오늘|어제)\s/, "")}
+          {formatRelative(batch.at)}
         </Text>
         <Icon.chevronDown
           size={17}
@@ -216,7 +211,7 @@ interface SystemRow {
   id: string;
   status: "success" | "fail" | "info";
   title: string;
-  time: string;
+  at: number;
 }
 
 export function Notifications({ filter }: { filter: LogFilter | null }) {
@@ -272,7 +267,7 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
                 ? "success"
                 : "info",
           title: a.text,
-          time: a.time,
+          at: a.at,
         })),
       ),
     );
@@ -294,8 +289,8 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
     (!q || s.title.includes(q));
 
   type Row =
-    | { kind: "batch"; b: LogBatch; time: string }
-    | { kind: "system"; s: SystemRow; time: string };
+    | { kind: "batch"; b: LogBatch; at: number }
+    | { kind: "system"; s: SystemRow; at: number };
 
   const batches: Row[] =
     cat === "system"
@@ -303,20 +298,18 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
       : logBatches.filter(matchBatch).map((b) => ({
           kind: "batch",
           b,
-          time: b.time,
+          at: b.at,
         }));
   const systems: Row[] =
     cat === "post"
       ? []
-      : sysRows
-          .filter(matchSys)
-          .map((s) => ({ kind: "system", s, time: s.time }));
+      : sysRows.filter(matchSys).map((s) => ({ kind: "system", s, at: s.at }));
   const merged = [...batches, ...systems];
 
   const dayOrder: Record<string, number> = { 오늘: 0, 어제: 1, 이전: 2 };
   const groups: { day: string; rows: Row[] }[] = [];
   merged.forEach((row) => {
-    const day = dayBucket(row.time);
+    const day = dayBucket(row.at);
     let g = groups.find((x) => x.day === day);
     if (!g) {
       g = { day, rows: [] };
@@ -412,12 +405,34 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
           size="sm"
           variant="default"
           leftSection={<Icon.download size={16} />}
-          onClick={() =>
-            notifications.show({
-              message: "알림 내역을 엑셀로 내보냈어요",
-              color: "green",
-            })
-          }
+          onClick={async () => {
+            const path = await save({
+              defaultPath: "알림.xlsx",
+              filters: [{ name: "Excel", extensions: ["xlsx"] }],
+            });
+            if (!path) return;
+            try {
+              await ipc.excel.exportActivity(path);
+              notifications.show({
+                message: "알림 내역을 엑셀로 내보냈어요",
+                color: "green",
+              });
+            } catch (err) {
+              notifications.show({
+                message:
+                  "내보내기 실패: " +
+                  (err instanceof Error ? err.message : String(err)),
+                color: "red",
+              });
+              ipc.activity
+                .append(
+                  "error",
+                  "알림 내보내기 실패 — " +
+                    (err instanceof Error ? err.message : String(err)),
+                )
+                .catch(() => {});
+            }
+          }}
         >
           내보내기
         </Button>
@@ -691,7 +706,7 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
                     {row.s.title}
                   </Text>
                   <Text fz={12} c="dimmed" w={70} ta="right">
-                    {row.s.time}
+                    {formatRelative(row.s.at)}
                   </Text>
                 </Group>
               ),

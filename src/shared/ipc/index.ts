@@ -8,6 +8,7 @@ import type { CommentJob } from "@/shared/bindings/CommentJob";
 import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutcome";
 import type { DashStat } from "@/shared/bindings/DashStat";
 import type { EnvironmentStatus } from "@/shared/bindings/EnvironmentStatus";
+import type { ImportSummary } from "@/shared/bindings/ImportSummary";
 import type { JoinedCafe } from "@/shared/bindings/JoinedCafe";
 import type { LibraryPost } from "@/shared/bindings/LibraryPost";
 import type { LogBatch } from "@/shared/bindings/LogBatch";
@@ -26,6 +27,7 @@ export type {
   CommentPublishOutcome,
   DashStat,
   EnvironmentStatus,
+  ImportSummary,
   JoinedCafe,
   LibraryPost,
   LogBatch,
@@ -134,7 +136,11 @@ export const ipc = {
       call<QueueNowItem[]>("promote_queue_scheduled", { id }),
   },
   stocks: { list: () => call<Stock[]>("list_stocks") },
-  activity: { list: () => call<ActivityItem[]>("list_activity") },
+  activity: {
+    list: () => call<ActivityItem[]>("list_activity"),
+    append: (kind: "success" | "error" | "info", text: string) =>
+      call<void>("append_activity", { kind, text }),
+  },
   stats: { list: () => call<DashStat[]>("list_stats") },
   logBatches: { list: () => call<LogBatch[]>("list_log_batches") },
   cafes: {
@@ -179,6 +185,17 @@ export const ipc = {
     endpoint: () => call<{ host: string; port: number }>("forum_endpoint"),
     publishNow: (request: ForumPublishRequest) =>
       call<ForumPublishResult[]>("run_forum_publish_now", { request }),
+  },
+  // 엑셀(.xlsx) 내보내기/가져오기 — Rust에서 파일 처리, 프론트에서 경로 공급.
+  excel: {
+    exportAccounts: (path: string) =>
+      call<void>("export_accounts_xlsx", { path }),
+    exportActivity: (path: string) =>
+      call<void>("export_activity_xlsx", { path }),
+    importAccounts: (path: string) =>
+      call<ImportSummary>("import_accounts_xlsx", { path }),
+    importPosts: (path: string) =>
+      call<ImportSummary>("import_posts_xlsx", { path }),
   },
   // 네이버 로그인 자동화(CDP). 계정 ID/PW로 로그인해 쿠키를 저장한다.
   auth: {

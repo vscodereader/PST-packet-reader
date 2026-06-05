@@ -1,8 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import {
   acctPlatforms,
   batchStatus,
+  dayBucket,
+  formatRelative,
   hasToken,
   jobLink,
   resolveTemplate,
@@ -65,12 +67,50 @@ describe("hasToken", () => {
   });
 });
 
+describe("formatRelative", () => {
+  const now = 1_700_000_000_000;
+  it("shows 방금 within a minute", () => {
+    expect(formatRelative(now - 30_000, now)).toBe("방금");
+  });
+  it("shows minutes then hours", () => {
+    expect(formatRelative(now - 5 * 60_000, now)).toBe("5분 전");
+    expect(formatRelative(now - 3 * 3_600_000, now)).toBe("3시간 전");
+  });
+  it("shows 어제 HH:mm for yesterday's items", () => {
+    // 2026-06-03T09:00:00 is 25 h before now (2026-06-04T10:00:00), so diff
+    // exceeds the 24 h threshold and dayBucket returns "어제".
+    const yesterday = new Date("2026-06-03T09:00:00").getTime();
+    const now = new Date("2026-06-04T10:00:00").getTime();
+    expect(formatRelative(yesterday, now)).toBe("어제 09:00");
+  });
+  it("shows M월 D일 for items older than yesterday", () => {
+    const old = new Date("2026-06-01T09:15:00").getTime();
+    const now = new Date("2026-06-04T10:00:00").getTime();
+    expect(formatRelative(old, now)).toBe("6월 1일");
+  });
+});
+
+describe("dayBucket", () => {
+  const now = new Date("2026-06-04T10:00:00").getTime();
+  it("buckets today / yesterday / older", () => {
+    expect(dayBucket(new Date("2026-06-04T08:00:00").getTime(), now)).toBe(
+      "오늘",
+    );
+    expect(dayBucket(new Date("2026-06-03T23:00:00").getTime(), now)).toBe(
+      "어제",
+    );
+    expect(dayBucket(new Date("2026-06-01T09:00:00").getTime(), now)).toBe(
+      "이전",
+    );
+  });
+});
+
 describe("batchStatus", () => {
   const base = (items: LogBatch["items"]): LogBatch => ({
     id: "x",
     title: "t",
     kind: "post",
-    time: "now",
+    at: 1_700_000_000_000,
     items,
   });
 
