@@ -1,102 +1,9 @@
-import type { CommentJob } from "@/shared/bindings/CommentJob";
 import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutcome";
 
 /** A resolved numeric comment target — the cafe + article to comment on. */
 export interface CommentArticleTarget {
   cafeId: number;
   articleId: number;
-}
-
-/** A pseudo-random source: a function returning a float in `[0, 1)`. */
-export type Rng = () => number;
-
-/**
- * `mulberry32` — a tiny, fast 32-bit seeded PRNG.
- *
- * Given the same numeric `seed` it always produces the same stream, which makes
- * the comment distribution reproducible in tests. We avoid `Math.random` inside
- * the builders precisely so a fixed seed yields a deterministic assignment;
- * production callers can seed with `Date.now()` (the default below).
- */
-export function mulberry32(seed: number): Rng {
-  let a = seed >>> 0;
-  return () => {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/** Options shared by every comment-job builder. */
-export interface DistributeOptions {
-  /**
-   * The RNG driving the random comment↔account assignment. Defaults to a
-   * `mulberry32` seeded from `Date.now()` so production output varies per run;
-   * pass a fixed-seed `mulberry32(n)` for deterministic tests.
-   */
-  rng?: Rng;
-}
-
-/** One account paired with the single comment randomly dealt to it. */
-export interface CommentAssignment {
-  accountId: string;
-  content: string;
-}
-
-/**
- * Fisher–Yates shuffle of a *copy* of `items`, driven by the injected `rng`.
- * Pure w.r.t. the input array; the result order is fully determined by `rng`.
- */
-function shuffle<T>(items: readonly T[], rng: Rng): T[] {
-  const out = items.slice();
-  for (let i = out.length - 1; i > 0; i--) {
-    const j = Math.floor(rng() * (i + 1));
-    // i ∈ [1, len-1] and j ∈ [0, i] are provably in-bounds, so the swap must
-    // ALWAYS happen — skipping it on a (type-only) `undefined` would bias the
-    // permutation. The non-null assertions are sound given those bounds and
-    // keep the shuffle unbiased even if reused with a nullable element type.
-    const tmp = out[i]!;
-    out[i] = out[j]!;
-    out[j] = tmp;
-  }
-  return out;
-}
-
-/**
- * Randomly assign **one** comment to each account so different accounts post
- * different comments (the UX promise: "계정마다 다른 댓글이 무작위로 게시돼").
- *
- * The comment pool is shuffled with the injected `rng` and dealt round-robin to
- * the accounts in order. This gives an even, varied spread in both boundary
- * cases:
- *   - **comments < accounts**: the shuffled pool is cycled, so every account
- *     still gets a comment and all comments get reused fairly.
- *   - **comments > accounts**: each account receives a distinct comment from
- *     the front of the shuffled pool (the surplus comments simply go unused).
- *
- * Returns `[]` when either list is empty. Exported so issue #97's future
- * latest·popular builder can reuse the exact same distribution.
- */
-export function distributeComments(
-  accountIds: readonly string[],
-  comments: readonly string[],
-  rng: Rng,
-): CommentAssignment[] {
-  if (accountIds.length === 0 || comments.length === 0) return [];
-  const pool = shuffle(comments, rng);
-  return accountIds.map((accountId, i) => {
-    // round-robin over the shuffled pool; modulo keeps us in-bounds, but the
-    // indexed read is still T | undefined under noUncheckedIndexedAccess.
-    const content = pool[i % pool.length] ?? comments[0] ?? "";
-    return { accountId, content };
-  });
-}
-
-/** Default production RNG: a fresh `mulberry32` seeded from the wall clock. */
-function defaultRng(): Rng {
-  return mulberry32(Date.now());
 }
 
 /**
@@ -153,57 +60,6 @@ export function parseCafeArticleUrl(
   }
 
   return null;
-}
-
-/**
- * `both` mode: one comment job per successfully-posted article, each getting a
- * single **randomly-distributed** comment (see {@link distributeComments}) so
- * accounts don't all post the same text in the same order.
- *
- * `posted` is the subset of naver posts that succeeded — each carries the
- * account plus the cafe/article the comment should attach to.
- */
-export function buildBothCommentJobs(
-  posted: { accountId: string; cafeId: number; articleId: number }[],
-  comments: string[],
-  opts: DistributeOptions = {},
-): CommentJob[] {
-  if (posted.length === 0 || comments.length === 0) return [];
-  const rng = opts.rng ?? defaultRng();
-  const assigned = distributeComments(
-    posted.map((p) => p.accountId),
-    comments,
-    rng,
-  );
-  return posted.map((p, i) => ({
-    accountId: p.accountId,
-    cafeId: p.cafeId,
-    articleId: p.articleId,
-    // distributeComments returns one assignment per account, same order/length
-    // as `posted`; fall back defensively to keep the type non-undefined.
-    content: assigned[i]?.content ?? comments[0] ?? "",
-  }));
-}
-
-/**
- * `comment` + `url` mode: one comment job per account, each getting a single
- * **randomly-distributed** comment (see {@link distributeComments}), all aimed
- * at the same parsed article `target`.
- */
-export function buildUrlCommentJobs(
-  accountIds: string[],
-  target: CommentArticleTarget,
-  comments: string[],
-  opts: DistributeOptions = {},
-): CommentJob[] {
-  if (accountIds.length === 0 || comments.length === 0) return [];
-  const rng = opts.rng ?? defaultRng();
-  return distributeComments(accountIds, comments, rng).map((a) => ({
-    accountId: a.accountId,
-    cafeId: target.cafeId,
-    articleId: target.articleId,
-    content: a.content,
-  }));
 }
 
 /**

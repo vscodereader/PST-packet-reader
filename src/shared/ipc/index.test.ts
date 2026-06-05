@@ -71,10 +71,13 @@ describe("ipc facade", () => {
     const jobs = [{ accountId: "a1" }] as never;
     await ipc.cafes.runPostJobs(jobs);
     expect(mockInvoke).toHaveBeenCalledWith("run_post_jobs", { jobs });
-    const commentJobs = [{ accountId: "a1", cafeId: 1, articleId: 2 }] as never;
-    await ipc.cafes.runCommentJobs(commentJobs);
+    const commentReq = {
+      targets: [{ accountId: "a1", cafeId: 1, articleId: 2 }],
+      comments: ["c1"],
+    } as never;
+    await ipc.cafes.runCommentJobs(commentReq);
     expect(mockInvoke).toHaveBeenCalledWith("run_comment_jobs", {
-      jobs: commentJobs,
+      req: commentReq,
     });
     await ipc.cafes.listJoined("acc1");
     expect(mockInvoke).toHaveBeenCalledWith("list_joined_cafes", {

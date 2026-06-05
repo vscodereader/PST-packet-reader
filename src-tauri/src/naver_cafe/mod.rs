@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 
 pub mod cafe_ref;
 pub mod comment;
+pub mod distribute;
 pub mod error;
 pub(crate) mod headers;
 pub mod joined_cafes;
