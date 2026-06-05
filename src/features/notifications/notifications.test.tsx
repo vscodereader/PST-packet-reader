@@ -5,6 +5,7 @@ import { beforeEach, describe, it, expect, vi } from "vitest";
 
 import type { LogFilter } from "@/shared/data/types";
 import { ipc } from "@/shared/ipc";
+import { resetIpc } from "@/test/ipc";
 import { pickOption } from "@/test/select";
 
 import { Notifications } from "./notifications";
@@ -28,6 +29,7 @@ function renderLog(filter: LogFilter | null = null) {
 
 describe("Notifications", () => {
   beforeEach(() => {
+    resetIpc();
     vi.spyOn(ipc.activity, "append").mockResolvedValue(undefined);
   });
 

@@ -84,7 +84,35 @@ pub fn get_queue_status(state: &QueueState) -> Result<QueueStatus, OrchestratorE
     })
 }
 
+/// Resets the queue's running flag (and fails any in-flight job) if `worker_loop`
+/// unwinds abnormally — e.g. `process_account` panics. Without it a panic would
+/// leave `is_running = true` and the job stuck `Running`, permanently wedging the
+/// queue (no later enqueue would spawn a new worker). `process_account` runs with
+/// the lock released, so the mutex isn't poisoned and cleanup can proceed.
+struct WorkerGuard<'a> {
+    state: &'a QueueState,
+}
+
+impl Drop for WorkerGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut inner) = self.state.inner.lock() {
+            inner.is_running = false;
+            inner.current_account_id = None;
+            for job in inner
+                .jobs
+                .iter_mut()
+                .filter(|j| j.status == QueueJobStatus::Running)
+            {
+                job.status = QueueJobStatus::Failed;
+                job.message = "작업이 비정상 종료되었습니다".to_string();
+                job.finished_at = Some(now_millis());
+            }
+        }
+    }
+}
+
 async fn worker_loop<R: Runtime>(state: QueueState, app: AppHandle<R>) {
+    let _guard = WorkerGuard { state: &state };
     loop {
         let job = {
             let Ok(mut inner) = state.inner.lock() else {
