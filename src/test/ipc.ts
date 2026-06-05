@@ -917,6 +917,8 @@ let loginJobIds: string[] = [];
 // 테스트에서 특정 계정의 로그인 결과를 실패 등으로 시뮬레이션하기 위한 오버라이드.
 // accountId → { status, message }. 미지정 계정은 success로 본다.
 let loginOutcomes: Record<string, { status: string; message: string }> = {};
+// 테스트에서 특정 카페의 최신/인기글 목록 조회를 실패시키기 위한 cafeId(문자열) 집합.
+let articleListFailures = new Set<string>();
 
 /**
  * Override login-queue outcomes for specific accounts (e.g. simulate a failure).
@@ -926,6 +928,14 @@ export function setLoginOutcomes(
   outcomes: Record<string, { status: string; message: string }>,
 ): void {
   loginOutcomes = outcomes;
+}
+
+/**
+ * Make `list_cafe_articles` reject for the given cafeIds (string form, as the
+ * modal passes them) to simulate a list-fetch failure. Cleared by `resetIpc`.
+ */
+export function setArticleListFailures(cafeIds: string[]): void {
+  articleListFailures = new Set(cafeIds);
 }
 
 /** Re-seed the in-memory backend to the pristine dataset. Call in `beforeEach`. */
@@ -940,6 +950,7 @@ export function resetIpc(): void {
   };
   loginJobIds = [];
   loginOutcomes = {};
+  articleListFailures = new Set();
 }
 
 resetIpc();
@@ -1011,6 +1022,9 @@ export const invoke = vi.fn(
         // 충분한 건수를 둔다.
         const cafeId = args!.cafeId as string;
         const sortBy = args!.sortBy as string;
+        if (articleListFailures.has(cafeId)) {
+          throw new Error(`목록 조회 실패 (cafe ${cafeId})`);
+        }
         const seed = SEED_ARTICLES[cafeId] ?? SEED_ARTICLES_DEFAULT;
         const articles = sortBy === "popular" ? [...seed].reverse() : seed;
         const response: ArticleListResponse = {

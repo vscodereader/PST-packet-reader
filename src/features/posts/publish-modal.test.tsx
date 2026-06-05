@@ -1,16 +1,27 @@
 import { MantineProvider } from "@mantine/core";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
 import type { LibraryPost } from "@/shared/data/types";
-import { invoke as ipcBackend, resetIpc } from "@/test/ipc";
+import {
+  invoke as ipcBackend,
+  resetIpc,
+  setArticleListFailures,
+} from "@/test/ipc";
 import { pickOption } from "@/test/select";
 
 import { PublishModal } from "./publish-modal";
 
 vi.mock("@tauri-apps/api/core", async () => ({
   invoke: (await import("@/test/ipc")).invoke,
+}));
+
+// 테스트는 <Notifications/> 없이 렌더하므로 토스트가 DOM에 뜨지 않는다.
+// notifications.show를 스파이로 대체해 red 토스트를 단언한다.
+const { notifShow } = vi.hoisted(() => ({ notifShow: vi.fn() }));
+vi.mock("@mantine/notifications", () => ({
+  notifications: { show: notifShow },
 }));
 
 const postDoc: LibraryPost = {
@@ -41,6 +52,7 @@ describe("PublishModal", () => {
   beforeEach(() => {
     resetIpc();
     ipcBackend.mockClear();
+    notifShow.mockClear();
   });
 
   it("renders 게시 설정 with the document title", async () => {
@@ -447,6 +459,124 @@ describe("PublishModal", () => {
     expect([...new Set(req.targets.map((t) => t.articleId))].sort()).toEqual([
       7000, 7001,
     ]);
+  });
+
+  it("surfaces a red toast and drops only the failed account when a list fetch rejects", async () => {
+    // money_lab → cafe 11111111 (succeeds), insight_note → cafe 33333333 (rejects).
+    setArticleListFailures(["33333333"]);
+    const latestDoc: LibraryPost = {
+      id: "lerr",
+      title: "최신글 댓글 — 목록 실패",
+      kind: "comment",
+      updated: "방금 전",
+      words: 30,
+      status: "ready",
+      excerpt: "요약",
+      commentTarget: "latest",
+      commentCount: 1,
+      comments: ["댓글"],
+    };
+    renderPublish({ doc: latestDoc });
+    await userEvent.click(await screen.findByText("invest_king7")); // drop forum
+    await userEvent.click(screen.getByText("money_lab")); // a5 naver
+    await userEvent.click(screen.getByText("insight_note")); // a10 naver
+    // Two naver rows each expose a cafe-select placeholder.
+    await screen.findAllByPlaceholderText("가입 카페 선택");
+    // Two naver rows → cafe selects at listbox index 0 and 2 (board selects 1/3).
+    await pickOption(0, "주식투자연구소 카페");
+    await pickOption(2, "가치투자 모임");
+    await userEvent.click(
+      await screen.findByRole(
+        "button",
+        { name: /^게시 \(2\)/ },
+        { timeout: 3000 },
+      ),
+    );
+    // The failing cafe surfaces a red toast…
+    await vi.waitFor(() =>
+      expect(notifShow).toHaveBeenCalledWith(
+        expect.objectContaining({ color: "red" }),
+      ),
+    );
+    // …and only the good account's article becomes a comment target — the failed
+    // account contributes none (other accounts are unaffected).
+    const call = ipcBackend.mock.calls.find((c) => c[0] === "run_comment_jobs");
+    expect(call).toBeDefined();
+    const req = (
+      call?.[1] as {
+        req: { targets: { accountId: string; cafeId: number }[] };
+      }
+    ).req;
+    expect(req.targets).toEqual([
+      expect.objectContaining({ accountId: "money_lab", cafeId: 11111111 }),
+    ]);
+    expect(req.targets.some((t) => t.accountId === "insight_note")).toBe(false);
+  });
+
+  it("reflects the chosen count (5) in the number of comment targets", async () => {
+    const latestDoc: LibraryPost = {
+      id: "l5",
+      title: "최신글 5건",
+      kind: "comment",
+      updated: "방금 전",
+      words: 30,
+      status: "ready",
+      excerpt: "요약",
+      commentTarget: "latest",
+      comments: ["댓글"],
+    };
+    renderPublish({ doc: latestDoc });
+    await userEvent.click(await screen.findByText("invest_king7")); // drop forum
+    await userEvent.click(screen.getByText("money_lab")); // a5 naver
+    await screen.findByPlaceholderText("가입 카페 선택");
+    // 주식투자연구소 카페 (cafeId 11111111) has 10 latest articles in the mock.
+    await pickOption(0, "주식투자연구소 카페");
+    // Pick top-5 via the count segmented control.
+    await userEvent.click(await screen.findByRole("radio", { name: "5" }));
+    await userEvent.click(
+      await screen.findByRole(
+        "button",
+        { name: /^게시 \(1\)/ },
+        { timeout: 3000 },
+      ),
+    );
+    const call = ipcBackend.mock.calls.find((c) => c[0] === "run_comment_jobs");
+    expect(call).toBeDefined();
+    const req = (call?.[1] as { req: { targets: { articleId: number }[] } })
+      .req;
+    // Top-5 latest → articleId 8000..8004.
+    expect(req.targets).toHaveLength(5);
+    expect([...new Set(req.targets.map((t) => t.articleId))].sort()).toEqual([
+      8000, 8001, 8002, 8003, 8004,
+    ]);
+  });
+
+  it("blocks publish while a selected naver account hasn't picked a cafe", async () => {
+    const latestDoc: LibraryPost = {
+      id: "lguard",
+      title: "최신글 — 카페 미선택 가드",
+      kind: "comment",
+      updated: "방금 전",
+      words: 30,
+      status: "ready",
+      excerpt: "요약",
+      commentTarget: "latest",
+      commentCount: 1,
+      comments: ["댓글"],
+    };
+    renderPublish({ doc: latestDoc });
+    await userEvent.click(await screen.findByText("invest_king7")); // drop forum
+    await userEvent.click(screen.getByText("money_lab")); // a5 naver, no cafe yet
+    await screen.findByPlaceholderText("가입 카페 선택");
+    // No cafe picked → no comment job is built, so the publish button is (0) and
+    // disabled (listTargetReady guard).
+    const publish = await screen.findByRole("button", { name: /^게시 \(0\)/ });
+    expect(publish).toBeDisabled();
+    // Picking a cafe satisfies the guard and re-enables it.
+    await pickOption(0, "주식투자연구소 카페");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^게시 \(1\)/ })).toBeEnabled(),
+    );
   });
 
   it("picks a per-account cafe/board and the band destination", async () => {
