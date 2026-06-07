@@ -20,6 +20,8 @@ pub use error::OrchestratorError;
 pub use paths::{app_data_root, paths_for_root};
 pub use queue::{enqueue_accounts, get_queue_status, QueueState};
 pub use types::{Account, QueueJob, QueueJobStatus, QueueStatus, RuntimePaths};
+// 로그용 ID 마스킹 헬퍼를 다른 모듈(예: discussion_batch)에서도 쓸 수 있게 재노출.
+pub(crate) use util::mask_id;
 
 use accounts::{has_valid_account_cookies, load_accounts_file};
 use adb::{assert_adb_device, toggle_airplane_mode};
