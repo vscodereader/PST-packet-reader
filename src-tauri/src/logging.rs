@@ -14,11 +14,22 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 /// non-blocking writer의 [`WorkerGuard`]를 프로세스 수명 동안 살려둔다.
 /// 이 가드가 drop되면 백그라운드 로깅 스레드가 멈추므로, 전역에 보관한다.
 static LOG_GUARD: Mutex<Option<WorkerGuard>> = Mutex::new(None);
+
+/// 로그 타임스탬프를 로컬 시각 `YYYY-MM-DD HH:MM:SS`로 출력한다(기본 UTC 마이크로초
+/// 대신 사람이 읽기 쉬운 형식). 표현만 바꾸며, 로깅 동작에는 영향이 없다.
+struct LocalTimer;
+
+impl FormatTime for LocalTimer {
+    fn format_time(&self, w: &mut fmt::format::Writer<'_>) -> std::fmt::Result {
+        write!(w, "{}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
+    }
+}
 
 /// 환경변수 `PSTMACRO_LOG`(미설정 시 `info`)로 필터를 구성한다.
 fn env_filter() -> EnvFilter {
@@ -46,6 +57,7 @@ pub fn init_file_logging(logs_dir: &Path) {
     let file_layer = fmt::layer()
         .with_ansi(false)
         .with_target(true)
+        .with_timer(LocalTimer)
         .with_writer(non_blocking);
 
     // 콘솔(stderr) 레이어 — `pnpm tauri dev`에선 터미널에 그대로 보이고, 콘솔이 없는
@@ -55,6 +67,7 @@ pub fn init_file_logging(logs_dir: &Path) {
     let console_layer = fmt::layer()
         .with_ansi(false)
         .with_target(false)
+        .with_timer(LocalTimer)
         .with_writer(std::io::stderr);
 
     // try_init: 이미 설치돼 있으면 Err를 반환하므로 무시(중복 초기화 안전).
