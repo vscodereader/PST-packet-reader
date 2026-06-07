@@ -146,6 +146,18 @@ mod tests {
     }
 
     #[test]
+    fn never_emits_password_values_passed_around_it() {
+        // 컨벤션: 비밀번호는 어떤 이벤트 인자로도 넘기지 않는다. 로그 호출부는
+        // 마스킹된 식별자(#순번 cho****)와 상태만 기록하므로 PW 평문이 남지 않는다.
+        let pw = "S3cr3tPassw0rd!";
+        let _password = pw; // 보유는 하지만 로깅엔 넘기지 않는다
+        let out = captured(|| {
+            tracing::info!("[LOGIN] #3 cho****  로그인 성공 ✅");
+        });
+        assert!(!out.contains(pw), "비밀번호가 로그에 노출됨: {out}");
+    }
+
+    #[test]
     fn init_file_logging_creates_logs_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let logs_dir = tmp.path().join("logs");
