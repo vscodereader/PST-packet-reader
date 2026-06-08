@@ -52,7 +52,15 @@ export interface StockCandidate {
   link: string;
 }
 
-export type AccountStatus = "new" | "active" | "error";
+// 백엔드 `AccountStatus`(ts-rs 생성 바인딩)와 일치시킨다. 이 손수 작성 union은 UI가
+// 한곳에서 도메인 타입을 import하도록 유지하는 미러다.
+export type AccountStatus =
+  | "new"
+  | "active"
+  | "badCredentials"
+  | "challenge"
+  | "blocked"
+  | "error";
 
 export interface Account {
   id: string;
@@ -60,6 +68,8 @@ export interface Account {
   loginId: string;
   pw: string;
   status: AccountStatus;
+  /** 마지막 상태 변경 사유(차단/타임아웃 원문이나 조치 안내). 배지 tooltip에 표시. */
+  statusMsg?: string;
   last: string;
   tags: string[];
 }
