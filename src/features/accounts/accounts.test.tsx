@@ -412,6 +412,8 @@ describe("Accounts", () => {
         accountIds: ["invest_king7"],
         headless: false,
         useAdb: false,
+        // 선택 계정 로그인은 강제 재로그인(이슈 #132).
+        force: true,
       }),
     );
 

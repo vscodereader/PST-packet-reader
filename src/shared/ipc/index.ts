@@ -222,7 +222,12 @@ export const ipc = {
     bootstrap: () => call<unknown>("bootstrap_runtime"),
     saveAccounts: (accounts: AuthAccount[]) =>
       call<AuthAccount[]>("save_accounts", { accounts }),
-    enqueueLogin: (accountIds: string[], headless = false) =>
+    // force=true: skip the local-cookie short-circuit and always perform a real
+    // re-login, overwriting the saved cookie file — for explicit per-account login
+    // so server-dead cookies that still pass local validation get refreshed
+    // (issue #132). Leave false for batch "run all" to avoid re-logging in live
+    // sessions (stealth: fewer automated logins).
+    enqueueLogin: (accountIds: string[], headless = false, force = false) =>
       call<LoginQueueStatus>("enqueue_cookie_refresh", {
         accountIds,
         headless,
@@ -230,6 +235,7 @@ export const ipc = {
         // IP를 바꾸려면 true로 — 단 폰 USB 연결 + PATH에 adb 필요(winget Google.PlatformTools).
         // 백엔드: src-tauri/src/auth/adb.rs toggle_airplane_mode.
         useAdb: false,
+        force,
       }),
     queueStatus: () => call<LoginQueueStatus>("get_queue_status"),
   },
