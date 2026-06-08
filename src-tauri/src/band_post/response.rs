@@ -62,6 +62,18 @@ pub fn web_url_from_result(result_data: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// 성공 응답에서 실제 밴드 이름(`post.band.name`)을 추출한다.
+///
+/// 예: band_no 103043410 → `"데일밴드"`. 프론트가 게시 결과에 진짜 밴드명을 표시하는 데 쓴다.
+pub fn band_name_from_result(result_data: &Value) -> Option<String> {
+    result_data
+        .get("post")
+        .and_then(|p| p.get("band"))
+        .and_then(|b| b.get("name"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 fn extract_error_message(value: &Value) -> String {
     // band 오류는 result_data.message 또는 message에 담기는 경우가 있다.
     value
@@ -94,15 +106,22 @@ mod tests {
     }
 
     #[test]
-    fn create_post_success_extracts_post_no_and_url() {
-        // 캡처 형태 축약: result_data.post.post_no / web_url
-        let body = r#"{"result_code":1,"result_data":{"post":{"post_no":2,"web_url":"https://band.us/band/103043410/post/2"}}}"#;
+    fn create_post_success_extracts_post_no_url_and_band_name() {
+        // 캡처 형태 축약: result_data.post.{post_no, web_url, band.name}
+        let body = r#"{"result_code":1,"result_data":{"post":{"post_no":2,"web_url":"https://band.us/band/103043410/post/2","band":{"band_no":103043410,"name":"데일밴드"}}}}"#;
         let data = parse_band_result(body).unwrap();
         assert_eq!(post_no_from_result(&data), Some(2));
         assert_eq!(
             web_url_from_result(&data).as_deref(),
             Some("https://band.us/band/103043410/post/2")
         );
+        assert_eq!(band_name_from_result(&data).as_deref(), Some("데일밴드"));
+    }
+
+    #[test]
+    fn band_name_none_when_absent() {
+        let data = serde_json::json!({"post": {"post_no": 1}});
+        assert!(band_name_from_result(&data).is_none());
     }
 
     #[test]

@@ -1203,6 +1203,9 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
           })
           .then((out) => ({
             ...j,
+            // 결과 라벨을 게시 응답의 실제 밴드명으로 바꾼다(시드 드롭다운 이름 대신).
+            // 응답에 밴드명이 없으면 저장한 링크를 라벨로 쓴다.
+            targetName: out.bandName ?? bandLinkSaved,
             ok: true,
             msg: out.commented ? "글·댓글 게시 완료" : "글 게시 완료",
           }))

@@ -803,5 +803,11 @@ describe("PublishModal", () => {
       expect(args.bandLink).toBe("https://band.us/band/103043410");
       expect(args.accountId).toBe("value_invest");
     });
+
+    // 결과 라벨은 시드 드롭다운 이름이 아니라 게시 응답의 실제 밴드명을 보여줘야 한다
+    // (목은 band_no로 "밴드 103043410"을 돌려준다).
+    expect(
+      await screen.findByText("밴드 103043410", undefined, { timeout: 3000 }),
+    ).toBeInTheDocument();
   });
 });

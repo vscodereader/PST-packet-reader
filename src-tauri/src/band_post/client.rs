@@ -26,6 +26,14 @@ pub const BROWSER_USER_AGENT: &str =
 
 const API_ORIGIN: &str = "https://www.band.us";
 
+/// 글 게시 성공 결과: 생성된 게시물 번호 + 응답에서 확인된 실제 밴드 이름.
+#[derive(Debug, Clone)]
+pub struct CreatedPost {
+    pub post_no: u64,
+    /// `post.band.name`. 응답에 없으면 `None`.
+    pub band_name: Option<String>,
+}
+
 /// band api HTTP 클라이언트.
 pub struct BandHttpClient {
     /// `https://api-kr.band.us` (테스트는 wiremock URL).
@@ -132,14 +140,14 @@ impl BandHttpClient {
         Ok(())
     }
 
-    /// 밴드에 글을 게시하고 생성된 `post_no`를 반환한다.
+    /// 밴드에 글을 게시하고 생성된 게시물 정보(`post_no` + 실제 밴드명)를 반환한다.
     pub async fn create_post(
         &self,
         band_no: &str,
         content: &str,
         key: &BandAuthKey,
         cookie_header: &str,
-    ) -> Result<u64, BandPostError> {
+    ) -> Result<CreatedPost, BandPostError> {
         let referer = format!("https://www.band.us/band/{band_no}/post");
         let data = self
             .post_signed(
@@ -150,11 +158,15 @@ impl BandHttpClient {
                 &referer,
             )
             .await?;
-        post_no_from_result(&data).ok_or_else(|| {
+        let post_no = post_no_from_result(&data).ok_or_else(|| {
             BandPostError::Api(super::response::BandApiError {
                 result_code: Some(1),
                 message: "글 게시는 성공했으나 post_no를 찾지 못했습니다.".to_string(),
             })
+        })?;
+        Ok(CreatedPost {
+            post_no,
+            band_name: super::response::band_name_from_result(&data),
         })
     }
 
@@ -245,22 +257,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_post_returns_post_no() {
+    async fn create_post_returns_post_no_and_band_name() {
         let api = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path_regex(r"^/v2\.0\.2/create_post"))
             .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"{"result_code":1,"result_data":{"post":{"post_no":2,"web_url":"https://band.us/band/103043410/post/2"}}}"#,
+                r#"{"result_code":1,"result_data":{"post":{"post_no":2,"web_url":"https://band.us/band/103043410/post/2","band":{"band_no":103043410,"name":"데일밴드"}}}}"#,
             ))
             .mount(&api)
             .await;
 
         let client = BandHttpClient::with_base_urls(api.uri(), "http://unused");
-        let post_no = client
+        let created = client
             .create_post("103043410", "제목\n내용", &test_key(), FAKE_COOKIE)
             .await
             .expect("게시 성공이어야 함");
-        assert_eq!(post_no, 2);
+        assert_eq!(created.post_no, 2);
+        assert_eq!(created.band_name.as_deref(), Some("데일밴드"));
     }
 
     #[tokio::test]

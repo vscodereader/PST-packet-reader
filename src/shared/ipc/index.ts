@@ -91,6 +91,8 @@ export interface BandPublishOutcome {
   postNo: number;
   webUrl: string;
   commented: boolean;
+  /** 실제 게시된 밴드 이름(게시 응답 post.band.name). 응답에 없으면 null. */
+  bandName: string | null;
 }
 
 /** A naver-login account (auth module): keyed by loginId so cookies land at cookies/{loginId}.json. */

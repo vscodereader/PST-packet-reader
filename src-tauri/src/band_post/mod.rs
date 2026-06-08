@@ -36,6 +36,8 @@ pub struct BandPublishOutcome {
     pub web_url: String,
     /// 댓글까지 작성했는지.
     pub commented: bool,
+    /// 실제 게시된 밴드 이름(게시 응답 `post.band.name`). 응답에 없으면 `None`.
+    pub band_name: Option<String>,
 }
 
 /// 밴드 링크로 가입한 뒤 글(+선택 댓글)을 게시한다.
@@ -73,9 +75,10 @@ pub async fn band_publish(
         .is_ok();
 
     let post_content = combine_title_and_content(title, content);
-    let post_no = client
+    let created = client
         .create_post(&band_no, &post_content, &key, &cookie_header)
         .await?;
+    let post_no = created.post_no;
 
     let commented = match comment {
         Some(body) if !body.trim().is_empty() => {
@@ -92,6 +95,7 @@ pub async fn band_publish(
         post_no,
         web_url: format!("https://band.us/band/{band_no}/post/{post_no}"),
         commented,
+        band_name: created.band_name,
     })
 }
 

@@ -1103,6 +1103,7 @@ export const invoke = vi.fn(
           postNo: 1,
           webUrl: `https://band.us/band/${bandNo}/post/1`,
           commented: Boolean(String(args!.comment ?? "").trim()),
+          bandName: `밴드 ${bandNo}`,
         });
       }
       case "get_environment_status":
