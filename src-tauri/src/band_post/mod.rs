@@ -7,4 +7,6 @@
 //! 네이버 카페 모듈([`naver_cafe`](crate::naver_cafe)) 구조를 미러한다:
 //! 순수 빌더([`request_builder`]) + HTTP 클라이언트([`client`]) 분리.
 
+pub mod getkey;
 pub mod signature;
+pub mod util;
