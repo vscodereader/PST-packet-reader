@@ -76,6 +76,29 @@ pub(crate) struct PageInfo {
     pub last_page: bool,
 }
 
+/// 가입 카페 API **실패** 봉투 — `{ "message": { "status", "error": { "code", "msg" } } }`.
+/// 성공과 같은 `message` 래퍼지만 `result` 없이 `error`만 채워진다(쿠키 만료 등
+/// 인증 실패가 HTTP 200으로 내려오는 형태). 성공 봉투(`result` 필수) 파싱이
+/// 실패한 뒤에만 시도하며, `NaverApiErrorBody`(최상위 `error.errorCode/message`)와
+/// 위치·키가 달라 별도로 둔다.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct JoinCafesErrorEnvelope {
+    pub message: JoinCafesErrorMessage,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct JoinCafesErrorMessage {
+    pub error: JoinCafesApiError,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct JoinCafesApiError {
+    /// 네이버 오류 코드(예: 미로그인 "0004"). 성공 응답에선 빈 문자열.
+    pub code: String,
+    /// 사람이 읽는 사유(예: "로그인하지 않았습니다.").
+    pub msg: String,
+}
+
 /// 응답의 카페 항목 — 필요한 키만 선언(민감 `memberKey`/`st`는 무시됨).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,7 +106,13 @@ pub(crate) struct JoinCafeItem {
     pub cafe_id: u64,
     pub cafe_name: String,
     pub cafe_url: String,
+    /// 네이버는 멤버 표시 필드(닉네임·등급명)를 상황에 따라 응답에서 생략한다
+    /// (이슈 #124, 등급명 누락을 실측). 그런 카페가 하나라도 있으면 그 계정의 가입
+    /// 목록 전체가 파싱 실패하므로, 표시 필드는 누락 시 빈 문자열로 둔다. 반면
+    /// `cafe_id`/`cafe_name`/`cafe_url`은 카페 식별 핵심이라 필수로 남겨 둔다.
+    #[serde(default)]
     pub member_nickname: String,
+    #[serde(default)]
     pub member_levelname: String,
     pub managing_cafe: bool,
     pub dormant_cafe: bool,
@@ -126,6 +155,8 @@ mod tests {
     use super::*;
 
     const REAL_FIXTURE: &str = include_str!("fixtures/join_cafes_groups_success.json");
+    const MISSING_LEVELNAME_FIXTURE: &str =
+        include_str!("fixtures/join_cafes_groups_missing_levelname.json");
 
     #[test]
     fn joined_cafe_serializes_camel_case() {
@@ -195,5 +226,19 @@ mod tests {
         let serialized = serde_json::to_string(&cafes).expect("직렬화 실패");
         assert!(!serialized.contains("memberKey"), "memberKey가 노출됨");
         assert!(!serialized.contains("DUMMY_ST_TOKEN"), "st JWT가 노출됨");
+    }
+
+    #[test]
+    fn parses_cafe_with_missing_member_levelname() {
+        // 네이버는 등급명이 없는 멤버의 `memberLevelname` 필드를 응답에서 생략한다
+        // (이슈 #124). 그래도 역직렬화가 성공하고 등급명은 빈 문자열이어야 한다 —
+        // 필수로 강제하면 그 카페가 든 계정의 가입 목록 전체가 파싱 실패한다.
+        let envelope: JoinCafesEnvelope = serde_json::from_str(MISSING_LEVELNAME_FIXTURE)
+            .expect("등급명 누락 응답도 역직렬화되어야 함");
+        let cafes = envelope.into_cafes();
+        assert_eq!(cafes.len(), 1);
+        assert_eq!(cafes[0].cafe_id, 31732304);
+        assert_eq!(cafes[0].member_levelname, "");
+        assert_eq!(cafes[0].member_nickname, "Nokk");
     }
 }

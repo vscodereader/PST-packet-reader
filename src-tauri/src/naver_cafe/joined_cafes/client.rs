@@ -10,7 +10,9 @@
 //! 로그, 에러 메시지, `Debug` 출력에 절대 포함하지 않는다.
 
 use crate::naver_cafe::error::{http_error_envelope, ErrorEnvelope, NaverCafeCommonErrorData};
-use crate::naver_cafe::joined_cafes::models::{JoinCafesEnvelope, JoinedCafe, JoinedCafesError};
+use crate::naver_cafe::joined_cafes::models::{
+    JoinCafesEnvelope, JoinCafesErrorEnvelope, JoinedCafe, JoinedCafesError,
+};
 use crate::naver_cafe::post::BROWSER_USER_AGENT;
 use crate::naver_cafe::response::{truncate_body, NaverApiErrorBody};
 
@@ -79,7 +81,8 @@ impl JoinedCafesClient {
     /// # 실패 처리
     /// - Transport 오류 → `JOINED_CAFES_TRANSPORT_ERROR`
     /// - non-2xx → `JOINED_CAFES_HTTP_ERROR`
-    /// - 2xx + `{"error":{...}}` → `JOINED_CAFES_API_ERROR`
+    /// - 2xx + `message.error`(미로그인/세션 만료) → `JOINED_CAFES_AUTH_ERROR`
+    /// - 2xx + `message.error`(기타) 또는 `{"error":{...}}` → `JOINED_CAFES_API_ERROR`
     /// - 2xx + 파싱 불가 → `JOINED_CAFES_PARSE_ERROR`
     pub async fn fetch_joined_cafes(
         &self,
@@ -167,6 +170,42 @@ impl JoinedCafesClient {
         if let Ok(envelope) = serde_json::from_str::<JoinCafesEnvelope>(&raw_body) {
             let last_page = envelope.is_last_page();
             return Ok((envelope.into_cafes(), last_page));
+        }
+
+        // 2xx인데 result 없이 message.error 가 채워진 join-cafes 실패 봉투
+        // (쿠키 만료 등 인증 실패가 HTTP 200으로 내려오는 형태).
+        if let Ok(err_env) = serde_json::from_str::<JoinCafesErrorEnvelope>(&raw_body) {
+            let api_error = err_env.message.error;
+            if !api_error.code.is_empty() {
+                // 미로그인/세션 만료(코드 "0004" 또는 "로그인" 사유)는 전용 코드로
+                // 구분해 재로그인을 안내한다. 쿠키 검증/재발급은 별도 작업이다.
+                let is_auth = api_error.code == "0004" || api_error.msg.contains("로그인");
+                let (code, message) = if is_auth {
+                    (
+                        "JOINED_CAFES_AUTH_ERROR",
+                        "로그인 세션이 만료됐어요. 계정을 다시 로그인한 뒤 다시 시도해 주세요."
+                            .to_string(),
+                    )
+                } else {
+                    (
+                        "JOINED_CAFES_API_ERROR",
+                        format!("가입 카페 목록 조회가 거부됐어요: {}", api_error.msg),
+                    )
+                };
+                tracing::warn!(api_error_code = %api_error.code, "가입 카페 조회 실패(message.error)");
+                return Err(ErrorEnvelope {
+                    trace_id: String::new(),
+                    code: code.to_string(),
+                    message,
+                    error_data: Some(NaverCafeCommonErrorData {
+                        target: None,
+                        http_status: Some(status_code),
+                        api_error_code: Some(api_error.code),
+                        api_error_message: Some(api_error.msg),
+                        retryable: false,
+                    }),
+                });
+            }
         }
 
         // 2xx인데 {"error":{...}} 형태 (200-with-error)
@@ -333,6 +372,63 @@ mod tests {
             .await
             .expect_err("파싱불가는 Err여야 함");
         assert_eq!(err.code, "JOINED_CAFES_PARSE_ERROR");
+    }
+
+    #[tokio::test]
+    async fn fetch_joined_cafes_maps_expired_session_to_auth_error() {
+        // 쿠키(서버측) 만료 시 네이버 실측 응답: HTTP 200인데 result 없이
+        // message.error에 미로그인 사유가 담긴다. 파싱 실패로 뭉뚱그리지 말고
+        // 인증 만료로 구분해 재로그인을 안내해야 한다.
+        let server = MockServer::start().await;
+        let body = r#"{"message":{"status":"500","error":{"code":"0004","msg":"로그인하지 않았습니다."}}}"#;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let client = JoinedCafesClient::with_base_url(server.uri());
+        let err = client
+            .fetch_joined_cafes(None)
+            .await
+            .expect_err("만료 세션은 Err여야 함");
+        assert_eq!(err.code, "JOINED_CAFES_AUTH_ERROR");
+        assert!(
+            err.message.contains("로그인"),
+            "재로그인 안내 메시지여야 함: {}",
+            err.message
+        );
+        let data = err.error_data.unwrap();
+        assert_eq!(data.api_error_code.as_deref(), Some("0004"));
+        assert!(!data.retryable);
+    }
+
+    #[tokio::test]
+    async fn fetch_joined_cafes_maps_other_message_error_to_api_error() {
+        // 인증(미로그인) 외 message.error 는 네이버 사유를 그대로 노출하는 API
+        // 오류로 분류한다("파싱 실패"로 뭉뚱그리지 않음).
+        let server = MockServer::start().await;
+        let body =
+            r#"{"message":{"status":"500","error":{"code":"9999","msg":"일시적인 오류입니다."}}}"#;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let client = JoinedCafesClient::with_base_url(server.uri());
+        let err = client
+            .fetch_joined_cafes(None)
+            .await
+            .expect_err("API 오류는 Err여야 함");
+        assert_eq!(err.code, "JOINED_CAFES_API_ERROR");
+        assert!(
+            err.message.contains("일시적인 오류입니다."),
+            "네이버 사유를 노출해야 함: {}",
+            err.message
+        );
+        assert_eq!(
+            err.error_data.unwrap().api_error_code.as_deref(),
+            Some("9999")
+        );
     }
 
     #[tokio::test]

@@ -1,0 +1,32 @@
+{
+  "message": {
+    "status": "200",
+    "error": { "code": "", "msg": "" },
+    "result": {
+      "groups": [
+        {
+          "group": { "groupId": 999, "groupName": "기본그룹", "order": 4, "cafeCount": 1 },
+          "cafes": [
+            {
+              "memberKey": "DUMMY_MEMBER_KEY",
+              "cafeName": "test64979381",
+              "cafeId": 31732304,
+              "cafeUrl": "bluegrayoc3uc",
+              "realnameCafe": false,
+              "memberNickname": "Nokk",
+              "realnameMember": false,
+              "receiveMail": false,
+              "favoriteCafe": false,
+              "dormantCafe": false,
+              "managingCafe": false,
+              "listOrder": 9999,
+              "groupId": 999,
+              "st": "DUMMY_ST_TOKEN"
+            }
+          ]
+        }
+      ],
+      "pageInfo": { "page": 1, "perPage": 15, "totalCount": 1, "lastPage": true }
+    }
+  }
+}
