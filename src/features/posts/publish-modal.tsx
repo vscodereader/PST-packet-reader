@@ -581,6 +581,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [bands, setBands] = useState<Band[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [stockCodes, setStockCodes] = useState<string[]>(["005930"]);
+  // 라이브 검색으로 고른 종목의 이름(시드 목록에 없을 수 있어 onConfirm에서 받아둠).
+  const [stockNames, setStockNames] = useState<Record<string, string>>({});
   const [stockModal, setStockModal] = useState(false);
   const [band, setBand] = useState("");
   // Account-driven naver state: joined cafes per account, boards per cafe, and
@@ -830,7 +832,10 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
           key: aid + "-" + code,
           platform: "forum",
           loginId: a.loginId,
-          targetName: stocks.find((x) => x.code === code)?.name ?? code,
+          targetName:
+            stockNames[code] ??
+            stocks.find((x) => x.code === code)?.name ??
+            code,
           code,
           board: "종목토론방",
           status: a.status,
@@ -1631,6 +1636,10 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         onClose={() => setStockModal(false)}
         onConfirm={(stocks) => {
           setStockCodes(stocks.map((s) => s.code));
+          setStockNames((m) => ({
+            ...m,
+            ...Object.fromEntries(stocks.map((s) => [s.code, s.name])),
+          }));
           setStockModal(false);
         }}
       />

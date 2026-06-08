@@ -20,6 +20,7 @@ import type { QueueNowItem } from "@/shared/bindings/QueueNowItem";
 import type { QueueScheduledItem } from "@/shared/bindings/QueueScheduledItem";
 import type { SortBy } from "@/shared/bindings/SortBy";
 import type { Stock } from "@/shared/bindings/Stock";
+import type { StockCandidate } from "@/shared/data/types";
 
 export type {
   Account,
@@ -147,7 +148,11 @@ export const ipc = {
     reorderNow: (orderedIds: string[]) =>
       call<QueueNowItem[]>("reorder_queue_now", { orderedIds }),
   },
-  stocks: { list: () => call<Stock[]>("list_stocks") },
+  stocks: {
+    list: () => call<Stock[]>("list_stocks"),
+    search: (query: string) =>
+      call<StockCandidate[]>("search_stocks", { query }),
+  },
   activity: {
     list: () => call<ActivityItem[]>("list_activity"),
     append: (kind: "success" | "error" | "info", text: string) =>
