@@ -502,6 +502,7 @@ describe("PublishModal", () => {
       status: "ready",
       excerpt: "요약",
       commentTarget: "latest",
+      commentCount: 3,
       comments: ["댓글1", "댓글2"],
     };
     renderPublish({ doc: latestDoc });
@@ -509,9 +510,8 @@ describe("PublishModal", () => {
     await userEvent.click(screen.getByText("money_lab")); // a5 naver
     await screen.findByPlaceholderText("가입 카페 선택");
     // 주식투자연구소 카페 (cafeId 11111111) has 10 latest articles in the mock.
+    // 개수(3)는 템플릿(doc.commentCount)에서 동결 — 게시 모달엔 개수 UI가 없다.
     await pickOption(0, "주식투자연구소 카페");
-    // Pick top-3 articles via the count segmented control.
-    await userEvent.click(await screen.findByRole("radio", { name: "3" }));
     await userEvent.click(
       await screen.findByRole(
         "button",
@@ -672,7 +672,9 @@ describe("PublishModal", () => {
     expect(req.targets.some((t) => t.accountId === "insight_note")).toBe(false);
   });
 
-  it("reflects the chosen count (5) in the number of comment targets", async () => {
+  it("uses the template's commentCount (5) for the number of comment targets", async () => {
+    // 개수는 댓글 템플릿(doc.commentCount)에서 동결된 값을 쓴다 — 게시 모달엔
+    // 더 이상 개수 선택 UI가 없다(중복 제거).
     const latestDoc: LibraryPost = {
       id: "l5",
       title: "최신글 5건",
@@ -682,6 +684,7 @@ describe("PublishModal", () => {
       status: "ready",
       excerpt: "요약",
       commentTarget: "latest",
+      commentCount: 5,
       comments: ["댓글"],
     };
     renderPublish({ doc: latestDoc });
@@ -690,8 +693,6 @@ describe("PublishModal", () => {
     await screen.findByPlaceholderText("가입 카페 선택");
     // 주식투자연구소 카페 (cafeId 11111111) has 10 latest articles in the mock.
     await pickOption(0, "주식투자연구소 카페");
-    // Pick top-5 via the count segmented control.
-    await userEvent.click(await screen.findByRole("radio", { name: "5" }));
     await userEvent.click(
       await screen.findByRole(
         "button",

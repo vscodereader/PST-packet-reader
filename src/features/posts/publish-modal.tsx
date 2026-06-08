@@ -607,10 +607,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [date, setDate] = useState(() => nowParts().date);
   const [time, setTime] = useState(() => nowParts().time);
   const [acctFilter, setAcctFilter] = useState<"all" | PlatformId>("all");
-  // 댓글 대상 글 개수(최신글/인기글). 문서의 commentCount를 초기값으로, 없으면 1.
-  const [commentCount, setCommentCount] = useState(() =>
-    [1, 3, 5, 10].includes(doc?.commentCount ?? 0) ? doc!.commentCount! : 1,
-  );
+  // 댓글 대상 글 개수(최신글/인기글)는 댓글 템플릿(writer-modal)에서 정한 값을
+  // 그대로 쓴다. 게시 모달에서 다시 고르지 않는다(중복 UI 제거). 없거나 허용값이
+  // 아니면 1.
+  const commentCount = [1, 3, 5, 10].includes(doc?.commentCount ?? 0)
+    ? doc!.commentCount!
+    : 1;
   const [linkOverride, setLinkOverride] = useState("");
   const [showPreview, setShowPreview] = useState(false);
   const [flow, setFlow] = useState<null | "running" | PublishResult[]>(null);
@@ -1422,38 +1424,6 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
               onRefreshJoined={refreshJoined}
             />
           </>
-        )}
-
-        {mode === "comment" && isListTarget && selectedNaver.length > 0 && (
-          <Box mt={22}>
-            <Group gap={7} mb={10}>
-              <Icon.target size={17} color="var(--mantine-color-gray-6)" />
-              <Text fz={13.5} fw={700}>
-                Comment targets
-              </Text>
-              <Badge size="sm" variant="light" color="blue">
-                {commentTargetMode === "popular" ? "Popular" : "Latest"}
-              </Badge>
-            </Group>
-            <Text fz={12} c="dimmed" mb={8}>
-              Comment on the top N{" "}
-              {commentTargetMode === "popular" ? "popular" : "latest"} articles
-              of each selected cafe.
-            </Text>
-            <SegmentedControl
-              fullWidth
-              size="sm"
-              value={String(commentCount)}
-              onChange={(v) => setCommentCount(Number(v))}
-              data={[
-                { value: "1", label: "1" },
-                { value: "3", label: "3" },
-                { value: "5", label: "5" },
-                { value: "10", label: "10" },
-              ]}
-              aria-label="comment article count"
-            />
-          </Box>
         )}
 
         {showTokens && (
