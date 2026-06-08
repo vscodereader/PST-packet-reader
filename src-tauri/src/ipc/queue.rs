@@ -457,11 +457,14 @@ pub fn reconcile_missed_on_startup<R: tauri::Runtime>(app: &tauri::AppHandle<R>)
     }
 }
 
-/// 백그라운드 예약 스케줄러. 앱 시작 시 한 번 spawn되어 앱 수명 동안 ~30초마다 예약
-/// 시각이 도래한 아이템을 자동 게시한다(`run_due_now`). interval의 첫 tick은 즉시
-/// 발화하지만, 시작 reconciliation이 먼저 끝나므로 미발행 예약을 잘못 게시하지 않는다.
+/// 스케줄러 검사 주기(초). 예약 시각보다 최대 이만큼 늦게 게시될 수 있다(게시 용도엔 충분).
+const SCHEDULER_TICK_SECS: u64 = 30;
+
+/// 백그라운드 예약 스케줄러. 앱 시작 시 한 번 spawn되어 앱 수명 동안 `SCHEDULER_TICK_SECS`
+/// 마다 예약 시각이 도래한 아이템을 자동 게시한다(`run_due_now`). interval의 첫 tick은
+/// 즉시 발화하지만, 시작 reconciliation이 먼저 끝나므로 미발행 예약을 잘못 게시하지 않는다.
 pub async fn scheduler_loop<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
-    let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(SCHEDULER_TICK_SECS));
     loop {
         tick.tick().await;
         run_due_now(&app);

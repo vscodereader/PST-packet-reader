@@ -30,6 +30,12 @@ import { DateTimePicker } from "@/shared/ui/date-time-picker";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformPill } from "@/shared/ui/platform-logo";
 
+// 실행 중(running) 아이템은 워커가 처리 중이라 맨 앞에 고정한다. 단 실행 중인 게
+// 없으면(워커 idle) 첫 대기 아이템도 자유롭게 옮길 수 있어야 하므로, index 0을 무조건
+// 막지 않고 "선두 running 개수"만큼만 고정한다(백엔드 apply_reorder_now와 일치).
+const pinnedCount = (list: QueueNowItem[]) =>
+  list[0]?.state === "running" ? 1 : 0;
+
 function LocSummary({
   locs,
   size = 18,
@@ -135,12 +141,6 @@ export function Queue({ go }: { go: GoFn }) {
         persistingRef.current = false;
       });
   };
-
-  // 실행 중(running) 아이템은 워커가 처리 중이라 맨 앞에 고정한다. 단 실행 중인 게
-  // 없으면(워커 idle) 첫 대기 아이템도 자유롭게 옮길 수 있어야 하므로, index 0을 무조건
-  // 막지 않고 "선두 running 개수"만큼만 고정한다(백엔드 apply_reorder_now와 일치).
-  const pinnedCount = (list: QueueNowItem[]) =>
-    list[0]?.state === "running" ? 1 : 0;
 
   const reorder = (id: string, targetId: string) => {
     setNow((list) => {
