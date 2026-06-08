@@ -18,7 +18,10 @@ import {
 import { notifications } from "@mantine/notifications";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import type { CommentTargetSpec } from "@/shared/bindings/CommentTargetSpec";
+import type { ForumTarget } from "@/shared/bindings/ForumTarget";
 import type { JoinedCafe } from "@/shared/bindings/JoinedCafe";
+import type { NaverTarget } from "@/shared/bindings/NaverTarget";
 import type { PostJob } from "@/shared/bindings/PostJob";
 import type { PublishOutcome } from "@/shared/bindings/PublishOutcome";
 import { KIND, STATUS_ACCOUNT } from "@/shared/data/config";
@@ -35,6 +38,7 @@ import type {
   LibraryPost,
   PlatformId,
   PublishJob,
+  PublishPlan,
   PublishResult,
   QueueLocation,
   QueueScheduledItem,
@@ -1142,6 +1146,59 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     );
   };
 
+  // 예약 시점에 동결할 댓글 대상 스펙. comment/both 모드일 때만 만든다. url이면
+  // 파싱된 cafeId/articleId를, latest/popular면 계정이 고른 cafeId + 상위 N(count)을
+  // 박제한다(실제 글 목록 해석은 워커가 게시 시점에 수행). post 전용이면 undefined.
+  const commentSpecFor = (j: PublishJob): CommentTargetSpec | undefined => {
+    if (mode !== "comment" && mode !== "both") return undefined;
+    if (commentTargetMode === "url") {
+      if (!urlTarget) return undefined;
+      return {
+        mode: "url",
+        cafeId: urlTarget.cafeId,
+        articleId: urlTarget.articleId,
+      };
+    }
+    const cafeId = naverPicks[j.key]?.cafeId;
+    if (cafeId == null) return undefined;
+    return { mode: commentTargetMode, count: commentCount, cafeId };
+  };
+
+  // 예약 plan(동결 실행 페이로드): 본문은 모달이 이미 평문화한 값을 박제하고,
+  // 엔진이 있는 naver/forum 대상만 싣는다(band 등은 제외). naver의 cafe/menuId/
+  // boardType은 toPostJob과 동일하게 naverPicks에서 구한다.
+  const buildPlan = (): PublishPlan => {
+    const naver: NaverTarget[] = jobs
+      .filter((j) => j.platform === "naver")
+      .map((j) => {
+        const pj = toPostJob(j);
+        const spec = commentSpecFor(j);
+        return {
+          accountId: pj.accountId,
+          cafe: pj.cafe,
+          menuId: pj.menuId,
+          boardType: pj.boardType,
+          ...(spec ? { commentTarget: spec } : {}),
+        };
+      });
+    const forum: ForumTarget[] = jobs
+      .filter((j) => j.platform === "forum")
+      .map((j) => ({
+        accountId: j.loginId,
+        name: j.targetName,
+        code: j.code ?? "",
+      }));
+    return {
+      postId: doc.id,
+      kind: doc.kind,
+      title: doc.title,
+      bodyText: htmlToText(doc.body ?? ""),
+      comments: doc.comments ?? [],
+      naver,
+      forum,
+    };
+  };
+
   const doPublish = () => {
     if (when !== "schedule") {
       runNow();
@@ -1168,6 +1225,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       when: moment.when,
       rel: moment.label,
       locs,
+      plan: buildPlan(),
     };
     // Defense-in-depth: the backend rejects a past time even though the picker
     // already prevents it.
