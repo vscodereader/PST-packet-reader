@@ -213,6 +213,7 @@ mod tests {
                 name: "n".into(),
                 code: None,
             }],
+            plan: None,
         }
     }
 
