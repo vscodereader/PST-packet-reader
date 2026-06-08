@@ -5,6 +5,7 @@ pub mod config;
 mod error;
 mod login;
 mod login_flow;
+mod outcome;
 mod paths;
 mod queue;
 mod types;
@@ -43,7 +44,7 @@ async fn process_account<R: Runtime>(
     headless: bool,
     use_adb: bool,
     force: bool,
-) -> Result<(), OrchestratorError> {
+) -> Result<outcome::LoginResolution, OrchestratorError> {
     let paths = if use_adb {
         bootstrap_runtime().await?
     } else {
@@ -63,7 +64,8 @@ async fn process_account<R: Runtime>(
     // (세션 쿠키는 항상 "안 만료"로 통과)이며, 이 단락이 그대로면 죽은 쿠키가 영원히
     // 남는다(이슈 #132).
     if should_skip_login(force, has_valid_account_cookies(&paths, account_id)?) {
-        return Ok(());
+        // 로컬 쿠키가 유효해 단락 — 이미 로그인된 상태로 간주한다.
+        return Ok(outcome::LoginResolution::active());
     }
 
     if use_adb {

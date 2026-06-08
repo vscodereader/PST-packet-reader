@@ -24,12 +24,20 @@ pub enum PlatformId {
     Threads,
 }
 
+/// 계정의 로그인/활동 상태. `new`/`active`/`error`는 기존과 동일한 와이어 형태를 유지하고
+/// (camelCase에서도 단일 단어라 그대로), 로그인 결과를 세분화하는 세 값을 추가한다:
+/// `badCredentials`(아이디/비밀번호 오류), `challenge`(캡차·OTP·기기 등 추가 인증 필요),
+/// `blocked`(접근 차단). `error`는 그 외(전송 오류/타임아웃/미상)의 catch-all로 남겨,
+/// 디스크에 이미 저장된 `"error"` 값과의 하위호환을 보장한다.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../src/shared/bindings/")]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "camelCase")]
 pub enum AccountStatus {
     New,
     Active,
+    BadCredentials,
+    Challenge,
+    Blocked,
     Error,
 }
 
@@ -43,6 +51,11 @@ pub struct Account {
     pub login_id: String,
     pub pw: String,
     pub status: AccountStatus,
+    /// 마지막 상태 변경 사유(동결). 로그인 워커가 채운다 — 차단/타임아웃 원문이나 조치
+    /// 안내. UI가 배지 tooltip에 보여준다. 과거 JSON엔 없을 수 있어 기본값 None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub status_msg: Option<String>,
     pub last: String,
     pub tags: Vec<String>,
 }
@@ -76,6 +89,28 @@ pub fn apply_delete(accounts: Vec<Account>, ids: &[String]) -> Vec<Account> {
         .collect()
 }
 
+/// 로그인 워커가 결정한 상태/사유를 `login_id`가 일치하는 모든 계정에 반영한다(순수).
+/// 키가 `login_id`인 이유: 로그인 잡은 쿠키 키(=loginId)로 식별되며, 같은 loginId를 쓰는
+/// 여러 행이 있으면 모두 같은 로그인 결과를 받아야 하기 때문이다(프론트 `pollLogin`과 동일
+/// 규약). 매칭이 없으면 원본을 그대로 둔다.
+pub fn apply_status_by_login_id(
+    accounts: Vec<Account>,
+    login_id: &str,
+    status: AccountStatus,
+    status_msg: Option<String>,
+) -> Vec<Account> {
+    accounts
+        .into_iter()
+        .map(|mut a| {
+            if a.login_id == login_id {
+                a.status = status.clone();
+                a.status_msg = status_msg.clone();
+            }
+            a
+        })
+        .collect()
+}
+
 /// First-run seed, mirroring a slice of the frontend mock data.
 pub fn seed() -> Vec<Account> {
     vec![
@@ -85,6 +120,7 @@ pub fn seed() -> Vec<Account> {
             login_id: "invest_king7".into(),
             pw: "ik7!naver22".into(),
             status: AccountStatus::Active,
+            status_msg: None,
             last: "12분 전".into(),
             tags: vec!["대형주".into(), "반도체".into()],
         },
@@ -94,6 +130,7 @@ pub fn seed() -> Vec<Account> {
             login_id: "value_pick".into(),
             pw: "vp@2024kr".into(),
             status: AccountStatus::Active,
+            status_msg: None,
             last: "30분 전".into(),
             tags: vec!["반도체".into()],
         },
@@ -103,6 +140,7 @@ pub fn seed() -> Vec<Account> {
             login_id: "money_lab".into(),
             pw: "mlab2024!!".into(),
             status: AccountStatus::Active,
+            status_msg: None,
             last: "3시간 전".into(),
             tags: vec!["분석방".into()],
         },
@@ -112,6 +150,7 @@ pub fn seed() -> Vec<Account> {
             login_id: "stock_daily".into(),
             pw: "daily#stock1".into(),
             status: AccountStatus::New,
+            status_msg: None,
             last: "—".into(),
             tags: vec![],
         },
@@ -189,6 +228,7 @@ mod tests {
             login_id: login.into(),
             pw: "pw".into(),
             status: AccountStatus::New,
+            status_msg: None,
             last: "—".into(),
             tags: vec![],
         }
@@ -242,9 +282,27 @@ mod tests {
             serde_json::to_string(&PlatformId::Forum).unwrap(),
             "\"forum\""
         );
+        // 기존 3개 값은 camelCase 전환 후에도 단일 단어라 와이어 형태 불변(하위호환).
         assert_eq!(
             serde_json::to_string(&AccountStatus::Active).unwrap(),
             "\"active\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AccountStatus::Error).unwrap(),
+            "\"error\""
+        );
+        // 새 다단어 값은 camelCase로 직렬화된다.
+        assert_eq!(
+            serde_json::to_string(&AccountStatus::BadCredentials).unwrap(),
+            "\"badCredentials\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AccountStatus::Challenge).unwrap(),
+            "\"challenge\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AccountStatus::Blocked).unwrap(),
+            "\"blocked\""
         );
     }
 
@@ -253,5 +311,57 @@ mod tests {
         let json = serde_json::to_string(&acct("a1", "u")).unwrap();
         assert!(json.contains("\"loginId\""));
         assert!(!json.contains("login_id"));
+    }
+
+    #[test]
+    fn legacy_account_without_status_msg_deserializes() {
+        // 구버전 JSON(statusMsg 없음)도 status_msg=None으로 역직렬화된다.
+        let json = r#"{"id":"a1","platform":"naver","loginId":"u","pw":"p","status":"error","last":"—","tags":[]}"#;
+        let acc: Account = serde_json::from_str(json).unwrap();
+        assert_eq!(acc.status, AccountStatus::Error);
+        assert_eq!(acc.status_msg, None);
+    }
+
+    #[test]
+    fn status_msg_omitted_when_none_present_when_set() {
+        // None이면 키가 생략돼 기존 JSON과 호환된다.
+        assert!(!serde_json::to_string(&acct("a1", "u"))
+            .unwrap()
+            .contains("statusMsg"));
+        // Some이면 camelCase 필드로 직렬화된다.
+        let mut a = acct("a1", "u");
+        a.status_msg = Some("차단됨".into());
+        assert!(serde_json::to_string(&a)
+            .unwrap()
+            .contains("\"statusMsg\":\"차단됨\""));
+    }
+
+    #[test]
+    fn apply_status_by_login_id_updates_all_matching_rows() {
+        let start = vec![
+            acct("r1", "shared"),
+            acct("r2", "other"),
+            acct("r3", "shared"),
+        ];
+        let next = apply_status_by_login_id(
+            start,
+            "shared",
+            AccountStatus::Blocked,
+            Some("접근 차단".into()),
+        );
+        // 같은 loginId(shared) 두 행 모두 갱신, 사유도 동결.
+        assert_eq!(next[0].status, AccountStatus::Blocked);
+        assert_eq!(next[0].status_msg.as_deref(), Some("접근 차단"));
+        assert_eq!(next[2].status, AccountStatus::Blocked);
+        // 비매칭(other)은 불변.
+        assert_eq!(next[1].status, AccountStatus::New);
+        assert_eq!(next[1].status_msg, None);
+    }
+
+    #[test]
+    fn apply_status_by_login_id_no_match_is_noop() {
+        let start = vec![acct("r1", "a"), acct("r2", "b")];
+        let next = apply_status_by_login_id(start.clone(), "zzz", AccountStatus::Active, None);
+        assert_eq!(next, start);
     }
 }
