@@ -1,7 +1,9 @@
 import { MantineProvider } from "@mantine/core";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
+
+import { ipc } from "@/shared/ipc";
 
 import { MacroApp } from "./app-shell";
 
@@ -40,6 +42,16 @@ describe("MacroApp", () => {
     await userEvent.click(navButton(/글 관리/));
     expect(screen.getByPlaceholderText("제목 검색")).toBeInTheDocument();
     expect(localStorage.getItem("mc-view")).toBe("posts");
+  });
+
+  it("글 관리 badge counts only non-draft posts", async () => {
+    const posts = await ipc.posts.list();
+    const expected = posts.filter((p) => p.status !== "draft").length;
+    // 시드에 draft가 있어야 의미 있는 검증(배지 = 전체가 아니라 draft 제외)
+    expect(expected).toBeLessThan(posts.length);
+    renderApp();
+    const btn = navButton(/글 관리/);
+    expect(await within(btn).findByText(String(expected))).toBeInTheDocument();
   });
 
   it("navigates to 게시 큐", async () => {
@@ -84,6 +96,29 @@ describe("MacroApp", () => {
     expect(
       screen.getByPlaceholderText("내용·종목·계정 검색"),
     ).toBeInTheDocument();
+  });
+
+  it("bell shows an unread dot that clears after opening 알림", async () => {
+    const { container } = render(
+      <MantineProvider>
+        <MacroApp />
+      </MantineProvider>,
+    );
+    // 시드 알림(activity/log-batches)의 at>0, 아직 본 적 없음 → 빨간 점 표시
+    await waitFor(() =>
+      expect(
+        container.querySelector(".mantine-Indicator-indicator"),
+      ).toBeInTheDocument(),
+    );
+    await userEvent.click(
+      container.querySelector(".tabler-icon-bell") as Element,
+    );
+    // 알림을 열면 읽음 처리 → 빨간 점 사라짐
+    await waitFor(() =>
+      expect(
+        container.querySelector(".mantine-Indicator-indicator"),
+      ).not.toBeInTheDocument(),
+    );
   });
 
   it("toggles the desktop sidebar via the burger (collapse + expand)", async () => {

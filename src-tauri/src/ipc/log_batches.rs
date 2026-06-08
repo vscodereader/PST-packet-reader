@@ -10,6 +10,10 @@ use super::accounts::PlatformId;
 use super::posts::ModeValue;
 use crate::store::JsonStore;
 
+/// Retain only the most recent N publish batches (mirrors `activity::MAX_ACTIVITY`)
+/// so `log-batches.json` can't grow unbounded across months of publishing.
+pub const MAX_LOG_BATCHES: usize = 500;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "lowercase")]
@@ -55,6 +59,14 @@ pub struct BatchItem {
 pub struct LogBatch {
     pub id: String,
     pub title: String,
+    /// 게시 본문 원문(스냅샷). 본문 없는 게시면 None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub body: Option<String>,
+    /// 게시 댓글 원문(스냅샷). 댓글 없는 게시면 None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub comment: Option<String>,
     pub kind: ModeValue,
     #[ts(type = "number")]
     pub at: i64,
@@ -87,6 +99,8 @@ mod tests {
         let b = LogBatch {
             id: "b1".into(),
             title: "테스트".into(),
+            body: None,
+            comment: None,
             kind: ModeValue::Post,
             at: 1_700_000_000_000,
             state: None,
@@ -96,5 +110,40 @@ mod tests {
         assert!(json.contains("\"at\":1700000000000"));
         let back: LogBatch = serde_json::from_str(&json).unwrap();
         assert_eq!(b, back);
+    }
+
+    #[test]
+    fn log_batch_roundtrips_body_and_comment() {
+        let b = LogBatch {
+            id: "b2".into(),
+            title: "제목".into(),
+            body: Some("<p>본문</p>".into()),
+            comment: Some("좋네요".into()),
+            kind: ModeValue::Both,
+            at: 1_700_000_000_000,
+            state: None,
+            items: vec![],
+        };
+        let json = serde_json::to_string(&b).unwrap();
+        assert!(json.contains("\"body\":\"<p>본문</p>\""));
+        assert!(json.contains("\"comment\":\"좋네요\""));
+        assert_eq!(b, serde_json::from_str::<LogBatch>(&json).unwrap());
+    }
+
+    #[test]
+    fn log_batch_omits_none_body_comment() {
+        let b = LogBatch {
+            id: "b3".into(),
+            title: "제목".into(),
+            body: None,
+            comment: None,
+            kind: ModeValue::Post,
+            at: 1,
+            state: None,
+            items: vec![],
+        };
+        let json = serde_json::to_string(&b).unwrap();
+        assert!(!json.contains("body"));
+        assert!(!json.contains("comment"));
     }
 }

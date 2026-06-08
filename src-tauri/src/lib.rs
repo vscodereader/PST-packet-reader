@@ -113,6 +113,8 @@ fn build_publish_batch(
     run_post: bool,
     run_comment: bool,
     account_id: &str,
+    body: &str,
+    comment: &str,
     at: i64,
     results: &[ForumPublishResult],
 ) -> ipc::log_batches::LogBatch {
@@ -153,6 +155,17 @@ fn build_publish_batch(
     LogBatch {
         id: format!("lb-{at}-{seq}"),
         title: title.to_owned(),
+        // 게시 시점 원문 스냅샷: 실제 게시한 것만 남긴다.
+        body: if run_post && !body.is_empty() {
+            Some(body.to_owned())
+        } else {
+            None
+        },
+        comment: if run_comment && !comment.is_empty() {
+            Some(comment.to_owned())
+        } else {
+            None
+        },
         kind,
         at,
         state: None,
@@ -167,6 +180,8 @@ async fn run_forum_publish_now<R: Runtime>(
     request: ForumPublishRequest,
 ) -> Result<Vec<ForumPublishResult>, String> {
     let title = request.title.clone();
+    let body = request.body.clone();
+    let comment = request.comment.clone();
     let account_id = request.account_id.clone();
     let (run_post, run_comment) = (request.run_post, request.run_comment);
     let app_for_job = app.clone();
@@ -187,11 +202,21 @@ async fn run_forum_publish_now<R: Runtime>(
         .map_err(|error| format!("게시 실행 스레드 오류: {error}"))??;
 
     let at = util::now_ms();
-    let batch = build_publish_batch(&title, run_post, run_comment, &account_id, at, &results);
+    let batch = build_publish_batch(
+        &title,
+        run_post,
+        run_comment,
+        &account_id,
+        &body,
+        &comment,
+        at,
+        &results,
+    );
     let ok = results.iter().filter(|r| r.ok).count();
     let logs = app.state::<JsonStore<ipc::log_batches::LogBatch>>();
     logs.mutate(|mut v| {
         v.insert(0, batch);
+        v.truncate(ipc::log_batches::MAX_LOG_BATCHES);
         v
     });
     let activity = app.state::<JsonStore<ipc::activity::ActivityItem>>();
@@ -338,6 +363,7 @@ fn enqueue_cookie_refresh<R: Runtime>(
     account_ids: Vec<String>,
     headless: Option<bool>,
     use_adb: Option<bool>,
+    force: Option<bool>,
 ) -> Result<auth::QueueStatus, String> {
     let n = account_ids.len();
     let result = auth::enqueue_accounts(
@@ -346,6 +372,7 @@ fn enqueue_cookie_refresh<R: Runtime>(
         account_ids,
         headless.unwrap_or(false),
         use_adb.unwrap_or(false),
+        force.unwrap_or(false),
     )
     .map_err(|e| e.to_string())?;
     if n > 0 {
@@ -489,6 +516,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         queue::cancel_queue_scheduled,
         queue::add_queue_scheduled,
         queue::promote_queue_scheduled,
+        queue::reorder_queue_now,
         stocks::list_stocks,
         activity::list_activity,
         append_activity,
@@ -619,6 +647,8 @@ mod tests {
             true,
             false,
             "invest_king7",
+            "",
+            "",
             1_700_000_000_000,
             &results,
         );
@@ -630,6 +660,37 @@ mod tests {
             ipc::log_batches::BatchItemStatus::Success
         ));
         assert_eq!(b.items[1].trace.as_deref(), Some("로그인 만료"));
+    }
+
+    #[test]
+    fn build_publish_batch_snapshots_nonempty_body_and_comment() {
+        let results = vec![ForumPublishResult {
+            code: "005930".into(),
+            name: "삼성전자".into(),
+            ok: true,
+            message: "게시 완료".into(),
+        }];
+        let b = build_publish_batch(
+            "제목",
+            true,
+            true,
+            "acct",
+            "본문내용",
+            "댓글내용",
+            1,
+            &results,
+        );
+        assert_eq!(b.body.as_deref(), Some("본문내용"));
+        assert_eq!(b.comment.as_deref(), Some("댓글내용"));
+    }
+
+    #[test]
+    fn build_publish_batch_omits_empty_and_unused_text() {
+        let results = vec![];
+        // run_comment=false → comment 무시; body 빈 문자열 → None
+        let b = build_publish_batch("제목", true, false, "acct", "", "안쓴댓글", 1, &results);
+        assert_eq!(b.body, None);
+        assert_eq!(b.comment, None);
     }
 
     #[test]

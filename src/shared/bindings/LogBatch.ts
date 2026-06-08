@@ -3,4 +3,4 @@ import type { BatchItem } from "./BatchItem";
 import type { BatchState } from "./BatchState";
 import type { ModeValue } from "./ModeValue";
 
-export type LogBatch = { id: string, title: string, kind: ModeValue, at: number, state?: BatchState, items: Array<BatchItem>, };
+export type LogBatch = { id: string, title: string, body?: string, comment?: string, kind: ModeValue, at: number, state?: BatchState, items: Array<BatchItem>, };

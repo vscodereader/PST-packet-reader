@@ -346,7 +346,13 @@ export function Accounts({ go }: { go: GoFn }) {
           label: t.loginId,
         })),
       );
-      await ipc.auth.enqueueLogin(targets.map((t) => t.loginId));
+      // 명시적 선택 계정 로그인 → force=true: 서버측에서 죽었지만 로컬 검증만 통과하는
+      // 쿠키도 실제 재로그인으로 새로 덮어쓴다(이슈 #132).
+      await ipc.auth.enqueueLogin(
+        targets.map((t) => t.loginId),
+        false,
+        true,
+      );
       pollLogin(targets);
     } catch (err) {
       setLoggingIn(false);
