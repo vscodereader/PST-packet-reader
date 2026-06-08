@@ -1,6 +1,7 @@
-//! band 세션 쿠키 검증(네이버 `auth/accounts.rs` 쿠키부 미러, `BUC` 기준).
+//! band 세션 쿠키 검증(네이버 `auth/accounts.rs` 쿠키부 미러, `band_session` 기준).
 //!
-//! band 로그인 성공 판정은 쿠키 `BUC`(domain contains `band.us`) 존재 + 미만료다.
+//! band 로그인 성공 판정은 쿠키 `band_session`(domain contains `band.us`) 존재 + 미만료다.
+//! (`BUC`는 네이버 쿠키이며 band은 발급하지 않는다 — 패킷 캡처로 확인.)
 //! 만료 검사 로직은 네이버와 동일(`cookie_is_unexpired`).
 
 use serde_json::Value;
@@ -13,7 +14,7 @@ use super::{
     util::now_secs,
 };
 
-const REQUIRED_BAND_COOKIE_NAMES: [&str; 1] = ["BUC"];
+const REQUIRED_BAND_COOKIE_NAMES: [&str; 1] = ["band_session"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BandCookieStatus {
@@ -134,11 +135,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn valid_band_session_requires_buc_cookie() {
+    fn valid_band_session_requires_session_cookie() {
         let now = 1_700_000_000;
         let value = serde_json::json!({
             "cookies": [
-                {"name": "BUC", "domain": ".band.us", "expires": now + 3600}
+                {"name": "band_session", "domain": ".band.us", "expires": now + 3600}
             ]
         });
 
@@ -167,7 +168,7 @@ mod tests {
         let now = 1_700_000_000;
         let value = serde_json::json!({
             "cookies": [
-                {"name": "BUC", "domain": ".band.us", "expires": now - 1}
+                {"name": "band_session", "domain": ".band.us", "expires": now - 1}
             ]
         });
 
@@ -183,7 +184,7 @@ mod tests {
         let now = 1_700_000_000;
         let value = serde_json::json!({
             "cookies": [
-                {"name": "BUC", "domain": "example.com", "expires": now + 3600}
+                {"name": "band_session", "domain": "example.com", "expires": now + 3600}
             ]
         });
 
@@ -207,7 +208,7 @@ mod tests {
         let now = 1_700_000_000;
         let value = serde_json::json!({
             "cookies": [
-                {"name": "BUC", "domain": ".band.us", "expires": -1}
+                {"name": "band_session", "domain": ".band.us", "expires": -1}
             ]
         });
 
@@ -222,7 +223,7 @@ mod tests {
 
         let valid = serde_json::json!({
             "cookies": [
-                {"name": "BUC", "domain": ".band.us", "expires": now + 3600}
+                {"name": "band_session", "domain": ".band.us", "expires": now + 3600}
             ]
         });
         let cookie_path = temp.path().join("id1.json");

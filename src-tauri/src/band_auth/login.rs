@@ -65,7 +65,7 @@ fn finalize(
                 Ok(())
             } else {
                 Err(OrchestratorError::CommandFailed(
-                    "저장된 쿠키에 유효한 band 세션(BUC)이 없습니다.".to_owned(),
+                    "저장된 쿠키에 유효한 band 세션(band_session)이 없습니다.".to_owned(),
                 ))
             }
         }
