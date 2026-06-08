@@ -955,8 +955,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     mode,
   );
   // 밴드가 선택됐으면 저장된 가입 링크가 있어야 게시 가능(사수 요구 흐름).
+  // 단 예약(schedule)에서는 밴드가 plan에서 제외되므로(엔진 미연결) 링크가 필요 없다 —
+  // 즉시 게시(now)일 때만 링크 저장을 요구한다.
   const bandReady =
-    !selPlatforms.includes("band") || bandLinkSaved.trim().length > 0;
+    when === "schedule" ||
+    !selPlatforms.includes("band") ||
+    bandLinkSaved.trim().length > 0;
   const canPublish =
     selected.length > 0 &&
     targetsOk &&
