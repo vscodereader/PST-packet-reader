@@ -995,6 +995,50 @@ export const invoke = vi.fn(
             : candidates,
         );
       }
+      // 종목토론방 종목 선택 화면(m.stock.naver.com) — 시드 종목을 ForumStockPage로 반환.
+      case "list_forum_stocks":
+      case "search_forum_stocks": {
+        const query = ((args?.query as string | undefined) ?? "").trim();
+        // 시드 종목 + list_stocks 밖의 ETF 한 종목(0193T0): 칩 이름 보강 회귀 테스트용.
+        const FORUM_ONLY = {
+          code: "0193T0",
+          name: "KODEX SK하이닉스단일종목레버리지",
+          market: "코스피",
+          price: "",
+          chg: 0,
+        };
+        const pool = [
+          ...SEED_STOCKS.map((s) => ({
+            code: s.code,
+            name: s.name,
+            market: s.market,
+            price: s.price,
+            chg: s.chg,
+          })),
+          FORUM_ONLY,
+        ];
+        const matched =
+          cmd === "search_forum_stocks" && query
+            ? pool.filter(
+                (s) => s.name.includes(query) || s.code.includes(query),
+              )
+            : pool;
+        const stocks = matched.map((s) => ({
+          code: s.code,
+          name: s.name,
+          exchange: s.market,
+          price: s.price,
+          changeRate: String(s.chg),
+          changeType: s.chg > 0 ? "rising" : s.chg < 0 ? "falling" : "even",
+          isHotDiscussion: false,
+        }));
+        return clone({
+          stocks,
+          totalCount: stocks.length,
+          page: (args?.page as number | undefined) ?? 1,
+          hasNext: false,
+        });
+      }
       case "list_activity":
         return clone(state.activity);
       case "append_activity": {
