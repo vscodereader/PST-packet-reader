@@ -17,6 +17,8 @@ use crate::store::JsonStore;
 pub mod auth;
 // band.us 이메일 로그인(네이버 로그인 병행 모듈).
 pub mod band_auth;
+// band.us 가입·글쓰기·댓글(순수 HTTP, md 서명). band_auth 로그인 쿠키를 소비한다.
+pub mod band_post;
 pub mod naver_cafe;
 // 네이버 증권 토론방 패킷 게시 엔진.
 pub mod discussion_batch;
