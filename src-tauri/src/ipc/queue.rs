@@ -343,6 +343,28 @@ pub fn add_queue_scheduled(
     Ok(next)
 }
 
+/// 예약 아이템 1건을 now 큐로 승격한다(수동 "즉시 처리"·자동 스케줄러 공용). scheduled
+/// 에서 제거 → now에 추가(plan 보존) → 워커 기동. 활동 로그는 호출부가 맥락에 맞게 남긴다
+/// (수동/자동 메시지가 다름). 아이템이 없으면(취소·중복 race) false.
+fn promote_one<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    now: &JsonStore<QueueNowItem>,
+    scheduled: &JsonStore<QueueScheduledItem>,
+    runner: &super::queue_runner::NowQueueRunner,
+    id: &str,
+) -> bool {
+    let Some(s) = scheduled.snapshot().into_iter().find(|s| s.id == id) else {
+        return false;
+    };
+    scheduled.mutate(|items| apply_cancel_scheduled(items, id));
+    now.mutate(|mut items| {
+        items.push(to_now_item(s));
+        items
+    });
+    super::queue_runner::start_if_idle(runner, app.clone());
+    true
+}
+
 /// Move a scheduled item into the immediate queue ("즉시 처리"): drop it from the
 /// scheduled store, append it to the now store, and return the updated now list.
 /// now 큐에 작업이 생기면 실행 워커를 기동한다(이미 돌고 있으면 무시).
@@ -355,23 +377,94 @@ pub fn promote_queue_scheduled<R: tauri::Runtime>(
     runner: tauri::State<'_, super::queue_runner::NowQueueRunner>,
     id: String,
 ) -> Vec<QueueNowItem> {
-    let found = scheduled.snapshot().into_iter().find(|s| s.id == id);
-    match found {
-        Some(s) => {
-            scheduled.mutate(|items| apply_cancel_scheduled(items, &id));
-            let next = now.mutate(|mut items| {
-                items.push(to_now_item(s));
-                items
-            });
+    if promote_one(&app, now.inner(), scheduled.inner(), runner.inner(), &id) {
+        record(
+            activity.inner(),
+            ActivityType::Info,
+            "예약을 즉시 게시로 전환",
+        );
+    }
+    now.snapshot()
+}
+
+/// 예약 시각을 변경한다(재예약). 놓친(missed) 예약을 새 시각으로 되살리거나, 대기 중인
+/// 예약의 시각을 바꾸는 데 쓴다. 과거 시각은 거부(add와 동일 가드). missed는 해제된다.
+#[tauri::command]
+pub fn reschedule_queue_scheduled(
+    store: tauri::State<'_, JsonStore<QueueScheduledItem>>,
+    activity: tauri::State<'_, JsonStore<crate::ipc::activity::ActivityItem>>,
+    id: String,
+    at: i64,
+    when: String,
+    rel: String,
+) -> Result<Vec<QueueScheduledItem>, String> {
+    if !is_future_enough(at, crate::util::now_ms()) {
+        return Err("예약 시각이 현재보다 과거입니다".into());
+    }
+    let next = store.mutate(|items| apply_reschedule(items, &id, at, &when, &rel));
+    record(activity.inner(), ActivityType::Info, "예약 시각 변경됨");
+    Ok(next)
+}
+
+/// 지금 게시해야 할 예약(`pick_due`)을 모두 now 큐로 승격하고 자동 게시 활동을 남긴다.
+/// 스케줄러 티커가 매 tick 호출한다. 동기 함수라 State 가드를 await 너머로 들지 않는다.
+pub fn run_due_now<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use tauri::Manager;
+
+    let scheduled = app.state::<JsonStore<QueueScheduledItem>>();
+    let now = app.state::<JsonStore<QueueNowItem>>();
+    let activity = app.state::<JsonStore<crate::ipc::activity::ActivityItem>>();
+    let runner = app.state::<super::queue_runner::NowQueueRunner>();
+
+    let snap = scheduled.snapshot();
+    for id in pick_due(&snap, crate::util::now_ms()) {
+        if promote_one(app, now.inner(), scheduled.inner(), runner.inner(), &id) {
+            let title = snap
+                .iter()
+                .find(|s| s.id == id)
+                .map_or("", |s| s.title.as_str());
             record(
                 activity.inner(),
                 ActivityType::Info,
-                "예약을 즉시 게시로 전환",
+                format!("예약 시각 도래 — 자동 게시: {title}"),
             );
-            super::queue_runner::start_if_idle(&runner, app);
-            next
         }
-        None => now.snapshot(),
+    }
+}
+
+/// 앱 시작 reconciliation: 앱 종료 중 시각이 지난 미발행 예약을 missed로 표시하고(자동
+/// 게시하지 않음) 새로 놓친 건이 있으면 사용자에게 알림으로 남긴다. 티커 spawn 전에
+/// 동기로 호출해, 첫 tick이 이미 missed로 표시된 항목을 자동 게시하지 않게 한다.
+pub fn reconcile_missed_on_startup<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use tauri::Manager;
+
+    let scheduled = app.state::<JsonStore<QueueScheduledItem>>();
+    let activity = app.state::<JsonStore<crate::ipc::activity::ActivityItem>>();
+
+    let before = scheduled.snapshot().iter().filter(|s| s.missed).count();
+    let after = scheduled.mutate(|items| mark_missed(items, crate::util::now_ms()));
+    let newly = after
+        .iter()
+        .filter(|s| s.missed)
+        .count()
+        .saturating_sub(before);
+    if newly > 0 {
+        record(
+            activity.inner(),
+            ActivityType::Error,
+            format!("예약 {newly}건이 앱 종료 중 시각이 지나 미발행됐습니다. 큐에서 재예약하거나 취소하세요."),
+        );
+    }
+}
+
+/// 백그라운드 예약 스케줄러. 앱 시작 시 한 번 spawn되어 앱 수명 동안 ~30초마다 예약
+/// 시각이 도래한 아이템을 자동 게시한다(`run_due_now`). interval의 첫 tick은 즉시
+/// 발화하지만, 시작 reconciliation이 먼저 끝나므로 미발행 예약을 잘못 게시하지 않는다.
+pub async fn scheduler_loop<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+    loop {
+        tick.tick().await;
+        run_due_now(&app);
     }
 }
 

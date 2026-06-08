@@ -479,6 +479,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         queue::cancel_queue_scheduled,
         queue::add_queue_scheduled,
         queue::promote_queue_scheduled,
+        queue::reschedule_queue_scheduled,
         queue::reorder_queue_now,
         stocks::list_stocks,
         activity::list_activity,
@@ -578,6 +579,15 @@ pub fn run() {
                 "pstmacro backend starting"
             );
             manage_stores(app.handle(), &dir)?;
+            // 앱 시작 reconciliation: 종료 중 시각이 지난 미발행 예약을 missed로 표시하고
+            // 알림으로 남긴다(자동 게시하지 않음). 반드시 스케줄러 spawn 전에 동기 수행해
+            // 첫 tick이 미발행 예약을 잘못 게시하지 않게 한다.
+            ipc::queue::reconcile_missed_on_startup(app.handle());
+            // 예약 시각 자동 트리거 스케줄러를 기동한다(앱 수명 동안 1회).
+            let scheduler_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                ipc::queue::scheduler_loop(scheduler_app).await;
+            });
             Ok(())
         })
         .run(tauri::generate_context!())
