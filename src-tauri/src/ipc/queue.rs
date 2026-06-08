@@ -134,6 +134,15 @@ pub struct QueueScheduledItem {
     pub kind: ModeValue,
     pub when: String,
     pub rel: String,
+    /// 예약 시각(epoch ms). 자동 트리거 스케줄러가 이 값과 현재 시각을 비교한다.
+    /// 과거에 저장된(표시 전용) 아이템엔 없을 수 있어 기본값(0)을 허용한다.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub at: i64,
+    /// 앱이 꺼져 있는 동안 예약 시각이 지나 미발행된 상태. 자동 게시하지 않고 사용자가
+    /// 재예약/취소하도록 표시한다. 기본 false.
+    #[serde(default)]
+    pub missed: bool,
     pub locs: Vec<QueueLocation>,
     /// 워커가 실제 게시에 사용하는 실행 페이로드. 레거시/표시 전용 아이템은 None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -260,6 +269,51 @@ pub fn is_future_enough(at: i64, now: i64) -> bool {
     at >= now - now.rem_euclid(60_000)
 }
 
+/// 시작 시 "놓침" 판정의 유예(1분). 직전 1분 내에 예약 시각이 된 아이템은 놓침으로
+/// 보지 않고 티커가 곧 게시한다(앱을 막 켠 직후의 오판 방지).
+const MISSED_GRACE_MS: i64 = 60_000;
+
+/// 지금 게시해야 할 예약 아이템의 id 목록(`at <= now` 이고 놓침이 아닌 것). 티커가
+/// 앱 실행 중 시각이 도래한 아이템을 promote하는 데 쓴다(순서 보존).
+pub fn pick_due(items: &[QueueScheduledItem], now: i64) -> Vec<String> {
+    items
+        .iter()
+        .filter(|s| !s.missed && s.at <= now)
+        .map(|s| s.id.clone())
+        .collect()
+}
+
+/// 앱 시작 시 호출: 유예를 넘겨(`at <= now - MISSED_GRACE_MS`) 미발행 상태로 지나간
+/// 예약을 `missed`로 표시한다. 게시는 하지 않는다. 멱등(이미 missed면 그대로).
+pub fn mark_missed(mut items: Vec<QueueScheduledItem>, now: i64) -> Vec<QueueScheduledItem> {
+    for item in &mut items {
+        if !item.missed && item.at <= now - MISSED_GRACE_MS {
+            item.missed = true;
+        }
+    }
+    items
+}
+
+/// 예약 시각을 변경한다(재예약): 매칭 id의 `at`/표시 문자열(`when`/`rel`)을 갱신하고
+/// `missed`를 해제한다. 매칭 없으면 원본 유지.
+pub fn apply_reschedule(
+    mut items: Vec<QueueScheduledItem>,
+    id: &str,
+    at: i64,
+    when: &str,
+    rel: &str,
+) -> Vec<QueueScheduledItem> {
+    for item in &mut items {
+        if item.id == id {
+            item.at = at;
+            item.when = when.to_owned();
+            item.rel = rel.to_owned();
+            item.missed = false;
+        }
+    }
+    items
+}
+
 /// Append a new scheduled item (used when a post is scheduled from the publish
 /// modal). Rejects a past time — defense-in-depth behind the picker's own guard.
 #[tauri::command]
@@ -274,6 +328,10 @@ pub fn add_queue_scheduled(
     }
     let title = item.title.clone();
     let next = store.mutate(|mut items| {
+        // 예약 시각을 아이템에 박제한다 — 자동 트리거 스케줄러가 이 값을 본다.
+        let mut item = item;
+        item.at = at;
+        item.missed = false;
         items.push(item);
         items
     });
@@ -349,6 +407,8 @@ mod tests {
             kind: ModeValue::Both,
             when: "오늘 18:30".into(),
             rel: "5시간 후".into(),
+            at: 1_700_000_000_000,
+            missed: false,
             locs: vec![loc(PlatformId::Forum, "에코프로", Some("086520"))],
             plan: None,
         }
@@ -515,5 +575,73 @@ mod tests {
         assert!(json.contains("\"postId\":\"p1\""));
         assert!(json.contains("\"bodyText\":\"본문\""));
         assert!(json.contains("\"commentTarget\""));
+    }
+
+    fn sched_at(id: &str, at: i64, missed: bool) -> QueueScheduledItem {
+        let mut s = sample_scheduled_item(id);
+        s.at = at;
+        s.missed = missed;
+        s
+    }
+
+    #[test]
+    fn pick_due_returns_past_non_missed_in_order() {
+        let now = 1_000_000;
+        let items = vec![
+            sched_at("a", now, false),       // 경계: at == now → 포함
+            sched_at("b", now + 1, false),   // 미래 → 제외
+            sched_at("c", now - 50, true),   // 과거지만 missed → 제외
+            sched_at("d", now - 100, false), // 과거 → 포함
+        ];
+        assert_eq!(pick_due(&items, now), vec!["a", "d"]);
+        assert!(pick_due(&[], now).is_empty());
+    }
+
+    #[test]
+    fn mark_missed_flags_only_past_grace_unmissed() {
+        let now = 10_000_000;
+        let items = vec![
+            sched_at("grace", now - MISSED_GRACE_MS + 1, false), // 유예 내 → 유지
+            sched_at("old", now - MISSED_GRACE_MS - 1, false),   // 유예 초과 → missed
+            sched_at("already", now - 1_000_000, true),          // 이미 missed → 유지
+            sched_at("future", now + 10_000, false),             // 미래 → 유지
+            sched_at("legacy", 0, false),                        // 레거시 at=0 → missed
+        ];
+        let next = mark_missed(items, now);
+        let by = |id: &str| next.iter().find(|s| s.id == id).unwrap().missed;
+        assert!(!by("grace"));
+        assert!(by("old"));
+        assert!(by("already"));
+        assert!(!by("future"));
+        assert!(by("legacy"));
+    }
+
+    #[test]
+    fn apply_reschedule_updates_time_and_clears_missed() {
+        let items = vec![sched_at("a", 100, true), sched_at("b", 200, false)];
+        let next = apply_reschedule(items, "a", 999, "내일 09:00", "내일");
+        let a = next.iter().find(|s| s.id == "a").unwrap();
+        assert_eq!(a.at, 999);
+        assert_eq!(a.when, "내일 09:00");
+        assert_eq!(a.rel, "내일");
+        assert!(!a.missed); // 재예약 시 놓침 해제
+                            // 비매칭 아이템은 그대로
+        let b = next.iter().find(|s| s.id == "b").unwrap();
+        assert_eq!(b.at, 200);
+    }
+
+    #[test]
+    fn scheduled_item_defaults_at_and_missed_when_absent() {
+        // 구버전 JSON(at/missed 없음) → at=0, missed=false 로 역직렬화(serde default).
+        let json =
+            r#"{"id":"q1","title":"t","kind":"post","when":"오늘 18:30","rel":"오늘","locs":[]}"#;
+        let item: QueueScheduledItem = serde_json::from_str(json).unwrap();
+        assert_eq!(item.at, 0);
+        assert!(!item.missed);
+        // 전체 라운드트립도 보존.
+        let full = sched_at("q2", 1_700_000_000_000, true);
+        let back: QueueScheduledItem =
+            serde_json::from_str(&serde_json::to_string(&full).unwrap()).unwrap();
+        assert_eq!(full, back);
     }
 }

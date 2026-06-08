@@ -3,7 +3,17 @@ import type { ModeValue } from "./ModeValue";
 import type { PublishPlan } from "./PublishPlan";
 import type { QueueLocation } from "./QueueLocation";
 
-export type QueueScheduledItem = { id: string, title: string, kind: ModeValue, when: string, rel: string, locs: Array<QueueLocation>, 
+export type QueueScheduledItem = { id: string, title: string, kind: ModeValue, when: string, rel: string, 
+/**
+ * 예약 시각(epoch ms). 자동 트리거 스케줄러가 이 값과 현재 시각을 비교한다.
+ * 과거에 저장된(표시 전용) 아이템엔 없을 수 있어 기본값(0)을 허용한다.
+ */
+at: number, 
+/**
+ * 앱이 꺼져 있는 동안 예약 시각이 지나 미발행된 상태. 자동 게시하지 않고 사용자가
+ * 재예약/취소하도록 표시한다. 기본 false.
+ */
+missed: boolean, locs: Array<QueueLocation>, 
 /**
  * 워커가 실제 게시에 사용하는 실행 페이로드. 레거시/표시 전용 아이템은 None.
  */
