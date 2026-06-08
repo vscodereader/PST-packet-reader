@@ -402,6 +402,29 @@ fn get_band_queue_status(
     band_auth::get_band_queue_status(&state).map_err(|e| e.to_string())
 }
 
+/// 밴드 링크로 가입한 뒤 글(+선택 댓글)을 순수 HTTP로 게시한다.
+///
+/// `account_id`는 band 로그인 쿠키 파일 키(loginId)다. `band_link`로 가입 →
+/// 제목·내용 게시 → 댓글(있으면) 순으로 진행한다(band_post::band_publish).
+#[tauri::command]
+async fn band_publish(
+    account_id: String,
+    band_link: String,
+    title: String,
+    content: String,
+    comment: Option<String>,
+) -> Result<band_post::BandPublishOutcome, String> {
+    band_post::band_publish(
+        &account_id,
+        &band_link,
+        &title,
+        &content,
+        comment.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn get_account_cookies(account_id: String) -> Result<Option<serde_json::Value>, String> {
     auth::read_account_cookies(&account_id).map_err(|e| e.to_string())
@@ -512,6 +535,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         get_queue_status,
         enqueue_band_login,
         get_band_queue_status,
+        band_publish,
         get_account_cookies,
         run_naver_discussion,
         parse_template_csv,
