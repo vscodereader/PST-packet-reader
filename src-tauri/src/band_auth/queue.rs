@@ -65,6 +65,8 @@ pub fn enqueue_band_accounts<R: Runtime>(
                 account_id,
                 headless,
                 use_adb,
+                // band 큐는 자체 쿠키 만료 검사로 재로그인 여부를 정하므로 force는 항상 false.
+                force: false,
                 status: QueueJobStatus::Pending,
                 message: "queued".to_string(),
                 queued_at: now_millis(),
@@ -228,6 +230,7 @@ mod tests {
                 account_id: "id1".to_string(),
                 headless: true,
                 use_adb: false,
+                force: false,
                 status: QueueJobStatus::Pending,
                 message: "queued".to_string(),
                 queued_at: 1,
