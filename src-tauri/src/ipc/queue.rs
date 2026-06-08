@@ -283,11 +283,14 @@ pub fn add_queue_scheduled(
 
 /// Move a scheduled item into the immediate queue ("즉시 처리"): drop it from the
 /// scheduled store, append it to the now store, and return the updated now list.
+/// now 큐에 작업이 생기면 실행 워커를 기동한다(이미 돌고 있으면 무시).
 #[tauri::command]
-pub fn promote_queue_scheduled(
+pub fn promote_queue_scheduled<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     now: tauri::State<'_, JsonStore<QueueNowItem>>,
     scheduled: tauri::State<'_, JsonStore<QueueScheduledItem>>,
     activity: tauri::State<'_, JsonStore<crate::ipc::activity::ActivityItem>>,
+    runner: tauri::State<'_, super::queue_runner::NowQueueRunner>,
     id: String,
 ) -> Vec<QueueNowItem> {
     let found = scheduled.snapshot().into_iter().find(|s| s.id == id);
@@ -303,6 +306,7 @@ pub fn promote_queue_scheduled(
                 ActivityType::Info,
                 "예약을 즉시 게시로 전환",
             );
+            super::queue_runner::start_if_idle(&runner, app);
             next
         }
         None => now.snapshot(),
