@@ -13,6 +13,8 @@ use tauri::{AppHandle, Manager, Runtime};
 
 use super::posts::{CommentTarget, ModeValue};
 use super::queue::{apply_cancel_now, PublishPlan, QueueNowItem, QueueState};
+use crate::discussion_batch::{run_forum_publish, ForumPublishRequest};
+use crate::naver_automation::types::DiscussionStock;
 use crate::naver_cafe::article_list::models::SortBy;
 use crate::naver_cafe::distribute::{distribute_comments, mulberry32, seed_from_clock};
 use crate::naver_cafe::orchestrator::{CommentJob, JobReport, PostJob};
@@ -194,8 +196,8 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) {
     // 작업 수**로 잡아야 100%에 도달한다(빈 댓글 풀로 인한 영구 미완 방지 — build_comment_jobs).
     let comment_jobs = build_comment_jobs(comment_targets, &plan.comments);
 
-    // 진행률 총계 확정(실제 카페 글 + 카페 댓글 작업 수; 종목토론방은 후속 단계).
-    let total = (post_reports.len() + comment_jobs.len()) as u32;
+    // 진행률 총계 확정(실제 카페 글 + 카페 댓글 작업 + 종목토론방 종목 수).
+    let total = (post_reports.len() + comment_jobs.len() + plan.forum.len()) as u32;
     let mut done = post_reports.len() as u32;
     update_progress(app, id, done, total);
 
@@ -205,7 +207,14 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) {
         done += posted;
         update_progress(app, id, done, total);
     }
-    // 후속 단계: 종목토론방(spawn_blocking + Chrome) + 완료 로그/activity.
+
+    // 4. 종목토론방 게시(계정별 Chrome, 본문은 평문 = plan.body_text). 진행 중 단계는
+    // 끝까지 두되, 진입 전 협조적 취소를 확인한다.
+    if !plan.forum.is_empty() && item_present(app, id) {
+        done += run_forum_targets(app, plan).await;
+        update_progress(app, id, done, total);
+    }
+    // 후속 단계: 완료 로그/activity.
 }
 
 /// 댓글 대상을 모은다. both 모드는 방금 게시에 성공한 글(self)에, comment 전용은
@@ -266,6 +275,72 @@ async fn collect_comment_targets(
         }
     }
     targets
+}
+
+/// plan의 종목토론방 대상을 계정별로 묶어 `ForumPublishRequest`로 만든다. 본문은
+/// 동결된 평문(`body_text`)을 쓰고(토론방은 평문만 지원), 댓글은 풀의 첫 항목을 쓴다
+/// (즉시게시 forum 경로와 동일). host/port는 호출부가 띄운 Chrome 값으로 채운다.
+fn plan_to_forum_requests(plan: &PublishPlan) -> Vec<ForumPublishRequest> {
+    use std::collections::BTreeMap;
+
+    let mut by_account: BTreeMap<String, Vec<DiscussionStock>> = BTreeMap::new();
+    for f in &plan.forum {
+        by_account
+            .entry(f.account_id.clone())
+            .or_default()
+            .push(DiscussionStock {
+                name: f.name.clone(),
+                code: f.code.clone(),
+                link: String::new(),
+            });
+    }
+
+    let run_post = runs_post(plan);
+    let run_comment = runs_comment(plan);
+    let comment = plan.comments.first().cloned().unwrap_or_default();
+
+    by_account
+        .into_iter()
+        .map(|(account_id, stocks)| ForumPublishRequest {
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            account_id,
+            run_post,
+            run_comment,
+            title: plan.title.clone(),
+            body: plan.body_text.clone(),
+            comment: comment.clone(),
+            stocks,
+        })
+        .collect()
+}
+
+/// 종목토론방 대상을 계정별로 게시한다. 계정마다 디버그 포트 Chrome을 직접 띄워
+/// (run_forum_publish_now와 동일 패턴) 패킷 엔진으로 게시하고, 처리한 종목 수를 돌려준다.
+/// 단일 워커가 순차로 돌므로 Chrome 인스턴스 충돌이 없다. 결과 로그는 후속 단계.
+async fn run_forum_targets<R: Runtime>(app: &AppHandle<R>, plan: &PublishPlan) -> u32 {
+    let mut done = 0u32;
+    for req in plan_to_forum_requests(plan) {
+        let posted = req.stocks.len() as u32;
+        let app_for_job = app.clone();
+        let _results = tauri::async_runtime::spawn_blocking(move || {
+            match crate::auth::launch_debug_chrome(true) {
+                Ok(chrome) => {
+                    let mut req = req;
+                    req.host = "127.0.0.1".to_owned();
+                    req.port = chrome.port;
+                    let results = run_forum_publish(req, app_for_job);
+                    drop(chrome);
+                    results
+                }
+                // Chrome 기동 실패 시 이 계정은 건너뛴다(결과/오류 로그는 후속 단계).
+                Err(_) => Vec::new(),
+            }
+        })
+        .await;
+        done += posted;
+    }
+    done
 }
 
 /// 댓글 대상에 댓글 풀(comments)을 분배해 작업으로 만든다. 풀이 비면 빈 목록을 내
@@ -453,6 +528,39 @@ mod tests {
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].cafe_id, 444);
         assert_eq!(targets[0].article_id, 555);
+    }
+
+    #[test]
+    fn forum_requests_group_by_account_with_plain_body() {
+        use crate::ipc::queue::ForumTarget;
+        let mut p = plan(ModeValue::Post, vec![]);
+        p.body_text = "평문 본문".into();
+        p.comments = vec!["댓글1".into()];
+        p.forum = vec![
+            ForumTarget {
+                account_id: "u0".into(),
+                name: "삼성전자".into(),
+                code: "005930".into(),
+            },
+            ForumTarget {
+                account_id: "u0".into(),
+                name: "SK하이닉스".into(),
+                code: "000660".into(),
+            },
+            ForumTarget {
+                account_id: "u1".into(),
+                name: "에코프로".into(),
+                code: "086520".into(),
+            },
+        ];
+        let reqs = plan_to_forum_requests(&p);
+        assert_eq!(reqs.len(), 2); // 계정별(u0, u1) 그룹
+        let u0 = reqs.iter().find(|r| r.account_id == "u0").unwrap();
+        assert_eq!(u0.stocks.len(), 2);
+        assert_eq!(u0.body, "평문 본문"); // 동결 평문 본문(토론방은 평문만 지원)
+        assert_eq!(u0.comment, "댓글1");
+        assert!(u0.run_post);
+        assert!(!u0.run_comment); // Post 모드
     }
 
     #[test]
