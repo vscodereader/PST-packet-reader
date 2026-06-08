@@ -499,10 +499,11 @@ fn read_signals(client: &mut CdpClient) -> Result<BandPageSignals, AutomationErr
 
 // Network.getCookies로 band.us 쿠키를 수거한다.
 fn collect_band_cookies(client: &mut CdpClient) -> Result<Vec<Value>, AutomationError> {
-    let result = client.call(
-        "Network.getCookies",
-        json!({ "urls": ["https://www.band.us", "https://auth.band.us"] }),
-    )?;
+    // getAllCookies는 경로(Path) 제한과 무관하게 브라우저의 모든 쿠키를 돌려준다.
+    // getCookies(urls)는 URL 경로('/')에 매칭되는 쿠키만 줘서, 로그인이 발급하는
+    // `secretKey` 쿠키(Path=/s/login/getKey, HttpOnly)가 누락된다 — 이게 없으면
+    // 게시용 getKey가 'temp'만 돌려줘 서명키 발급에 실패한다(패킷 캡처로 확인).
+    let result = client.call("Network.getAllCookies", json!({}))?;
     let cookies = result
         .get("cookies")
         .and_then(Value::as_array)
