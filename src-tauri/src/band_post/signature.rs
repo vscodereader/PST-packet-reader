@@ -24,16 +24,31 @@ type HmacSha256 = Hmac<Sha256>;
 /// 고정 앱 키. `akey` 헤더 값으로 쓰이며 **HMAC 키가 아니다**(band-web `APP_KEY` 상수).
 pub const APP_KEY: &str = "bbc59b0b5f7a1c6efe950f6236ccda35";
 
+/// 임의의 키 바이트로 `path`에 대한 `md` 서명을 만든다(코어).
+///
+/// 출력은 표준 base64(`=` 패딩 포함, base64url 아님).
+pub fn make_md_bytes(key: &[u8], path: &str) -> String {
+    // HMAC은 임의 키 길이를 허용하므로 `new_from_slice`는 실패하지 않는다.
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC은 모든 키 길이를 허용");
+    mac.update(path.as_bytes());
+    STANDARD.encode(mac.finalize().into_bytes())
+}
+
 /// `secret_key`로 `path`(스킴/호스트 제거된 경로+쿼리)에 대한 `md` 서명을 만든다.
 ///
 /// band-web 일반 웹 케이스(`isJwtType=false`)를 미러한다: 키는 `secret_key`의
-/// UTF-8 바이트, 출력은 표준 base64(`=` 패딩 포함, base64url 아님).
+/// UTF-8 바이트 그대로.
 pub fn make_md(secret_key: &str, path: &str) -> String {
-    // HMAC은 임의 키 길이를 허용하므로 `new_from_slice`는 실패하지 않는다.
-    let mut mac =
-        HmacSha256::new_from_slice(secret_key.as_bytes()).expect("HMAC은 모든 키 길이를 허용");
-    mac.update(path.as_bytes());
-    STANDARD.encode(mac.finalize().into_bytes())
+    make_md_bytes(secret_key.as_bytes(), path)
+}
+
+/// JWT/인앱 케이스(`isJwtType=true`)의 `md` 서명: `secret_key`를 base64url 디코드한
+/// 바이트를 HMAC 키로 쓴다. 디코드 실패 시 UTF-8 폴백(웹 동작 보존).
+pub fn make_md_jwt(secret_key: &str, path: &str) -> String {
+    match base64::engine::general_purpose::URL_SAFE.decode(secret_key) {
+        Ok(bytes) => make_md_bytes(&bytes, path),
+        Err(_) => make_md(secret_key, path),
+    }
 }
 
 /// 전체 URL에서 서명 대상 경로를 추출한다(band-web `createMd`+`extractPath` 미러).
