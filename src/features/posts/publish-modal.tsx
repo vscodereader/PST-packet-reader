@@ -969,10 +969,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         articleId: x.out.articleId as number,
       }));
     if (posted.length === 0) return postResults;
-    // The backend shuffles `comments` and deals one to each posted article
-    // (issue #98); `posted` already carries {accountId, cafeId, articleId}.
+    // both = "위에서 작성한 글에 바로 댓글이 달립니다": 쓴 글마다 댓글 풀 전체를 단다.
+    // 각 글을 댓글 수만큼 복제해 보내면, 백엔드 분배(셔플 후 pool[i % pool.len()])가
+    // 글 블록(길이 = 풀 크기)마다 풀 전체를 정확히 한 번씩 깔아 준다.
+    const targets = posted.flatMap((p) => comments.map(() => p));
     const couts = await ipc.cafes
-      .runCommentJobs({ targets: posted, comments })
+      .runCommentJobs({ targets, comments })
       .catch((): null => null);
     // 글이 올라간 행이라도 그 계정 댓글이 전부 성공해야 "성공"으로 둔다. 일부/전부
     // 실패를 초록 배지로 묻으면(이전 동작) 운영자가 재시도를 안 한다. 건수는 msg에.

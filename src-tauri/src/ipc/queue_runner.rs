@@ -209,9 +209,15 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) {
         Vec::new()
     };
 
-    // 3. 카페 댓글 작업 구성. 진행률 total은 comment_targets가 아니라 **실제 만들어진
-    // 작업 수**로 잡아야 100%에 도달한다(빈 댓글 풀로 인한 영구 미완 방지 — build_comment_jobs).
-    let comment_jobs = build_comment_jobs(comment_targets, &plan.comments);
+    // 3. 카페 댓글 작업 구성. both(쓴 글에 self-comment)는 글마다 템플릿의 **모든**
+    // 댓글을 달고(writer-modal "위에서 작성한 글에 바로 댓글이 달립니다"), comment 전용은
+    // 대상마다 풀에서 1개씩 분배한다(#98 "계정마다 다른 댓글"). 진행률 total은 실제
+    // 만들어진 작업 수로 잡아 100%에 도달하게 한다(빈 풀로 인한 영구 미완 방지).
+    let comment_jobs = if matches!(plan.kind, ModeValue::Both) {
+        build_self_comment_jobs(comment_targets, &plan.comments)
+    } else {
+        build_comment_jobs(comment_targets, &plan.comments)
+    };
 
     // 진행률 총계 확정(실제 카페 글 + 카페 댓글 작업 + 종목토론방 종목 수).
     let total = (post_reports.len() + comment_jobs.len() + plan.forum.len()) as u32;
@@ -420,6 +426,27 @@ fn build_comment_jobs(targets: Vec<CommentTargetEntry>, comments: &[String]) -> 
         .collect()
 }
 
+/// both(쓴 글에 self-comment)용: 각 대상(쓴 글)에 템플릿의 **모든** 비어있지 않은 댓글을
+/// 각각 단다. 분배(1개씩)와 달리 글 하나에 댓글 풀 전체가 올라간다. 빈 댓글은 건너뛴다.
+fn build_self_comment_jobs(
+    targets: Vec<CommentTargetEntry>,
+    comments: &[String],
+) -> Vec<CommentJob> {
+    let texts: Vec<&String> = comments.iter().filter(|c| !c.trim().is_empty()).collect();
+    let mut jobs = Vec::new();
+    for t in &targets {
+        for content in &texts {
+            jobs.push(CommentJob {
+                account_id: t.account_id.clone(),
+                cafe_id: t.cafe_id,
+                article_id: t.article_id,
+                content: (*content).clone(),
+            });
+        }
+    }
+    jobs
+}
+
 fn status_of(ok: bool) -> BatchItemStatus {
     if ok {
         BatchItemStatus::Success
@@ -581,8 +608,13 @@ fn estimate_total(plan: &PublishPlan) -> u32 {
     let posts = if runs_post(plan) { plan.naver.len() } else { 0 };
     let comments = if runs_comment(plan) {
         if matches!(plan.kind, ModeValue::Both) {
-            // both: 방금 쓴 글에 self-comment — 글 대상 수만큼.
-            plan.naver.len()
+            // both: 글마다 비어있지 않은 댓글 전부 — 글 수 × 댓글 수.
+            let n_comments = plan
+                .comments
+                .iter()
+                .filter(|c| !c.trim().is_empty())
+                .count();
+            plan.naver.len() * n_comments
         } else {
             // comment 전용: 대상별 commentTarget(latest/popular=count, url=1) 합.
             plan.naver
@@ -910,6 +942,34 @@ mod tests {
         assert_eq!(jobs.len(), 2);
         assert_eq!(jobs[0].article_id, 2);
         assert_eq!(jobs[1].article_id, 3);
+    }
+
+    #[test]
+    fn build_self_comment_jobs_posts_all_comments_per_article() {
+        // both: 글 1개에 댓글 풀 전체(3개, 공백 제외)를 단다.
+        let targets = vec![CommentTargetEntry {
+            account_id: "u0".into(),
+            cafe_id: 1,
+            article_id: 2,
+        }];
+        let jobs = build_self_comment_jobs(
+            targets,
+            &["댓글1".into(), "  ".into(), "댓글2".into(), "댓글3".into()],
+        );
+        assert_eq!(jobs.len(), 3); // 공백 1개 제외
+        assert!(jobs.iter().all(|j| j.article_id == 2 && j.cafe_id == 1));
+        let contents: Vec<&str> = jobs.iter().map(|j| j.content.as_str()).collect();
+        assert_eq!(contents, vec!["댓글1", "댓글2", "댓글3"]);
+    }
+
+    #[test]
+    fn build_self_comment_jobs_empty_when_no_nonempty_comments() {
+        let targets = vec![CommentTargetEntry {
+            account_id: "u0".into(),
+            cafe_id: 1,
+            article_id: 2,
+        }];
+        assert!(build_self_comment_jobs(targets, &["".into(), "   ".into()]).is_empty());
     }
 
     #[test]

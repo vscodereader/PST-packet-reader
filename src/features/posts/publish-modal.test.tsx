@@ -399,7 +399,7 @@ describe("PublishModal", () => {
     ]);
   });
 
-  it("comments on the just-posted article in 'both' mode", async () => {
+  it("comments every template comment on the just-posted article in 'both' mode", async () => {
     const bothDoc: LibraryPost = {
       id: "lb",
       title: "실적 점검 + 댓글",
@@ -409,7 +409,7 @@ describe("PublishModal", () => {
       status: "ready",
       excerpt: "요약",
       body: "<p>본문</p>",
-      comments: ["좋네요"],
+      comments: ["좋네요", "굿"],
     };
     renderPublish({ doc: bothDoc });
     await userEvent.click(await screen.findByText("invest_king7")); // drop forum
@@ -425,25 +425,28 @@ describe("PublishModal", () => {
     );
     // post lands first…
     expect(ipcBackend).toHaveBeenCalledWith("run_post_jobs", expect.anything());
-    // …then a comment request for that article (articleId 1000 from the mock,
-    // cafeId from the picked joined cafe) is sent. The backend now distributes
-    // the comment pool (issue #98), so the front sends the target + pool — the
-    // chosen `content` is no longer decided here.
-    expect(ipcBackend).toHaveBeenCalledWith(
-      "run_comment_jobs",
-      expect.objectContaining({
-        req: expect.objectContaining({
-          targets: [
-            expect.objectContaining({
-              accountId: "money_lab",
-              cafeId: 11111111,
-              articleId: 1000,
-            }),
-          ],
-          comments: ["좋네요"],
-        }),
-      }),
-    );
+    // …then both 모드는 쓴 글(articleId 1000)에 댓글 풀 전체를 단다: 글을 댓글 수만큼
+    // 복제해 보내 백엔드 분배가 글마다 풀 전체를 깔게 한다(여기선 글 1개 × 댓글 2개).
+    const call = ipcBackend.mock.calls.find((c) => c[0] === "run_comment_jobs");
+    expect(call).toBeDefined();
+    const req = (
+      call?.[1] as {
+        req: {
+          targets: { accountId: string; cafeId: number; articleId: number }[];
+          comments: string[];
+        };
+      }
+    ).req;
+    expect(req.targets).toHaveLength(2);
+    expect(
+      req.targets.every(
+        (t) =>
+          t.accountId === "money_lab" &&
+          t.cafeId === 11111111 &&
+          t.articleId === 1000,
+      ),
+    ).toBe(true);
+    expect(req.comments).toEqual(["좋네요", "굿"]);
   });
 
   it("comments on a pasted article URL in 'comment' mode", async () => {
