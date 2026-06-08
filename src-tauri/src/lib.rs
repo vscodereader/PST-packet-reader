@@ -336,6 +336,7 @@ fn enqueue_cookie_refresh<R: Runtime>(
     account_ids: Vec<String>,
     headless: Option<bool>,
     use_adb: Option<bool>,
+    force: Option<bool>,
 ) -> Result<auth::QueueStatus, String> {
     let n = account_ids.len();
     let result = auth::enqueue_accounts(
@@ -344,6 +345,7 @@ fn enqueue_cookie_refresh<R: Runtime>(
         account_ids,
         headless.unwrap_or(false),
         use_adb.unwrap_or(false),
+        force.unwrap_or(false),
     )
     .map_err(|e| e.to_string())?;
     if n > 0 {

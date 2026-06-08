@@ -35,6 +35,7 @@ pub fn enqueue_accounts<R: Runtime>(
     account_ids: Vec<String>,
     headless: bool,
     use_adb: bool,
+    force: bool,
 ) -> Result<QueueStatus, OrchestratorError> {
     let should_start = {
         let mut inner = state
@@ -46,6 +47,7 @@ pub fn enqueue_accounts<R: Runtime>(
                 account_id,
                 headless,
                 use_adb,
+                force,
                 status: QueueJobStatus::Pending,
                 message: "queued".to_string(),
                 queued_at: now_millis(),
@@ -129,7 +131,8 @@ async fn worker_loop<R: Runtime>(state: QueueState, app: AppHandle<R>) {
             }
         }
 
-        let result = process_account(&app, &job.account_id, job.headless, job.use_adb).await;
+        let result =
+            process_account(&app, &job.account_id, job.headless, job.use_adb, job.force).await;
         let message = match &result {
             Ok(()) if cookie_status == CookieStatus::Expired => "expired; refreshed".to_string(),
             Ok(()) => "success".to_string(),
@@ -210,6 +213,7 @@ mod tests {
                 account_id: "id1".to_string(),
                 headless: true,
                 use_adb: false,
+                force: false,
                 status: QueueJobStatus::Pending,
                 message: "queued".to_string(),
                 queued_at: 1,

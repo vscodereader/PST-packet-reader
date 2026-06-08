@@ -40,6 +40,7 @@ async fn process_account<R: Runtime>(
     account_id: &str,
     headless: bool,
     use_adb: bool,
+    force: bool,
 ) -> Result<(), OrchestratorError> {
     let paths = if use_adb {
         bootstrap_runtime().await?
@@ -55,7 +56,11 @@ async fn process_account<R: Runtime>(
         .find(|account| account.id == account_id)
         .ok_or_else(|| OrchestratorError::AccountNotFound(account_id.to_string()))?;
 
-    if has_valid_account_cookies(&paths, account_id)? {
+    // 로컬 쿠키가 유효해 보여도, 명시적 재로그인(force)이면 단락하지 않고 실제 로그인을
+    // 수행해 새 쿠키로 덮어쓴다. 로컬 검증은 서버측에서 죽은 세션을 가려낼 수 없기 때문
+    // (세션 쿠키는 항상 "안 만료"로 통과)이며, 이 단락이 그대로면 죽은 쿠키가 영원히
+    // 남는다(이슈 #132).
+    if should_skip_login(force, has_valid_account_cookies(&paths, account_id)?) {
         return Ok(());
     }
 
@@ -79,4 +84,31 @@ async fn process_account<R: Runtime>(
     tauri::async_runtime::spawn_blocking(move || login::login(&paths, &account, headless))
         .await
         .map_err(|error| OrchestratorError::CommandFailed(format!("로그인 스레드 오류: {error}")))?
+}
+
+// 로컬 쿠키가 유효해 보일 때 실제 로그인을 건너뛸지(단락) 판정한다. 단, 명시적 재로그인
+// (force)이면 로컬 캐시를 무시하고 절대 건너뛰지 않는다(이슈 #132).
+fn should_skip_login(force: bool, has_valid_cookies: bool) -> bool {
+    !force && has_valid_cookies
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_skip_login;
+
+    #[test]
+    fn force_never_skips_even_with_valid_cookies() {
+        // 죽었지만 로컬 검증만 통과하는 쿠키를 새 값으로 덮어쓰려면, force일 때는
+        // 유효해 보여도 건너뛰지 않고 실제 로그인을 해야 한다.
+        assert!(!should_skip_login(true, true));
+        assert!(!should_skip_login(true, false));
+    }
+
+    #[test]
+    fn non_force_skips_only_when_cookies_look_valid() {
+        // 비강제(예: 전체 실행)는 기존 단락을 유지해 살아있는 세션을 재로그인하지 않는다.
+        assert!(should_skip_login(false, true));
+        // 쿠키가 없거나 만료면 비강제여도 로그인해야 한다(건너뛰지 않음).
+        assert!(!should_skip_login(false, false));
+    }
 }
