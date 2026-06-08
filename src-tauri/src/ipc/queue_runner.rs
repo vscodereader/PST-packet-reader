@@ -5,21 +5,31 @@
 //!
 //! 범위: 워커 골격 + 카페 글(`run_post_jobs`) + 카페 댓글(both=방금 쓴 글에 self /
 //! latest·popular=글목록 조회 / url) + 종목토론방 게시(`run_forum_publish`, 계정별
-//! Chrome). 완료 로그(log_batch)/activity 기록은 후속 단계.
+//! Chrome) + 완료 로그(`LogBatch`)/activity 기록(아이템별 결과를 알림에 남긴다).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Manager, Runtime};
 
+use super::accounts::PlatformId;
+use super::activity::{record, ActivityItem, ActivityType};
+use super::log_batches::{BatchItem, BatchItemStatus, LogBatch, MAX_LOG_BATCHES};
 use super::posts::{CommentTarget, ModeValue};
 use super::queue::{apply_cancel_now, PublishPlan, QueueNowItem, QueueState};
-use crate::discussion_batch::{run_forum_publish, ForumPublishRequest};
+use crate::discussion_batch::{run_forum_publish, ForumPublishRequest, ForumPublishResult};
 use crate::naver_automation::types::DiscussionStock;
 use crate::naver_cafe::article_list::models::SortBy;
 use crate::naver_cafe::distribute::{distribute_comments, mulberry32, seed_from_clock};
-use crate::naver_cafe::orchestrator::{CommentJob, JobReport, PostJob};
+use crate::naver_cafe::orchestrator::{CommentJob, CommentJobReport, JobReport, PostJob};
 use crate::naver_cafe::{fetch_article_list_for_account, run_comment_jobs, run_post_jobs};
 use crate::store::JsonStore;
+use crate::util::now_ms;
+
+/// 완료 로그(`LogBatch`) id의 단조 증가 시퀀스 — 같은 ms에 여러 배치가 나도 id가
+/// 겹치지 않게 한다. id는 `lb-q-` prefix를 써서 lib.rs forum 즉시게시(`lb-`)의 별도
+/// 카운터와도 충돌하지 않는다.
+static LB_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// now 큐 실행 워커의 in-memory 상태. 잡 자체는 `JsonStore<QueueNowItem>`에 있다.
 #[derive(Default, Clone)]
@@ -51,6 +61,13 @@ struct CommentTargetEntry {
     account_id: String,
     cafe_id: u64,
     article_id: u64,
+}
+
+/// 종목토론방 게시 결과 1건 — 어느 계정으로 돌렸는지(login_id)와 종목별 결과를 묶는다.
+/// `ForumPublishResult`에는 계정 정보가 없으므로 워커가 계정과 짝지어 보존한다.
+struct ForumOutcome {
+    account_id: String,
+    result: ForumPublishResult,
 }
 
 /// 위에서부터 첫 `Waiting` 아이템을 고른다(`Running`은 건너뛴다).
@@ -201,20 +218,40 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) {
     let mut done = post_reports.len() as u32;
     update_progress(app, id, done, total);
 
-    if !comment_jobs.is_empty() {
+    let comment_reports = if comment_jobs.is_empty() {
+        Vec::new()
+    } else {
         let posted = comment_jobs.len() as u32;
-        let _reports = run_comment_jobs(&comment_jobs).await;
+        let reports = run_comment_jobs(&comment_jobs).await;
         done += posted;
         update_progress(app, id, done, total);
-    }
+        reports
+    };
 
     // 4. 종목토론방 게시(계정별 Chrome, 본문은 평문 = plan.body_text). 진행 중 단계는
     // 끝까지 두되, 진입 전 협조적 취소를 확인한다.
-    if !plan.forum.is_empty() && item_present(app, id) {
-        done += run_forum_targets(app, plan).await;
+    let forum_outcomes = if !plan.forum.is_empty() && item_present(app, id) {
+        let outcomes = run_forum_targets(app, plan).await;
+        done += outcomes.len() as u32;
         update_progress(app, id, done, total);
+        outcomes
+    } else {
+        Vec::new()
+    };
+
+    // 5. 완료 로그(LogBatch)/activity: 실제 실행한 카페 글·댓글·토론방 결과를 알림에
+    // 남긴다. 실행한 작업이 하나도 없으면(빈 plan) 빈 배치는 만들지 않는다.
+    let batch = build_log_batch(
+        plan,
+        &post_reports,
+        &comment_reports,
+        &forum_outcomes,
+        now_ms(),
+        LB_SEQ.fetch_add(1, Ordering::Relaxed),
+    );
+    if !batch.items.is_empty() {
+        record_completion(app, batch);
     }
-    // 후속 단계: 완료 로그/activity.
 }
 
 /// 댓글 대상을 모은다. both 모드는 방금 게시에 성공한 글(self)에, comment 전용은
@@ -316,14 +353,19 @@ fn plan_to_forum_requests(plan: &PublishPlan) -> Vec<ForumPublishRequest> {
 }
 
 /// 종목토론방 대상을 계정별로 게시한다. 계정마다 디버그 포트 Chrome을 직접 띄워
-/// (run_forum_publish_now와 동일 패턴) 패킷 엔진으로 게시하고, 처리한 종목 수를 돌려준다.
-/// 단일 워커가 순차로 돌므로 Chrome 인스턴스 충돌이 없다. 결과 로그는 후속 단계.
-async fn run_forum_targets<R: Runtime>(app: &AppHandle<R>, plan: &PublishPlan) -> u32 {
-    let mut done = 0u32;
+/// (run_forum_publish_now와 동일 패턴) 패킷 엔진으로 게시하고, 계정·종목별 결과를
+/// 돌려준다(완료 로그용). 단일 워커가 순차로 돌므로 Chrome 인스턴스 충돌이 없다.
+/// Chrome 기동 실패 시 그 계정의 종목들을 실패 결과로 합성해, 진행률·로그가 조용히
+/// 누락되지 않게 한다(거짓 100% 방지).
+async fn run_forum_targets<R: Runtime>(
+    app: &AppHandle<R>,
+    plan: &PublishPlan,
+) -> Vec<ForumOutcome> {
+    let mut outcomes = Vec::new();
     for req in plan_to_forum_requests(plan) {
-        let posted = req.stocks.len() as u32;
+        let account_id = req.account_id.clone();
         let app_for_job = app.clone();
-        let _results = tauri::async_runtime::spawn_blocking(move || {
+        let results = tauri::async_runtime::spawn_blocking(move || {
             match crate::auth::launch_debug_chrome(true) {
                 Ok(chrome) => {
                     let mut req = req;
@@ -333,14 +375,29 @@ async fn run_forum_targets<R: Runtime>(app: &AppHandle<R>, plan: &PublishPlan) -
                     drop(chrome);
                     results
                 }
-                // Chrome 기동 실패 시 이 계정은 건너뛴다(결과/오류 로그는 후속 단계).
-                Err(_) => Vec::new(),
+                // Chrome 기동 실패 → 이 계정 종목 전부 실패로 기록(누락 대신 명시).
+                Err(error) => req
+                    .stocks
+                    .iter()
+                    .map(|s| ForumPublishResult {
+                        code: s.code.clone(),
+                        name: s.name.clone(),
+                        ok: false,
+                        message: format!("Chrome 실행 실패: {error}"),
+                    })
+                    .collect(),
             }
         })
-        .await;
-        done += posted;
+        .await
+        .unwrap_or_default();
+        for result in results {
+            outcomes.push(ForumOutcome {
+                account_id: account_id.clone(),
+                result,
+            });
+        }
     }
-    done
+    outcomes
 }
 
 /// 댓글 대상에 댓글 풀(comments)을 분배해 작업으로 만든다. 풀이 비면 빈 목록을 내
@@ -361,6 +418,143 @@ fn build_comment_jobs(targets: Vec<CommentTargetEntry>, comments: &[String]) -> 
             content,
         })
         .collect()
+}
+
+fn status_of(ok: bool) -> BatchItemStatus {
+    if ok {
+        BatchItemStatus::Success
+    } else {
+        BatchItemStatus::Fail
+    }
+}
+
+/// 카페 글·댓글·종목토론방 실행 결과를 알림 배치(`LogBatch`) 한 건으로 묶는다.
+/// 본문/댓글 스냅샷은 실제 그 작업을 돌린 모드일 때만 남긴다(즉시게시 forum 경로와 동일).
+fn build_log_batch(
+    plan: &PublishPlan,
+    post_reports: &[JobReport],
+    comment_reports: &[CommentJobReport],
+    forum_outcomes: &[ForumOutcome],
+    at: i64,
+    seq: u64,
+) -> LogBatch {
+    let mut items = Vec::new();
+
+    for r in post_reports {
+        items.push(BatchItem {
+            platform: PlatformId::Naver,
+            target: r.cafe.clone(),
+            code: None,
+            board: Some(r.menu_id.to_string()),
+            login_id: r.account_id.clone(),
+            status: status_of(r.success),
+            // msg/status를 같은 기준(success)으로 묶는다 — 실패인데 오류가 비면(불변식
+            // 위반 시) "완료"로 오인되지 않게.
+            msg: if r.success {
+                "글 게시 완료".to_owned()
+            } else {
+                r.error
+                    .as_ref()
+                    .map_or_else(|| "글 게시 실패".to_owned(), |e| e.message.clone())
+            },
+            trace: r
+                .error
+                .as_ref()
+                .map(|e| format!("{}: {}", e.code, e.message)),
+        });
+    }
+
+    for r in comment_reports {
+        items.push(BatchItem {
+            platform: PlatformId::Naver,
+            target: r.cafe_id.to_string(),
+            code: None,
+            board: None,
+            login_id: r.account_id.clone(),
+            status: status_of(r.success),
+            msg: if r.success {
+                "댓글 게시 완료".to_owned()
+            } else {
+                r.error
+                    .as_ref()
+                    .map_or_else(|| "댓글 게시 실패".to_owned(), |e| e.message.clone())
+            },
+            trace: r
+                .error
+                .as_ref()
+                .map(|e| format!("{}: {}", e.code, e.message)),
+        });
+    }
+
+    for o in forum_outcomes {
+        items.push(BatchItem {
+            platform: PlatformId::Forum,
+            target: o.result.name.clone(),
+            code: Some(o.result.code.clone()),
+            board: None,
+            login_id: o.account_id.clone(),
+            status: status_of(o.result.ok),
+            msg: o.result.message.clone(),
+            trace: if o.result.ok {
+                None
+            } else {
+                Some(o.result.message.clone())
+            },
+        });
+    }
+
+    LogBatch {
+        // 큐 경로 전용 prefix(`lb-q-`): lib.rs forum 즉시게시의 `lb-` 시퀀스와 별도
+        // 카운터라, 같은 ms·seq라도 id가 겹치지 않게 한다.
+        id: format!("lb-q-{at}-{seq}"),
+        title: plan.title.clone(),
+        // 게시 시점 원문 스냅샷: 실제 그 작업을 돌린 모드만 남긴다.
+        body: if runs_post(plan) && !plan.body_text.is_empty() {
+            Some(plan.body_text.clone())
+        } else {
+            None
+        },
+        comment: if runs_comment(plan) {
+            plan.comments.iter().find(|c| !c.trim().is_empty()).cloned()
+        } else {
+            None
+        },
+        kind: plan.kind.clone(),
+        at,
+        state: None,
+        items,
+    }
+}
+
+/// 완료 배치를 로그 스토어 맨 앞에 넣고(최신순) activity에 요약을 남긴다.
+fn record_completion<R: Runtime>(app: &AppHandle<R>, batch: LogBatch) {
+    let total = batch.items.len();
+    let ok = batch
+        .items
+        .iter()
+        .filter(|i| i.status == BatchItemStatus::Success)
+        .count();
+    let title = batch.title.clone();
+
+    app.state::<JsonStore<LogBatch>>().mutate(|mut v| {
+        v.insert(0, batch);
+        v.truncate(MAX_LOG_BATCHES);
+        v
+    });
+
+    let ty = if ok == total {
+        ActivityType::Success
+    } else if ok == 0 {
+        ActivityType::Error
+    } else {
+        ActivityType::Info
+    };
+    let activity = app.state::<JsonStore<ActivityItem>>();
+    record(
+        activity.inner(),
+        ty,
+        format!("'{title}' 예약 게시 — {total}곳 중 {ok}곳 성공"),
+    );
 }
 
 /// 아이템을 `Running`으로 전이한다. 진행률은 execute_item이 총계를 확정한 뒤 채운다.
@@ -446,6 +640,35 @@ mod tests {
                 menu_id: 7,
             }),
             error: None,
+        }
+    }
+
+    fn post_fail(account: &str, cafe: &str, code: &str, msg: &str) -> JobReport {
+        use crate::naver_cafe::ErrorEnvelope;
+        JobReport {
+            account_id: account.into(),
+            cafe: cafe.into(),
+            menu_id: 7,
+            success: false,
+            result: None,
+            error: Some(ErrorEnvelope {
+                trace_id: "t".into(),
+                code: code.into(),
+                message: msg.into(),
+                error_data: None,
+            }),
+        }
+    }
+
+    fn forum_ok(account: &str, name: &str, code: &str) -> ForumOutcome {
+        ForumOutcome {
+            account_id: account.into(),
+            result: ForumPublishResult {
+                code: code.into(),
+                name: name.into(),
+                ok: true,
+                message: "게시 완료".into(),
+            },
         }
     }
 
@@ -599,6 +822,50 @@ mod tests {
         assert_eq!(jobs.len(), 2);
         assert_eq!(jobs[0].article_id, 2);
         assert_eq!(jobs[1].article_id, 3);
+    }
+
+    #[test]
+    fn build_log_batch_maps_post_success_and_fail() {
+        let p = plan(ModeValue::Post, vec![naver_target("u0")]);
+        let reports = vec![
+            post_report("u0", 123, 999),
+            post_fail("u1", "456", "NO_COOKIES", "쿠키 없음"),
+        ];
+        let b = build_log_batch(&p, &reports, &[], &[], 1_700_000_000_000, 0);
+        assert_eq!(b.id, "lb-q-1700000000000-0");
+        assert_eq!(b.title, "T");
+        assert_eq!(b.body.as_deref(), Some("B")); // post 모드 → 본문 스냅샷
+        assert!(b.comment.is_none()); // post 모드 → 댓글 스냅샷 없음
+        assert_eq!(b.items.len(), 2);
+        assert_eq!(b.items[0].platform, PlatformId::Naver);
+        assert_eq!(b.items[0].status, BatchItemStatus::Success);
+        assert_eq!(b.items[0].board.as_deref(), Some("7"));
+        assert_eq!(b.items[1].status, BatchItemStatus::Fail);
+        assert_eq!(b.items[1].msg, "쿠키 없음");
+        assert_eq!(b.items[1].trace.as_deref(), Some("NO_COOKIES: 쿠키 없음"));
+    }
+
+    #[test]
+    fn build_log_batch_comment_mode_snapshots_comment_not_body() {
+        let mut p = plan(ModeValue::Comment, vec![naver_target("u0")]);
+        p.comments = vec!["  ".into(), "좋은 글이네요".into()];
+        let b = build_log_batch(&p, &[], &[], &[], 1, 0);
+        assert!(b.body.is_none()); // comment 모드 → 본문 스냅샷 없음
+        assert_eq!(b.comment.as_deref(), Some("좋은 글이네요")); // 공백 항목은 건너뜀
+        assert!(b.items.is_empty());
+    }
+
+    #[test]
+    fn build_log_batch_includes_forum_items_with_code_and_account() {
+        let p = plan(ModeValue::Post, vec![]);
+        let forum = vec![forum_ok("u0", "삼성전자", "005930")];
+        let b = build_log_batch(&p, &[], &[], &forum, 1, 0);
+        assert_eq!(b.items.len(), 1);
+        assert_eq!(b.items[0].platform, PlatformId::Forum);
+        assert_eq!(b.items[0].target, "삼성전자");
+        assert_eq!(b.items[0].code.as_deref(), Some("005930"));
+        assert_eq!(b.items[0].login_id, "u0");
+        assert_eq!(b.items[0].status, BatchItemStatus::Success);
     }
 
     #[tokio::test]
