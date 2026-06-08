@@ -1057,6 +1057,18 @@ export const invoke = vi.fn(
       }
       case "list_bands":
         return clone(SEED_BANDS);
+      case "band_publish": {
+        // 밴드 가입+게시 목: 링크에서 band_no를 뽑아 성공 결과를 만든다.
+        const link = String(args!.bandLink ?? "");
+        const m = link.match(/\/band\/(\d+)|^(\d+)$/);
+        const bandNo = m ? (m[1] ?? m[2]) : "0";
+        return clone({
+          joined: true,
+          postNo: 1,
+          webUrl: `https://band.us/band/${bandNo}/post/1`,
+          commented: Boolean(String(args!.comment ?? "").trim()),
+        });
+      }
       case "get_environment_status":
         return clone(SEED_ENV_STATUS);
       case "open_chrome_download":

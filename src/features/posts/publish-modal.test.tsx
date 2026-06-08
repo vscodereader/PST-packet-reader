@@ -607,4 +607,42 @@ describe("PublishModal", () => {
     expect(combos[1]).toHaveValue("공지사항");
     expect(combos[2]).toHaveValue("단타클럽 BAND");
   });
+
+  it("requires a saved band link before publishing, then calls band_publish", async () => {
+    renderPublish();
+    // 기본 forum 계정(a1)에 더해 밴드 계정(a7)을 선택한다.
+    await userEvent.click(await screen.findByText("value_invest"));
+
+    // 링크 저장 전: 안내 문구가 뜨고 게시 버튼이 비활성이어야 한다.
+    const publishBtn = await screen.findByRole("button", {
+      name: /^게시 \(\d+\)/,
+    });
+    expect(
+      screen.getByText(/밴드 링크를 입력하고 저장해야/),
+    ).toBeInTheDocument();
+    expect(publishBtn).toBeDisabled();
+
+    // 링크 입력 후 저장.
+    await userEvent.type(
+      screen.getByLabelText("밴드 링크"),
+      "https://band.us/band/103043410",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "저장" }));
+
+    // 저장 확인 문구가 뜨고 게시 버튼이 활성화된다.
+    expect(
+      await screen.findByText(/저장된 링크로 가입 후 게시/),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(publishBtn).toBeEnabled());
+
+    // 게시 → band_publish IPC가 저장된 링크/계정으로 호출되어야 한다.
+    await userEvent.click(publishBtn);
+    await waitFor(() => {
+      const call = ipcBackend.mock.calls.find((c) => c[0] === "band_publish");
+      expect(call).toBeTruthy();
+      const args = call![1] as { bandLink: string; accountId: string };
+      expect(args.bandLink).toBe("https://band.us/band/103043410");
+      expect(args.accountId).toBe("value_invest");
+    });
+  });
 });

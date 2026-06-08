@@ -136,6 +136,10 @@ function DestinationPicker({
   band,
   setBand,
   bands,
+  bandLink,
+  setBandLink,
+  bandLinkSaved,
+  onSaveBandLink,
   stocks,
   naverAccounts,
   joinedByAccount,
@@ -154,6 +158,10 @@ function DestinationPicker({
   band: string;
   setBand: (v: string) => void;
   bands: Band[];
+  bandLink: string;
+  setBandLink: (v: string) => void;
+  bandLinkSaved: string;
+  onSaveBandLink: () => void;
   stocks: Stock[];
   naverAccounts: Account[];
   joinedByAccount: Record<string, JoinedCafe[]>;
@@ -322,13 +330,48 @@ function DestinationPicker({
               밴드
             </Text>
           </Group>
-          <Box p={10}>
+          <Stack gap={8} p={10}>
             <Select
               value={band}
               data={bands.map((b) => b.name)}
               onChange={(v) => setBand(v ?? "")}
             />
-          </Box>
+            {/* 사수 요구 흐름: 가입할 밴드 링크 입력 → 저장 → 게시 시 그 링크로
+                가입 후 글 게시. 저장된 링크가 있어야 게시 버튼이 활성화된다. */}
+            <Group gap={8} align="flex-end" wrap="nowrap">
+              <TextInput
+                style={{ flex: 1 }}
+                label="가입할 밴드 링크"
+                placeholder="https://band.us/band/103043410"
+                value={bandLink}
+                onChange={(e) => setBandLink(e.currentTarget.value)}
+                leftSection={<Icon.link size={14} />}
+                aria-label="밴드 링크"
+              />
+              <Button
+                variant="light"
+                color="band"
+                onClick={onSaveBandLink}
+                disabled={!bandLink.trim()}
+              >
+                저장
+              </Button>
+            </Group>
+            {bandLinkSaved ? (
+              <Group gap={6} wrap="nowrap">
+                <ThemeIcon size="sm" variant="transparent" color="green">
+                  <Icon.checkCircle size={15} />
+                </ThemeIcon>
+                <Text fz={12} c="dimmed" truncate>
+                  저장된 링크로 가입 후 게시: {bandLinkSaved}
+                </Text>
+              </Group>
+            ) : (
+              <Text fz={12} c="orange.7">
+                밴드 링크를 입력하고 저장해야 게시할 수 있어요.
+              </Text>
+            )}
+          </Stack>
         </Box>
       )}
     </Stack>
@@ -579,6 +622,10 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [stockCodes, setStockCodes] = useState<string[]>(["005930"]);
   const [stockModal, setStockModal] = useState(false);
   const [band, setBand] = useState("");
+  // 밴드 가입 링크: 입력값(bandLink)과 저장 확정값(bandLinkSaved)을 분리한다.
+  // 저장 버튼을 눌러야 확정되고, 확정돼야 밴드 게시가 가능하다(사수 요구 흐름).
+  const [bandLink, setBandLink] = useState("");
+  const [bandLinkSaved, setBandLinkSaved] = useState("");
   // Account-driven naver state: joined cafes per account, boards per cafe, and
   // each account's chosen cafe/board. Loaded live on selection and cached for
   // the modal session (the refresh control re-fetches).
@@ -898,11 +945,15 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     naverPicks,
     mode,
   );
+  // 밴드가 선택됐으면 저장된 가입 링크가 있어야 게시 가능(사수 요구 흐름).
+  const bandReady =
+    !selPlatforms.includes("band") || bandLinkSaved.trim().length > 0;
   const canPublish =
     selected.length > 0 &&
     targetsOk &&
     commentReady &&
     naverNotReady.length === 0 &&
+    bandReady &&
     jobs.length > 0;
 
   const action =
@@ -1056,8 +1107,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     // 나머지는 엔진 미구현이라 시뮬레이션(후속 작업).
     const naverJobs = jobs.filter((j) => j.platform === "naver");
     const forumJobs = jobs.filter((j) => j.platform === "forum");
+    const bandJobs = jobs.filter((j) => j.platform === "band");
     const otherJobs = jobs.filter(
-      (j) => j.platform !== "naver" && j.platform !== "forum",
+      (j) =>
+        j.platform !== "naver" &&
+        j.platform !== "forum" &&
+        j.platform !== "band",
     );
 
     // 네이버 카페: 실제 백엔드(글/댓글).
@@ -1119,7 +1174,30 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       ),
     ).then((forumArr) => forumArr.flat());
 
-    // 밴드 등 나머지: 진행 UI가 보이도록 약간 지연 후 시뮬레이션 결과를 낸다.
+    // 밴드(band.us): 저장된 링크로 가입 후 글(+댓글) 게시 — 순수 HTTP 백엔드 호출.
+    const bandComment =
+      mode === "both" || mode === "comment" ? firstComment : "";
+    const bandWork: Promise<PublishResult[]> = Promise.all(
+      bandJobs.map((j) =>
+        ipc.band
+          .publish({
+            // 백엔드는 loginId(쿠키 파일 키)로 band 로그인 쿠키를 찾는다.
+            accountId: j.loginId,
+            bandLink: bandLinkSaved,
+            title: doc.title,
+            content: htmlToText(doc.body ?? ""),
+            ...(bandComment ? { comment: bandComment } : {}),
+          })
+          .then((out) => ({
+            ...j,
+            ok: true,
+            msg: out.commented ? "글·댓글 게시 완료" : "글 게시 완료",
+          }))
+          .catch((err: unknown) => ({ ...j, ok: false, msg: errText(err) })),
+      ),
+    );
+
+    // 그 외 플랫폼(현재 없음): 진행 UI가 보이도록 지연 후 시뮬레이션 결과를 낸다.
     const mockOthers = new Promise<PublishResult[]>((resolve) => {
       window.setTimeout(
         () =>
@@ -1137,8 +1215,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       );
     });
 
-    void Promise.all([naverWork, forumWork, mockOthers]).then(([nr, fr, or]) =>
-      setFlow([...nr, ...fr, ...or]),
+    void Promise.all([naverWork, forumWork, bandWork, mockOthers]).then(
+      ([nr, fr, br, or]) => setFlow([...nr, ...fr, ...br, ...or]),
     );
   };
 
@@ -1347,6 +1425,10 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
               band={band}
               setBand={setBand}
               bands={bands}
+              bandLink={bandLink}
+              setBandLink={setBandLink}
+              bandLinkSaved={bandLinkSaved}
+              onSaveBandLink={() => setBandLinkSaved(bandLink.trim())}
               stocks={stocks}
               naverAccounts={selectedNaver}
               joinedByAccount={joinedByAccount}
