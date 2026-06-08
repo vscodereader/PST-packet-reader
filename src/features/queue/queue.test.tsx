@@ -107,4 +107,32 @@ describe("Queue", () => {
       q3El.compareDocumentPosition(q2El) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
+
+  it("persists the new order so it survives a reload", async () => {
+    const q2 = "반도체 흐름 코멘트 10종";
+    const q3 = "오늘의 특징주 정리 — 장 마감 요약";
+    const { unmount } = render(
+      <MantineProvider>
+        <Queue go={vi.fn()} />
+      </MantineProvider>,
+    );
+    await screen.findByText(q2);
+
+    // 첫 대기 항목(q2)을 한 칸 내린다 → 백엔드(reorder_queue_now)에 영속화돼야 한다.
+    await userEvent.click(screen.getAllByTitle("우선순위 내리기")[0]!);
+    unmount();
+
+    // 재마운트 시 백엔드에서 다시 로드 → 로컬 상태가 아니라 영속화된 순서여야 한다.
+    render(
+      <MantineProvider>
+        <Queue go={vi.fn()} />
+      </MantineProvider>,
+    );
+    await screen.findByText(q2);
+    const q2El = screen.getByText(q2);
+    const q3El = screen.getByText(q3);
+    expect(
+      q3El.compareDocumentPosition(q2El) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
 });

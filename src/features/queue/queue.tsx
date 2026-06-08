@@ -14,7 +14,7 @@ import {
   Title,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { KIND, KIND_ICON } from "@/shared/data/config";
 import type {
@@ -58,10 +58,39 @@ export function Queue({ go }: { go: GoFn }) {
   const [sched, setSched] = useState<QueueScheduledItem[]>([]);
   const [dragId, setDragId] = useState<string | null>(null);
 
+  // 폴링/이벤트 콜백에서 최신 값을 읽기 위한 ref (stale closure 회피).
+  const nowRef = useRef<QueueNowItem[]>(now);
+  const dragIdRef = useRef<string | null>(dragId);
+  // 순서 영속화(reorderNow)가 끝나기 전에 폴링이 낙관적 순서를 덮어쓰지 않도록 막는다.
+  const persistingRef = useRef(false);
+  useEffect(() => {
+    nowRef.current = now;
+    dragIdRef.current = dragId;
+  }, [now, dragId]);
+
   useEffect(() => {
     void ipc.queue.listNow().then(setNow);
     void ipc.queue.listScheduled().then(setSched);
+    // 워커 진행률·상태를 주기적으로 반영. 단 드래그 중이거나 순서 영속화 대기 중에는
+    // 사용자가 맞춘 로컬 순서를 덮어쓰지 않도록 폴링을 건너뛴다.
+    const timer = window.setInterval(() => {
+      if (dragIdRef.current !== null || persistingRef.current) return;
+      void ipc.queue.listNow().then(setNow);
+    }, 1500);
+    return () => window.clearInterval(timer);
   }, []);
+
+  // 대기열 순서를 백엔드에 영속화한다. 응답이 올 때까지 폴링을 막아(persistingRef)
+  // 진행 중인 변경이 되돌려지지 않게 한다. drag(onDragEnd)와 화살표(move) 공통 경로.
+  const persistOrder = (orderedIds: string[]) => {
+    persistingRef.current = true;
+    void ipc.queue
+      .reorderNow(orderedIds)
+      .then(setNow)
+      .finally(() => {
+        persistingRef.current = false;
+      });
+  };
 
   const reorder = (id: string, targetId: string) => {
     setNow((list) => {
@@ -74,20 +103,21 @@ export function Queue({ go }: { go: GoFn }) {
       return copy;
     });
   };
+  // running 아이템은 항상 맨 앞(index 0)에 고정된다(워커는 한 번에 하나만 실행).
+  // 따라서 index 0은 건드리지 않고 대기 아이템끼리만 자리를 바꾼다.
   const move = (id: string, dir: -1 | 1) => {
-    setNow((list) => {
-      const i = list.findIndex((x) => x.id === id);
-      const j = i + dir;
-      if (i < 1 || j < 1 || j >= list.length) return list;
-      const copy = [...list];
-      const a = copy[i];
-      const b = copy[j];
-      if (a && b) {
-        copy[i] = b;
-        copy[j] = a;
-      }
-      return copy;
-    });
+    const list = nowRef.current;
+    const i = list.findIndex((x) => x.id === id);
+    const j = i + dir;
+    if (i < 1 || j < 1 || j >= list.length) return;
+    const copy = [...list];
+    const a = copy[i];
+    const b = copy[j];
+    if (!a || !b) return;
+    copy[i] = b;
+    copy[j] = a;
+    setNow(copy);
+    persistOrder(copy.map((x) => x.id));
   };
   const cancel = (id: string) => {
     void ipc.queue.cancelNow(id).then(setNow);
@@ -176,7 +206,12 @@ export function Queue({ go }: { go: GoFn }) {
                 e.preventDefault();
                 if (dragId && dragId !== q.id) reorder(dragId, q.id);
               }}
-              onDragEnd={() => setDragId(null)}
+              onDragEnd={() => {
+                const dragged = dragId !== null;
+                setDragId(null);
+                // 드래그로 바뀐 최종 순서를 백엔드에 영속화한다.
+                if (dragged) persistOrder(nowRef.current.map((x) => x.id));
+              }}
               title={running ? "클릭하면 알림에서 세부 로그 보기" : undefined}
               style={{
                 display: "flex",

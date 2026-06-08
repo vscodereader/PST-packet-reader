@@ -149,6 +149,34 @@ pub fn apply_cancel_scheduled(items: Vec<QueueScheduledItem>, id: &str) -> Vec<Q
     items.into_iter().filter(|i| i.id != id).collect()
 }
 
+/// now 큐를 `ordered_ids` 순서로 재배열한다. 단 실행 중(Running) 아이템은 워커가
+/// 처리 중이므로 순서를 바꾸지 않고 항상 맨 앞에 고정한다(프론트 UI의 "running은 0번"
+/// 가드와 일치). `ordered_ids`에 없는(알 수 없는) 아이템은 원래 상대 순서대로 뒤에
+/// 보존해 유실을 막는다.
+pub fn apply_reorder_now(items: Vec<QueueNowItem>, ordered_ids: &[String]) -> Vec<QueueNowItem> {
+    let mut running = Vec::new();
+    let mut rest = Vec::new();
+    for item in items {
+        if item.state == QueueState::Running {
+            running.push(item);
+        } else {
+            rest.push(item);
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(rest.len());
+    for id in ordered_ids {
+        if let Some(pos) = rest.iter().position(|i| &i.id == id) {
+            ordered.push(rest.remove(pos));
+        }
+    }
+    // ordered_ids에 빠진 대기 아이템은 원래 순서대로 뒤에 보존한다.
+    ordered.extend(rest);
+
+    running.extend(ordered);
+    running
+}
+
 /// Convert a scheduled item into a waiting immediate-queue item (for "즉시 처리").
 /// 실행 페이로드(plan)도 그대로 옮겨, 승격된 아이템을 워커가 게시할 수 있게 한다.
 pub fn to_now_item(s: QueueScheduledItem) -> QueueNowItem {
@@ -199,6 +227,16 @@ pub fn cancel_queue_now(
     let next = store.mutate(|items| apply_cancel_now(items, &id));
     record(activity.inner(), ActivityType::Info, "진행 작업 취소됨");
     next
+}
+
+/// 대기열 순서를 `ordered_ids`대로 영속화한다(드래그/우선순위 변경). 빈번한 조작이라
+/// activity 피드에는 기록하지 않는다.
+#[tauri::command]
+pub fn reorder_queue_now(
+    store: tauri::State<'_, JsonStore<QueueNowItem>>,
+    ordered_ids: Vec<String>,
+) -> Vec<QueueNowItem> {
+    store.mutate(|items| apply_reorder_now(items, &ordered_ids))
 }
 
 #[tauri::command]
@@ -360,6 +398,52 @@ mod tests {
         assert_eq!(now.locs.len(), locs_len);
         // 실행 페이로드(plan)는 승격 시 보존돼야 워커가 게시할 수 있다(이슈 #142).
         assert_eq!(now.plan, Some(sample_plan()));
+    }
+
+    #[test]
+    fn reorder_now_follows_ordered_ids_but_pins_running_first() {
+        let items = vec![
+            sample_now_item("r1", QueueState::Running),
+            sample_now_item("w1", QueueState::Waiting),
+            sample_now_item("w2", QueueState::Waiting),
+            sample_now_item("w3", QueueState::Waiting),
+        ];
+        // 대기 아이템을 w3, w1, w2 순으로 재배열 요청. Running(r1)은 맨 앞 고정.
+        let next = apply_reorder_now(
+            items,
+            &["w3".to_string(), "w1".to_string(), "w2".to_string()],
+        );
+        let ids: Vec<&str> = next.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["r1", "w3", "w1", "w2"]);
+    }
+
+    #[test]
+    fn reorder_now_ignores_unknown_ids_and_preserves_missing() {
+        let items = vec![
+            sample_now_item("w1", QueueState::Waiting),
+            sample_now_item("w2", QueueState::Waiting),
+            sample_now_item("w3", QueueState::Waiting),
+        ];
+        // 알 수 없는 id("zzz")는 무시, ordered_ids에 빠진 w3는 원래 순서대로 뒤에 보존.
+        let next = apply_reorder_now(
+            items,
+            &["w2".to_string(), "zzz".to_string(), "w1".to_string()],
+        );
+        let ids: Vec<&str> = next.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["w2", "w1", "w3"]);
+    }
+
+    #[test]
+    fn reorder_now_keeps_multiple_running_at_front_in_original_order() {
+        let items = vec![
+            sample_now_item("w1", QueueState::Waiting),
+            sample_now_item("r1", QueueState::Running),
+            sample_now_item("r2", QueueState::Running),
+        ];
+        // running이 여러 개여도 원래 순서대로 맨 앞에 모인다.
+        let next = apply_reorder_now(items, &["w1".to_string()]);
+        let ids: Vec<&str> = next.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["r1", "r2", "w1"]);
     }
 
     #[test]

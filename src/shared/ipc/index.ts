@@ -140,6 +140,12 @@ export const ipc = {
     /** Move a scheduled item into the immediate queue; returns the new now-list. */
     promote: (id: string) =>
       call<QueueNowItem[]>("promote_queue_scheduled", { id }),
+    /**
+     * Persist the now-queue order (drag / priority change); returns the list.
+     * Running items stay pinned to the front by the backend.
+     */
+    reorderNow: (orderedIds: string[]) =>
+      call<QueueNowItem[]>("reorder_queue_now", { orderedIds }),
   },
   stocks: { list: () => call<Stock[]>("list_stocks") },
   activity: {
