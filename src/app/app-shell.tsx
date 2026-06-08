@@ -103,7 +103,8 @@ export function MacroApp() {
       ipc.accounts.list(),
     ]).then(([posts, now, sched, accounts]) =>
       setCounts({
-        posts: posts.length,
+        // 글관리 화면(posts.tsx)이 draft(임시저장)를 숨기므로 배지도 같은 기준으로 센다.
+        posts: posts.filter((p) => p.status !== "draft").length,
         queue: now.length + sched.length,
         accounts: accounts.length,
       }),

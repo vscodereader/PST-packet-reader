@@ -739,6 +739,8 @@ const SEED_LOG_BATCHES: LogBatch[] = [
   {
     id: "b1",
     title: "5월 이벤트 결과 발표",
+    body: "<p>5월 이벤트 결과를 정리했습니다. 많은 참여 감사드립니다.</p>",
+    comment: "이벤트 참여 감사합니다 🙌",
     kind: "post",
     at: NOW_BASE - 4 * 3_600_000,
     items: [

@@ -47,6 +47,15 @@ describe("Notifications", () => {
     expect(screen.getByText(/invest_king7/)).toBeInTheDocument();
   });
 
+  it("shows the written body and comment when a batch is expanded", async () => {
+    renderLog();
+    await userEvent.click(await screen.findByText("5월 이벤트 결과 발표"));
+    expect(
+      screen.getByText(/5월 이벤트 결과를 정리했습니다/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/이벤트 참여 감사합니다/)).toBeInTheDocument();
+  });
+
   it("shows the account filter chip when a loginId filter is passed", () => {
     renderLog({ loginId: "value_pick", platform: "forum" });
     expect(screen.getByText("계정 필터 적용됨")).toBeInTheDocument();

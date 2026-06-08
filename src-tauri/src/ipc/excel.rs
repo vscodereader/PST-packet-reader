@@ -422,6 +422,8 @@ mod tests {
         let batch = LogBatch {
             id: "lb1".into(),
             title: "실적 정리".into(),
+            body: None,
+            comment: None,
             kind: ModeValue::Post,
             at: 1_700_000_000_000,
             state: None,

@@ -202,6 +202,45 @@ function BatchRow({
           }}
         />
       </Group>
+      {expanded && (
+        <Box
+          px={16}
+          py={12}
+          bg="gray.0"
+          style={{ borderTop: "1px solid var(--mantine-color-gray-2)" }}
+        >
+          <Text fz={11.5} c="dimmed" mb={3}>
+            작성 내용
+          </Text>
+          <Text
+            fz={13}
+            fw={700}
+            mb={batch.body || batch.comment ? 6 : 0}
+            style={{ whiteSpace: "pre-wrap" }}
+          >
+            {batch.title}
+          </Text>
+          {batch.body && (
+            <Text
+              fz={12.5}
+              mb={batch.comment ? 8 : 0}
+              style={{ whiteSpace: "pre-wrap" }}
+            >
+              {batch.body}
+            </Text>
+          )}
+          {batch.comment && (
+            <>
+              <Text fz={11.5} c="dimmed" mb={2}>
+                댓글
+              </Text>
+              <Text fz={12.5} style={{ whiteSpace: "pre-wrap" }}>
+                {batch.comment}
+              </Text>
+            </>
+          )}
+        </Box>
+      )}
       {expanded && batch.items.map((item, i) => <SubLog key={i} item={item} />)}
     </Box>
   );

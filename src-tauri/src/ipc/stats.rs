@@ -184,6 +184,8 @@ mod tests {
         LogBatch {
             id: "b".into(),
             title: "t".into(),
+            body: None,
+            comment: None,
             kind,
             at,
             state: None,
