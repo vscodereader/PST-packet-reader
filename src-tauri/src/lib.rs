@@ -560,6 +560,8 @@ pub fn manage_stores<R: Runtime>(app: &AppHandle<R>, dir: &Path) -> std::io::Res
     ));
     // Naver-login cookie-refresh queue state (empty until enqueued).
     app.manage(auth::QueueState::default());
+    // 게시 큐 실행 워커 상태(promote 시 기동, 이슈 #144).
+    app.manage(ipc::queue_runner::NowQueueRunner::default());
     Ok(())
 }
 
