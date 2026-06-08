@@ -76,6 +76,29 @@ pub(crate) struct PageInfo {
     pub last_page: bool,
 }
 
+/// 가입 카페 API **실패** 봉투 — `{ "message": { "status", "error": { "code", "msg" } } }`.
+/// 성공과 같은 `message` 래퍼지만 `result` 없이 `error`만 채워진다(쿠키 만료 등
+/// 인증 실패가 HTTP 200으로 내려오는 형태). 성공 봉투(`result` 필수) 파싱이
+/// 실패한 뒤에만 시도하며, `NaverApiErrorBody`(최상위 `error.errorCode/message`)와
+/// 위치·키가 달라 별도로 둔다.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct JoinCafesErrorEnvelope {
+    pub message: JoinCafesErrorMessage,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct JoinCafesErrorMessage {
+    pub error: JoinCafesApiError,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct JoinCafesApiError {
+    /// 네이버 오류 코드(예: 미로그인 "0004"). 성공 응답에선 빈 문자열.
+    pub code: String,
+    /// 사람이 읽는 사유(예: "로그인하지 않았습니다.").
+    pub msg: String,
+}
+
 /// 응답의 카페 항목 — 필요한 키만 선언(민감 `memberKey`/`st`는 무시됨).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
