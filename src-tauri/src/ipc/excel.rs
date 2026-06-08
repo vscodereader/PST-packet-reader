@@ -148,15 +148,16 @@ pub fn import_accounts(
     Ok((existing, summary))
 }
 
-/// `taken`에 없는 제목이면 그대로, 있으면 " (1)", " (2)" … 접미사.
-pub fn unique_title(title: &str, taken: &[String]) -> String {
-    if !taken.iter().any(|t| t == title) {
+/// 제목이 이미 `is_taken`이면 " (1)", " (2)" … 접미사를 붙여 유일하게 만든다.
+/// 술어로 추상화해 호출부가 `HashSet`(O(1) 조회)로 뒷받침할 수 있게 한다.
+fn unique_title_with(title: &str, is_taken: impl Fn(&str) -> bool) -> String {
+    if !is_taken(title) {
         return title.to_owned();
     }
     let mut n = 1;
     loop {
         let cand = format!("{title} ({n})");
-        if !taken.iter().any(|t| t == &cand) {
+        if !is_taken(&cand) {
             return cand;
         }
         n += 1;
@@ -199,6 +200,10 @@ pub fn import_posts(
     let cell = |r: &[Data], i: usize| r.get(i).map(|c| c.to_string()).unwrap_or_default();
     // M-6: hoist now_ms() so it's called once per import, not per row
     let base_ms = crate::util::now_ms();
+    // Track taken titles in a set seeded from existing posts and updated as each
+    // row is added — avoids rebuilding+rescanning a Vec per row (was O(n²)).
+    let mut taken: std::collections::HashSet<String> =
+        existing.iter().map(|p| p.title.clone()).collect();
 
     for (n, r) in rows.enumerate() {
         let title_raw = cell(r, i_title).trim().to_owned();
@@ -208,8 +213,8 @@ pub fn import_posts(
             summary.errors.push(format!("{}행: title/body 누락", n + 2));
             continue;
         }
-        let taken: Vec<String> = existing.iter().map(|p| p.title.clone()).collect();
-        let title = unique_title(&title_raw, &taken);
+        let title = unique_title_with(&title_raw, |t| taken.contains(t));
+        taken.insert(title.clone());
         let kind = i_kind
             .map(|i| parse_kind(&cell(r, i)))
             .unwrap_or(ModeValue::Post);
@@ -530,9 +535,10 @@ mod tests {
     // D3 — unique_title and import_posts de-duplication
     #[test]
     fn unique_title_appends_suffix() {
-        let taken = vec!["실적 정리".to_string(), "실적 정리 (1)".to_string()];
-        assert_eq!(unique_title("실적 정리", &taken), "실적 정리 (2)");
-        assert_eq!(unique_title("새 글", &taken), "새 글");
+        let taken = ["실적 정리".to_string(), "실적 정리 (1)".to_string()];
+        let is_taken = |t: &str| taken.iter().any(|x| x == t);
+        assert_eq!(unique_title_with("실적 정리", is_taken), "실적 정리 (2)");
+        assert_eq!(unique_title_with("새 글", is_taken), "새 글");
     }
 
     #[test]

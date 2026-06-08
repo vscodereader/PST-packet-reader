@@ -70,24 +70,12 @@ pub fn list_cafes(store: tauri::State<'_, JsonStore<Cafe>>) -> Vec<Cafe> {
 /// `cafeId` is the cafe's resolved identity, so re-registering the same cafe
 /// (e.g. to refresh its boards) updates it rather than duplicating. New cafes
 /// are prepended so the most recently added shows first.
-pub fn apply_upsert(cafes: Vec<Cafe>, cafe: Cafe) -> Vec<Cafe> {
-    if cafes.iter().any(|c| c.cafe_id == cafe.cafe_id) {
-        cafes
-            .into_iter()
-            .map(|c| {
-                if c.cafe_id == cafe.cafe_id {
-                    cafe.clone()
-                } else {
-                    c
-                }
-            })
-            .collect()
-    } else {
-        let mut next = Vec::with_capacity(cafes.len() + 1);
-        next.push(cafe);
-        next.extend(cafes);
-        next
+pub fn apply_upsert(mut cafes: Vec<Cafe>, cafe: Cafe) -> Vec<Cafe> {
+    match cafes.iter_mut().find(|c| c.cafe_id == cafe.cafe_id) {
+        Some(slot) => *slot = cafe,    // update in place — single pass, no clone
+        None => cafes.insert(0, cafe), // new → prepend (most recent first)
     }
+    cafes
 }
 
 /// Persist a resolved cafe (from [`resolve_cafe`]); returns the updated list.
