@@ -1,6 +1,5 @@
 use std::{
     collections::VecDeque,
-    fs,
     sync::{Arc, Mutex},
 };
 
@@ -9,10 +8,9 @@ use tauri::{AppHandle, Manager, Runtime};
 use super::{
     accounts::{account_cookie_status_for_app_data, CookieStatus},
     error::OrchestratorError,
-    paths::{app_data_root, paths_for_root},
     process_account,
     types::{QueueJob, QueueJobStatus, QueueStatus},
-    util::now_millis,
+    util::{mask_id, now_millis},
 };
 
 #[derive(Default)]
@@ -35,6 +33,7 @@ pub fn enqueue_accounts<R: Runtime>(
     account_ids: Vec<String>,
     headless: bool,
     use_adb: bool,
+    force: bool,
 ) -> Result<QueueStatus, OrchestratorError> {
     let should_start = {
         let mut inner = state
@@ -46,6 +45,7 @@ pub fn enqueue_accounts<R: Runtime>(
                 account_id,
                 headless,
                 use_adb,
+                force,
                 status: QueueJobStatus::Pending,
                 message: "queued".to_string(),
                 queued_at: now_millis(),
@@ -84,9 +84,37 @@ pub fn get_queue_status(state: &QueueState) -> Result<QueueStatus, OrchestratorE
     })
 }
 
+/// Resets the queue's running flag (and fails any in-flight job) if `worker_loop`
+/// unwinds abnormally — e.g. `process_account` panics. Without it a panic would
+/// leave `is_running = true` and the job stuck `Running`, permanently wedging the
+/// queue (no later enqueue would spawn a new worker). `process_account` runs with
+/// the lock released, so the mutex isn't poisoned and cleanup can proceed.
+struct WorkerGuard<'a> {
+    state: &'a QueueState,
+}
+
+impl Drop for WorkerGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut inner) = self.state.inner.lock() {
+            inner.is_running = false;
+            inner.current_account_id = None;
+            for job in inner
+                .jobs
+                .iter_mut()
+                .filter(|j| j.status == QueueJobStatus::Running)
+            {
+                job.status = QueueJobStatus::Failed;
+                job.message = "작업이 비정상 종료되었습니다".to_string();
+                job.finished_at = Some(now_millis());
+            }
+        }
+    }
+}
+
 async fn worker_loop<R: Runtime>(state: QueueState, app: AppHandle<R>) {
+    let _guard = WorkerGuard { state: &state };
     loop {
-        let job = {
+        let (job, idx) = {
             let Ok(mut inner) = state.inner.lock() else {
                 return;
             };
@@ -107,8 +135,12 @@ async fn worker_loop<R: Runtime>(state: QueueState, app: AppHandle<R>) {
             inner.current_account_id = Some(job.account_id.clone());
             inner.jobs[index] = job.clone();
             push_log(&mut inner, format!("{}: started", job.account_id));
-            job
+            (job, index + 1)
         };
+
+        // 로그용 마스킹 식별자(#순번 + 앞 3자). PW는 어떤 로그에도 넣지 않는다.
+        let label = format!("#{idx} {}", mask_id(&job.account_id));
+        tracing::info!("[LOGIN] {label}  로그인 시작");
 
         let cookie_status =
             account_cookie_status_for_app_data(&job.account_id).unwrap_or(CookieStatus::Missing);
@@ -127,9 +159,11 @@ async fn worker_loop<R: Runtime>(state: QueueState, app: AppHandle<R>) {
                 }
                 push_log(&mut inner, format!("{}: cookie expired", job.account_id));
             }
+            tracing::info!("[LOGIN] {label}  쿠키 만료 — 갱신 시도");
         }
 
-        let result = process_account(&app, &job.account_id, job.headless, job.use_adb).await;
+        let result =
+            process_account(&app, &job.account_id, job.headless, job.use_adb, job.force).await;
         let message = match &result {
             Ok(()) if cookie_status == CookieStatus::Expired => "expired; refreshed".to_string(),
             Ok(()) => "success".to_string(),
@@ -157,6 +191,14 @@ async fn worker_loop<R: Runtime>(state: QueueState, app: AppHandle<R>) {
             inner.current_account_id = None;
         }
 
+        // 로그인 결과를 pstmacro.log에 기록(가독성·상세화). 동작 무변경, 로그 줄만 추가.
+        match status {
+            QueueJobStatus::Success | QueueJobStatus::Expired => {
+                tracing::info!("[LOGIN] {label}  로그인 성공 ✅");
+            }
+            _ => tracing::info!("[LOGIN] {label}  로그인 실패 ❌ — {message}"),
+        }
+
         // Log login result to the activity feed.
         {
             use crate::ipc::activity::{record, ActivityItem, ActivityType};
@@ -177,23 +219,13 @@ async fn worker_loop<R: Runtime>(state: QueueState, app: AppHandle<R>) {
     }
 }
 
+// 큐 상태 조회(`QueueStatus.logs`)용 in-memory 로그만 유지한다. 과거에는 별도
+// `queue.log` 파일에도 기록했지만, 로그를 `pstmacro.log` 하나로 일원화하면서 파일
+// 출력을 제거했다(같은 이벤트를 worker_loop가 `tracing`으로 pstmacro.log에 남긴다).
 fn push_log(inner: &mut QueueInner, message: String) {
     inner.logs.push(format!("{} {}", now_millis(), message));
     if inner.logs.len() > 200 {
         inner.logs.remove(0);
-    }
-
-    if let Ok(paths) = app_data_root().map(paths_for_root) {
-        if fs::create_dir_all(&paths.logs_dir).is_ok() {
-            let _ = fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(paths.logs_dir.join("queue.log"))
-                .and_then(|mut file| {
-                    use std::io::Write;
-                    writeln!(file, "{}", inner.logs.last().unwrap_or(&message))
-                });
-        }
     }
 }
 
@@ -210,6 +242,7 @@ mod tests {
                 account_id: "id1".to_string(),
                 headless: true,
                 use_adb: false,
+                force: false,
                 status: QueueJobStatus::Pending,
                 message: "queued".to_string(),
                 queued_at: 1,
@@ -230,32 +263,15 @@ mod tests {
     }
 
     #[test]
-    fn push_log_caps_history_and_writes_queue_log() {
-        // push_log은 app_data_root()(LOCALAPPDATA)를 읽으므로 env 락을 잡는다.
-        let _guard = crate::auth::config::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let temp = tempfile::tempdir().unwrap();
-        std::env::set_var("LOCALAPPDATA", temp.path());
-
+    fn push_log_caps_in_memory_history() {
+        // 로그는 pstmacro.log로 일원화되었으므로 push_log는 in-memory 큐 상태만 유지한다.
         let mut inner = QueueInner::default();
         for i in 0..205 {
             push_log(&mut inner, format!("event {i}"));
         }
 
-        std::env::remove_var("LOCALAPPDATA");
-
         // 메모리 로그는 최근 200개로 제한되고 가장 최신 항목이 남는다.
         assert_eq!(inner.logs.len(), 200);
         assert!(inner.logs.last().unwrap().contains("event 204"));
-
-        // 디스크의 queue.log에도 기록된다.
-        let log_file = temp
-            .path()
-            .join(crate::auth::config::APP_NAME)
-            .join(crate::auth::config::DIR_LOGS)
-            .join("queue.log");
-        assert!(log_file.is_file());
-        assert!(fs::read_to_string(&log_file).unwrap().contains("event 204"));
     }
 }

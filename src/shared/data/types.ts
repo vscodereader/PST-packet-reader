@@ -1,3 +1,5 @@
+import type { PublishPlan } from "@/shared/bindings/PublishPlan";
+
 export type ViewId = "dashboard" | "posts" | "queue" | "log" | "accounts";
 
 export interface LogFilter {
@@ -43,6 +45,13 @@ export interface Stock {
   chg: number;
 }
 
+/** A live Naver stock-search result (backend `search_stocks` → `StockCandidate`). */
+export interface StockCandidate {
+  name: string;
+  code: string;
+  link: string;
+}
+
 export type AccountStatus = "new" | "active" | "error";
 
 export interface Account {
@@ -60,6 +69,8 @@ export interface Account {
 // objects ({ name, menuId, boardType }), not plain strings.
 export type { Board } from "@/shared/bindings/Board";
 export type { Cafe } from "@/shared/bindings/Cafe";
+// 게시 실행 페이로드(ts-rs 생성). 큐 아이템의 `plan?` 필드와 게시 모달이 사용한다.
+export type { PublishPlan };
 
 export interface Band {
   name: string;
@@ -121,6 +132,8 @@ export interface QueueNowItem {
   batchId?: string;
   progress?: [number, number];
   locs: QueueLocation[];
+  /** 워커가 실제 게시에 쓰는 실행 페이로드. 표시 전용 아이템은 없음. */
+  plan?: PublishPlan;
 }
 
 export interface QueueScheduledItem {
@@ -130,6 +143,8 @@ export interface QueueScheduledItem {
   when: string;
   rel: string;
   locs: QueueLocation[];
+  /** 워커가 실제 게시에 쓰는 실행 페이로드. 표시 전용 아이템은 없음. */
+  plan?: PublishPlan;
 }
 
 export interface BatchItem {
@@ -146,6 +161,8 @@ export interface BatchItem {
 export interface LogBatch {
   id: string;
   title: string;
+  body?: string;
+  comment?: string;
   kind: ModeValue;
   at: number;
   state?: "running";

@@ -240,6 +240,165 @@ describe("PublishModal", () => {
     expect(scheduled.some((q) => q.title === postDoc.title)).toBe(true);
   });
 
+  it("freezes a post-mode plan (flattened body, naver target) when 예약 is confirmed", async () => {
+    renderPublish();
+    // forum(a1)을 빼고 naver(money_lab) 선택 → 카페/게시판이 정해지면 naver job 1건.
+    await userEvent.click(await screen.findByText("invest_king7"));
+    await userEvent.click(screen.getByText("money_lab"));
+    await screen.findByPlaceholderText("가입 카페 선택");
+    await pickOption(0, "주식투자연구소 카페");
+    // 카페·게시판이 정해지면 naver job 1건 → 버튼 카운트가 1로 오른다(아직 now 모드).
+    await screen.findByRole(
+      "button",
+      { name: /^게시 \(1\)/ },
+      { timeout: 3000 },
+    );
+    await userEvent.click(await screen.findByText("예약 게시"));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^예약 \(1\)/ }),
+    );
+    const call = ipcBackend.mock.calls.find(
+      (c) => c[0] === "add_queue_scheduled",
+    );
+    expect(call).toBeDefined();
+    const item = (call?.[1] as { item: { plan?: unknown } }).item;
+    expect(item.plan).toEqual(
+      expect.objectContaining({
+        postId: postDoc.id,
+        kind: "post",
+        title: postDoc.title,
+        // 본문은 예약 시점에 평문화돼 동결된다(HTML 태그 제거).
+        bodyText: "#{종목명} 본문 #{링크}",
+        comments: [],
+        naver: [
+          expect.objectContaining({
+            accountId: "money_lab",
+            cafe: "11111111",
+            menuId: 1,
+            boardType: "L",
+          }),
+        ],
+        forum: [],
+      }),
+    );
+    // post 모드 naver 대상엔 댓글 스펙이 없어야 한다.
+    const plan = item.plan as { naver: { commentTarget?: unknown }[] };
+    expect(plan.naver[0]?.commentTarget).toBeUndefined();
+  });
+
+  it("includes a url comment spec in a comment-mode scheduled plan", async () => {
+    const commentDoc: LibraryPost = {
+      id: "lcs",
+      title: "URL 댓글 예약",
+      kind: "comment",
+      updated: "방금 전",
+      words: 30,
+      status: "ready",
+      excerpt: "요약",
+      commentTarget: "url",
+      commentUrl: "https://cafe.naver.com/ca-fe/cafes/31732304/articles/9",
+      comments: ["댓글1", "댓글2"],
+    };
+    renderPublish({ doc: commentDoc });
+    await userEvent.click(await screen.findByText("invest_king7"));
+    await userEvent.click(screen.getByText("money_lab"));
+    await userEvent.click(await screen.findByText("예약 게시"));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^예약 \(1\)/ }),
+    );
+    const call = ipcBackend.mock.calls.find(
+      (c) => c[0] === "add_queue_scheduled",
+    );
+    expect(call).toBeDefined();
+    const plan = (call?.[1] as { item: { plan: { naver: unknown[] } } }).item
+      .plan;
+    expect(plan.naver).toEqual([
+      expect.objectContaining({
+        accountId: "money_lab",
+        commentTarget: {
+          mode: "url",
+          cafeId: 31732304,
+          articleId: 9,
+        },
+      }),
+    ]);
+  });
+
+  it("includes a latest comment spec (cafeId + count) in a both-mode scheduled plan", async () => {
+    const bothDoc: LibraryPost = {
+      id: "lbs",
+      title: "글+댓글 예약",
+      kind: "both",
+      updated: "방금 전",
+      words: 100,
+      status: "ready",
+      excerpt: "요약",
+      body: "<p>본문</p>",
+      commentTarget: "latest",
+      commentCount: 3,
+      comments: ["좋네요"],
+    };
+    renderPublish({ doc: bothDoc });
+    await userEvent.click(await screen.findByText("invest_king7"));
+    await userEvent.click(screen.getByText("money_lab"));
+    await screen.findByPlaceholderText("가입 카페 선택");
+    await pickOption(0, "주식투자연구소 카페");
+    await screen.findByRole(
+      "button",
+      { name: /^게시 \(1\)/ },
+      { timeout: 3000 },
+    );
+    await userEvent.click(await screen.findByText("예약 게시"));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^예약 \(1\)/ }),
+    );
+    const call = ipcBackend.mock.calls.find(
+      (c) => c[0] === "add_queue_scheduled",
+    );
+    expect(call).toBeDefined();
+    const plan = (call?.[1] as { item: { plan: { naver: unknown[] } } }).item
+      .plan;
+    expect(plan.naver).toEqual([
+      expect.objectContaining({
+        accountId: "money_lab",
+        commentTarget: { mode: "latest", count: 3, cafeId: 11111111 },
+      }),
+    ]);
+  });
+
+  it("includes only naver/forum targets in a scheduled plan (band excluded)", async () => {
+    renderPublish();
+    // 기본 forum(a1) 유지 + naver(money_lab) + band(value_invest) 선택.
+    await userEvent.click(await screen.findByText("money_lab"));
+    await userEvent.click(screen.getByText("value_invest"));
+    await screen.findByPlaceholderText("가입 카페 선택");
+    await pickOption(0, "개미투자 카페");
+    // forum + band + naver = 3곳.
+    await screen.findByRole(
+      "button",
+      { name: /^게시 \(3\)/ },
+      { timeout: 3000 },
+    );
+    await userEvent.click(await screen.findByText("예약 게시"));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^예약 \(3\)/ }),
+    );
+    const call = ipcBackend.mock.calls.find(
+      (c) => c[0] === "add_queue_scheduled",
+    );
+    expect(call).toBeDefined();
+    const plan = (
+      call?.[1] as {
+        item: { plan: { naver: unknown[]; forum: unknown[] } };
+      }
+    ).item.plan;
+    // band는 엔진이 없어 plan에서 제외된다 — naver 1건, forum 1건만.
+    expect(plan.naver).toHaveLength(1);
+    expect(plan.forum).toEqual([
+      expect.objectContaining({ accountId: "invest_king7", code: "005930" }),
+    ]);
+  });
+
   it("comments on the just-posted article in 'both' mode", async () => {
     const bothDoc: LibraryPost = {
       id: "lb",

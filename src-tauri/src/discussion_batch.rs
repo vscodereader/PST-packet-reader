@@ -109,6 +109,24 @@ pub fn run_forum_publish<R: Runtime>(
             Ok(()) => (true, "게시 완료".to_owned()),
             Err(error) => (false, error),
         };
+
+        // 작업 결과를 pstmacro.log에 기록(가독성·상세화). 동작 무변경, 로그 줄만 추가.
+        // 계정 ID는 마스킹하고 PW는 넣지 않는다.
+        let who = crate::auth::mask_id(&request.account_id);
+        let kind = match (request.run_post, request.run_comment) {
+            (true, true) => "글+댓글",
+            (false, true) => "댓글",
+            _ => "글",
+        };
+        if ok {
+            tracing::info!("[POST] {who}  \"{}\" 종목토론방 {kind} 성공 ✅", stock.name);
+        } else {
+            tracing::info!(
+                "[POST] {who}  \"{}\" 종목토론방 {kind} 실패 ❌ — {message}",
+                stock.name
+            );
+        }
+
         results.push(ForumPublishResult {
             code: stock.code.clone(),
             name: stock.name.clone(),
@@ -279,6 +297,12 @@ pub fn run_discussion_batch<R: Runtime>(
         + request.count * usize::from(request.run_comment);
     let mut completed_actions = 0;
 
+    // 로그용 계정 식별자(마스킹). PW는 넣지 않는다. 계정 미지정이면 표식만 남긴다.
+    let who = request
+        .account_id
+        .as_deref()
+        .map_or_else(|| "(계정 미지정)".to_owned(), crate::auth::mask_id);
+
     for index in 0..request.count {
         let stock = request.stocks[index % request.stocks.len()].clone();
 
@@ -288,7 +312,8 @@ pub fn run_discussion_batch<R: Runtime>(
             let comment = pick_text(&request.comments, &request.comment_mode, index, "댓글내용")?;
             // 마지막 회차가 아닐 때만 글 등록 직후 타이머를 emit하고 1분을 채웁니다.
             let sleep_after = index + 1 < request.count;
-            let pair_reports = run_naver_post_with_comment_macro(
+            let stock_name = stock.name.clone();
+            let pair_reports = match run_naver_post_with_comment_macro(
                 NaverPostWithCommentRequest {
                     title,
                     body,
@@ -300,8 +325,19 @@ pub fn run_discussion_batch<R: Runtime>(
                 },
                 &app,
                 sleep_after,
-            )
-            .map_err(|error| error.to_string())?;
+            ) {
+                Ok(pair_reports) => {
+                    tracing::info!("[POST] {who}  \"{stock_name}\" 종목토론방 글+댓글 성공 ✅");
+                    pair_reports
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    tracing::info!(
+                        "[POST] {who}  \"{stock_name}\" 종목토론방 글+댓글 실패 ❌ — {message}"
+                    );
+                    return Err(message);
+                }
+            };
 
             for report in pair_reports {
                 reports.push(report);
@@ -316,19 +352,30 @@ pub fn run_discussion_batch<R: Runtime>(
             let title = pick_text(&request.titles, &request.title_mode, index, "제목")?;
             let body = pick_text(&request.bodies, &request.body_mode, index, "내용")?;
 
-            reports.push(
-                run_naver_discussion_macro(NaverDiscussionRequest {
-                    title,
-                    body,
-                    host: request.host.clone(),
-                    port: request.port,
-                    target: AutomationTarget::Post,
-                    submit_after_fill: true,
-                    stock: Some(stock.clone()),
-                    account_id: request.account_id.clone(),
-                })
-                .map_err(|error| error.to_string())?,
-            );
+            let stock_name = stock.name.clone();
+            let report = match run_naver_discussion_macro(NaverDiscussionRequest {
+                title,
+                body,
+                host: request.host.clone(),
+                port: request.port,
+                target: AutomationTarget::Post,
+                submit_after_fill: true,
+                stock: Some(stock.clone()),
+                account_id: request.account_id.clone(),
+            }) {
+                Ok(report) => {
+                    tracing::info!("[POST] {who}  \"{stock_name}\" 종목토론방 글 성공 ✅");
+                    report
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    tracing::info!(
+                        "[POST] {who}  \"{stock_name}\" 종목토론방 글 실패 ❌ — {message}"
+                    );
+                    return Err(message);
+                }
+            };
+            reports.push(report);
             completed_actions += 1;
             sleep_between_actions(completed_actions, total_actions, &app);
         }
@@ -336,19 +383,30 @@ pub fn run_discussion_batch<R: Runtime>(
         if request.run_comment {
             let comment = pick_text(&request.comments, &request.comment_mode, index, "댓글내용")?;
 
-            reports.push(
-                run_naver_discussion_macro(NaverDiscussionRequest {
-                    title: String::new(),
-                    body: comment,
-                    host: request.host.clone(),
-                    port: request.port,
-                    target: AutomationTarget::Comment,
-                    submit_after_fill: true,
-                    stock: Some(stock),
-                    account_id: request.account_id.clone(),
-                })
-                .map_err(|error| error.to_string())?,
-            );
+            let stock_name = stock.name.clone();
+            let report = match run_naver_discussion_macro(NaverDiscussionRequest {
+                title: String::new(),
+                body: comment,
+                host: request.host.clone(),
+                port: request.port,
+                target: AutomationTarget::Comment,
+                submit_after_fill: true,
+                stock: Some(stock),
+                account_id: request.account_id.clone(),
+            }) {
+                Ok(report) => {
+                    tracing::info!("[POST] {who}  \"{stock_name}\" 종목토론방 댓글 성공 ✅");
+                    report
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    tracing::info!(
+                        "[POST] {who}  \"{stock_name}\" 종목토론방 댓글 실패 ❌ — {message}"
+                    );
+                    return Err(message);
+                }
+            };
+            reports.push(report);
             completed_actions += 1;
             sleep_between_actions(completed_actions, total_actions, &app);
         }

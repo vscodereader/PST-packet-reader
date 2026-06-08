@@ -36,6 +36,11 @@ pub struct QueueJob {
     pub headless: bool,
     #[serde(default)]
     pub use_adb: bool,
+    /// 로컬 쿠키가 유효해 보여도 단락(스킵)하지 않고 실제 재로그인을 강제할지 여부.
+    /// 사용자가 명시적으로 선택 계정 로그인을 누른 경우에만 true로 둬, 서버측에서
+    /// 죽었지만 로컬 검증만 통과하는 쿠키를 새 값으로 덮어쓴다(이슈 #132).
+    #[serde(default)]
+    pub force: bool,
     pub status: QueueJobStatus,
     pub message: String,
     pub queued_at: u128,

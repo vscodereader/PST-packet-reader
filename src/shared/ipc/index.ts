@@ -20,6 +20,7 @@ import type { QueueNowItem } from "@/shared/bindings/QueueNowItem";
 import type { QueueScheduledItem } from "@/shared/bindings/QueueScheduledItem";
 import type { SortBy } from "@/shared/bindings/SortBy";
 import type { Stock } from "@/shared/bindings/Stock";
+import type { StockCandidate } from "@/shared/data/types";
 
 export type {
   Account,
@@ -159,8 +160,18 @@ export const ipc = {
     /** Move a scheduled item into the immediate queue; returns the new now-list. */
     promote: (id: string) =>
       call<QueueNowItem[]>("promote_queue_scheduled", { id }),
+    /**
+     * Persist the now-queue order (drag / priority change); returns the list.
+     * Running items stay pinned to the front by the backend.
+     */
+    reorderNow: (orderedIds: string[]) =>
+      call<QueueNowItem[]>("reorder_queue_now", { orderedIds }),
   },
-  stocks: { list: () => call<Stock[]>("list_stocks") },
+  stocks: {
+    list: () => call<Stock[]>("list_stocks"),
+    search: (query: string) =>
+      call<StockCandidate[]>("search_stocks", { query }),
+  },
   activity: {
     list: () => call<ActivityItem[]>("list_activity"),
     append: (kind: "success" | "error" | "info", text: string) =>
@@ -246,7 +257,12 @@ export const ipc = {
     bootstrap: () => call<unknown>("bootstrap_runtime"),
     saveAccounts: (accounts: AuthAccount[]) =>
       call<AuthAccount[]>("save_accounts", { accounts }),
-    enqueueLogin: (accountIds: string[], headless = false) =>
+    // force=true: skip the local-cookie short-circuit and always perform a real
+    // re-login, overwriting the saved cookie file — for explicit per-account login
+    // so server-dead cookies that still pass local validation get refreshed
+    // (issue #132). Leave false for batch "run all" to avoid re-logging in live
+    // sessions (stealth: fewer automated logins).
+    enqueueLogin: (accountIds: string[], headless = false, force = false) =>
       call<LoginQueueStatus>("enqueue_cookie_refresh", {
         accountIds,
         headless,
@@ -254,6 +270,7 @@ export const ipc = {
         // IP를 바꾸려면 true로 — 단 폰 USB 연결 + PATH에 adb 필요(winget Google.PlatformTools).
         // 백엔드: src-tauri/src/auth/adb.rs toggle_airplane_mode.
         useAdb: false,
+        force,
       }),
     queueStatus: () => call<LoginQueueStatus>("get_queue_status"),
   },

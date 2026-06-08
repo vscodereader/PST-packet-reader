@@ -739,6 +739,8 @@ const SEED_LOG_BATCHES: LogBatch[] = [
   {
     id: "b1",
     title: "5월 이벤트 결과 발표",
+    body: "<p>5월 이벤트 결과를 정리했습니다. 많은 참여 감사드립니다.</p>",
+    comment: "이벤트 참여 감사합니다 🙌",
     kind: "post",
     at: NOW_BASE - 4 * 3_600_000,
     items: [
@@ -978,6 +980,21 @@ export const invoke = vi.fn(
       // --- read-only domains -------------------------------------------------
       case "list_stocks":
         return clone(SEED_STOCKS);
+      case "search_stocks": {
+        const query = ((args?.query as string | undefined) ?? "").trim();
+        const candidates = SEED_STOCKS.map((s) => ({
+          name: s.name,
+          code: s.code,
+          link: "",
+        }));
+        return clone(
+          query
+            ? candidates.filter(
+                (c) => c.name.includes(query) || c.code.includes(query),
+              )
+            : candidates,
+        );
+      }
       case "list_activity":
         return clone(state.activity);
       case "append_activity": {
@@ -1145,6 +1162,19 @@ export const invoke = vi.fn(
             },
           ];
         }
+        return clone(state.queueNow);
+      }
+      case "reorder_queue_now": {
+        const orderedIds = args!.orderedIds as string[];
+        const running = state.queueNow.filter((q) => q.state === "running");
+        const rest = state.queueNow.filter((q) => q.state !== "running");
+        const ordered: QueueNowItem[] = [];
+        for (const id of orderedIds) {
+          const idx = rest.findIndex((q) => q.id === id);
+          if (idx >= 0) ordered.push(rest.splice(idx, 1)[0]!);
+        }
+        ordered.push(...rest); // 알 수 없는/누락 id는 원래 순서로 보존
+        state.queueNow = [...running, ...ordered];
         return clone(state.queueNow);
       }
 

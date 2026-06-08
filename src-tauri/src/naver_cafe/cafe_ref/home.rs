@@ -174,7 +174,16 @@ impl CafeHomeClient {
 
         let status = response.status();
         let status_code = status.as_u16();
-        let raw_body = response.text().await.unwrap_or_default();
+        // Propagate a body-read failure as a transport error instead of treating
+        // an empty body as "club id not found" further down.
+        let raw_body = response.text().await.map_err(|e| {
+            http_error(
+                "CAFE_HOME_TRANSPORT_ERROR",
+                format!("응답 본문을 읽지 못했습니다: {}", e),
+                Some(status_code),
+                status_code >= 500,
+            )
+        })?;
 
         if !status.is_success() {
             return Err(http_error(

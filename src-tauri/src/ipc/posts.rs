@@ -71,18 +71,12 @@ pub struct LibraryPost {
 // --------------------------------------------------------------------------
 
 /// Replace the post with a matching id, or prepend it if new (newest first).
-pub fn apply_upsert(posts: Vec<LibraryPost>, post: LibraryPost) -> Vec<LibraryPost> {
-    if posts.iter().any(|p| p.id == post.id) {
-        posts
-            .into_iter()
-            .map(|p| if p.id == post.id { post.clone() } else { p })
-            .collect()
-    } else {
-        let mut next = Vec::with_capacity(posts.len() + 1);
-        next.push(post);
-        next.extend(posts);
-        next
+pub fn apply_upsert(mut posts: Vec<LibraryPost>, post: LibraryPost) -> Vec<LibraryPost> {
+    match posts.iter_mut().find(|p| p.id == post.id) {
+        Some(slot) => *slot = post,    // update in place — single pass, no clone
+        None => posts.insert(0, post), // new → prepend (newest first)
     }
+    posts
 }
 
 pub fn apply_delete(posts: Vec<LibraryPost>, id: &str) -> Vec<LibraryPost> {

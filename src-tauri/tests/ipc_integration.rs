@@ -69,6 +69,19 @@ fn array(value: &Value) -> &Vec<Value> {
         .unwrap_or_else(|| panic!("expected a JSON array, got: {value}"))
 }
 
+/// 게시 큐는 빈 상태로 시작하므로(이슈 #142), 큐 흐름 테스트는 예약 항목을 직접
+/// 만들어 넣는다. `plan`은 optional이라 생략한다(표시용 흐름 검증).
+fn sample_scheduled_item(id: &str) -> Value {
+    json!({
+        "id": id,
+        "title": "통합 테스트 예약",
+        "kind": "post",
+        "when": "오늘 18:30",
+        "rel": "5시간 후",
+        "locs": [],
+    })
+}
+
 #[test]
 fn every_list_command_returns_its_seeded_collection() {
     let (app, _dir) = mock_app();
@@ -78,8 +91,6 @@ fn every_list_command_returns_its_seeded_collection() {
     for cmd in [
         "list_accounts",
         "list_posts",
-        "list_queue_now",
-        "list_queue_scheduled",
         "list_stocks",
         "list_stats",
         "list_bands",
@@ -89,8 +100,15 @@ fn every_list_command_returns_its_seeded_collection() {
     }
 
     // activity and log_batches start empty — they are filled by real actions,
-    // not a static seed. Verify the commands return a JSON array (even if []).
-    for cmd in ["list_activity", "list_log_batches"] {
+    // not a static seed. The publish queue (now/scheduled) also starts empty
+    // since #142 (실제 게시 작업만 큐에 들어가도록 데모 시드 제거). Verify the
+    // commands return a JSON array (even if []).
+    for cmd in [
+        "list_activity",
+        "list_log_batches",
+        "list_queue_now",
+        "list_queue_scheduled",
+    ] {
         let out = invoke_ok(&wv, cmd, json!({}));
         let _ = array(&out); // panics if not an array
     }
@@ -179,16 +197,18 @@ fn queue_now_cancel_removes_the_targeted_item() {
     let (app, _dir) = mock_app();
     let wv = main_webview(&app);
 
-    let before = invoke_ok(&wv, "list_queue_now", json!({}));
-    let total = array(&before).len();
-    let id = array(&before)[0]["id"]
-        .as_str()
-        .expect("now id")
-        .to_string();
+    // 큐는 빈 상태로 시작하므로(이슈 #142), 예약 추가 후 즉시 처리(promote)로 now 큐에
+    // 항목 하나를 만든 다음 취소가 그 항목을 제거하는지 확인한다.
+    invoke_ok(
+        &wv,
+        "add_queue_scheduled",
+        json!({ "item": sample_scheduled_item("qn1"), "at": 4_102_444_800_000_i64 }),
+    );
+    let now = invoke_ok(&wv, "promote_queue_scheduled", json!({ "id": "qn1" }));
+    assert_eq!(array(&now).len(), 1);
 
-    let after = invoke_ok(&wv, "cancel_queue_now", json!({ "id": id }));
-
-    assert_eq!(array(&after).len(), total - 1);
+    let after = invoke_ok(&wv, "cancel_queue_now", json!({ "id": "qn1" }));
+    assert!(array(&after).is_empty());
 }
 
 #[test]
@@ -196,33 +216,79 @@ fn scheduled_add_promote_and_cancel_flow() {
     let (app, _dir) = mock_app();
     let wv = main_webview(&app);
 
-    let scheduled = invoke_ok(&wv, "list_queue_scheduled", json!({}));
-    let item = array(&scheduled)[0].clone();
-    let id = item["id"].as_str().expect("scheduled id").to_string();
-    let total = array(&scheduled).len();
-
+    // 큐는 빈 상태로 시작하므로(이슈 #142) 예약을 직접 추가한다.
     // A far-future timestamp (year 2100) clears the past-time guard.
     let after_add = invoke_ok(
         &wv,
         "add_queue_scheduled",
-        json!({ "item": item, "at": 4_102_444_800_000_i64 }),
+        json!({ "item": sample_scheduled_item("qs1"), "at": 4_102_444_800_000_i64 }),
     );
-    assert_eq!(array(&after_add).len(), total + 1);
+    assert_eq!(array(&after_add).len(), 1);
 
     // A past timestamp is rejected with an error.
     let rejected = invoke(
         &wv,
         "add_queue_scheduled",
-        json!({ "item": array(&scheduled)[0].clone(), "at": 0_i64 }),
+        json!({ "item": sample_scheduled_item("qs2"), "at": 0_i64 }),
     );
     assert!(rejected.is_err(), "past schedule time should be rejected");
 
     // Promote drops it from scheduled and appends to the now queue.
-    let now_after = invoke_ok(&wv, "promote_queue_scheduled", json!({ "id": id }));
-    assert!(now_after.is_array());
+    let now_after = invoke_ok(&wv, "promote_queue_scheduled", json!({ "id": "qs1" }));
+    assert_eq!(array(&now_after).len(), 1);
 
-    let cancelled = invoke_ok(&wv, "cancel_queue_scheduled", json!({ "id": id }));
+    let cancelled = invoke_ok(&wv, "cancel_queue_scheduled", json!({ "id": "qs1" }));
     assert!(cancelled.is_array());
+}
+
+// 실행 페이로드(plan)가 IPC 경계(역직렬화)와 저장소를 통과해 그대로 복원되고,
+// promote(to_now_item) 후에도 보존되는지 end-to-end로 확인한다. 본문 동결 정책의
+// 핵심이라, 프론트가 보내는 camelCase JSON(menuId number, commentTarget 등)이
+// PublishPlan으로 정확히 역직렬화되는지를 함께 검증한다(이슈 #142).
+#[test]
+fn scheduled_item_round_trips_its_publish_plan() {
+    let (app, _dir) = mock_app();
+    let wv = main_webview(&app);
+
+    let mut item = sample_scheduled_item("qp1");
+    item["plan"] = json!({
+        "postId": "p1",
+        "kind": "post",
+        "title": "동결 제목",
+        "bodyText": "동결 본문",
+        "comments": ["댓글A"],
+        "naver": [{
+            "accountId": "user01",
+            "cafe": "12345",
+            "menuId": 7,
+            "boardType": "L",
+            "commentTarget": { "mode": "latest", "count": 3 }
+        }],
+        "forum": [{ "accountId": "user01", "name": "삼성전자", "code": "005930" }],
+    });
+
+    invoke_ok(
+        &wv,
+        "add_queue_scheduled",
+        json!({ "item": item, "at": 4_102_444_800_000_i64 }),
+    );
+
+    // 저장 후 list로 복원 → plan이 필드 그대로 돌아온다.
+    let scheduled = invoke_ok(&wv, "list_queue_scheduled", json!({}));
+    let stored = &array(&scheduled)[0]["plan"];
+    assert_eq!(stored["title"], "동결 제목");
+    assert_eq!(stored["bodyText"], "동결 본문");
+    assert_eq!(stored["naver"][0]["menuId"], 7);
+    assert_eq!(stored["naver"][0]["commentTarget"]["mode"], "latest");
+    assert_eq!(stored["naver"][0]["commentTarget"]["count"], 3);
+    assert_eq!(stored["forum"][0]["code"], "005930");
+
+    // promote → now 큐로 옮겨도 plan이 보존된다.
+    let now = invoke_ok(&wv, "promote_queue_scheduled", json!({ "id": "qp1" }));
+    let promoted = &array(&now)[0]["plan"];
+    assert_eq!(promoted["title"], "동결 제목");
+    assert_eq!(promoted["naver"][0]["boardType"], "L");
+    assert_eq!(promoted["forum"][0]["name"], "삼성전자");
 }
 
 #[test]
