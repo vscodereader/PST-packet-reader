@@ -214,6 +214,7 @@ async fn run_forum_publish_now<R: Runtime>(
     let logs = app.state::<JsonStore<ipc::log_batches::LogBatch>>();
     logs.mutate(|mut v| {
         v.insert(0, batch);
+        v.truncate(ipc::log_batches::MAX_LOG_BATCHES);
         v
     });
     let activity = app.state::<JsonStore<ipc::activity::ActivityItem>>();
