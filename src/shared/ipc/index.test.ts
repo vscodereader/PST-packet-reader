@@ -116,4 +116,33 @@ describe("ipc facade", () => {
       undefined,
     );
   });
+
+  it("forumStocks.list invokes list_forum_stocks with category/exchange/page", async () => {
+    mockInvoke.mockResolvedValueOnce({
+      stocks: [],
+      totalCount: 0,
+      page: 1,
+      hasNext: false,
+    });
+    await ipc.forumStocks.list("tradingValue", "krx", 1);
+    expect(mockInvoke).toHaveBeenCalledWith("list_forum_stocks", {
+      category: "tradingValue",
+      exchange: "krx",
+      page: 1,
+    });
+  });
+
+  it("forumStocks.search invokes search_forum_stocks with query/page", async () => {
+    mockInvoke.mockResolvedValueOnce({
+      stocks: [],
+      totalCount: 0,
+      page: 1,
+      hasNext: false,
+    });
+    await ipc.forumStocks.search("코", 2);
+    expect(mockInvoke).toHaveBeenCalledWith("search_forum_stocks", {
+      query: "코",
+      page: 2,
+    });
+  });
 });
