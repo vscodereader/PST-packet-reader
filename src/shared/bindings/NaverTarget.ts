@@ -5,7 +5,12 @@ import type { CommentTargetSpec } from "./CommentTargetSpec";
  * 네이버 카페 게시 대상 1건 (orchestrator `PostJob`의 재료). `account_id`는 로그인 쿠키
  * 키(= loginId) 규약을 따른다.
  */
-export type NaverTarget = { accountId: string, cafe: string, menuId: number, boardType: string, 
+export type NaverTarget = { accountId: string, cafe: string, 
+/**
+ * 카페 표시 이름(예약 시점 동결). 완료 로그에 카페 ID 대신 보여준다. 과거에
+ * 저장된 plan에는 없을 수 있어 기본값(빈 문자열)을 허용한다.
+ */
+cafeName: string, menuId: number, boardType: string, 
 /**
  * comment/both 모드에서 댓글을 달 대상. post 전용이면 None.
  */

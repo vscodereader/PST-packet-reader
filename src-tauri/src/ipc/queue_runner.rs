@@ -438,12 +438,28 @@ fn build_log_batch(
     at: i64,
     seq: u64,
 ) -> LogBatch {
+    use std::collections::HashMap;
+
+    // 카페 ID(문자열) → 표시 이름. plan에 동결된 이름을 써서 로그에 ID 대신 카페 명을
+    // 보여준다. 이름이 비었거나 매칭이 없으면 ID로 폴백한다.
+    let cafe_names: HashMap<&str, &str> = plan
+        .naver
+        .iter()
+        .filter(|t| !t.cafe_name.is_empty())
+        .map(|t| (t.cafe.as_str(), t.cafe_name.as_str()))
+        .collect();
+    let cafe_label = |id: &str| -> String {
+        cafe_names
+            .get(id)
+            .map_or_else(|| id.to_owned(), |n| n.to_string())
+    };
+
     let mut items = Vec::new();
 
     for r in post_reports {
         items.push(BatchItem {
             platform: PlatformId::Naver,
-            target: r.cafe.clone(),
+            target: cafe_label(&r.cafe),
             code: None,
             board: Some(r.menu_id.to_string()),
             login_id: r.account_id.clone(),
@@ -467,7 +483,7 @@ fn build_log_batch(
     for r in comment_reports {
         items.push(BatchItem {
             platform: PlatformId::Naver,
-            target: r.cafe_id.to_string(),
+            target: cafe_label(&r.cafe_id.to_string()),
             code: None,
             board: None,
             login_id: r.account_id.clone(),
@@ -557,11 +573,43 @@ fn record_completion<R: Runtime>(app: &AppHandle<R>, batch: LogBatch) {
     );
 }
 
-/// 아이템을 `Running`으로 전이한다. 진행률은 execute_item이 총계를 확정한 뒤 채운다.
+/// plan으로부터 진행률 total의 상한 추정치를 낸다. mark_running 시점에 `(0, total)`을
+/// 미리 채워, 카페 글 게시·댓글 대상 조회(both/comment는 네트워크)로 실제 total이
+/// 확정되기 전에도 "처리 중 N/N"이 빈칸("/")으로 보이지 않게 한다. 이후 execute_item이
+/// 실제 작업 수로 정밀화한다(실패·빈 풀로 실제치가 더 작아질 수 있다).
+fn estimate_total(plan: &PublishPlan) -> u32 {
+    let posts = if runs_post(plan) { plan.naver.len() } else { 0 };
+    let comments = if runs_comment(plan) {
+        if matches!(plan.kind, ModeValue::Both) {
+            // both: 방금 쓴 글에 self-comment — 글 대상 수만큼.
+            plan.naver.len()
+        } else {
+            // comment 전용: 대상별 commentTarget(latest/popular=count, url=1) 합.
+            plan.naver
+                .iter()
+                .filter_map(|t| t.comment_target.as_ref())
+                .map(|s| match s.mode {
+                    CommentTarget::Url => 1,
+                    CommentTarget::Latest | CommentTarget::Popular => {
+                        s.count.unwrap_or(1).max(1) as usize
+                    }
+                })
+                .sum()
+        }
+    } else {
+        0
+    };
+    (posts + comments + plan.forum.len()) as u32
+}
+
+/// 아이템을 `Running`으로 전이하고 진행률을 `(0, 추정 total)`로 초기화한다. execute_item이
+/// 실제 작업 수로 total을 정밀화하기 전까지 진행률이 빈칸으로 보이지 않게 한다.
 fn mark_running(mut items: Vec<QueueNowItem>, id: &str) -> Vec<QueueNowItem> {
     for item in &mut items {
         if item.id == id {
             item.state = QueueState::Running;
+            let total = item.plan.as_ref().map_or(0, estimate_total);
+            item.progress = Some((0, total));
         }
     }
     items
@@ -597,6 +645,7 @@ mod tests {
         NaverTarget {
             account_id: account.into(),
             cafe: "123".into(),
+            cafe_name: "테스트카페".into(),
             menu_id: 7,
             board_type: "L".into(),
             comment_target: None,
@@ -713,10 +762,49 @@ mod tests {
     }
 
     #[test]
-    fn mark_running_sets_state_only() {
+    fn mark_running_sets_state_and_initial_progress() {
+        // plan 없으면 total 0이라도 progress는 채워 빈칸("/")을 막는다.
         let next = mark_running(vec![now_item("a", QueueState::Waiting, None)], "a");
         assert_eq!(next[0].state, QueueState::Running);
-        assert!(next[0].progress.is_none());
+        assert_eq!(next[0].progress, Some((0, 0)));
+    }
+
+    #[test]
+    fn mark_running_seeds_total_from_plan() {
+        // both + naver 2개 → 글 2 + self-댓글 2 = 4를 미리 채운다.
+        let p = plan(
+            ModeValue::Both,
+            vec![naver_target("u0"), naver_target("u1")],
+        );
+        let next = mark_running(vec![now_item("a", QueueState::Waiting, Some(p))], "a");
+        assert_eq!(next[0].progress, Some((0, 4)));
+    }
+
+    #[test]
+    fn estimate_total_counts_posts_comments_forum() {
+        use crate::ipc::queue::{CommentTargetSpec, ForumTarget};
+        // post 전용: 글 대상 수.
+        assert_eq!(
+            estimate_total(&plan(ModeValue::Post, vec![naver_target("u0")])),
+            1
+        );
+        // comment 전용 latest count=3 → 3.
+        let mut t = naver_target("u0");
+        t.comment_target = Some(CommentTargetSpec {
+            mode: CommentTarget::Latest,
+            count: Some(3),
+            cafe_id: Some(1),
+            article_id: None,
+        });
+        assert_eq!(estimate_total(&plan(ModeValue::Comment, vec![t])), 3);
+        // forum 종목도 더한다.
+        let mut p = plan(ModeValue::Post, vec![naver_target("u0")]);
+        p.forum = vec![ForumTarget {
+            account_id: "u0".into(),
+            name: "삼성전자".into(),
+            code: "005930".into(),
+        }];
+        assert_eq!(estimate_total(&p), 2); // 글 1 + 종목 1
     }
 
     #[test]
@@ -839,8 +927,12 @@ mod tests {
         assert_eq!(b.items.len(), 2);
         assert_eq!(b.items[0].platform, PlatformId::Naver);
         assert_eq!(b.items[0].status, BatchItemStatus::Success);
+        // 카페 ID("123")가 아니라 plan에 동결된 카페 명으로 로그를 남긴다.
+        assert_eq!(b.items[0].target, "테스트카페");
         assert_eq!(b.items[0].board.as_deref(), Some("7"));
         assert_eq!(b.items[1].status, BatchItemStatus::Fail);
+        // plan에 없는 카페("456")는 ID로 폴백.
+        assert_eq!(b.items[1].target, "456");
         assert_eq!(b.items[1].msg, "쿠키 없음");
         assert_eq!(b.items[1].trace.as_deref(), Some("NO_COOKIES: 쿠키 없음"));
     }

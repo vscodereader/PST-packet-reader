@@ -63,6 +63,10 @@ pub struct CommentTargetSpec {
 pub struct NaverTarget {
     pub account_id: String,
     pub cafe: String,
+    /// 카페 표시 이름(예약 시점 동결). 완료 로그에 카페 ID 대신 보여준다. 과거에
+    /// 저장된 plan에는 없을 수 있어 기본값(빈 문자열)을 허용한다.
+    #[serde(default)]
+    pub cafe_name: String,
     #[ts(type = "number")]
     pub menu_id: u64,
     pub board_type: String,
@@ -360,6 +364,7 @@ mod tests {
             naver: vec![NaverTarget {
                 account_id: "user01".into(),
                 cafe: "12345".into(),
+                cafe_name: "주식투자연구소".into(),
                 menu_id: 7,
                 board_type: "L".into(),
                 comment_target: Some(CommentTargetSpec {

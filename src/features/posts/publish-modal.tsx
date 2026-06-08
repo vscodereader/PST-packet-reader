@@ -1183,6 +1183,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         return {
           accountId: pj.accountId,
           cafe: pj.cafe,
+          // 완료 로그에 카페 ID 대신 보여줄 표시 이름(동결). pick이 없으면 대상명으로.
+          cafeName: naverPicks[j.key]?.cafeName ?? j.targetName,
           menuId: pj.menuId,
           boardType: pj.boardType,
           ...(spec ? { commentTarget: spec } : {}),
