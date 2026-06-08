@@ -3,18 +3,20 @@
 //! 워커 자신은 실행 상태(`is_running`, `current_id`)만 in-memory로 들고, 잡 목록·
 //! 순서·진행률은 모두 디스크(JsonStore)에 반영한다(영속화·폴링은 #143).
 //!
-//! 1단계 범위: 워커 골격 + 카페 글(`run_post_jobs`). 카페 댓글(both=self /
-//! latest·popular / url)·종목토론방 게시와 완료 로그/activity는 후속 단계에서
-//! `execute_item`에 추가한다.
+//! 현재 범위: 워커 골격 + 카페 글(`run_post_jobs`) + 카페 댓글(both=방금 쓴 글에
+//! self / latest·popular=글목록 조회 / url). 종목토론방 게시와 완료 로그/activity는
+//! 후속 단계에서 `execute_item`에 추가한다.
 
 use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Manager, Runtime};
 
-use super::posts::ModeValue;
+use super::posts::{CommentTarget, ModeValue};
 use super::queue::{apply_cancel_now, PublishPlan, QueueNowItem, QueueState};
-use crate::naver_cafe::orchestrator::PostJob;
-use crate::naver_cafe::run_post_jobs;
+use crate::naver_cafe::article_list::models::SortBy;
+use crate::naver_cafe::distribute::{distribute_comments, mulberry32, seed_from_clock};
+use crate::naver_cafe::orchestrator::{CommentJob, JobReport, PostJob};
+use crate::naver_cafe::{fetch_article_list_for_account, run_comment_jobs, run_post_jobs};
 use crate::store::JsonStore;
 
 /// now 큐 실행 워커의 in-memory 상태. 잡 자체는 `JsonStore<QueueNowItem>`에 있다.
@@ -26,7 +28,27 @@ pub struct NowQueueRunner {
 #[derive(Default)]
 struct RunnerInner {
     is_running: bool,
-    current_id: Option<String>,
+}
+
+/// 워커 종료(정상/패닉) 시 `is_running`을 반드시 해제해, 패닉 한 번에 큐가 영구히
+/// 멈추지(wedge) 않게 하는 안전망. 정상 종료 경로도 이 가드를 거친다.
+struct RunningGuard {
+    runner: NowQueueRunner,
+}
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        if let Ok(mut inner) = self.runner.inner.lock() {
+            inner.is_running = false;
+        }
+    }
+}
+
+/// 댓글 게시 대상 1건 — 글 작성 결과(self) 또는 commentTarget 해석으로 만들어진다.
+struct CommentTargetEntry {
+    account_id: String,
+    cafe_id: u64,
+    article_id: u64,
 }
 
 /// 위에서부터 첫 `Waiting` 아이템을 고른다(`Running`은 건너뛴다).
@@ -59,6 +81,19 @@ fn runs_post(plan: &PublishPlan) -> bool {
     matches!(plan.kind, ModeValue::Post | ModeValue::Both)
 }
 
+/// 이 plan이 카페 댓글을 다는지(comment/both 모드).
+fn runs_comment(plan: &PublishPlan) -> bool {
+    matches!(plan.kind, ModeValue::Comment | ModeValue::Both)
+}
+
+fn sort_by_for(mode: &CommentTarget) -> Option<SortBy> {
+    match mode {
+        CommentTarget::Latest => Some(SortBy::Latest),
+        CommentTarget::Popular => Some(SortBy::Popular),
+        CommentTarget::Url => None,
+    }
+}
+
 /// 워커가 돌고 있지 않으면 기동한다. promote(예약→즉시 처리) 시 호출한다.
 /// 이미 돌고 있으면 아무것도 하지 않는다(워커가 새 Waiting 아이템을 이어서 집어간다).
 pub fn start_if_idle<R: Runtime>(runner: &NowQueueRunner, app: AppHandle<R>) {
@@ -82,74 +117,201 @@ pub fn start_if_idle<R: Runtime>(runner: &NowQueueRunner, app: AppHandle<R>) {
 }
 
 async fn worker_loop<R: Runtime>(app: AppHandle<R>, runner: NowQueueRunner) {
+    // 정상/패닉 종료 모두 is_running을 해제한다(큐 wedge 방지).
+    let _guard = RunningGuard {
+        runner: runner.clone(),
+    };
+
     loop {
         let now_store = app.state::<JsonStore<QueueNowItem>>();
 
         let job = match pick_next_waiting(&now_store.snapshot()) {
             Some(job) => job,
             None => {
-                if let Ok(mut inner) = runner.inner.lock() {
-                    inner.is_running = false;
-                    inner.current_id = None;
+                // drain 경계 race 방지: is_running 해제를 runner 락 안에서, 큐를 한 번 더
+                // 확인한 뒤 한다. 락이 promote의 start_if_idle(검사+set)과 직렬화되므로,
+                // 막 추가된 Waiting 아이템이 stranded 되지 않는다.
+                let Ok(mut inner) = runner.inner.lock() else {
+                    return;
+                };
+                if pick_next_waiting(&now_store.snapshot()).is_some() {
+                    drop(inner);
+                    continue;
                 }
+                inner.is_running = false;
                 return;
             }
         };
 
-        if let Ok(mut inner) = runner.inner.lock() {
-            inner.current_id = Some(job.id.clone());
-        }
-        let total = job.plan.as_ref().map_or(0, |p| p.naver.len() as u32);
-        now_store.mutate(|items| set_running(items, &job.id, total));
+        now_store.mutate(|items| mark_running(items, &job.id));
 
         execute_item(&app, &job).await;
 
         // 완료된 아이템은 큐에서 제거한다(취소와 동일 경로 재사용).
         app.state::<JsonStore<QueueNowItem>>()
             .mutate(|items| apply_cancel_now(items, &job.id));
-        if let Ok(mut inner) = runner.inner.lock() {
-            inner.current_id = None;
-        }
     }
 }
 
-/// 한 큐 아이템을 실제로 게시한다. 1단계는 카페 글(post/both 모드)만 처리한다.
+/// 큐에 해당 id의 아이템이 아직 있는지(협조적 취소 확인용). cancel_queue_now가
+/// 아이템을 제거하면, 워커는 다음 단계로 진입하기 전 이를 보고 중단한다.
+fn item_present<R: Runtime>(app: &AppHandle<R>, id: &str) -> bool {
+    app.state::<JsonStore<QueueNowItem>>()
+        .snapshot()
+        .iter()
+        .any(|i| i.id == id)
+}
+
+/// 한 큐 아이템을 실제로 게시한다(카페 글 + 카페 댓글). 각 단계 진입 전 아이템이
+/// 아직 큐에 있는지 확인해, 진행 중 단계는 끝까지 두되 다음 단계는 협조적으로 멈춘다.
+/// (실행 중 단계의 강한 중단과 종목토론방·완료 로그는 후속 단계.)
 async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) {
     let Some(plan) = item.plan.as_ref() else {
         return;
     };
+    let id = item.id.as_str();
 
-    if runs_post(plan) {
-        let post_jobs = plan_to_post_jobs(plan);
-        if !post_jobs.is_empty() {
-            let done = post_jobs.len() as u32;
-            // 한 건이 실패해도 나머지를 계속 진행한다(run_post_jobs 내부 보장).
-            let _reports = run_post_jobs(&post_jobs).await;
-            app.state::<JsonStore<QueueNowItem>>()
-                .mutate(|items| set_progress(items, &item.id, done));
+    // 1. 카페 글(post/both).
+    let post_reports = if runs_post(plan) && item_present(app, id) {
+        let jobs = plan_to_post_jobs(plan);
+        if jobs.is_empty() {
+            Vec::new()
+        } else {
+            run_post_jobs(&jobs).await
         }
+    } else {
+        Vec::new()
+    };
+
+    // 2. 카페 댓글(comment/both) 대상 확정.
+    let comment_targets = if runs_comment(plan) && item_present(app, id) {
+        collect_comment_targets(plan, &post_reports).await
+    } else {
+        Vec::new()
+    };
+
+    // 3. 카페 댓글 작업 구성. 진행률 total은 comment_targets가 아니라 **실제 만들어진
+    // 작업 수**로 잡아야 100%에 도달한다(빈 댓글 풀로 인한 영구 미완 방지 — build_comment_jobs).
+    let comment_jobs = build_comment_jobs(comment_targets, &plan.comments);
+
+    // 진행률 총계 확정(실제 카페 글 + 카페 댓글 작업 수; 종목토론방은 후속 단계).
+    let total = (post_reports.len() + comment_jobs.len()) as u32;
+    let mut done = post_reports.len() as u32;
+    update_progress(app, id, done, total);
+
+    if !comment_jobs.is_empty() {
+        let posted = comment_jobs.len() as u32;
+        let _reports = run_comment_jobs(&comment_jobs).await;
+        done += posted;
+        update_progress(app, id, done, total);
     }
-    // 2단계: 카페 댓글(both=self / latest·popular / url) + 종목토론방 + 완료 로그/activity.
+    // 후속 단계: 종목토론방(spawn_blocking + Chrome) + 완료 로그/activity.
 }
 
-/// 아이템을 `Running`으로 전이하고 진행률을 `(0, total)`로 초기화한다.
-fn set_running(mut items: Vec<QueueNowItem>, id: &str, total: u32) -> Vec<QueueNowItem> {
+/// 댓글 대상을 모은다. both 모드는 방금 게시에 성공한 글(self)에, comment 전용은
+/// 각 naver 대상의 `commentTarget`(url 직접 / latest·popular 글목록 조회)에 단다.
+async fn collect_comment_targets(
+    plan: &PublishPlan,
+    post_reports: &[JobReport],
+) -> Vec<CommentTargetEntry> {
+    let mut targets = Vec::new();
+
+    if matches!(plan.kind, ModeValue::Both) {
+        // self-comment: 방금 게시에 성공한 글에 단다(즉시게시 both 동작과 동일).
+        for report in post_reports {
+            if let Some(result) = &report.result {
+                targets.push(CommentTargetEntry {
+                    account_id: report.account_id.clone(),
+                    cafe_id: result.cafe_id,
+                    article_id: result.article_id,
+                });
+            }
+        }
+        return targets;
+    }
+
+    // comment 전용: 대상마다 commentTarget을 해석한다.
+    for t in &plan.naver {
+        let Some(spec) = &t.comment_target else {
+            continue;
+        };
+        match spec.mode {
+            CommentTarget::Url => {
+                if let (Some(cafe_id), Some(article_id)) = (spec.cafe_id, spec.article_id) {
+                    targets.push(CommentTargetEntry {
+                        account_id: t.account_id.clone(),
+                        cafe_id,
+                        article_id,
+                    });
+                }
+            }
+            CommentTarget::Latest | CommentTarget::Popular => {
+                let (Some(cafe_id), Some(sort)) = (spec.cafe_id, sort_by_for(&spec.mode)) else {
+                    continue;
+                };
+                let count = spec.count.unwrap_or(1).max(1) as usize;
+                // 실행 시점에 상위 N개를 다시 조회한다(예약과 실행 사이 새 글 반영).
+                if let Ok(resp) =
+                    fetch_article_list_for_account(&cafe_id.to_string(), sort, &t.account_id).await
+                {
+                    for article in resp.articles.iter().take(count) {
+                        targets.push(CommentTargetEntry {
+                            account_id: t.account_id.clone(),
+                            cafe_id,
+                            article_id: article.article_id,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    targets
+}
+
+/// 댓글 대상에 댓글 풀(comments)을 분배해 작업으로 만든다. 풀이 비면 빈 목록을 내
+/// 댓글 작업이 0건이 되며, 호출부의 진행률 total이 실제 작업 수로 잡혀 영구 미완을 피한다.
+fn build_comment_jobs(targets: Vec<CommentTargetEntry>, comments: &[String]) -> Vec<CommentJob> {
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let mut rng = mulberry32(seed_from_clock());
+    let contents = distribute_comments(targets.len(), comments, &mut rng);
+    targets
+        .into_iter()
+        .zip(contents)
+        .map(|(t, content)| CommentJob {
+            account_id: t.account_id,
+            cafe_id: t.cafe_id,
+            article_id: t.article_id,
+            content,
+        })
+        .collect()
+}
+
+/// 아이템을 `Running`으로 전이한다. 진행률은 execute_item이 총계를 확정한 뒤 채운다.
+fn mark_running(mut items: Vec<QueueNowItem>, id: &str) -> Vec<QueueNowItem> {
     for item in &mut items {
         if item.id == id {
             item.state = QueueState::Running;
-            item.progress = Some((0, total));
         }
     }
     items
 }
 
-/// 진행률의 완료 수(done)를 갱신한다(총계는 유지).
-fn set_progress(mut items: Vec<QueueNowItem>, id: &str, done: u32) -> Vec<QueueNowItem> {
+fn update_progress<R: Runtime>(app: &AppHandle<R>, id: &str, done: u32, total: u32) {
+    app.state::<JsonStore<QueueNowItem>>()
+        .mutate(|items| set_progress_value(items, id, done, total));
+}
+
+fn set_progress_value(
+    mut items: Vec<QueueNowItem>,
+    id: &str,
+    done: u32,
+    total: u32,
+) -> Vec<QueueNowItem> {
     for item in &mut items {
         if item.id == id {
-            if let Some((_, total)) = item.progress {
-                item.progress = Some((done, total));
-            }
+            item.progress = Some((done, total));
         }
     }
     items
@@ -158,29 +320,33 @@ fn set_progress(mut items: Vec<QueueNowItem>, id: &str, done: u32) -> Vec<QueueN
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::queue::NaverTarget;
+    use crate::ipc::queue::{CommentTargetSpec, NaverTarget};
+    use crate::naver_cafe::orchestrator::JobReport;
+    use crate::naver_cafe::post::parser::ArticleRegisterResult;
 
-    fn plan_with_naver(n: usize, kind: ModeValue) -> PublishPlan {
+    fn naver_target(account: &str) -> NaverTarget {
+        NaverTarget {
+            account_id: account.into(),
+            cafe: "123".into(),
+            menu_id: 7,
+            board_type: "L".into(),
+            comment_target: None,
+        }
+    }
+
+    fn plan(kind: ModeValue, naver: Vec<NaverTarget>) -> PublishPlan {
         PublishPlan {
             post_id: "p1".into(),
             kind,
             title: "T".into(),
             body_text: "B".into(),
-            comments: vec![],
-            naver: (0..n)
-                .map(|i| NaverTarget {
-                    account_id: format!("u{i}"),
-                    cafe: "123".into(),
-                    menu_id: 7,
-                    board_type: "L".into(),
-                    comment_target: None,
-                })
-                .collect(),
+            comments: vec!["c1".into()],
+            naver,
             forum: vec![],
         }
     }
 
-    fn now_item(id: &str, state: QueueState, plan: Option<PublishPlan>) -> QueueNowItem {
+    fn now_item(id: &str, state: QueueState, p: Option<PublishPlan>) -> QueueNowItem {
         QueueNowItem {
             id: id.into(),
             title: "t".into(),
@@ -189,7 +355,22 @@ mod tests {
             batch_id: None,
             progress: None,
             locs: vec![],
-            plan,
+            plan: p,
+        }
+    }
+
+    fn post_report(account: &str, cafe_id: u64, article_id: u64) -> JobReport {
+        JobReport {
+            account_id: account.into(),
+            cafe: cafe_id.to_string(),
+            menu_id: 7,
+            success: true,
+            result: Some(ArticleRegisterResult {
+                cafe_id,
+                article_id,
+                menu_id: 7,
+            }),
+            error: None,
         }
     }
 
@@ -211,7 +392,10 @@ mod tests {
 
     #[test]
     fn plan_to_post_jobs_uses_frozen_title_and_body() {
-        let jobs = plan_to_post_jobs(&plan_with_naver(2, ModeValue::Post));
+        let jobs = plan_to_post_jobs(&plan(
+            ModeValue::Post,
+            vec![naver_target("u0"), naver_target("u1")],
+        ));
         assert_eq!(jobs.len(), 2);
         assert_eq!(jobs[0].subject, "T");
         assert_eq!(jobs[0].body_text, "B");
@@ -221,24 +405,104 @@ mod tests {
     }
 
     #[test]
-    fn runs_post_only_for_post_and_both() {
-        assert!(runs_post(&plan_with_naver(1, ModeValue::Post)));
-        assert!(runs_post(&plan_with_naver(1, ModeValue::Both)));
-        assert!(!runs_post(&plan_with_naver(1, ModeValue::Comment)));
+    fn runs_post_and_runs_comment_match_mode() {
+        assert!(runs_post(&plan(ModeValue::Post, vec![])));
+        assert!(runs_post(&plan(ModeValue::Both, vec![])));
+        assert!(!runs_post(&plan(ModeValue::Comment, vec![])));
+        assert!(runs_comment(&plan(ModeValue::Comment, vec![])));
+        assert!(runs_comment(&plan(ModeValue::Both, vec![])));
+        assert!(!runs_comment(&plan(ModeValue::Post, vec![])));
     }
 
     #[test]
-    fn set_running_transitions_state_and_initializes_progress() {
-        let next = set_running(vec![now_item("a", QueueState::Waiting, None)], "a", 3);
+    fn mark_running_sets_state_only() {
+        let next = mark_running(vec![now_item("a", QueueState::Waiting, None)], "a");
         assert_eq!(next[0].state, QueueState::Running);
-        assert_eq!(next[0].progress, Some((0, 3)));
+        assert!(next[0].progress.is_none());
     }
 
     #[test]
-    fn set_progress_updates_done_and_keeps_total() {
-        let mut item = now_item("a", QueueState::Running, None);
-        item.progress = Some((0, 3));
-        let next = set_progress(vec![item], "a", 2);
+    fn set_progress_value_writes_done_and_total() {
+        let next = set_progress_value(vec![now_item("a", QueueState::Running, None)], "a", 2, 3);
         assert_eq!(next[0].progress, Some((2, 3)));
+    }
+
+    #[tokio::test]
+    async fn collect_targets_both_comments_on_just_posted_articles() {
+        let p = plan(ModeValue::Both, vec![naver_target("u0")]);
+        let reports = vec![post_report("u0", 111, 222), post_report("u0", 111, 333)];
+        let targets = collect_comment_targets(&p, &reports).await;
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].cafe_id, 111);
+        assert_eq!(targets[0].article_id, 222);
+        assert_eq!(targets[1].article_id, 333);
+        assert_eq!(targets[0].account_id, "u0");
+    }
+
+    #[tokio::test]
+    async fn collect_targets_url_uses_frozen_ids() {
+        let mut t = naver_target("u0");
+        t.comment_target = Some(CommentTargetSpec {
+            mode: CommentTarget::Url,
+            count: None,
+            cafe_id: Some(444),
+            article_id: Some(555),
+        });
+        let p = plan(ModeValue::Comment, vec![t]);
+        let targets = collect_comment_targets(&p, &[]).await;
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].cafe_id, 444);
+        assert_eq!(targets[0].article_id, 555);
+    }
+
+    #[test]
+    fn build_comment_jobs_empty_when_pool_empty() {
+        let targets = vec![
+            CommentTargetEntry {
+                account_id: "u0".into(),
+                cafe_id: 1,
+                article_id: 2,
+            },
+            CommentTargetEntry {
+                account_id: "u0".into(),
+                cafe_id: 1,
+                article_id: 3,
+            },
+        ];
+        // 댓글 풀이 비면 작업 0건 — 진행률 영구 미완(comment_targets만큼 total) 방지.
+        assert!(build_comment_jobs(targets, &[]).is_empty());
+    }
+
+    #[test]
+    fn build_comment_jobs_one_per_target_when_pool_present() {
+        let targets = vec![
+            CommentTargetEntry {
+                account_id: "u0".into(),
+                cafe_id: 1,
+                article_id: 2,
+            },
+            CommentTargetEntry {
+                account_id: "u0".into(),
+                cafe_id: 1,
+                article_id: 3,
+            },
+        ];
+        let jobs = build_comment_jobs(targets, &["c1".into()]);
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].article_id, 2);
+        assert_eq!(jobs[1].article_id, 3);
+    }
+
+    #[tokio::test]
+    async fn collect_targets_url_skips_when_ids_missing() {
+        let mut t = naver_target("u0");
+        t.comment_target = Some(CommentTargetSpec {
+            mode: CommentTarget::Url,
+            count: None,
+            cafe_id: Some(444),
+            article_id: None,
+        });
+        let p = plan(ModeValue::Comment, vec![t]);
+        assert!(collect_comment_targets(&p, &[]).await.is_empty());
     }
 }
