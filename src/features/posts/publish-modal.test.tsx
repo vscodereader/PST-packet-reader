@@ -373,15 +373,15 @@ describe("PublishModal", () => {
     await userEvent.click(screen.getByText("value_invest"));
     await screen.findByPlaceholderText("가입 카페 선택");
     await pickOption(0, "개미투자 카페");
-    // forum + band + naver = 3곳.
+    // forum + naver = 2곳 (밴드 계정은 선택됐지만 게시할 밴드 미선택 → 0건).
     await screen.findByRole(
       "button",
-      { name: /^게시 \(3\)/ },
+      { name: /^게시 \(2\)/ },
       { timeout: 3000 },
     );
     await userEvent.click(await screen.findByText("예약 게시"));
     await userEvent.click(
-      await screen.findByRole("button", { name: /^예약 \(3\)/ }),
+      await screen.findByRole("button", { name: /^예약 \(2\)/ }),
     );
     const call = ipcBackend.mock.calls.find(
       (c) => c[0] === "add_queue_scheduled",
@@ -744,17 +744,16 @@ describe("PublishModal", () => {
     await userEvent.click(await screen.findByText("money_lab")); // a5 naver
     await userEvent.click(screen.getByText("value_invest")); // a7 band
     await screen.findByPlaceholderText("가입 카페 선택");
-    // naver row exposes cafe (0) + board (1); 밴드는 셀렉트 없이 링크 입력만 쓴다.
+    // naver row exposes cafe (0) + board (1); 밴드는 링크/실제밴드명 드롭다운(2).
     await pickOption(0, "개미투자 카페");
-    // forum (a1) + band (a7) = 2 jobs; the naver job lands once its first board
-    // is auto-selected, bringing the total to 3.
+    // forum (a1) = 1 job; the naver job lands once its first board auto-selects → 2.
+    // (밴드 계정은 선택됐지만 게시할 밴드 미선택 → 밴드 잡 0건.)
     await screen.findByRole(
       "button",
-      { name: /^게시 \(3\)/ },
+      { name: /^게시 \(2\)/ },
       { timeout: 3000 },
     );
     await pickOption(1, "공지사항");
-    // 보이는 listbox는 cafe, board 둘뿐(밴드 시드 드롭다운은 제거됨).
     const combos = [
       ...document.querySelectorAll<HTMLInputElement>(
         'input[aria-haspopup="listbox"]',
@@ -767,47 +766,51 @@ describe("PublishModal", () => {
     expect(screen.queryByText("단타클럽 BAND")).not.toBeInTheDocument();
   });
 
-  it("requires a saved band link before publishing, then calls band_publish", async () => {
+  it("requires a selected band before publishing (button disabled until then)", async () => {
     renderPublish();
-    // 기본 forum 계정(a1)에 더해 밴드 계정(a7)을 선택한다.
-    await userEvent.click(await screen.findByText("value_invest"));
+    await userEvent.click(await screen.findByText("value_invest")); // band a7
+    // 밴드 미선택: 안내 문구 + 게시 버튼 비활성.
+    expect(screen.getByText(/게시할 밴드를 선택하세요/)).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: /^게시 \(\d+\)/ }),
+    ).toBeDisabled();
+  });
 
-    // 링크 저장 전: 안내 문구가 뜨고 게시 버튼이 비활성이어야 한다.
+  it("accumulates bands from links, multi-selects, and publishes to each", async () => {
+    renderPublish();
+    await userEvent.click(await screen.findByText("value_invest")); // band a7
+
+    const linkInput = screen.getByLabelText("밴드 링크");
+    const saveBtn = screen.getByRole("button", { name: "저장" });
+
+    // 링크 저장 → resolveName 조회 완료(옵션 등장) 후 드롭다운에서 선택 → 칩.
+    const addBand = async (link: string, name: string) => {
+      await userEvent.type(linkInput, link);
+      await waitFor(() => expect(saveBtn).toBeEnabled());
+      await userEvent.click(saveBtn);
+      await waitFor(() => expect(linkInput).toHaveValue(""));
+      // 조회 완료 시 드롭다운(Select)이 활성화된다(placeholder 변경으로 확인).
+      await screen.findByPlaceholderText("게시할 밴드 선택");
+      await pickOption(0, name); // 드롭다운(유일 listbox)에서 밴드 선택 → 칩
+    };
+
+    await addBand("https://band.us/band/103043410", "데일밴드"); // 목: 103043410→데일밴드
+    expect(await screen.findByLabelText("데일밴드 제거")).toBeInTheDocument(); // 칩
+    await addBand("https://band.us/band/999", "밴드 999");
+    expect(await screen.findByLabelText("밴드 999 제거")).toBeInTheDocument(); // 칩
+
+    // 게시 → 선택한 각 밴드 링크로 band_publish가 호출되어야 한다.
     const publishBtn = await screen.findByRole("button", {
       name: /^게시 \(\d+\)/,
     });
-    expect(
-      screen.getByText(/밴드 링크를 입력하고 저장해야/),
-    ).toBeInTheDocument();
-    expect(publishBtn).toBeDisabled();
-
-    // 링크 입력 후 저장.
-    await userEvent.type(
-      screen.getByLabelText("밴드 링크"),
-      "https://band.us/band/103043410",
-    );
-    await userEvent.click(screen.getByRole("button", { name: "저장" }));
-
-    // 저장하면 링크의 실제 밴드명(목: 103043410 → "데일밴드")을 조회해 표시하고,
-    // 게시 버튼이 활성화된다.
-    expect(
-      await screen.findByText(/"데일밴드" 밴드로 가입 후 게시/),
-    ).toBeInTheDocument();
     await waitFor(() => expect(publishBtn).toBeEnabled());
-
-    // 게시 → band_publish IPC가 저장된 링크/계정으로 호출되어야 한다.
     await userEvent.click(publishBtn);
     await waitFor(() => {
-      const call = ipcBackend.mock.calls.find((c) => c[0] === "band_publish");
-      expect(call).toBeTruthy();
-      const args = call![1] as { bandLink: string; accountId: string };
-      expect(args.bandLink).toBe("https://band.us/band/103043410");
-      expect(args.accountId).toBe("value_invest");
+      const links = ipcBackend.mock.calls
+        .filter((c) => c[0] === "band_publish")
+        .map((c) => (c[1] as { bandLink: string }).bandLink);
+      expect(links).toContain("https://band.us/band/103043410");
+      expect(links).toContain("https://band.us/band/999");
     });
-
-    // 결과 라벨은 시드 이름이 아니라 실제 밴드명("데일밴드")을 보여줘야 한다.
-    expect(
-      await screen.findByText("데일밴드", undefined, { timeout: 3000 }),
-    ).toBeInTheDocument();
   });
 });
