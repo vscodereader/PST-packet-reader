@@ -228,6 +228,60 @@ describe("StockCrawlModal", () => {
     expect(even).toHaveStyle({ color: "var(--mantine-color-gray-6)" });
   });
 
+  it("거래소 모달은 Escape로 닫을 수 있다", async () => {
+    renderModal();
+    await screen.findByText("SK하이닉스");
+    fireEvent.click(screen.getByRole("button", { name: /KRX/ }));
+    expect(
+      await screen.findByRole("button", { name: "NXT" }),
+    ).toBeInTheDocument();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByText("거래소 선택")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("검색 모드에서도 더보기로 다음 검색 페이지를 append한다", async () => {
+    searchMock
+      .mockResolvedValueOnce(
+        page(
+          [
+            {
+              code: "069500",
+              name: "KODEX 200",
+              exchange: "코스피",
+              price: "",
+              changeRate: "",
+              changeType: "even",
+              isHotDiscussion: false,
+            },
+          ],
+          true,
+        ),
+      )
+      .mockResolvedValueOnce(
+        page([
+          {
+            code: "229200",
+            name: "KODEX 코스닥150",
+            exchange: "코스닥",
+            price: "",
+            changeRate: "",
+            changeType: "even",
+            isHotDiscussion: false,
+          },
+        ]),
+      );
+    renderModal();
+    fireEvent.change(screen.getByPlaceholderText("종목명 또는 코드 검색"), {
+      target: { value: "ko" },
+    });
+    expect(await screen.findByText("KODEX 200")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "더보기" }));
+    await waitFor(() => expect(searchMock).toHaveBeenCalledWith("ko", 2));
+    expect(await screen.findByText("KODEX 코스닥150")).toBeInTheDocument();
+  });
+
   it("취소를 누르면 onClose가 호출된다", async () => {
     const onClose = vi.fn();
     render(
