@@ -189,6 +189,23 @@ async fn worker_loop<R: Runtime>(state: QueueState, app: AppHandle<R>) {
             QueueJobStatus::Failed
         };
 
+        // 계정 세밀 상태/사유를 큐 상태보다 먼저 IPC 계정 store에 기록한다. 프론트 폴링이
+        // 큐 잡을 finished로 보고 계정 리스트를 재조회할 때 이미 최신 상태가 보이도록 해
+        // race 창을 좁힌다. loginId(=잡 식별자)가 일치하는 모든 행에 반영한다.
+        {
+            use crate::ipc::accounts::{apply_status_by_login_id, Account};
+            use crate::store::JsonStore;
+            let accounts = app.state::<JsonStore<Account>>();
+            accounts.mutate(|list| {
+                apply_status_by_login_id(
+                    list,
+                    &job.account_id,
+                    account_status.clone(),
+                    Some(account_msg.clone()),
+                )
+            });
+        }
+
         if let Ok(mut inner) = state.inner.lock() {
             if let Some(existing) = inner
                 .jobs
@@ -211,23 +228,11 @@ async fn worker_loop<R: Runtime>(state: QueueState, app: AppHandle<R>) {
             _ => tracing::info!("[LOGIN] {label}  로그인 실패 ❌ — {message}"),
         }
 
-        // 계정 세밀 상태/사유를 IPC 계정 store에 반영하고, 같은 사실을 활동 피드에도 남긴다.
+        // 같은 사실을 활동 피드에도 상태별 타입으로 남긴다(순서 무관 — 폴링이 보지 않음).
         {
             use super::outcome::{activity_message, status_activity_type};
-            use crate::ipc::accounts::{apply_status_by_login_id, Account};
             use crate::ipc::activity::{record, ActivityItem};
             use crate::store::JsonStore;
-
-            // loginId(=잡 식별자)가 일치하는 모든 계정 행에 상태/사유를 반영한다.
-            let accounts = app.state::<JsonStore<Account>>();
-            accounts.mutate(|list| {
-                apply_status_by_login_id(
-                    list,
-                    &job.account_id,
-                    account_status.clone(),
-                    Some(account_msg.clone()),
-                )
-            });
 
             let activity = app.state::<JsonStore<ActivityItem>>();
             record(

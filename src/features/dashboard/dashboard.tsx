@@ -18,7 +18,7 @@ import type { Account } from "@/shared/bindings/Account";
 import type { DashStat } from "@/shared/bindings/DashStat";
 import type { LogBatch } from "@/shared/bindings/LogBatch";
 import type { QueueScheduledItem } from "@/shared/bindings/QueueScheduledItem";
-import { PLATFORMS } from "@/shared/data/config";
+import { isProblemStatus, PLATFORMS } from "@/shared/data/config";
 import { batchStatus, formatRelative } from "@/shared/data/helpers";
 import type { GoFn, PlatformId, ViewId } from "@/shared/data/types";
 import { ipc } from "@/shared/ipc";
@@ -250,7 +250,7 @@ export function Dashboard({ go }: { go: GoFn }) {
       <SimpleGrid cols={{ base: 2, md: 4 }} spacing="md">
         {PLATFORMS.map((p) => {
           const list = accounts.filter((a) => a.platform === p.id);
-          const errCount = list.filter((a) => a.status === "error").length;
+          const errCount = list.filter((a) => isProblemStatus(a.status)).length;
           const activeCount = list.filter((a) => a.status === "active").length;
           return (
             <Card

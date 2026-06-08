@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 
 import {
   ACTIVE_PLATFORMS,
+  isProblemStatus,
   KIND,
   PLATFORM,
   PLATFORMS,
@@ -74,5 +75,15 @@ describe("label tables", () => {
     expect(STATUS_ACCOUNT_CYCLE).not.toContain("badCredentials");
     expect(STATUS_ACCOUNT_CYCLE).not.toContain("challenge");
     expect(STATUS_ACCOUNT_CYCLE).not.toContain("error");
+  });
+
+  it("isProblemStatus flags the same set as backend stats (error/badCredentials/blocked)", () => {
+    expect(isProblemStatus("error")).toBe(true);
+    expect(isProblemStatus("badCredentials")).toBe(true);
+    expect(isProblemStatus("blocked")).toBe(true);
+    // challenge는 진행 중 단계, active/new는 정상 — 오류로 세지 않는다.
+    expect(isProblemStatus("challenge")).toBe(false);
+    expect(isProblemStatus("active")).toBe(false);
+    expect(isProblemStatus("new")).toBe(false);
   });
 });

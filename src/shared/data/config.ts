@@ -119,6 +119,13 @@ export const STATUS_GUIDE: Record<string, string> = {
   new: "아직 로그인하지 않은 계정입니다.",
 };
 
+// 대시보드 "오류" 집계 대상. 백엔드 `stats.rs::is_problem_status`와 일치시킨다 — 사용자
+// 조치가 필요한 실패 계열(비번오류·차단·기타 오류). challenge는 진행 중 단계라 제외.
+export const PROBLEM_STATUSES = ["error", "badCredentials", "blocked"];
+export function isProblemStatus(status: string): boolean {
+  return PROBLEM_STATUSES.includes(status);
+}
+
 export const STATUS_LABEL: Record<string, { t: string; c: string }> = {
   draft: { t: "임시저장", c: "gray" },
   ready: { t: "작성완료", c: "blue" },

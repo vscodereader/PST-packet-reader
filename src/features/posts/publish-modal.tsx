@@ -90,7 +90,10 @@ function AccountRow({
   onToggle: (id: string) => void;
 }) {
   const st = STATUS_ACCOUNT[a.status] ?? { t: a.status, c: "gray" };
-  const disabled = a.status === "error";
+  // 로그인 실패 계열(error/badCredentials/challenge/blocked)은 게시 대상에서 막는다.
+  // active(정상)와 new(아직 미로그인, 게시 시 로그인 시도)만 선택 가능 — 기존엔 error만
+  // 막아 세분화 후 차단·인증필요 계정이 선택 가능해지는 회귀를 방지한다.
+  const disabled = a.status !== "active" && a.status !== "new";
   return (
     <Group
       gap={9}

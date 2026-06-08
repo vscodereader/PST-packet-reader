@@ -308,9 +308,16 @@ export function Accounts({ go }: { go: GoFn }) {
   // Optimistically patch the row for snappy editing, then persist over IPC and
   // reconcile with the authoritative list the backend returns.
   const update = (id: string, patch: Partial<Account>) => {
+    // 사용자가 status를 직접 바꾸면 워커가 남긴 사유(statusMsg)는 더 이상 유효하지 않으므로
+    // 키를 제거한다 — 배지는 active인데 tooltip엔 옛 차단 사유가 남는 모순을 막는다.
+    const merge = (base: Account): Account => {
+      const next = { ...base, ...patch };
+      if ("status" in patch) delete next.statusMsg;
+      return next;
+    };
     const cur = rows.find((r) => r.id === id);
-    setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
-    if (cur) void ipc.accounts.update({ ...cur, ...patch }).then(setRows);
+    setRows((rs) => rs.map((r) => (r.id === id ? merge(r) : r)));
+    if (cur) void ipc.accounts.update(merge(cur)).then(setRows);
   };
 
   const addRow = () => {
@@ -385,6 +392,7 @@ export function Accounts({ go }: { go: GoFn }) {
       void ipc.auth
         .queueStatus()
         .then((status) => {
+          let resolvedThisTick = false;
           targets.forEach((t) => {
             if (!remaining.has(t.id)) return;
             // 백엔드 잡은 loginId(=쿠키 키)로 식별된다. 같은 loginId를 쓰는 행들은
@@ -396,16 +404,19 @@ export function Accounts({ go }: { go: GoFn }) {
               return;
 
             remaining.delete(t.id);
+            resolvedThisTick = true;
             const ok = job.status === "success" || job.status === "expired";
-            // 세밀 상태(active/blocked/challenge/badCredentials)와 사유는 백엔드 worker_loop가
-            // 이미 계정 store에 기록했다. 권위 리스트를 재조회해 배지·tooltip에 정확히 반영한다
-            // (로컬 이진 active/error 계산을 대체).
-            void ipc.accounts.list().then(setRows);
             toast(
               `${t.loginId}: ${ok ? "로그인 성공" : "로그인 실패 — " + job.message}`,
               ok ? "green" : "red",
             );
           });
+
+          // 이번 틱에 하나라도 완료됐으면 권위 계정 리스트를 한 번만 재조회해 배지·tooltip에
+          // 세밀 상태(active/blocked/challenge/badCredentials)와 사유를 반영한다. 백엔드
+          // worker_loop가 큐 상태를 finished로 바꾸기 전에 계정 store를 먼저 기록하므로,
+          // 여기서 읽으면 최신 상태가 보인다(틱당 1회 — 행별 중복 list 호출 방지).
+          if (resolvedThisTick) void ipc.accounts.list().then(setRows);
 
           if (remaining.size === 0) {
             if (loginPollRef.current !== null) {
