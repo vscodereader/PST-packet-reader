@@ -99,6 +99,27 @@ pub async fn band_publish(
     })
 }
 
+/// 링크(band_no)로 밴드 이름을 조회한다(게시 전 저장 시점에 실제 밴드명 확인용).
+///
+/// 저장된 band 로그인 쿠키 → getKey → `get_band_information`. 응답에 이름이 없으면
+/// `band_no`를 그대로 돌려준다(프론트가 항상 무언가 표시하도록).
+pub async fn resolve_band_name(
+    account_id: &str,
+    band_link: &str,
+) -> Result<String, BandPostError> {
+    let band_no = band_no_from_link(band_link)
+        .ok_or_else(|| BandPostError::InvalidLink(band_link.to_string()))?;
+
+    let cookie_header = load_band_cookie_header(account_id)
+        .map_err(|e| BandPostError::Transport(e.to_string()))?
+        .ok_or(BandPostError::NoSession)?;
+
+    let client = BandHttpClient::new();
+    let key = client.fetch_secret_key(&cookie_header).await?;
+    let name = client.get_band_name(&band_no, &key, &cookie_header).await?;
+    Ok(name.unwrap_or(band_no))
+}
+
 /// 제목과 본문을 밴드 단일 `content`로 합친다.
 ///
 /// 제목이 비어 있으면 본문만, 아니면 `"{제목}\n{본문}"`.

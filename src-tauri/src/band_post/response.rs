@@ -74,6 +74,16 @@ pub fn band_name_from_result(result_data: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// `get_band_information` 응답에서 밴드 이름(`result_data.name`)을 추출한다.
+///
+/// 게시 전에 링크(band_no)로 밴드명을 미리 확인하는 데 쓴다. 예: 103043410 → `"데일밴드"`.
+pub fn name_from_band_info(result_data: &Value) -> Option<String> {
+    result_data
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 fn extract_error_message(value: &Value) -> String {
     // band 오류는 result_data.message 또는 message에 담기는 경우가 있다.
     value
@@ -122,6 +132,16 @@ mod tests {
     fn band_name_none_when_absent() {
         let data = serde_json::json!({"post": {"post_no": 1}});
         assert!(band_name_from_result(&data).is_none());
+    }
+
+    #[test]
+    fn name_from_band_info_extracts_name() {
+        // 캡처: get_band_information → {"result_code":1,"result_data":{"name":"데일밴드",...}}
+        let data = parse_band_result(
+            r#"{"result_code":1,"result_data":{"band_no":103043410,"name":"데일밴드"}}"#,
+        )
+        .unwrap();
+        assert_eq!(name_from_band_info(&data).as_deref(), Some("데일밴드"));
     }
 
     #[test]

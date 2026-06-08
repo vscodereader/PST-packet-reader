@@ -452,6 +452,14 @@ async fn band_publish(
     .map_err(|e| e.to_string())
 }
 
+/// 링크(band_no)로 밴드 이름을 조회한다(게시 모달에서 링크 저장 시 실제 밴드명 표시용).
+#[tauri::command]
+async fn band_resolve_name(account_id: String, band_link: String) -> Result<String, String> {
+    band_post::resolve_band_name(&account_id, &band_link)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn get_account_cookies(account_id: String) -> Result<Option<serde_json::Value>, String> {
     auth::read_account_cookies(&account_id).map_err(|e| e.to_string())
@@ -564,6 +572,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         enqueue_band_login,
         get_band_queue_status,
         band_publish,
+        band_resolve_name,
         get_account_cookies,
         run_naver_discussion,
         parse_template_csv,

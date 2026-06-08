@@ -1103,8 +1103,15 @@ export const invoke = vi.fn(
           postNo: 1,
           webUrl: `https://band.us/band/${bandNo}/post/1`,
           commented: Boolean(String(args!.comment ?? "").trim()),
-          bandName: `밴드 ${bandNo}`,
+          bandName: bandNo === "103043410" ? "데일밴드" : `밴드 ${bandNo}`,
         });
+      }
+      case "band_resolve_name": {
+        // 링크에서 band_no를 뽑아 밴드명을 만든다(103043410 → 데일밴드).
+        const link = String(args!.bandLink ?? "");
+        const m = link.match(/\/band\/(\d+)|^(\d+)$/);
+        const bandNo = m ? (m[1] ?? m[2]) : "0";
+        return clone(bandNo === "103043410" ? "데일밴드" : `밴드 ${bandNo}`);
       }
       case "get_environment_status":
         return clone(SEED_ENV_STATUS);

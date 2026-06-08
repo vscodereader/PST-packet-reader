@@ -190,6 +190,50 @@ impl BandHttpClient {
         .await?;
         Ok(())
     }
+
+    /// 링크(band_no)로 밴드 이름을 조회한다(`get_band_information`, 서명된 GET).
+    ///
+    /// 게시 전에 저장한 링크의 실제 밴드명을 확인하는 데 쓴다. 응답에 이름이 없으면 `None`.
+    pub async fn get_band_name(
+        &self,
+        band_no: &str,
+        key: &BandAuthKey,
+        cookie_header: &str,
+    ) -> Result<Option<String>, BandPostError> {
+        let ts = now_millis();
+        // band-web과 동일한 쿼리 순서(ts → band_no)로 경로를 만든다(서명 대상).
+        let path = format!("/v2.2.0/get_band_information?ts={ts}&band_no={band_no}");
+        let md = if key.is_jwt_type {
+            make_md_jwt(&key.secret_key, &path)
+        } else {
+            make_md(&key.secret_key, &path)
+        };
+        let url = format!("{}{}", self.api_base, path);
+        let referer = format!("https://www.band.us/band/{band_no}/intro");
+
+        let mut req = self.http.get(&url);
+        for (name, value) in band_api_headers() {
+            req = req.header(&name, &value);
+        }
+        req = req
+            .header("md", md)
+            .header("Cookie", cookie_header)
+            .header("Origin", API_ORIGIN)
+            .header("Referer", referer)
+            .header("User-Agent", BROWSER_USER_AGENT);
+
+        let resp = req.send().await.map_err(transport)?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(transport)?;
+        if !status.is_success() {
+            return Err(BandPostError::Http {
+                status: status.as_u16(),
+                body: text,
+            });
+        }
+        let data = parse_band_result(&text)?;
+        Ok(super::response::name_from_band_info(&data))
+    }
 }
 
 impl Default for BandHttpClient {
@@ -292,6 +336,26 @@ mod tests {
             .create_comment("103043410", 2, "댓글", &test_key(), FAKE_COOKIE)
             .await
             .expect("댓글 성공이어야 함");
+    }
+
+    #[tokio::test]
+    async fn get_band_name_returns_name() {
+        let api = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/v2\.2\.0/get_band_information"))
+            .and(header_exists("md"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"result_code":1,"result_data":{"band_no":103043410,"name":"데일밴드"}}"#,
+            ))
+            .mount(&api)
+            .await;
+
+        let client = BandHttpClient::with_base_urls(api.uri(), "http://unused");
+        let name = client
+            .get_band_name("103043410", &test_key(), FAKE_COOKIE)
+            .await
+            .expect("조회 성공이어야 함");
+        assert_eq!(name.as_deref(), Some("데일밴드"));
     }
 
     #[tokio::test]

@@ -240,6 +240,9 @@ export const ipc = {
         useAdb,
       }),
     queueStatus: () => call<LoginQueueStatus>("get_band_queue_status"),
+    /** 링크(band_no)로 실제 밴드명을 조회한다(저장 시 표시용). accountId=band 쿠키 키. */
+    resolveName: (accountId: string, bandLink: string) =>
+      call<string>("band_resolve_name", { accountId, bandLink }),
   },
   diagnostics: {
     /** Probe Chrome install/version + ADB device connection (UI 새로고침). */

@@ -738,13 +738,13 @@ describe("PublishModal", () => {
     );
   });
 
-  it("picks a per-account cafe/board and the band destination", async () => {
+  it("picks a per-account cafe/board with a band account selected too", async () => {
     renderPublish();
     // Add a naver and a band account alongside the default forum one.
     await userEvent.click(await screen.findByText("money_lab")); // a5 naver
     await userEvent.click(screen.getByText("value_invest")); // a7 band
     await screen.findByPlaceholderText("가입 카페 선택");
-    // naver row exposes cafe (0) + board (1); band card adds the band select (2)
+    // naver row exposes cafe (0) + board (1); 밴드는 셀렉트 없이 링크 입력만 쓴다.
     await pickOption(0, "개미투자 카페");
     // forum (a1) + band (a7) = 2 jobs; the naver job lands once its first board
     // is auto-selected, bringing the total to 3.
@@ -754,9 +754,7 @@ describe("PublishModal", () => {
       { timeout: 3000 },
     );
     await pickOption(1, "공지사항");
-    await pickOption(2, "단타클럽 BAND");
-    // Mantine Select keeps a hidden duplicate input, so assert on the visible
-    // listbox inputs in order: cafe, board, band.
+    // 보이는 listbox는 cafe, board 둘뿐(밴드 시드 드롭다운은 제거됨).
     const combos = [
       ...document.querySelectorAll<HTMLInputElement>(
         'input[aria-haspopup="listbox"]',
@@ -764,7 +762,9 @@ describe("PublishModal", () => {
     ];
     expect(combos[0]).toHaveValue("개미투자 카페");
     expect(combos[1]).toHaveValue("공지사항");
-    expect(combos[2]).toHaveValue("단타클럽 BAND");
+    // 밴드 링크 입력란이 있고, 시드 밴드명(단타클럽 BAND 등)은 더 이상 없다.
+    expect(screen.getByLabelText("밴드 링크")).toBeInTheDocument();
+    expect(screen.queryByText("단타클럽 BAND")).not.toBeInTheDocument();
   });
 
   it("requires a saved band link before publishing, then calls band_publish", async () => {
@@ -788,9 +788,10 @@ describe("PublishModal", () => {
     );
     await userEvent.click(screen.getByRole("button", { name: "저장" }));
 
-    // 저장 확인 문구가 뜨고 게시 버튼이 활성화된다.
+    // 저장하면 링크의 실제 밴드명(목: 103043410 → "데일밴드")을 조회해 표시하고,
+    // 게시 버튼이 활성화된다.
     expect(
-      await screen.findByText(/저장된 링크로 가입 후 게시/),
+      await screen.findByText(/"데일밴드" 밴드로 가입 후 게시/),
     ).toBeInTheDocument();
     await waitFor(() => expect(publishBtn).toBeEnabled());
 
@@ -804,10 +805,9 @@ describe("PublishModal", () => {
       expect(args.accountId).toBe("value_invest");
     });
 
-    // 결과 라벨은 시드 드롭다운 이름이 아니라 게시 응답의 실제 밴드명을 보여줘야 한다
-    // (목은 band_no로 "밴드 103043410"을 돌려준다).
+    // 결과 라벨은 시드 이름이 아니라 실제 밴드명("데일밴드")을 보여줘야 한다.
     expect(
-      await screen.findByText("밴드 103043410", undefined, { timeout: 3000 }),
+      await screen.findByText("데일밴드", undefined, { timeout: 3000 }),
     ).toBeInTheDocument();
   });
 });
