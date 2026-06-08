@@ -66,7 +66,9 @@ pub async fn band_publish(
         .ok_or(BandPostError::NoSession)?;
 
     let client = BandHttpClient::new();
+    tracing::info!("[BAND] 게시 시작 — 계정 {account_id}, band_no {band_no}");
     let key = client.fetch_secret_key(&cookie_header).await?;
+    tracing::info!("[BAND] getKey 서명키 발급 성공 — 게시 진행");
 
     // 가입(best-effort). 이미 가입돼 있으면 오류일 수 있으나 게시를 시도한다.
     let joined = client

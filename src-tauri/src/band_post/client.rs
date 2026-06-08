@@ -70,13 +70,33 @@ impl BandHttpClient {
             .http
             .get(&url)
             .header("User-Agent", BROWSER_USER_AGENT)
+            .header("Accept", "*/*")
             .header("Cookie", cookie_header)
             .header("Referer", "https://www.band.us/")
             .send()
             .await
             .map_err(transport)?;
+        let status = resp.status();
         let text = resp.text().await.map_err(transport)?;
-        parse_getkey_response(&text).ok_or(BandPostError::NoSecretKey)
+        tracing::info!(
+            "[BAND] getKey 응답 status={} content_len={}",
+            status.as_u16(),
+            text.len()
+        );
+        parse_getkey_response(&text).ok_or_else(|| {
+            // 진단: secretKey 값은 가린 채 상태/응답 앞부분을 남겨 원인을 드러낸다.
+            let snippet = redact_secret_key(&text);
+            tracing::warn!(
+                "[BAND] getKey 파싱 실패 — secretKey 없음. status={} body앞부분={}",
+                status.as_u16(),
+                snippet
+            );
+            BandPostError::NoSecretKey(format!(
+                "status={} 응답앞부분={}",
+                status.as_u16(),
+                snippet
+            ))
+        })
     }
 
     /// 서명된 POST 요청을 보내고 `result_data`를 반환한다.
@@ -112,6 +132,7 @@ impl BandHttpClient {
         let resp = req.send().await.map_err(transport)?;
         let status = resp.status();
         let text = resp.text().await.map_err(transport)?;
+        tracing::info!("[BAND] POST {} → status={}", base_path, status.as_u16());
         if !status.is_success() {
             return Err(BandPostError::Http {
                 status: status.as_u16(),
@@ -246,6 +267,37 @@ fn transport(e: reqwest::Error) -> BandPostError {
     BandPostError::Transport(e.to_string())
 }
 
+/// 진단용: 응답에서 secretKey 값을 가리고 앞부분(최대 250자)만 남긴다.
+/// 자격 증명이 로그/에러로 새지 않게 하면서 실패 원인(에러 페이지/리다이렉트 등)을 보이게 한다.
+fn redact_secret_key(text: &str) -> String {
+    let mut out = String::with_capacity(text.len().min(260));
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // `secretKey` 토큰을 만나면 그 뒤 따옴표 안 값을 <redacted>로 치환한다.
+        if text[i..].starts_with("secretKey") {
+            out.push_str("secretKey<redacted>");
+            i += "secretKey".len();
+            // 다음 따옴표 쌍을 건너뛴다(값 숨김).
+            if let Some(q) = text[i..].find(['\'', '"']) {
+                let quote = text.as_bytes()[i + q];
+                if let Some(end) = text[i + q + 1..].find(quote as char) {
+                    i = i + q + 1 + end + 1;
+                }
+            }
+            continue;
+        }
+        let ch = text[i..].chars().next().unwrap_or(' ');
+        out.push(ch);
+        i += ch.len_utf8();
+        if out.chars().count() >= 250 {
+            out.push('…');
+            break;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,6 +388,16 @@ mod tests {
             .create_comment("103043410", 2, "댓글", &test_key(), FAKE_COOKIE)
             .await
             .expect("댓글 성공이어야 함");
+    }
+
+    #[test]
+    fn redact_secret_key_hides_value_keeps_context() {
+        let text =
+            "authCallBack_1(new BandWebAuthModule({ secretKey: 'TOPSECRET=', isJwtType: false }))";
+        let red = redact_secret_key(text);
+        assert!(!red.contains("TOPSECRET"), "secretKey 값이 노출됨: {red}");
+        assert!(red.contains("redacted"));
+        assert!(red.contains("isJwtType"), "맥락(파싱 단서)은 남아야 함");
     }
 
     #[tokio::test]

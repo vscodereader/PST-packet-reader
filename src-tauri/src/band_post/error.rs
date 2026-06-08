@@ -9,8 +9,8 @@ pub enum BandPostError {
     InvalidLink(String),
     /// 저장된 band 쿠키가 없거나 만료됨(재로그인 필요).
     NoSession,
-    /// getKey 응답에서 secretKey를 얻지 못함.
-    NoSecretKey,
+    /// getKey 응답에서 secretKey를 얻지 못함. 진단용 상세(HTTP 상태/응답 앞부분)를 담는다.
+    NoSecretKey(String),
     /// HTTP 전송 계층 오류(연결/타임아웃 등). 쿠키 값 미포함.
     Transport(String),
     /// non-2xx HTTP 응답.
@@ -28,8 +28,8 @@ impl std::fmt::Display for BandPostError {
             BandPostError::NoSession => {
                 write!(f, "밴드 로그인 세션이 없습니다. 먼저 밴드 로그인을 해주세요.")
             }
-            BandPostError::NoSecretKey => {
-                write!(f, "밴드 서명 키 발급에 실패했습니다(getKey).")
+            BandPostError::NoSecretKey(detail) => {
+                write!(f, "밴드 서명 키 발급에 실패했습니다(getKey). {detail}")
             }
             BandPostError::Transport(msg) => write!(f, "HTTP 전송 오류: {msg}"),
             BandPostError::Http { status, body } => {
