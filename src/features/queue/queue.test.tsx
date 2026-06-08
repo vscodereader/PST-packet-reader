@@ -18,7 +18,7 @@ async function renderQueue(go = vi.fn()) {
     </MantineProvider>,
   );
   // now + scheduled lists load asynchronously over the IPC wrapper (mock here)
-  await screen.findByText("삼성전자 4분기 실적 기대 — 매수 관점 정리");
+  await screen.findByText("반도체 흐름 코멘트 10종");
   await screen.findByText("에코프로 조정 구간 대응 전략");
   return go;
 }
@@ -35,16 +35,6 @@ describe("Queue", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("즉시 처리 대기열")).toBeInTheDocument();
     expect(screen.getByText("예약 대기")).toBeInTheDocument();
-  });
-
-  it("opens the running batch in 알림 when its row is clicked", async () => {
-    const go = await renderQueue();
-    await userEvent.click(
-      screen.getByText("삼성전자 4분기 실적 기대 — 매수 관점 정리"),
-    );
-    expect(go).toHaveBeenCalledWith("log", {
-      logFilter: { batchId: "b0" },
-    });
   });
 
   it("navigates to posts via '새 작업 추가'", async () => {

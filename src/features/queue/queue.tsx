@@ -136,24 +136,30 @@ export function Queue({ go }: { go: GoFn }) {
       });
   };
 
+  // 실행 중(running) 아이템은 워커가 처리 중이라 맨 앞에 고정한다. 단 실행 중인 게
+  // 없으면(워커 idle) 첫 대기 아이템도 자유롭게 옮길 수 있어야 하므로, index 0을 무조건
+  // 막지 않고 "선두 running 개수"만큼만 고정한다(백엔드 apply_reorder_now와 일치).
+  const pinnedCount = (list: QueueNowItem[]) =>
+    list[0]?.state === "running" ? 1 : 0;
+
   const reorder = (id: string, targetId: string) => {
     setNow((list) => {
       const from = list.findIndex((x) => x.id === id);
       const to = list.findIndex((x) => x.id === targetId);
-      if (from < 0 || to < 0 || from === to || to === 0) return list;
+      const pinned = pinnedCount(list);
+      if (from < pinned || to < pinned || from === to) return list;
       const copy = [...list];
       const [m] = copy.splice(from, 1);
       if (m) copy.splice(to, 0, m);
       return copy;
     });
   };
-  // running 아이템은 항상 맨 앞(index 0)에 고정된다(워커는 한 번에 하나만 실행).
-  // 따라서 index 0은 건드리지 않고 대기 아이템끼리만 자리를 바꾼다.
   const move = (id: string, dir: -1 | 1) => {
     const list = nowRef.current;
+    const pinned = pinnedCount(list);
     const i = list.findIndex((x) => x.id === id);
     const j = i + dir;
-    if (i < 1 || j < 1 || j >= list.length) return;
+    if (i < pinned || j < pinned || j >= list.length) return;
     const copy = [...list];
     const a = copy[i];
     const b = copy[j];

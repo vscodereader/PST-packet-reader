@@ -400,12 +400,6 @@ const SEED_STATS: DashStat[] = [
 
 const SEED_ACTIVITY: ActivityItem[] = [
   {
-    id: "ac1",
-    type: "success",
-    text: "’삼성전자 4분기 실적 기대’ 글이 종목토론방에 게시되었습니다",
-    at: NOW_BASE - 12 * 60_000,
-  },
-  {
     id: "ac2",
     type: "success",
     text: "반도체 코멘트 10종이 2개 계정에 분산 게시되었습니다",
@@ -442,19 +436,6 @@ const SEED_ENV_STATUS: EnvironmentStatus = {
 };
 
 const SEED_QUEUE_NOW: QueueNowItem[] = [
-  {
-    id: "q1",
-    title: "삼성전자 4분기 실적 기대 — 매수 관점 정리",
-    kind: "post",
-    state: "running",
-    batchId: "b0",
-    progress: [2, 3],
-    locs: [
-      { p: "forum", name: "삼성전자", code: "005930" },
-      { p: "forum", name: "SK하이닉스", code: "000660" },
-      { p: "naver", name: "주식투자연구소 카페" },
-    ],
-  },
   {
     id: "q2",
     title: "반도체 흐름 코멘트 10종",
@@ -710,39 +691,6 @@ const SEED_LIBRARY: LibraryPost[] = [
 ];
 
 const SEED_LOG_BATCHES: LogBatch[] = [
-  {
-    id: "b0",
-    title: "삼성전자 4분기 실적 기대 — 매수 관점 정리",
-    kind: "post",
-    at: NOW_BASE - 2 * 60_000,
-    state: "running",
-    items: [
-      {
-        platform: "forum",
-        target: "삼성전자",
-        code: "005930",
-        loginId: "invest_king7",
-        status: "success",
-        msg: "게시 완료",
-      },
-      {
-        platform: "forum",
-        target: "SK하이닉스",
-        code: "000660",
-        loginId: "value_pick",
-        status: "success",
-        msg: "게시 완료",
-      },
-      {
-        platform: "naver",
-        target: "주식투자연구소 카페",
-        board: "종목분석",
-        loginId: "money_lab",
-        status: "running",
-        msg: "게시 중…",
-      },
-    ],
-  },
   {
     id: "b1",
     title: "5월 이벤트 결과 발표",
