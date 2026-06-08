@@ -498,6 +498,8 @@ const SEED_QUEUE_SCHEDULED: QueueScheduledItem[] = [
     kind: "both",
     when: "오늘 18:30",
     rel: "5시간 후",
+    at: 4_102_444_800_000,
+    missed: false,
     locs: [{ p: "forum", name: "에코프로", code: "086520" }],
   },
   {
@@ -506,6 +508,8 @@ const SEED_QUEUE_SCHEDULED: QueueScheduledItem[] = [
     kind: "post",
     when: "내일 09:00",
     rel: "내일",
+    at: 4_102_531_200_000,
+    missed: false,
     locs: [
       { p: "naver", name: "주식투자연구소 카페" },
       { p: "band", name: "가치투자모임 BAND" },
@@ -516,7 +520,10 @@ const SEED_QUEUE_SCHEDULED: QueueScheduledItem[] = [
     title: "HBM 관련 기대 코멘트",
     kind: "comment",
     when: "5/31 20:00",
-    rel: "모레",
+    rel: "지남",
+    // 앱 종료 중 시각이 지나 미발행된 예약(놓침) — 재예약/취소 UI 확인용.
+    at: 1_700_000_000_000,
+    missed: true,
     locs: [{ p: "forum", name: "한미반도체", code: "042700" }],
   },
 ];
@@ -1151,6 +1158,21 @@ export const invoke = vi.fn(
           ];
         }
         return clone(state.queueNow);
+      }
+      case "reschedule_queue_scheduled": {
+        const id = args!.id as string;
+        state.queueScheduled = state.queueScheduled.map((q) =>
+          q.id === id
+            ? {
+                ...q,
+                at: args!.at as number,
+                when: args!.when as string,
+                rel: args!.rel as string,
+                missed: false,
+              }
+            : q,
+        );
+        return clone(state.queueScheduled);
       }
       case "reorder_queue_now": {
         const orderedIds = args!.orderedIds as string[];

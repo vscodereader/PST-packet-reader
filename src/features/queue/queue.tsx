@@ -25,6 +25,8 @@ import type {
   QueueScheduledItem,
 } from "@/shared/data/types";
 import { ipc } from "@/shared/ipc";
+import { nowParts, scheduleMoment, toEpochMs } from "@/shared/schedule";
+import { DateTimePicker } from "@/shared/ui/date-time-picker";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformPill } from "@/shared/ui/platform-logo";
 
@@ -53,6 +55,45 @@ function LocSummary({
   );
 }
 
+/**
+ * Inline re-schedule control for a "missed" item: a date/time picker seeded to
+ * "now" plus a confirm button. Local state keeps the pick until the user commits
+ * so we don't fire a reschedule on every adjustment.
+ */
+function RescheduleControl({
+  onSubmit,
+}: {
+  onSubmit: (date: string, time: string) => void;
+}) {
+  const [date, setDate] = useState(() => nowParts().date);
+  const [time, setTime] = useState(() => nowParts().time);
+  // 사용자가 picker를 건드리지 않아 시드("지금")가 현재보다 과거가 됐으면(컨트롤이 오래
+  // 열려 있던 경우) 제출 시 현재 시각으로 올려, 백엔드 과거-시각 거부를 피한다.
+  const submit = () => {
+    const fresh = nowParts();
+    if (toEpochMs(date, time) < toEpochMs(fresh.date, fresh.time)) {
+      onSubmit(fresh.date, fresh.time);
+    } else {
+      onSubmit(date, time);
+    }
+  };
+  return (
+    <Group gap={6} wrap="nowrap">
+      <DateTimePicker
+        date={date}
+        time={time}
+        onChange={(v) => {
+          setDate(v.date);
+          setTime(v.time);
+        }}
+      />
+      <Button size="sm" color="blue" onClick={submit}>
+        재예약
+      </Button>
+    </Group>
+  );
+}
+
 export function Queue({ go }: { go: GoFn }) {
   const [now, setNow] = useState<QueueNowItem[]>([]);
   const [sched, setSched] = useState<QueueScheduledItem[]>([]);
@@ -74,6 +115,9 @@ export function Queue({ go }: { go: GoFn }) {
     // 워커 진행률·상태를 주기적으로 반영. 단 드래그 중이거나 순서 영속화 대기 중에는
     // 사용자가 맞춘 로컬 순서를 덮어쓰지 않도록 폴링을 건너뛴다.
     const timer = window.setInterval(() => {
+      // 예약 큐는 드래그 대상이 아니므로 항상 폴링한다 — 스케줄러의 자동 게시(예약→now
+      // 이동)와 "놓침" 표시가 화면에 실시간 반영되게 한다.
+      void ipc.queue.listScheduled().then(setSched);
       if (dragIdRef.current !== null || persistingRef.current) return;
       void ipc.queue.listNow().then(setNow);
     }, 1500);
@@ -136,6 +180,26 @@ export function Queue({ go }: { go: GoFn }) {
   const cancelScheduled = (id: string) => {
     void ipc.queue.cancelScheduled(id).then(setSched);
     notifications.show({ message: "예약을 취소했어요", color: "blue" });
+  };
+  // 놓친 예약을 새 시각으로 되살린다(또는 대기 예약의 시각 변경). 백엔드가 과거 시각을
+  // 거부하면 알림으로 알린다.
+  const reschedule = (id: string, date: string, time: string) => {
+    const m = scheduleMoment(date, time);
+    void ipc.queue
+      .reschedule(id, toEpochMs(date, time), m.when, m.label)
+      .then((next) => {
+        setSched(next);
+        notifications.show({
+          message: "예약 시각을 변경했어요",
+          color: "green",
+        });
+      })
+      .catch(() => {
+        notifications.show({
+          message: "지난 시각으로는 예약할 수 없어요",
+          color: "red",
+        });
+      });
   };
 
   const waiting = now.filter((q) => q.state !== "running");
@@ -389,17 +453,30 @@ export function Queue({ go }: { go: GoFn }) {
                 </Group>
                 <LocSummary locs={q.locs} />
               </Box>
-              <Badge size="sm" color="yellow" variant="light">
-                예약됨
-              </Badge>
-              <Button
-                size="sm"
-                variant="default"
-                leftSection={<Icon.bolt size={14} />}
-                onClick={() => promote(q.id)}
-              >
-                즉시 처리
-              </Button>
+              {q.missed ? (
+                <>
+                  <Badge size="sm" color="red" variant="light">
+                    놓침
+                  </Badge>
+                  <RescheduleControl
+                    onSubmit={(date, time) => reschedule(q.id, date, time)}
+                  />
+                </>
+              ) : (
+                <>
+                  <Badge size="sm" color="yellow" variant="light">
+                    예약됨
+                  </Badge>
+                  <Button
+                    size="sm"
+                    variant="default"
+                    leftSection={<Icon.bolt size={14} />}
+                    onClick={() => promote(q.id)}
+                  >
+                    즉시 처리
+                  </Button>
+                </>
+              )}
               <ActionIcon
                 size="md"
                 variant="subtle"

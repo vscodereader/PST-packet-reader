@@ -142,6 +142,18 @@ export const ipc = {
     promote: (id: string) =>
       call<QueueNowItem[]>("promote_queue_scheduled", { id }),
     /**
+     * Re-schedule an item to a new local epoch-ms `atMs` (used to recover a
+     * "missed" schedule, or change the time). Clears the missed flag. Rejects a
+     * past time. `when`/`rel` are the display strings for the new moment.
+     */
+    reschedule: (id: string, atMs: number, when: string, rel: string) =>
+      call<QueueScheduledItem[]>("reschedule_queue_scheduled", {
+        id,
+        at: atMs,
+        when,
+        rel,
+      }),
+    /**
      * Persist the now-queue order (drag / priority change); returns the list.
      * Running items stay pinned to the front by the backend.
      */
