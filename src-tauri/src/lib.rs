@@ -454,6 +454,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         queue::cancel_queue_scheduled,
         queue::add_queue_scheduled,
         queue::promote_queue_scheduled,
+        queue::reorder_queue_now,
         stocks::list_stocks,
         activity::list_activity,
         append_activity,
