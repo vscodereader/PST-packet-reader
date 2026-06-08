@@ -85,12 +85,14 @@ fn merge_hot(stocks: &mut [ForumStock], hot: &HashSet<String>) {
 }
 
 /// 카테고리 한 페이지 조회(토론은 자체 🔥, 그 외는 itemCodes 병합).
-pub async fn fetch_list(
+///
+/// 클라이언트를 주입받아 wiremock으로 테스트 가능하다. 커맨드는 `::new()`를 넘긴다.
+async fn fetch_list_with(
+    client: &ForumStockClient,
     category: ForumStockCategory,
     exchange: StockExchange,
     page: u32,
 ) -> Result<ForumStockPage, String> {
-    let client = ForumStockClient::new();
     match category {
         ForumStockCategory::Discussion => client.fetch_discussion_page(exchange, page).await,
         _ => {
@@ -102,11 +104,14 @@ pub async fn fetch_list(
     }
 }
 
-/// 검색어 포함 국내 종목 한 페이지(🔥 병합).
-pub async fn fetch_search(query: String, page: u32) -> Result<ForumStockPage, String> {
-    let client = ForumStockClient::new();
+/// 검색어 포함 국내 종목 한 페이지(🔥 병합). 클라이언트 주입형.
+async fn fetch_search_with(
+    client: &ForumStockClient,
+    query: &str,
+    page: u32,
+) -> Result<ForumStockPage, String> {
     let hot = client.fetch_hot_codes().await;
-    client.fetch_search_page(&query, page, &hot).await
+    client.fetch_search_page(query, page, &hot).await
 }
 
 /// IPC: 카테고리 목록.
@@ -116,13 +121,13 @@ pub async fn list_forum_stocks(
     exchange: StockExchange,
     page: u32,
 ) -> Result<ForumStockPage, String> {
-    fetch_list(category, exchange, page).await
+    fetch_list_with(&ForumStockClient::new(), category, exchange, page).await
 }
 
 /// IPC: 전체 검색(국내).
 #[tauri::command]
 pub async fn search_forum_stocks(query: String, page: u32) -> Result<ForumStockPage, String> {
-    fetch_search(query, page).await
+    fetch_search_with(&ForumStockClient::new(), &query, page).await
 }
 
 #[cfg(test)]
@@ -191,5 +196,100 @@ mod tests {
         merge_hot(&mut stocks, &hot);
         assert!(stocks[0].is_hot_discussion);
         assert!(!stocks[1].is_hot_discussion);
+    }
+
+    // ------------------------------------------------------------------
+    // 오케스트레이션(클라이언트 주입) — wiremock
+    // ------------------------------------------------------------------
+
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const LIST_FIXTURE: &str = include_str!("fixtures/stock_list_krx_price_top.json");
+
+    #[tokio::test]
+    async fn fetch_list_with_category_merges_hot_codes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/front-api/domestic/stock/list"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(LIST_FIXTURE))
+            .mount(&server)
+            .await;
+        // 🔥 집합에 KODEX(122630)만 포함.
+        Mock::given(method("GET"))
+            .and(path("/front-api/discussion/rankings/itemCodes"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"isSuccess":true,"result":{"itemCodes":["122630"]}}"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let client = ForumStockClient::with_base_url(server.uri());
+        let page = fetch_list_with(&client, ForumStockCategory::TradingValue, StockExchange::Krx, 1)
+            .await
+            .unwrap();
+
+        let kodex = page.stocks.iter().find(|s| s.code == "122630").unwrap();
+        let sk = page.stocks.iter().find(|s| s.code == "000660").unwrap();
+        assert!(kodex.is_hot_discussion, "🔥 집합의 KODEX는 표시되어야 한다");
+        assert!(!sk.is_hot_discussion, "집합 밖 SK하이닉스는 표시 안 됨");
+    }
+
+    #[tokio::test]
+    async fn fetch_list_with_discussion_uses_ranking_branch() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/front-api/discussion/ranking/list/price"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"isSuccess":true,"result":{"totalCount":100,"hasNextPage":false,"itemCodes":["000660"]}}"#,
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/front-api/realTime/marketPrice"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"isSuccess":true,"result":{"datas":[{"itemCode":"000660","stockName":"SK하이닉스","stockExchangeType":{"nameKor":"코스피"},"closePrice":"1,911,000","compareToPreviousPrice":{"name":"FALLING"},"fluctuationsRatio":"-7.68"}]}}"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let client = ForumStockClient::with_base_url(server.uri());
+        let page = fetch_list_with(&client, ForumStockCategory::Discussion, StockExchange::Krx, 1)
+            .await
+            .unwrap();
+
+        assert_eq!(page.stocks.len(), 1);
+        assert_eq!(page.stocks[0].name, "SK하이닉스");
+        // 토론 탭은 전부 🔥.
+        assert!(page.stocks[0].is_hot_discussion);
+    }
+
+    #[tokio::test]
+    async fn fetch_search_with_filters_and_marks_hot() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/front-api/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"isSuccess":true,"result":{"totalCount":2,"items":[
+                  {"code":"069500","name":"KODEX 200","category":"stock","nationCode":"KOR","typeName":"코스피"},
+                  {"code":"KO","name":"코카콜라","category":"stock","nationCode":"USA","typeName":"뉴욕 거래소"}
+                ]}}"#,
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/front-api/discussion/rankings/itemCodes"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"isSuccess":true,"result":{"itemCodes":["069500"]}}"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let client = ForumStockClient::with_base_url(server.uri());
+        let page = fetch_search_with(&client, "ko", 1).await.unwrap();
+
+        assert_eq!(page.stocks.len(), 1, "해외(USA) 종목은 제외");
+        assert_eq!(page.stocks[0].code, "069500");
+        assert!(page.stocks[0].is_hot_discussion, "🔥 집합 포함 → 표시");
     }
 }
