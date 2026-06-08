@@ -74,13 +74,21 @@ pub fn band_name_from_result(result_data: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// `get_band_information` 응답에서 밴드 이름(`result_data.name`)을 추출한다.
+/// `get_band_information` 응답에서 밴드 이름을 추출한다.
 ///
 /// 게시 전에 링크(band_no)로 밴드명을 미리 확인하는 데 쓴다. 예: 103043410 → `"데일밴드"`.
+/// 응답 형태가 멤버/비멤버에 따라 다를 수 있어 `result_data.name`과 `result_data.band.name`
+/// 양쪽을 본다.
 pub fn name_from_band_info(result_data: &Value) -> Option<String> {
     result_data
         .get("name")
         .and_then(Value::as_str)
+        .or_else(|| {
+            result_data
+                .get("band")
+                .and_then(|b| b.get("name"))
+                .and_then(Value::as_str)
+        })
         .map(str::to_string)
 }
 
@@ -139,6 +147,16 @@ mod tests {
         // 캡처: get_band_information → {"result_code":1,"result_data":{"name":"데일밴드",...}}
         let data = parse_band_result(
             r#"{"result_code":1,"result_data":{"band_no":103043410,"name":"데일밴드"}}"#,
+        )
+        .unwrap();
+        assert_eq!(name_from_band_info(&data).as_deref(), Some("데일밴드"));
+    }
+
+    #[test]
+    fn name_from_band_info_falls_back_to_nested_band_name() {
+        // 일부 응답은 result_data.band.name 형태일 수 있다.
+        let data = parse_band_result(
+            r#"{"result_code":1,"result_data":{"band":{"band_no":103043410,"name":"데일밴드"}}}"#,
         )
         .unwrap();
         assert_eq!(name_from_band_info(&data).as_deref(), Some("데일밴드"));

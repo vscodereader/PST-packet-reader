@@ -253,7 +253,20 @@ impl BandHttpClient {
             });
         }
         let data = parse_band_result(&text)?;
-        Ok(super::response::name_from_band_info(&data))
+        let name = super::response::name_from_band_info(&data);
+        // 진단: 밴드명을 못 뽑으면(번호 폴백) 응답 앞부분을 로그로 남겨 원인을 본다.
+        if name.is_none() {
+            let snip: String = text.chars().take(300).collect();
+            tracing::warn!(
+                "[BAND] get_band_information 밴드명 없음 band_no={} status={} body앞부분={}",
+                band_no,
+                status.as_u16(),
+                snip
+            );
+        } else {
+            tracing::info!("[BAND] 밴드명 조회 성공 band_no={} → {:?}", band_no, name);
+        }
+        Ok(name)
     }
 }
 
