@@ -227,6 +227,17 @@ export const ipc = {
   band: {
     publish: (request: BandPublishRequest) =>
       call<BandPublishOutcome>("band_publish", { ...request }),
+    /**
+     * 밴드 계정 선택로그인 — 네이버가 아니라 band.us(CDP)로 로그인한다.
+     * 네이버 로그인 큐와 분리된 band 큐를 쓴다(상태는 queueStatus로 폴링).
+     */
+    login: (accountIds: string[], headless = false, useAdb = false) =>
+      call<LoginQueueStatus>("enqueue_band_login", {
+        accountIds,
+        headless,
+        useAdb,
+      }),
+    queueStatus: () => call<LoginQueueStatus>("get_band_queue_status"),
   },
   diagnostics: {
     /** Probe Chrome install/version + ADB device connection (UI 새로고침). */

@@ -916,6 +916,8 @@ interface IpcState {
 let state: IpcState;
 // 로그인 큐에 enqueue된 계정 id (get_queue_status가 같은 id로 잡을 돌려주도록 보관).
 let loginJobIds: string[] = [];
+// 밴드 로그인 큐에 enqueue된 계정 id (get_band_queue_status용, 네이버 큐와 분리).
+let bandLoginJobIds: string[] = [];
 // 테스트에서 특정 계정의 로그인 결과를 실패 등으로 시뮬레이션하기 위한 오버라이드.
 // accountId → { status, message }. 미지정 계정은 success로 본다.
 let loginOutcomes: Record<string, { status: string; message: string }> = {};
@@ -951,6 +953,7 @@ export function resetIpc(): void {
     cafes: clone(SEED_CAFES),
   };
   loginJobIds = [];
+  bandLoginJobIds = [];
   loginOutcomes = {};
   articleListFailures = new Set();
 }
@@ -963,6 +966,22 @@ function loginQueueStatus() {
     isRunning: false,
     currentAccountId: null,
     jobs: loginJobIds.map((accountId) => {
+      const outcome = loginOutcomes[accountId];
+      return {
+        accountId,
+        status: outcome?.status ?? "success",
+        message: outcome?.message ?? "success",
+      };
+    }),
+  };
+}
+
+// 밴드 로그인 큐 상태(네이버와 동일 형태, 별도 job 목록). loginOutcomes 오버라이드 공유.
+function bandQueueStatus() {
+  return {
+    isRunning: false,
+    currentAccountId: null,
+    jobs: bandLoginJobIds.map((accountId) => {
       const outcome = loginOutcomes[accountId];
       return {
         accountId,
@@ -1228,6 +1247,11 @@ export const invoke = vi.fn(
         return loginQueueStatus();
       case "get_queue_status":
         return loginQueueStatus();
+      case "enqueue_band_login":
+        bandLoginJobIds = (args?.accountIds as string[] | undefined) ?? [];
+        return bandQueueStatus();
+      case "get_band_queue_status":
+        return bandQueueStatus();
 
       default:
         throw new Error(`test ipc: unhandled command "${cmd}"`);
