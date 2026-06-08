@@ -1,11 +1,11 @@
 //! 게시 큐 실행 워커(이슈 #144). now 큐(`JsonStore<QueueNowItem>`)를 작업의 단일
 //! 진실원으로 두고, 위에서부터 `Waiting` 아이템을 하나씩 꺼내 실제로 게시한다.
-//! 워커 자신은 실행 상태(`is_running`, `current_id`)만 in-memory로 들고, 잡 목록·
-//! 순서·진행률은 모두 디스크(JsonStore)에 반영한다(영속화·폴링은 #143).
+//! 워커 자신은 실행 상태(`is_running`)만 in-memory로 들고, 잡 목록·순서·진행률은
+//! 모두 디스크(JsonStore)에 반영한다(영속화·폴링은 #143).
 //!
-//! 현재 범위: 워커 골격 + 카페 글(`run_post_jobs`) + 카페 댓글(both=방금 쓴 글에
-//! self / latest·popular=글목록 조회 / url). 종목토론방 게시와 완료 로그/activity는
-//! 후속 단계에서 `execute_item`에 추가한다.
+//! 범위: 워커 골격 + 카페 글(`run_post_jobs`) + 카페 댓글(both=방금 쓴 글에 self /
+//! latest·popular=글목록 조회 / url) + 종목토론방 게시(`run_forum_publish`, 계정별
+//! Chrome). 완료 로그(log_batch)/activity 기록은 후속 단계.
 
 use std::sync::{Arc, Mutex};
 
@@ -327,7 +327,7 @@ async fn run_forum_targets<R: Runtime>(app: &AppHandle<R>, plan: &PublishPlan) -
             match crate::auth::launch_debug_chrome(true) {
                 Ok(chrome) => {
                     let mut req = req;
-                    req.host = "127.0.0.1".to_owned();
+                    // host는 plan_to_forum_requests에서 이미 127.0.0.1; 포트만 띄운 Chrome 값으로.
                     req.port = chrome.port;
                     let results = run_forum_publish(req, app_for_job);
                     drop(chrome);
