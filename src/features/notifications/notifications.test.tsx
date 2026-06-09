@@ -249,7 +249,7 @@ describe("Notifications", () => {
     const { invoke } = await import("@/test/ipc");
     renderLog();
     const toggle = await screen.findByRole("switch", {
-      name: "boot autostart",
+      name: "부팅 자동 시작",
     });
     // 초기엔 꺼짐(mock 기본값).
     await waitFor(() => expect(toggle).not.toBeChecked());

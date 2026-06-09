@@ -670,11 +670,11 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
             </ThemeIcon>
             <Box style={{ minWidth: 0 }}>
               <Text fz={14} fw={800} lh={1}>
-                Start on boot
+                부팅 시 자동 시작
               </Text>
               <Text fz={12.5} c="dimmed" fw={600} mt={5}>
-                Launch to the tray on login so scheduled posts keep publishing
-                after you close the window or reboot.
+                컴퓨터를 켜면 트레이로 자동 실행돼, 창을 닫거나 재부팅해도 예약
+                게시가 백그라운드로 이어집니다.
               </Text>
             </Box>
           </Group>
@@ -682,7 +682,7 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
             checked={autostart ?? false}
             disabled={autostart === null || autostartBusy}
             onChange={(e) => toggleAutostart(e.currentTarget.checked)}
-            aria-label="boot autostart"
+            aria-label="부팅 자동 시작"
           />
         </Group>
       </Card>
