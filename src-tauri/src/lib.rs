@@ -15,9 +15,14 @@ use crate::store::JsonStore;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 pub mod auth;
+// band.us 이메일 로그인(네이버 로그인 병행 모듈).
+pub mod band_auth;
+// band.us 가입·글쓰기·댓글(순수 HTTP, md 서명). band_auth 로그인 쿠키를 소비한다.
+pub mod band_post;
 pub mod naver_cafe;
 // 네이버 증권 토론방 패킷 게시 엔진.
 pub mod discussion_batch;
+mod forum_stocks;
 pub mod naver_automation;
 
 use discussion_batch::{
@@ -391,6 +396,179 @@ fn get_queue_status(
 }
 
 #[tauri::command]
+fn enqueue_band_login<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, band_auth::BandQueueState>,
+    activity: tauri::State<'_, JsonStore<ipc::activity::ActivityItem>>,
+    account_ids: Vec<String>,
+    headless: Option<bool>,
+    use_adb: Option<bool>,
+) -> Result<auth::QueueStatus, String> {
+    let n = account_ids.len();
+    let result = band_auth::enqueue_band_accounts(
+        &state,
+        app,
+        account_ids,
+        headless.unwrap_or(false),
+        use_adb.unwrap_or(false),
+    )
+    .map_err(|e| e.to_string())?;
+    if n > 0 {
+        ipc::activity::record(
+            activity.inner(),
+            ipc::activity::ActivityType::Info,
+            format!("밴드 계정 {n}건 로그인 시작"),
+        );
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn get_band_queue_status(
+    state: tauri::State<'_, band_auth::BandQueueState>,
+) -> Result<auth::QueueStatus, String> {
+    band_auth::get_band_queue_status(&state).map_err(|e| e.to_string())
+}
+
+/// 밴드 링크로 가입한 뒤 글(+선택 댓글)을 순수 HTTP로 게시한다.
+///
+/// `account_id`는 band 로그인 쿠키 파일 키(loginId)다. `band_link`로 가입 →
+/// 제목·내용 게시 → 댓글(있으면) 순으로 진행한다(band_post::band_publish).
+#[tauri::command]
+async fn band_publish(
+    account_id: String,
+    band_link: String,
+    title: String,
+    content: String,
+    comment: Option<String>,
+) -> Result<band_post::BandPublishOutcome, String> {
+    band_post::band_publish(
+        &account_id,
+        &band_link,
+        &title,
+        &content,
+        comment.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// 링크(band_no)로 밴드 이름을 조회한다(게시 모달에서 링크 저장 시 실제 밴드명 표시용).
+#[tauri::command]
+async fn band_resolve_name(account_id: String, band_link: String) -> Result<String, String> {
+    band_post::resolve_band_name(&account_id, &band_link)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 프론트가 보내는 밴드 게시 결과 1건(알림 배치 기록용 최소 입력).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BandBatchItemInput {
+    target: String,
+    login_id: String,
+    ok: bool,
+    msg: String,
+}
+
+/// `run_post`/`run_comment` 플래그를 배치 kind로 변환한다(순수 함수, 테스트 가능).
+fn band_batch_kind(run_post: bool, run_comment: bool) -> ipc::posts::ModeValue {
+    use ipc::posts::ModeValue;
+    if run_post && run_comment {
+        ModeValue::Both
+    } else if run_comment {
+        ModeValue::Comment
+    } else {
+        ModeValue::Post
+    }
+}
+
+/// 밴드 게시 결과를 알림(게시 배치)에 기록한다.
+///
+/// 종토방(`run_forum_publish_now`)이 백엔드에서 LogBatch를 남기는 것과 동일하게,
+/// 프론트(publish-modal)가 모든 밴드 잡을 마친 뒤 한 번 호출해 `platform: Band` 배치 +
+/// activity를 저장한다. 밴드 게시는 프론트가 잡별로 호출하므로 집계는 여기서 한 번에 한다.
+#[tauri::command]
+fn record_band_batch<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    title: String,
+    body: String,
+    comment: String,
+    run_post: bool,
+    run_comment: bool,
+    items: Vec<BandBatchItemInput>,
+) -> Result<(), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use ipc::accounts::PlatformId;
+    use ipc::log_batches::{BatchItem, BatchItemStatus, LogBatch, MAX_LOG_BATCHES};
+
+    static LB_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = LB_SEQ.fetch_add(1, Ordering::Relaxed);
+
+    let at = util::now_ms();
+    let total = items.len();
+    let ok = items.iter().filter(|i| i.ok).count();
+    let batch_items: Vec<BatchItem> = items
+        .into_iter()
+        .map(|i| BatchItem {
+            platform: PlatformId::Band,
+            target: i.target,
+            code: None,
+            board: None,
+            login_id: i.login_id,
+            status: if i.ok {
+                BatchItemStatus::Success
+            } else {
+                BatchItemStatus::Fail
+            },
+            // 실패 행은 trace에도 메시지를 실어 "자세히 보기"에서 원인을 본다.
+            trace: if i.ok { None } else { Some(i.msg.clone()) },
+            msg: i.msg,
+        })
+        .collect();
+
+    let batch = LogBatch {
+        id: format!("lb-band-{at}-{seq}"),
+        title: title.clone(),
+        // 게시 시점 원문 스냅샷: 실제 게시(run_post)한 것만 남긴다(종토방 배치와 동일 규칙).
+        body: if run_post && !body.is_empty() {
+            Some(body)
+        } else {
+            None
+        },
+        comment: if run_comment && !comment.is_empty() {
+            Some(comment)
+        } else {
+            None
+        },
+        kind: band_batch_kind(run_post, run_comment),
+        at,
+        state: None,
+        items: batch_items,
+    };
+
+    let logs = app.state::<JsonStore<LogBatch>>();
+    logs.mutate(|mut v| {
+        v.insert(0, batch);
+        v.truncate(MAX_LOG_BATCHES);
+        v
+    });
+
+    let activity = app.state::<JsonStore<ipc::activity::ActivityItem>>();
+    ipc::activity::record(
+        activity.inner(),
+        if total > 0 && ok == total {
+            ipc::activity::ActivityType::Success
+        } else {
+            ipc::activity::ActivityType::Error
+        },
+        format!("밴드 '{title}' 게시 — {total}곳 중 {ok}곳 성공"),
+    );
+    Ok(())
+}
+
+#[tauri::command]
 fn get_account_cookies(account_id: String) -> Result<Option<serde_json::Value>, String> {
     auth::read_account_cookies(&account_id).map_err(|e| e.to_string())
 }
@@ -499,14 +677,21 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         save_accounts,
         enqueue_cookie_refresh,
         get_queue_status,
+        enqueue_band_login,
+        get_band_queue_status,
+        band_publish,
+        band_resolve_name,
         get_account_cookies,
         run_naver_discussion,
         parse_template_csv,
         search_stocks,
+        forum_stocks::list_forum_stocks,
+        forum_stocks::search_forum_stocks,
         open_incognito_chrome,
         run_naver_discussion_batch,
         forum_endpoint,
         run_forum_publish_now,
+        record_band_batch,
         export_accounts_xlsx,
         export_activity_xlsx,
         import_accounts_xlsx,
@@ -560,6 +745,7 @@ pub fn manage_stores<R: Runtime>(app: &AppHandle<R>, dir: &Path) -> std::io::Res
     ));
     // Naver-login cookie-refresh queue state (empty until enqueued).
     app.manage(auth::QueueState::default());
+    app.manage(band_auth::BandQueueState::default());
     // 게시 큐 실행 워커 상태(promote 시 기동, 이슈 #144).
     app.manage(ipc::queue_runner::NowQueueRunner::default());
     Ok(())
@@ -587,6 +773,14 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn band_batch_kind_maps_run_flags() {
+        use ipc::posts::ModeValue;
+        assert_eq!(band_batch_kind(true, false), ModeValue::Post);
+        assert_eq!(band_batch_kind(false, true), ModeValue::Comment);
+        assert_eq!(band_batch_kind(true, true), ModeValue::Both);
+    }
 
     #[test]
     fn build_publish_batch_maps_results_to_items() {
