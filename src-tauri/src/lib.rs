@@ -15,6 +15,8 @@ use crate::store::JsonStore;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 pub mod auth;
+// band.us 이메일 로그인(네이버 로그인 병행 모듈).
+pub mod band_auth;
 pub mod naver_cafe;
 // 네이버 증권 토론방 패킷 게시 엔진.
 pub mod discussion_batch;
@@ -392,6 +394,41 @@ fn get_queue_status(
 }
 
 #[tauri::command]
+fn enqueue_band_login<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, band_auth::BandQueueState>,
+    activity: tauri::State<'_, JsonStore<ipc::activity::ActivityItem>>,
+    account_ids: Vec<String>,
+    headless: Option<bool>,
+    use_adb: Option<bool>,
+) -> Result<auth::QueueStatus, String> {
+    let n = account_ids.len();
+    let result = band_auth::enqueue_band_accounts(
+        &state,
+        app,
+        account_ids,
+        headless.unwrap_or(false),
+        use_adb.unwrap_or(false),
+    )
+    .map_err(|e| e.to_string())?;
+    if n > 0 {
+        ipc::activity::record(
+            activity.inner(),
+            ipc::activity::ActivityType::Info,
+            format!("밴드 계정 {n}건 로그인 시작"),
+        );
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn get_band_queue_status(
+    state: tauri::State<'_, band_auth::BandQueueState>,
+) -> Result<auth::QueueStatus, String> {
+    band_auth::get_band_queue_status(&state).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_account_cookies(account_id: String) -> Result<Option<serde_json::Value>, String> {
     auth::read_account_cookies(&account_id).map_err(|e| e.to_string())
 }
@@ -500,6 +537,8 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         save_accounts,
         enqueue_cookie_refresh,
         get_queue_status,
+        enqueue_band_login,
+        get_band_queue_status,
         get_account_cookies,
         run_naver_discussion,
         parse_template_csv,
@@ -563,6 +602,7 @@ pub fn manage_stores<R: Runtime>(app: &AppHandle<R>, dir: &Path) -> std::io::Res
     ));
     // Naver-login cookie-refresh queue state (empty until enqueued).
     app.manage(auth::QueueState::default());
+    app.manage(band_auth::BandQueueState::default());
     // 게시 큐 실행 워커 상태(promote 시 기동, 이슈 #144).
     app.manage(ipc::queue_runner::NowQueueRunner::default());
     Ok(())
