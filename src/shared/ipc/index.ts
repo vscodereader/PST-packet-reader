@@ -10,6 +10,8 @@ import type { CommentDistributionRequest } from "@/shared/bindings/CommentDistri
 import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutcome";
 import type { DashStat } from "@/shared/bindings/DashStat";
 import type { EnvironmentStatus } from "@/shared/bindings/EnvironmentStatus";
+import type { ForumStockCategory } from "@/shared/bindings/ForumStockCategory";
+import type { ForumStockPage } from "@/shared/bindings/ForumStockPage";
 import type { ImportSummary } from "@/shared/bindings/ImportSummary";
 import type { JoinedCafe } from "@/shared/bindings/JoinedCafe";
 import type { LibraryPost } from "@/shared/bindings/LibraryPost";
@@ -20,6 +22,7 @@ import type { QueueNowItem } from "@/shared/bindings/QueueNowItem";
 import type { QueueScheduledItem } from "@/shared/bindings/QueueScheduledItem";
 import type { SortBy } from "@/shared/bindings/SortBy";
 import type { Stock } from "@/shared/bindings/Stock";
+import type { StockExchange } from "@/shared/bindings/StockExchange";
 import type { StockCandidate } from "@/shared/data/types";
 
 export type {
@@ -152,6 +155,19 @@ export const ipc = {
     list: () => call<Stock[]>("list_stocks"),
     search: (query: string) =>
       call<StockCandidate[]>("search_stocks", { query }),
+  },
+  // 종목토론방 종목 선택 화면 — 네이버 모바일(m.stock.naver.com) 종목 데이터.
+  forumStocks: {
+    /** 카테고리(토론/거래대금/인기/상승/하락/거래량) × 거래소(krx/nxt) 한 페이지. */
+    list: (
+      category: ForumStockCategory,
+      exchange: StockExchange,
+      page: number,
+    ) =>
+      call<ForumStockPage>("list_forum_stocks", { category, exchange, page }),
+    /** 검색어 포함 국내 종목 한 페이지(80개 상한 없음). */
+    search: (query: string, page: number) =>
+      call<ForumStockPage>("search_forum_stocks", { query, page }),
   },
   activity: {
     list: () => call<ActivityItem[]>("list_activity"),

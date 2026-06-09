@@ -88,7 +88,13 @@ describe("PublishModal", () => {
     await userEvent.click(
       await screen.findByRole("button", { name: /종목 선택/ }),
     );
-    expect(await screen.findByText(/finance\.naver\.com/)).toBeInTheDocument();
+    // 재디자인된 종목 선택 모달은 검색창 + 카테고리 탭을 띄운다.
+    expect(
+      await screen.findByPlaceholderText("종목명 또는 코드 검색"),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "거래대금" }),
+    ).toBeInTheDocument();
   });
 
   it("starts the publish flow and shows progress", async () => {
@@ -207,6 +213,25 @@ describe("PublishModal", () => {
     );
     await userEvent.type(input, "https://x.test");
     expect(input).toHaveValue("https://x.test");
+  });
+
+  it("선택한 종목(시드 밖)도 이름으로 칩에 표시된다", async () => {
+    renderPublish();
+    // forum 계정이 기본 선택돼 있어 종목 칩 영역이 보인다.
+    await userEvent.click(
+      await screen.findByRole("button", { name: /종목 선택/ }),
+    );
+    // list_stocks 밖의 ETF(0193T0)를 검색해 고른다.
+    const search = await screen.findByPlaceholderText("종목명 또는 코드 검색");
+    await userEvent.type(search, "0193T0");
+    await userEvent.click(
+      await screen.findByText("KODEX SK하이닉스단일종목레버리지"),
+    );
+    await userEvent.click(await screen.findByRole("button", { name: /적용/ }));
+    // onConfirm으로 받은 이름이 칩에 그대로 표시된다(코드가 아니라 이름).
+    expect(
+      await screen.findByText("KODEX SK하이닉스단일종목레버리지"),
+    ).toBeInTheDocument();
   });
 
   it("removes a selected stock chip", async () => {

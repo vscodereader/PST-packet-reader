@@ -18,6 +18,7 @@ pub mod auth;
 pub mod naver_cafe;
 // 네이버 증권 토론방 패킷 게시 엔진.
 pub mod discussion_batch;
+mod forum_stocks;
 pub mod naver_automation;
 
 use discussion_batch::{
@@ -503,6 +504,8 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         run_naver_discussion,
         parse_template_csv,
         search_stocks,
+        forum_stocks::list_forum_stocks,
+        forum_stocks::search_forum_stocks,
         open_incognito_chrome,
         run_naver_discussion_batch,
         forum_endpoint,
