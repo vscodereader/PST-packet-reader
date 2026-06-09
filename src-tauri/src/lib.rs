@@ -514,6 +514,8 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         export_activity_xlsx,
         import_accounts_xlsx,
         import_posts_xlsx,
+        get_autostart_enabled,
+        set_autostart,
     ])
 }
 
@@ -568,6 +570,32 @@ pub fn manage_stores<R: Runtime>(app: &AppHandle<R>, dir: &Path) -> std::io::Res
     Ok(())
 }
 
+/// 프로세스가 부팅 자동 시작(`--autostart` 인자)으로 실행됐는지 판별한다. 자동 시작이면
+/// 창을 숨긴 채(트레이) 시작한다(재부팅 후 조용히 백그라운드 복귀).
+fn launched_via_autostart<I: IntoIterator<Item = String>>(args: I) -> bool {
+    args.into_iter().any(|arg| arg == "--autostart")
+}
+
+/// 부팅 자동 시작 등록 여부를 돌려준다(설정 토글 표시용).
+#[tauri::command]
+fn get_autostart_enabled<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+/// 부팅 자동 시작 등록을 켜고/끈다(OS 로그인 시 자동 실행). 갱신된 상태를 돌려준다.
+#[tauri::command]
+fn set_autostart<R: Runtime>(app: AppHandle<R>, enabled: bool) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let manager = app.autolaunch();
+    if enabled {
+        manager.enable().map_err(|e| e.to_string())?;
+    } else {
+        manager.disable().map_err(|e| e.to_string())?;
+    }
+    manager.is_enabled().map_err(|e| e.to_string())
+}
+
 /// 메인 창을 보이게 하고 포커스한다(트레이 "창 열기"·아이콘 클릭에서 호출).
 fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
@@ -617,6 +645,12 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 pub fn run() {
     register_handlers(tauri::Builder::default())
         .plugin(tauri_plugin_dialog::init())
+        // 부팅 자동 시작 플러그인. 자동 시작으로 실행되면 `--autostart` 인자가 붙어
+        // (아래 setup에서 창을 숨긴 채 시작). 등록 on/off는 set_autostart 커맨드로 한다.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--autostart"]),
+        ))
         // 창 닫기(X)를 종료가 아니라 트레이로 숨김 처리 → 백그라운드 스케줄러 유지.
         // 완전 종료는 트레이 메뉴의 "완전 종료"로 한다.
         .on_window_event(|window, event| {
@@ -636,6 +670,11 @@ pub fn run() {
             manage_stores(app.handle(), &dir)?;
             // 창을 닫아도 백그라운드로 도는 앱이므로 트레이 아이콘을 띄운다.
             build_tray(app.handle())?;
+            // 창은 기본 숨김(conf visible:false). 일반 실행이면 보이고, 부팅 자동 시작
+            // (`--autostart`)이면 숨긴 채 트레이로만 시작한다.
+            if !launched_via_autostart(std::env::args()) {
+                show_main_window(app.handle());
+            }
             // 앱 시작 reconciliation: 종료 중 시각이 지난 미발행 예약을 missed로 표시하고
             // 알림으로 남긴다(자동 게시하지 않음). 반드시 스케줄러 spawn 전에 동기 수행해
             // 첫 tick이 미발행 예약을 잘못 게시하지 않게 한다.
@@ -654,6 +693,15 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launched_via_autostart_detects_the_flag() {
+        let with = ["pstmacro.exe", "--autostart"].map(String::from);
+        let without = ["pstmacro.exe"].map(String::from);
+        assert!(launched_via_autostart(with));
+        assert!(!launched_via_autostart(without));
+        assert!(!launched_via_autostart(Vec::<String>::new()));
+    }
 
     #[test]
     fn build_publish_batch_maps_results_to_items() {
