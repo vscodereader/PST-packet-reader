@@ -39,7 +39,7 @@ tracing-appender = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 open = "5"
 # 네이버 증권 토론방 패킷 게시 엔진(naver_automation/discussion_batch)에서 사용
-tungstenite = "0.21"
+tungstenite = "0.29"
 url = "2"
 # 엑셀(.xlsx) 입출력
 rust_xlsxwriter = "0.79"
