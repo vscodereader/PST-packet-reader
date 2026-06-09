@@ -45,6 +45,7 @@ import type {
   Stock,
 } from "@/shared/data/types";
 import { ipc } from "@/shared/ipc";
+import { nowParts, scheduleMoment, toEpochMs } from "@/shared/schedule";
 import { DateTimePicker } from "@/shared/ui/date-time-picker";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo, PlatformPill } from "@/shared/ui/platform-logo";
@@ -534,45 +535,6 @@ function outcomeToResult(
  */
 function fallbackEndpoint(): { host: string; port: number } {
   return { host: "127.0.0.1", port: 9222 };
-}
-
-const pad2 = (n: number) => String(n).padStart(2, "0");
-
-/** Current date/time as the picker's `{ date, time }` strings (minute precision). */
-function nowParts(): { date: string; time: string } {
-  const n = new Date();
-  return {
-    date: `${n.getFullYear()}-${pad2(n.getMonth() + 1)}-${pad2(n.getDate())}`,
-    time: `${pad2(n.getHours())}:${pad2(n.getMinutes())}`,
-  };
-}
-
-/** Local epoch-ms for a `YYYY-MM-DD` + `HH:MM` pair (for the IPC time guard). */
-function toEpochMs(date: string, time: string): number {
-  const [y, m, d] = date.split("-").map(Number);
-  const [h, mi] = time.split(":").map(Number);
-  return new Date(y ?? 1970, (m ?? 1) - 1, d ?? 1, h ?? 0, mi ?? 0).getTime();
-}
-
-/** Turn the picked date/time into the queue's `{ when, rel }` display strings. */
-function scheduleMoment(
-  date: string,
-  time: string,
-): { label: string; when: string } {
-  const [y, m, d] = date.split("-").map(Number);
-  const target = new Date(y ?? 1970, (m ?? 1) - 1, d ?? 1);
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const diff = Math.round((target.getTime() - today.getTime()) / 86400000);
-  const label =
-    diff <= 0
-      ? "오늘"
-      : diff === 1
-        ? "내일"
-        : diff === 2
-          ? "모레"
-          : `${m}/${d}`;
-  return { label, when: `${label} ${time}` };
 }
 
 function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
@@ -1235,6 +1197,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       kind: doc.kind,
       when: moment.when,
       rel: moment.label,
+      at: toEpochMs(date, time),
+      missed: false,
       locs,
       plan: buildPlan(),
     };

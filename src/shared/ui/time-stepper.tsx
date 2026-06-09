@@ -76,7 +76,7 @@ function Field({
 }
 
 /**
- * Hour/minute picker with up/down steppers (hour ±1, minute ±5, both wrap at
+ * Hour/minute picker with up/down steppers (hour ±1, minute ±1, both wrap at
  * the boundary) and direct numeric entry (clamped to range).
  */
 export function TimeStepper({ value, onChange }: TimeStepperProps) {
@@ -98,7 +98,7 @@ export function TimeStepper({ value, onChange }: TimeStepperProps) {
         label="분"
         value={value.m}
         max={59}
-        step={5}
+        step={1}
         onChange={(m) => onChange({ ...value, m })}
       />
     </Group>

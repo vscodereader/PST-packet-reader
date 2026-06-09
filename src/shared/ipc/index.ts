@@ -142,6 +142,18 @@ export const ipc = {
     promote: (id: string) =>
       call<QueueNowItem[]>("promote_queue_scheduled", { id }),
     /**
+     * Re-schedule an item to a new local epoch-ms `atMs` (used to recover a
+     * "missed" schedule, or change the time). Clears the missed flag. Rejects a
+     * past time. `when`/`rel` are the display strings for the new moment.
+     */
+    reschedule: (id: string, atMs: number, when: string, rel: string) =>
+      call<QueueScheduledItem[]>("reschedule_queue_scheduled", {
+        id,
+        at: atMs,
+        when,
+        rel,
+      }),
+    /**
      * Persist the now-queue order (drag / priority change); returns the list.
      * Running items stay pinned to the front by the backend.
      */
@@ -209,6 +221,13 @@ export const ipc = {
     getStatus: () => call<EnvironmentStatus>("get_environment_status"),
     /** Chrome 미설치 안내 카드의 "설치 페이지 열기" — 공식 다운로드 페이지를 기본 브라우저로 연다. */
     openChromeDownload: () => call<void>("open_chrome_download"),
+  },
+  app: {
+    /** 부팅 자동 시작(OS 로그인 시 자동 실행) 등록 여부. */
+    getAutostart: () => call<boolean>("get_autostart_enabled"),
+    /** 부팅 자동 시작 등록 on/off. 갱신된 상태를 돌려준다. */
+    setAutostart: (enabled: boolean) =>
+      call<boolean>("set_autostart", { enabled }),
   },
   // 종목토론방(forum) 즉시 게시 — 네이버 증권 토론방 패킷 게시 엔진 호출.
   forum: {

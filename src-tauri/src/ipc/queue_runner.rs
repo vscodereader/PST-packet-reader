@@ -598,6 +598,10 @@ fn record_completion<R: Runtime>(app: &AppHandle<R>, batch: LogBatch) {
         ty,
         format!("'{title}' 예약 게시 — {total}곳 중 {ok}곳 성공"),
     );
+
+    // 트레이 상주(창 닫힘) 중에도 결과를 인지하도록 OS 토스트도 best-effort로 띄운다(#163).
+    let (toast_title, toast_body) = super::notify::completion_message(&title, total, ok);
+    super::notify::notify_desktop(app, &toast_title, &toast_body);
 }
 
 /// plan으로부터 진행률 total의 상한 추정치를 낸다. mark_running 시점에 `(0, total)`을

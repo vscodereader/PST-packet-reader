@@ -400,12 +400,6 @@ const SEED_STATS: DashStat[] = [
 
 const SEED_ACTIVITY: ActivityItem[] = [
   {
-    id: "ac1",
-    type: "success",
-    text: "’삼성전자 4분기 실적 기대’ 글이 종목토론방에 게시되었습니다",
-    at: NOW_BASE - 12 * 60_000,
-  },
-  {
     id: "ac2",
     type: "success",
     text: "반도체 코멘트 10종이 2개 계정에 분산 게시되었습니다",
@@ -442,19 +436,6 @@ const SEED_ENV_STATUS: EnvironmentStatus = {
 };
 
 const SEED_QUEUE_NOW: QueueNowItem[] = [
-  {
-    id: "q1",
-    title: "삼성전자 4분기 실적 기대 — 매수 관점 정리",
-    kind: "post",
-    state: "running",
-    batchId: "b0",
-    progress: [2, 3],
-    locs: [
-      { p: "forum", name: "삼성전자", code: "005930" },
-      { p: "forum", name: "SK하이닉스", code: "000660" },
-      { p: "naver", name: "주식투자연구소 카페" },
-    ],
-  },
   {
     id: "q2",
     title: "반도체 흐름 코멘트 10종",
@@ -498,6 +479,8 @@ const SEED_QUEUE_SCHEDULED: QueueScheduledItem[] = [
     kind: "both",
     when: "오늘 18:30",
     rel: "5시간 후",
+    at: 4_102_444_800_000,
+    missed: false,
     locs: [{ p: "forum", name: "에코프로", code: "086520" }],
   },
   {
@@ -506,6 +489,8 @@ const SEED_QUEUE_SCHEDULED: QueueScheduledItem[] = [
     kind: "post",
     when: "내일 09:00",
     rel: "내일",
+    at: 4_102_531_200_000,
+    missed: false,
     locs: [
       { p: "naver", name: "주식투자연구소 카페" },
       { p: "band", name: "가치투자모임 BAND" },
@@ -516,7 +501,10 @@ const SEED_QUEUE_SCHEDULED: QueueScheduledItem[] = [
     title: "HBM 관련 기대 코멘트",
     kind: "comment",
     when: "5/31 20:00",
-    rel: "모레",
+    rel: "지남",
+    // 앱 종료 중 시각이 지나 미발행된 예약(놓침) — 재예약/취소 UI 확인용.
+    at: 1_700_000_000_000,
+    missed: true,
     locs: [{ p: "forum", name: "한미반도체", code: "042700" }],
   },
 ];
@@ -704,39 +692,6 @@ const SEED_LIBRARY: LibraryPost[] = [
 
 const SEED_LOG_BATCHES: LogBatch[] = [
   {
-    id: "b0",
-    title: "삼성전자 4분기 실적 기대 — 매수 관점 정리",
-    kind: "post",
-    at: NOW_BASE - 2 * 60_000,
-    state: "running",
-    items: [
-      {
-        platform: "forum",
-        target: "삼성전자",
-        code: "005930",
-        loginId: "invest_king7",
-        status: "success",
-        msg: "게시 완료",
-      },
-      {
-        platform: "forum",
-        target: "SK하이닉스",
-        code: "000660",
-        loginId: "value_pick",
-        status: "success",
-        msg: "게시 완료",
-      },
-      {
-        platform: "naver",
-        target: "주식투자연구소 카페",
-        board: "종목분석",
-        loginId: "money_lab",
-        status: "running",
-        msg: "게시 중…",
-      },
-    ],
-  },
-  {
     id: "b1",
     title: "5월 이벤트 결과 발표",
     body: "<p>5월 이벤트 결과를 정리했습니다. 많은 참여 감사드립니다.</p>",
@@ -911,6 +866,7 @@ interface IpcState {
   queueScheduled: QueueScheduledItem[];
   activity: ActivityItem[];
   cafes: Cafe[];
+  autostart: boolean;
 }
 
 let state: IpcState;
@@ -949,6 +905,7 @@ export function resetIpc(): void {
     queueScheduled: clone(SEED_QUEUE_SCHEDULED),
     activity: clone(SEED_ACTIVITY),
     cafes: clone(SEED_CAFES),
+    autostart: false,
   };
   loginJobIds = [];
   loginOutcomes = {};
@@ -1079,6 +1036,11 @@ export const invoke = vi.fn(
       case "open_chrome_download":
         // 브라우저 열기는 사이드이펙트뿐 — 목에서는 성공(void)으로 처리.
         return undefined;
+      case "get_autostart_enabled":
+        return state.autostart;
+      case "set_autostart":
+        state.autostart = args!.enabled as boolean;
+        return state.autostart;
 
       // --- accounts (stateful) ----------------------------------------------
       case "list_accounts":
@@ -1151,6 +1113,21 @@ export const invoke = vi.fn(
           ];
         }
         return clone(state.queueNow);
+      }
+      case "reschedule_queue_scheduled": {
+        const id = args!.id as string;
+        state.queueScheduled = state.queueScheduled.map((q) =>
+          q.id === id
+            ? {
+                ...q,
+                at: args!.at as number,
+                when: args!.when as string,
+                rel: args!.rel as string,
+                missed: false,
+              }
+            : q,
+        );
+        return clone(state.queueScheduled);
       }
       case "reorder_queue_now": {
         const orderedIds = args!.orderedIds as string[];

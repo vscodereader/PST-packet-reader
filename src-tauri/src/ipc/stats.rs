@@ -212,6 +212,8 @@ mod tests {
             kind: ModeValue::Post,
             when: "오늘 18:30".into(),
             rel: "5시간 후".into(),
+            at: 1_700_000_000_000,
+            missed: false,
             locs: vec![QueueLocation {
                 p: super::super::accounts::PlatformId::Forum,
                 name: "n".into(),
