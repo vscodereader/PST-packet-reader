@@ -202,7 +202,12 @@ function StockCrawlModalInner({
                   : "transparent",
               }}
             >
-              <Checkbox checked={checked} readOnly size="sm" />
+              <Checkbox
+                checked={checked}
+                onChange={() => toggle(s)}
+                onClick={(e) => e.stopPropagation()}
+                size="sm"
+              />
               {s.isHotDiscussion && (
                 <Icon.flame size={15} color="var(--mantine-color-orange-6)" />
               )}
