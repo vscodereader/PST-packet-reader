@@ -126,6 +126,14 @@ export function isProblemStatus(status: string): boolean {
   return PROBLEM_STATUSES.includes(status);
 }
 
+// 게시 대상으로 쓸 수 있는 계정 상태 — 정상(active)과 미로그인(new, 게시 시 로그인 시도)만.
+// 로그인 실패 계열(error/badCredentials/challenge/blocked)은 게시 위치·잡에서 완전히 제외해,
+// 로그인되지 않은 계정으로 글이 올라가는 것을 막는다.
+export const POSTABLE_STATUSES = ["active", "new"];
+export function isPostable(status: string): boolean {
+  return POSTABLE_STATUSES.includes(status);
+}
+
 export const STATUS_LABEL: Record<string, { t: string; c: string }> = {
   draft: { t: "임시저장", c: "gray" },
   ready: { t: "작성완료", c: "blue" },

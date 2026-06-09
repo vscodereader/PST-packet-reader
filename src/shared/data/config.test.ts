@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 
 import {
   ACTIVE_PLATFORMS,
+  isPostable,
   isProblemStatus,
   KIND,
   PLATFORM,
@@ -85,5 +86,16 @@ describe("label tables", () => {
     expect(isProblemStatus("challenge")).toBe(false);
     expect(isProblemStatus("active")).toBe(false);
     expect(isProblemStatus("new")).toBe(false);
+  });
+
+  it("isPostable allows only active/new and blocks every login-failure status", () => {
+    // 게시 모달의 모든 게이트(disabled/preselect/toggle/select-all/job 생성)가 이 헬퍼로
+    // 통일돼 있다 — 실패 계열이 게시 위치·잡에 새지 않도록 하는 단일 진실.
+    expect(isPostable("active")).toBe(true);
+    expect(isPostable("new")).toBe(true);
+    expect(isPostable("error")).toBe(false);
+    expect(isPostable("badCredentials")).toBe(false);
+    expect(isPostable("challenge")).toBe(false);
+    expect(isPostable("blocked")).toBe(false);
   });
 });
