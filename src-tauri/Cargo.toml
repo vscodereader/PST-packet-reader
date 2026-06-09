@@ -46,6 +46,8 @@ calamine = "0.26"
 # 네이티브 파일 다이얼로그
 tauri-plugin-dialog = "2"
 tauri-plugin-autostart = "2"
+# 단일 인스턴스 가드 — 이미 트레이로 상주 중이면 두 번째 실행을 막고 기존 창을 띄운다.
+tauri-plugin-single-instance = "2"
 
 [dev-dependencies]
 tempfile = "3"

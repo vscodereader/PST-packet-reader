@@ -647,55 +647,63 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    register_handlers(tauri::Builder::default())
-        .plugin(tauri_plugin_dialog::init())
-        // 부팅 자동 시작 플러그인. 자동 시작으로 실행되면 `--autostart` 인자가 붙어
-        // (아래 setup에서 창을 숨긴 채 시작). 등록 on/off는 set_autostart 커맨드로 한다.
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec![AUTOSTART_FLAG]),
-        ))
-        // 창 닫기(X)를 종료가 아니라 트레이로 숨김 처리 → 백그라운드 스케줄러 유지.
-        // 완전 종료는 트레이 메뉴의 "완전 종료"로 한다.
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
-                api.prevent_close();
-            }
-        })
-        .setup(|app| {
-            let dir = app.path().app_data_dir()?;
-            // 로그는 도메인 데이터와 같은 앱 데이터 디렉터리(<app_data>/logs)에 남긴다.
-            logging::init_file_logging(&dir.join("logs"));
-            tracing::info!(
-                version = env!("CARGO_PKG_VERSION"),
-                "pstmacro backend starting"
-            );
-            manage_stores(app.handle(), &dir)?;
-            // 창을 닫아도 백그라운드로 도는 앱이므로 트레이 아이콘을 띄운다. 트레이 생성
-            // 실패는 비치명적으로 둔다 — 앱(과 창)은 정상 동작해야 한다(창이 숨은 채로
-            // brick 되지 않게).
-            if let Err(error) = build_tray(app.handle()) {
-                tracing::error!(%error, "트레이 아이콘 생성 실패 — 트레이 없이 계속");
-            }
-            // 창은 기본 숨김(conf visible:false). 일반 실행이면 보이고, 부팅 자동 시작
-            // (`--autostart`)이면 숨긴 채 트레이로만 시작한다.
-            if !launched_via_autostart(std::env::args()) {
-                show_main_window(app.handle());
-            }
-            // 앱 시작 reconciliation: 종료 중 시각이 지난 미발행 예약을 missed로 표시하고
-            // 알림으로 남긴다(자동 게시하지 않음). 반드시 스케줄러 spawn 전에 동기 수행해
-            // 첫 tick이 미발행 예약을 잘못 게시하지 않게 한다.
-            ipc::queue::reconcile_missed_on_startup(app.handle());
-            // 예약 시각 자동 트리거 스케줄러를 기동한다(앱 수명 동안 1회).
-            let scheduler_app = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                ipc::queue::scheduler_loop(scheduler_app).await;
-            });
-            Ok(())
-        })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+    register_handlers(
+        tauri::Builder::default()
+            // 단일 인스턴스 가드. 이미 트레이로 상주 중인데 앱을 다시 실행하면, 새 프로세스는
+            // 곧바로 종료되고 이 콜백이 기존 프로세스에서 호출된다 → 트레이가 두 개로 늘지 않고
+            // 숨어 있던 창만 다시 뜬다. 플러그인은 등록 순서대로 동작하므로 가장 먼저 등록한다.
+            .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+                show_main_window(app);
+            })),
+    )
+    .plugin(tauri_plugin_dialog::init())
+    // 부팅 자동 시작 플러그인. 자동 시작으로 실행되면 `--autostart` 인자가 붙어
+    // (아래 setup에서 창을 숨긴 채 시작). 등록 on/off는 set_autostart 커맨드로 한다.
+    .plugin(tauri_plugin_autostart::init(
+        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+        Some(vec![AUTOSTART_FLAG]),
+    ))
+    // 창 닫기(X)를 종료가 아니라 트레이로 숨김 처리 → 백그라운드 스케줄러 유지.
+    // 완전 종료는 트레이 메뉴의 "완전 종료"로 한다.
+    .on_window_event(|window, event| {
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            let _ = window.hide();
+            api.prevent_close();
+        }
+    })
+    .setup(|app| {
+        let dir = app.path().app_data_dir()?;
+        // 로그는 도메인 데이터와 같은 앱 데이터 디렉터리(<app_data>/logs)에 남긴다.
+        logging::init_file_logging(&dir.join("logs"));
+        tracing::info!(
+            version = env!("CARGO_PKG_VERSION"),
+            "pstmacro backend starting"
+        );
+        manage_stores(app.handle(), &dir)?;
+        // 창을 닫아도 백그라운드로 도는 앱이므로 트레이 아이콘을 띄운다. 트레이 생성
+        // 실패는 비치명적으로 둔다 — 앱(과 창)은 정상 동작해야 한다(창이 숨은 채로
+        // brick 되지 않게).
+        if let Err(error) = build_tray(app.handle()) {
+            tracing::error!(%error, "트레이 아이콘 생성 실패 — 트레이 없이 계속");
+        }
+        // 창은 기본 숨김(conf visible:false). 일반 실행이면 보이고, 부팅 자동 시작
+        // (`--autostart`)이면 숨긴 채 트레이로만 시작한다.
+        if !launched_via_autostart(std::env::args()) {
+            show_main_window(app.handle());
+        }
+        // 앱 시작 reconciliation: 종료 중 시각이 지난 미발행 예약을 missed로 표시하고
+        // 알림으로 남긴다(자동 게시하지 않음). 반드시 스케줄러 spawn 전에 동기 수행해
+        // 첫 tick이 미발행 예약을 잘못 게시하지 않게 한다.
+        ipc::queue::reconcile_missed_on_startup(app.handle());
+        // 예약 시각 자동 트리거 스케줄러를 기동한다(앱 수명 동안 1회).
+        let scheduler_app = app.handle().clone();
+        tauri::async_runtime::spawn(async move {
+            ipc::queue::scheduler_loop(scheduler_app).await;
+        });
+        Ok(())
+    })
+    .run(tauri::generate_context!())
+    .expect("error while running tauri application");
 }
 
 #[cfg(test)]
