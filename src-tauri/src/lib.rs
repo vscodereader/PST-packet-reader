@@ -6,7 +6,9 @@ mod util;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use tauri::{AppHandle, Builder, Manager, Runtime};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Builder, Manager, Runtime, WindowEvent};
 
 use crate::ipc::{
     accounts, activity, bands, cafes, diagnostics, excel, log_batches, posts, queue, stats, stocks,
@@ -566,10 +568,63 @@ pub fn manage_stores<R: Runtime>(app: &AppHandle<R>, dir: &Path) -> std::io::Res
     Ok(())
 }
 
+/// 메인 창을 보이게 하고 포커스한다(트레이 "창 열기"·아이콘 클릭에서 호출).
+fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// 시스템 트레이 아이콘 + 메뉴(창 열기 / 완전 종료)를 구성한다. 창을 닫아도(트레이로
+/// 숨김) 백그라운드 스케줄러가 살아 있으므로, 트레이에서 창을 다시 열거나 완전히 종료한다.
+fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, "tray-show", "창 열기", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "tray-quit", "완전 종료", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+
+    TrayIconBuilder::with_id("main-tray")
+        .icon(
+            app.default_window_icon()
+                .cloned()
+                .expect("default window icon is set by the bundle config"),
+        )
+        .tooltip("pstmacro — 예약 게시 백그라운드 실행 중")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "tray-show" => show_main_window(app),
+            "tray-quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            // 좌클릭(버튼 떼는 순간)으로 창을 다시 연다.
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     register_handlers(tauri::Builder::default())
         .plugin(tauri_plugin_dialog::init())
+        // 창 닫기(X)를 종료가 아니라 트레이로 숨김 처리 → 백그라운드 스케줄러 유지.
+        // 완전 종료는 트레이 메뉴의 "완전 종료"로 한다.
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let _ = window.hide();
+                api.prevent_close();
+            }
+        })
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             // 로그는 도메인 데이터와 같은 앱 데이터 디렉터리(<app_data>/logs)에 남긴다.
@@ -579,6 +634,8 @@ pub fn run() {
                 "pstmacro backend starting"
             );
             manage_stores(app.handle(), &dir)?;
+            // 창을 닫아도 백그라운드로 도는 앱이므로 트레이 아이콘을 띄운다.
+            build_tray(app.handle())?;
             // 앱 시작 reconciliation: 종료 중 시각이 지난 미발행 예약을 missed로 표시하고
             // 알림으로 남긴다(자동 게시하지 않음). 반드시 스케줄러 spawn 전에 동기 수행해
             // 첫 tick이 미발행 예약을 잘못 게시하지 않게 한다.
