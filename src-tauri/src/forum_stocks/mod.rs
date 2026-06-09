@@ -218,16 +218,22 @@ mod tests {
         // 🔥 집합에 KODEX(122630)만 포함.
         Mock::given(method("GET"))
             .and(path("/front-api/discussion/rankings/itemCodes"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"{"isSuccess":true,"result":{"itemCodes":["122630"]}}"#,
-            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"isSuccess":true,"result":{"itemCodes":["122630"]}}"#),
+            )
             .mount(&server)
             .await;
 
         let client = ForumStockClient::with_base_url(server.uri());
-        let page = fetch_list_with(&client, ForumStockCategory::TradingValue, StockExchange::Krx, 1)
-            .await
-            .unwrap();
+        let page = fetch_list_with(
+            &client,
+            ForumStockCategory::TradingValue,
+            StockExchange::Krx,
+            1,
+        )
+        .await
+        .unwrap();
 
         let kodex = page.stocks.iter().find(|s| s.code == "122630").unwrap();
         let sk = page.stocks.iter().find(|s| s.code == "000660").unwrap();
@@ -254,9 +260,14 @@ mod tests {
             .await;
 
         let client = ForumStockClient::with_base_url(server.uri());
-        let page = fetch_list_with(&client, ForumStockCategory::Discussion, StockExchange::Krx, 1)
-            .await
-            .unwrap();
+        let page = fetch_list_with(
+            &client,
+            ForumStockCategory::Discussion,
+            StockExchange::Krx,
+            1,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(page.stocks.len(), 1);
         assert_eq!(page.stocks[0].name, "SK하이닉스");
@@ -279,9 +290,10 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/front-api/discussion/rankings/itemCodes"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"{"isSuccess":true,"result":{"itemCodes":["069500"]}}"#,
-            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"isSuccess":true,"result":{"itemCodes":["069500"]}}"#),
+            )
             .mount(&server)
             .await;
 
