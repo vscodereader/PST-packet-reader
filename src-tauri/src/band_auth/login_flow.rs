@@ -112,12 +112,16 @@ pub(crate) fn credentials_present(id: &str, pw: &str) -> bool {
     !id.trim().is_empty() && !pw.is_empty()
 }
 
-/// 수거한 쿠키에 `BUC`가 있는지 확인한다(순수 함수).
+/// 수거한 쿠키에 band 세션 쿠키 `band_session`이 있는지 확인한다(순수 함수).
+///
+/// band 로그인 성공 시 `auth.band.us/email_login/password` 응답이 `band_session`
+/// 쿠키(domain `.band.us`)를 발급한다. (`BUC`는 네이버 쿠키이며 band은 발급하지 않는다 —
+/// 패킷 캡처로 확인.)
 pub(crate) fn has_band_session_cookies(cookies: &[Value]) -> bool {
     cookies
         .iter()
         .filter_map(|c| c.get("name").and_then(Value::as_str))
-        .any(|name| name == "BUC")
+        .any(|name| name == "band_session")
 }
 
 /// 로그인을 수행하고 결과를 분류해 반환한다.
@@ -479,7 +483,7 @@ fn read_signals(client: &mut CdpClient) -> Result<BandPageSignals, AutomationErr
     let cookies = collect_band_cookies(client)?;
     let current_url = client.current_url().unwrap_or_default();
 
-    // 성공: BUC 쿠키 존재 + auth를 벗어나 www.band.us 로 이동.
+    // 성공: band_session 쿠키 존재 + auth를 벗어나 www.band.us 로 이동.
     let logged_in = has_band_session_cookies(&cookies) && current_url.contains("www.band.us");
     // 차단: 계정 상태 페이지로 리다이렉트.
     let blocked = current_url.contains("account_status");
@@ -495,10 +499,11 @@ fn read_signals(client: &mut CdpClient) -> Result<BandPageSignals, AutomationErr
 
 // Network.getCookies로 band.us 쿠키를 수거한다.
 fn collect_band_cookies(client: &mut CdpClient) -> Result<Vec<Value>, AutomationError> {
-    let result = client.call(
-        "Network.getCookies",
-        json!({ "urls": ["https://www.band.us", "https://auth.band.us"] }),
-    )?;
+    // getAllCookies는 경로(Path) 제한과 무관하게 브라우저의 모든 쿠키를 돌려준다.
+    // getCookies(urls)는 URL 경로('/')에 매칭되는 쿠키만 줘서, 로그인이 발급하는
+    // `secretKey` 쿠키(Path=/s/login/getKey, HttpOnly)가 누락된다 — 이게 없으면
+    // 게시용 getKey가 'temp'만 돌려줘 서명키 발급에 실패한다(패킷 캡처로 확인).
+    let result = client.call("Network.getAllCookies", json!({}))?;
     let cookies = result
         .get("cookies")
         .and_then(Value::as_array)
@@ -727,8 +732,10 @@ mod tests {
 
     #[test]
     fn band_session_cookie_detection() {
-        let cookies = vec![json!({ "name": "BUC", "value": "a" })];
+        let cookies = vec![json!({ "name": "band_session", "value": "a" })];
         assert!(has_band_session_cookies(&cookies));
+        // BUC는 네이버 쿠키이므로 band 세션으로 인정하지 않는다.
+        assert!(!has_band_session_cookies(&[json!({ "name": "BUC" })]));
         assert!(!has_band_session_cookies(&[json!({ "name": "OTHER" })]));
         assert!(!has_band_session_cookies(&[]));
     }
