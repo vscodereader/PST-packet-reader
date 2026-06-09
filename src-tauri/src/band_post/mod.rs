@@ -58,6 +58,49 @@ pub async fn band_publish(
     content: &str,
     comment: Option<&str>,
 ) -> Result<BandPublishOutcome, BandPostError> {
+    // 최종 게시 결과를 사람이 읽는 한 줄로 남긴다(로그인의 ✅/❌ 결과 로그와 동일
+    // 형식). 내부 흐름과 기존 단계별 로그(게시 시작·getKey 등)는 그대로 두고,
+    // 성공/실패 결과만 덧붙인다.
+    match band_publish_inner(account_id, band_link, title, content, comment).await {
+        Ok(outcome) => {
+            tracing::info!(
+                "{}",
+                publish_success_log(
+                    account_id,
+                    outcome.band_name.as_deref(),
+                    outcome.post_no,
+                    outcome.commented,
+                )
+            );
+            Ok(outcome)
+        }
+        Err(e) => {
+            tracing::warn!("[BAND] ❌ 게시 실패 — 계정 {account_id} ({e})");
+            Err(e)
+        }
+    }
+}
+
+/// 게시 성공 로그 문구를 만든다(순수 함수, 테스트 가능). 댓글 작성 여부와 밴드명을
+/// 반영한다(밴드명이 없으면 "밴드"로 대체).
+fn publish_success_log(
+    account_id: &str,
+    band_name: Option<&str>,
+    post_no: u64,
+    commented: bool,
+) -> String {
+    let what = if commented { "글+댓글" } else { "글" };
+    let band = band_name.unwrap_or("밴드");
+    format!("[BAND] ✅ \"{band}\" {what} 게시 성공 — 계정 {account_id}, post_no {post_no}")
+}
+
+async fn band_publish_inner(
+    account_id: &str,
+    band_link: &str,
+    title: &str,
+    content: &str,
+    comment: Option<&str>,
+) -> Result<BandPublishOutcome, BandPostError> {
     let band_no = band_no_from_link(band_link)
         .ok_or_else(|| BandPostError::InvalidLink(band_link.to_string()))?;
 
@@ -153,5 +196,24 @@ mod tests {
     #[test]
     fn combine_title_only_when_no_body() {
         assert_eq!(combine_title_and_content("제목", ""), "제목");
+    }
+
+    #[test]
+    fn success_log_mentions_band_post_no_and_comment() {
+        let s = publish_success_log("cho****", Some("데일밴드"), 42, true);
+        assert!(s.contains("[BAND] ✅"), "{s}");
+        assert!(s.contains("데일밴드"), "{s}");
+        assert!(s.contains("글+댓글"), "{s}");
+        assert!(s.contains("post_no 42"), "{s}");
+        assert!(s.contains("cho****"), "{s}");
+    }
+
+    #[test]
+    fn success_log_without_comment_falls_back_to_band_label() {
+        let s = publish_success_log("acc", None, 7, false);
+        // 댓글 없음 → "글"만(글+댓글 아님), 밴드명 없음 → "밴드" 대체.
+        assert!(s.contains("\"밴드\" 글 게시 성공"), "{s}");
+        assert!(!s.contains("글+댓글"), "{s}");
+        assert!(s.contains("post_no 7"), "{s}");
     }
 }
