@@ -193,6 +193,24 @@ describe("PublishModal", () => {
     expect(await screen.findByText("0개")).toBeInTheDocument();
   });
 
+  it("toggles selection when the checkbox itself is clicked (exactly once)", async () => {
+    renderPublish();
+    // invest_king7 (a1) is preselected → its checkbox is the only checked one.
+    expect(await screen.findByText("1개")).toBeInTheDocument();
+    const checkedBoxes = (await screen.findAllByRole("checkbox")).filter(
+      (b) => (b as HTMLInputElement).checked,
+    );
+    expect(checkedBoxes).toHaveLength(1);
+    // Clicking the checkbox itself must register a single toggle → deselected.
+    // (A double-toggle from the checkbox + the row bubbling would leave it at 1개.)
+    await userEvent.click(checkedBoxes[0]!);
+    expect(await screen.findByText("0개")).toBeInTheDocument();
+    // And clicking it again re-selects — the control is not stuck.
+    const box = (await screen.findAllByRole("checkbox"))[0]!;
+    await userEvent.click(box);
+    expect(await screen.findByText("1개")).toBeInTheDocument();
+  });
+
   it("selects every visible account and expands the destinations", async () => {
     renderPublish();
     await userEvent.click(

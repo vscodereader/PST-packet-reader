@@ -107,7 +107,13 @@ function AccountRow({
           : "transparent",
       }}
     >
-      <Checkbox checked={selected} readOnly size="sm" disabled={disabled} />
+      <Checkbox
+        checked={selected}
+        onChange={() => !disabled && onToggle(a.id)}
+        onClick={(e) => e.stopPropagation()}
+        size="sm"
+        disabled={disabled}
+      />
       <PlatformLogo id={a.platform} size={24} />
       <Text fz={13} fw={700} ff="monospace" style={{ flexShrink: 0 }}>
         {a.loginId}
