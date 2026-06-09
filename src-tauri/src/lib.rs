@@ -106,6 +106,10 @@ fn forum_endpoint() -> ForumEndpoint {
     }
 }
 
+// 게시 결과를 LogBatch로 변환하는 헬퍼. 인자 8개가 모두 의미상 구분되는
+// 게시 메타데이터(제목/실행플래그/계정/본문/댓글/시각/결과)라 구조체로
+// 묶기보다 그대로 둔다 — clippy too_many_arguments 만 억제(동작 무변경).
+#[allow(clippy::too_many_arguments)]
 fn build_publish_batch(
     title: &str,
     run_post: bool,
