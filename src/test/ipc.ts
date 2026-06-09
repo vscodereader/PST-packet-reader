@@ -866,6 +866,7 @@ interface IpcState {
   queueScheduled: QueueScheduledItem[];
   activity: ActivityItem[];
   cafes: Cafe[];
+  autostart: boolean;
 }
 
 let state: IpcState;
@@ -904,6 +905,7 @@ export function resetIpc(): void {
     queueScheduled: clone(SEED_QUEUE_SCHEDULED),
     activity: clone(SEED_ACTIVITY),
     cafes: clone(SEED_CAFES),
+    autostart: false,
   };
   loginJobIds = [];
   loginOutcomes = {};
@@ -1034,6 +1036,11 @@ export const invoke = vi.fn(
       case "open_chrome_download":
         // 브라우저 열기는 사이드이펙트뿐 — 목에서는 성공(void)으로 처리.
         return undefined;
+      case "get_autostart_enabled":
+        return state.autostart;
+      case "set_autostart":
+        state.autostart = args!.enabled as boolean;
+        return state.autostart;
 
       // --- accounts (stateful) ----------------------------------------------
       case "list_accounts":

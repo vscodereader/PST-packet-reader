@@ -244,4 +244,29 @@ describe("Notifications", () => {
       await screen.findByText(/IP 변경\(로테이션\)이 동작하지 않습니다/),
     ).toBeInTheDocument();
   });
+
+  it("toggles boot autostart through the IPC backend", async () => {
+    const { invoke } = await import("@/test/ipc");
+    renderLog();
+    const toggle = await screen.findByRole("switch", {
+      name: "부팅 자동 시작",
+    });
+    // 초기엔 꺼짐(mock 기본값).
+    await waitFor(() => expect(toggle).not.toBeChecked());
+
+    await userEvent.click(toggle);
+    await waitFor(() => expect(toggle).toBeChecked());
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.some(
+          (c) =>
+            c[0] === "set_autostart" && (c[1] as { enabled: boolean }).enabled,
+        ),
+    ).toBe(true);
+
+    // 다시 끄면 백엔드에 false 전달 + UI도 꺼짐.
+    await userEvent.click(toggle);
+    await waitFor(() => expect(toggle).not.toBeChecked());
+  });
 });

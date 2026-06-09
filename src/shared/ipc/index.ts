@@ -222,6 +222,13 @@ export const ipc = {
     /** Chrome 미설치 안내 카드의 "설치 페이지 열기" — 공식 다운로드 페이지를 기본 브라우저로 연다. */
     openChromeDownload: () => call<void>("open_chrome_download"),
   },
+  app: {
+    /** 부팅 자동 시작(OS 로그인 시 자동 실행) 등록 여부. */
+    getAutostart: () => call<boolean>("get_autostart_enabled"),
+    /** 부팅 자동 시작 등록 on/off. 갱신된 상태를 돌려준다. */
+    setAutostart: (enabled: boolean) =>
+      call<boolean>("set_autostart", { enabled }),
+  },
   // 종목토론방(forum) 즉시 게시 — 네이버 증권 토론방 패킷 게시 엔진 호출.
   forum: {
     /** 게시 엔진이 붙을 Chrome DevTools 엔드포인트. 백엔드가 단일 출처(프론트 상수 아님). */

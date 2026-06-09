@@ -12,6 +12,7 @@ import {
   Select,
   SimpleGrid,
   Stack,
+  Switch,
   Text,
   TextInput,
   ThemeIcon,
@@ -268,6 +269,27 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
   const [activity, setActivity] = useState<SystemRow[]>([]);
   const [env, setEnv] = useState<EnvironmentStatus | null>(null);
   const [envLoading, setEnvLoading] = useState(false);
+  // 부팅 자동 시작 등록 여부(null = 확인 중). 토글 중에는 busy로 입력을 막는다.
+  const [autostart, setAutostart] = useState<boolean | null>(null);
+  const [autostartBusy, setAutostartBusy] = useState(false);
+
+  // 부팅 자동 시작 등록 on/off. 스위치가 즉시 반응하도록 낙관적으로 갱신하고,
+  // 백엔드 응답으로 확정한다. 실패하면 이전 값으로 되돌리고 알림으로 알린다.
+  const toggleAutostart = useCallback((enabled: boolean) => {
+    setAutostart(enabled);
+    setAutostartBusy(true);
+    void ipc.app
+      .setAutostart(enabled)
+      .then(setAutostart)
+      .catch(() => {
+        setAutostart(!enabled);
+        notifications.show({
+          message: "자동 시작 설정을 바꾸지 못했어요.",
+          color: "red",
+        });
+      })
+      .finally(() => setAutostartBusy(false));
+  }, []);
 
   // Re-probe the live environment (Chrome/ADB) from the 새로고침 button. The
   // loading flag drives the button spinner; the initial probe runs in the effect
@@ -294,6 +316,10 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
 
   useEffect(() => {
     void ipc.diagnostics.getStatus().then(setEnv);
+    void ipc.app
+      .getAutostart()
+      .then(setAutostart)
+      .catch(() => setAutostart(false));
     void ipc.logBatches.list().then(setLogBatches);
     void ipc.activity.list().then((items) =>
       setActivity(
@@ -633,6 +659,33 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
           );
         })}
       </SimpleGrid>
+
+      {/* 부팅 자동 시작 — 켜면 컴퓨터를 켤 때 트레이로 자동 실행돼, 창을 닫아도/재부팅
+          후에도 예약 게시가 백그라운드로 이어진다. */}
+      <Card withBorder padding="md" radius="md" mb={22}>
+        <Group gap={13} wrap="nowrap" justify="space-between">
+          <Group gap={13} wrap="nowrap" style={{ minWidth: 0 }}>
+            <ThemeIcon size={40} radius="md" variant="light" color="blue">
+              <Icon.bolt size={21} />
+            </ThemeIcon>
+            <Box style={{ minWidth: 0 }}>
+              <Text fz={14} fw={800} lh={1}>
+                부팅 시 자동 시작
+              </Text>
+              <Text fz={12.5} c="dimmed" fw={600} mt={5}>
+                컴퓨터를 켜면 트레이로 자동 실행돼, 창을 닫거나 재부팅해도 예약
+                게시가 백그라운드로 이어집니다.
+              </Text>
+            </Box>
+          </Group>
+          <Switch
+            checked={autostart ?? false}
+            disabled={autostart === null || autostartBusy}
+            onChange={(e) => toggleAutostart(e.currentTarget.checked)}
+            aria-label="부팅 자동 시작"
+          />
+        </Group>
+      </Card>
 
       <Group justify="space-between" mb={16} wrap="wrap">
         <SegmentedControl
