@@ -572,8 +572,12 @@ pub fn manage_stores<R: Runtime>(app: &AppHandle<R>, dir: &Path) -> std::io::Res
 
 /// 프로세스가 부팅 자동 시작(`--autostart` 인자)으로 실행됐는지 판별한다. 자동 시작이면
 /// 창을 숨긴 채(트레이) 시작한다(재부팅 후 조용히 백그라운드 복귀).
+/// 부팅 자동 시작으로 실행됐음을 표시하는 인자. 플러그인 등록(`init`)과
+/// `launched_via_autostart` 검사가 같은 값을 쓰도록 상수로 묶는다.
+const AUTOSTART_FLAG: &str = "--autostart";
+
 fn launched_via_autostart<I: IntoIterator<Item = String>>(args: I) -> bool {
-    args.into_iter().any(|arg| arg == "--autostart")
+    args.into_iter().any(|arg| arg == AUTOSTART_FLAG)
 }
 
 /// 부팅 자동 시작 등록 여부를 돌려준다(설정 토글 표시용).
@@ -612,12 +616,12 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "tray-quit", "완전 종료", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
 
-    TrayIconBuilder::with_id("main-tray")
-        .icon(
-            app.default_window_icon()
-                .cloned()
-                .expect("default window icon is set by the bundle config"),
-        )
+    let mut builder = TrayIconBuilder::with_id("main-tray");
+    // 번들 아이콘이 있으면 트레이 아이콘으로 쓴다(없어도 패닉 없이 트레이는 만든다).
+    if let Some(icon) = app.default_window_icon().cloned() {
+        builder = builder.icon(icon);
+    }
+    builder
         .tooltip("pstmacro — 예약 게시 백그라운드 실행 중")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -649,7 +653,7 @@ pub fn run() {
         // (아래 setup에서 창을 숨긴 채 시작). 등록 on/off는 set_autostart 커맨드로 한다.
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec!["--autostart"]),
+            Some(vec![AUTOSTART_FLAG]),
         ))
         // 창 닫기(X)를 종료가 아니라 트레이로 숨김 처리 → 백그라운드 스케줄러 유지.
         // 완전 종료는 트레이 메뉴의 "완전 종료"로 한다.
@@ -668,8 +672,12 @@ pub fn run() {
                 "pstmacro backend starting"
             );
             manage_stores(app.handle(), &dir)?;
-            // 창을 닫아도 백그라운드로 도는 앱이므로 트레이 아이콘을 띄운다.
-            build_tray(app.handle())?;
+            // 창을 닫아도 백그라운드로 도는 앱이므로 트레이 아이콘을 띄운다. 트레이 생성
+            // 실패는 비치명적으로 둔다 — 앱(과 창)은 정상 동작해야 한다(창이 숨은 채로
+            // brick 되지 않게).
+            if let Err(error) = build_tray(app.handle()) {
+                tracing::error!(%error, "트레이 아이콘 생성 실패 — 트레이 없이 계속");
+            }
             // 창은 기본 숨김(conf visible:false). 일반 실행이면 보이고, 부팅 자동 시작
             // (`--autostart`)이면 숨긴 채 트레이로만 시작한다.
             if !launched_via_autostart(std::env::args()) {

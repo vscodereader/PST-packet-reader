@@ -273,13 +273,16 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
   const [autostart, setAutostart] = useState<boolean | null>(null);
   const [autostartBusy, setAutostartBusy] = useState(false);
 
-  // 부팅 자동 시작 등록 on/off. 실패하면 알림으로 알리고 상태를 되돌린다(백엔드 응답 기준).
+  // 부팅 자동 시작 등록 on/off. 스위치가 즉시 반응하도록 낙관적으로 갱신하고,
+  // 백엔드 응답으로 확정한다. 실패하면 이전 값으로 되돌리고 알림으로 알린다.
   const toggleAutostart = useCallback((enabled: boolean) => {
+    setAutostart(enabled);
     setAutostartBusy(true);
     void ipc.app
       .setAutostart(enabled)
       .then(setAutostart)
       .catch(() => {
+        setAutostart(!enabled);
         notifications.show({
           message: "자동 시작 설정을 바꾸지 못했어요.",
           color: "red",
