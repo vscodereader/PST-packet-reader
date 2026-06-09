@@ -188,6 +188,19 @@ describe("StockCrawlModal", () => {
     expect(screen.getByRole("button", { name: /적용/ })).toBeDisabled();
   });
 
+  it("체크박스를 직접 클릭해도 선택이 한 번에 토글된다", async () => {
+    renderModal();
+    await screen.findByText("SK하이닉스");
+    // 체크박스 자체 클릭 → 선택(적용 1). 체크박스+행 이중 토글이면 0으로 남아 실패.
+    fireEvent.click(screen.getByRole("checkbox"));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /적용 \(1\)/ })).toBeEnabled(),
+    );
+    // 다시 클릭 → 해제. readOnly로 상태가 안 풀리면 실패.
+    fireEvent.click(screen.getByRole("checkbox"));
+    expect(screen.getByRole("button", { name: /적용/ })).toBeDisabled();
+  });
+
   it("preselected 종목은 적용 시 행에서 이름을 찾아 반환한다", async () => {
     const { onConfirm } = renderModal({ preselected: ["000660"] });
     await screen.findByText("SK하이닉스");
