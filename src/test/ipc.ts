@@ -872,6 +872,8 @@ interface IpcState {
 let state: IpcState;
 // 로그인 큐에 enqueue된 계정 id (get_queue_status가 같은 id로 잡을 돌려주도록 보관).
 let loginJobIds: string[] = [];
+// 밴드 로그인 큐에 enqueue된 계정 id (get_band_queue_status용, 네이버 큐와 분리).
+let bandLoginJobIds: string[] = [];
 // 테스트에서 특정 계정의 로그인 결과를 실패 등으로 시뮬레이션하기 위한 오버라이드.
 // accountId → { status, message }. 미지정 계정은 success로 본다.
 let loginOutcomes: Record<string, { status: string; message: string }> = {};
@@ -908,6 +910,7 @@ export function resetIpc(): void {
     autostart: false,
   };
   loginJobIds = [];
+  bandLoginJobIds = [];
   loginOutcomes = {};
   articleListFailures = new Set();
 }
@@ -920,6 +923,22 @@ function loginQueueStatus() {
     isRunning: false,
     currentAccountId: null,
     jobs: loginJobIds.map((accountId) => {
+      const outcome = loginOutcomes[accountId];
+      return {
+        accountId,
+        status: outcome?.status ?? "success",
+        message: outcome?.message ?? "success",
+      };
+    }),
+  };
+}
+
+// 밴드 로그인 큐 상태(네이버와 동일 형태, 별도 job 목록). loginOutcomes 오버라이드 공유.
+function bandQueueStatus() {
+  return {
+    isRunning: false,
+    currentAccountId: null,
+    jobs: bandLoginJobIds.map((accountId) => {
       const outcome = loginOutcomes[accountId];
       return {
         accountId,
@@ -951,6 +970,50 @@ export const invoke = vi.fn(
               )
             : candidates,
         );
+      }
+      // 종목토론방 종목 선택 화면(m.stock.naver.com) — 시드 종목을 ForumStockPage로 반환.
+      case "list_forum_stocks":
+      case "search_forum_stocks": {
+        const query = ((args?.query as string | undefined) ?? "").trim();
+        // 시드 종목 + list_stocks 밖의 ETF 한 종목(0193T0): 칩 이름 보강 회귀 테스트용.
+        const FORUM_ONLY = {
+          code: "0193T0",
+          name: "KODEX SK하이닉스단일종목레버리지",
+          market: "코스피",
+          price: "",
+          chg: 0,
+        };
+        const pool = [
+          ...SEED_STOCKS.map((s) => ({
+            code: s.code,
+            name: s.name,
+            market: s.market,
+            price: s.price,
+            chg: s.chg,
+          })),
+          FORUM_ONLY,
+        ];
+        const matched =
+          cmd === "search_forum_stocks" && query
+            ? pool.filter(
+                (s) => s.name.includes(query) || s.code.includes(query),
+              )
+            : pool;
+        const stocks = matched.map((s) => ({
+          code: s.code,
+          name: s.name,
+          exchange: s.market,
+          price: s.price,
+          changeRate: String(s.chg),
+          changeType: s.chg > 0 ? "rising" : s.chg < 0 ? "falling" : "even",
+          isHotDiscussion: false,
+        }));
+        return clone({
+          stocks,
+          totalCount: stocks.length,
+          page: (args?.page as number | undefined) ?? 1,
+          hasNext: false,
+        });
       }
       case "list_activity":
         return clone(state.activity);
@@ -1031,6 +1094,29 @@ export const invoke = vi.fn(
       }
       case "list_bands":
         return clone(SEED_BANDS);
+      case "band_publish": {
+        // 밴드 가입+게시 목: 링크에서 band_no를 뽑아 성공 결과를 만든다.
+        const link = String(args!.bandLink ?? "");
+        const m = link.match(/\/band\/(\d+)|^(\d+)$/);
+        const bandNo = m ? (m[1] ?? m[2]) : "0";
+        return clone({
+          joined: true,
+          postNo: 1,
+          webUrl: `https://band.us/band/${bandNo}/post/1`,
+          commented: Boolean(String(args!.comment ?? "").trim()),
+          bandName: bandNo === "103043410" ? "데일밴드" : `밴드 ${bandNo}`,
+        });
+      }
+      case "record_band_batch":
+        // 밴드 게시 결과를 알림 배치에 기록(부작용). 테스트에선 호출 여부만 보므로 no-op.
+        return clone(null);
+      case "band_resolve_name": {
+        // 링크에서 band_no를 뽑아 밴드명을 만든다(103043410 → 데일밴드).
+        const link = String(args!.bandLink ?? "");
+        const m = link.match(/\/band\/(\d+)|^(\d+)$/);
+        const bandNo = m ? (m[1] ?? m[2]) : "0";
+        return clone(bandNo === "103043410" ? "데일밴드" : `밴드 ${bandNo}`);
+      }
       case "get_environment_status":
         return clone(SEED_ENV_STATUS);
       case "open_chrome_download":
@@ -1193,6 +1279,11 @@ export const invoke = vi.fn(
         return loginQueueStatus();
       case "get_queue_status":
         return loginQueueStatus();
+      case "enqueue_band_login":
+        bandLoginJobIds = (args?.accountIds as string[] | undefined) ?? [];
+        return bandQueueStatus();
+      case "get_band_queue_status":
+        return bandQueueStatus();
 
       default:
         throw new Error(`test ipc: unhandled command "${cmd}"`);

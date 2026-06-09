@@ -88,7 +88,13 @@ describe("PublishModal", () => {
     await userEvent.click(
       await screen.findByRole("button", { name: /종목 선택/ }),
     );
-    expect(await screen.findByText(/finance\.naver\.com/)).toBeInTheDocument();
+    // 재디자인된 종목 선택 모달은 검색창 + 카테고리 탭을 띄운다.
+    expect(
+      await screen.findByPlaceholderText("종목명 또는 코드 검색"),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "거래대금" }),
+    ).toBeInTheDocument();
   });
 
   it("starts the publish flow and shows progress", async () => {
@@ -187,6 +193,24 @@ describe("PublishModal", () => {
     expect(await screen.findByText("0개")).toBeInTheDocument();
   });
 
+  it("toggles selection when the checkbox itself is clicked (exactly once)", async () => {
+    renderPublish();
+    // invest_king7 (a1) is preselected → its checkbox is the only checked one.
+    expect(await screen.findByText("1개")).toBeInTheDocument();
+    const checkedBoxes = (await screen.findAllByRole("checkbox")).filter(
+      (b) => (b as HTMLInputElement).checked,
+    );
+    expect(checkedBoxes).toHaveLength(1);
+    // Clicking the checkbox itself must register a single toggle → deselected.
+    // (A double-toggle from the checkbox + the row bubbling would leave it at 1개.)
+    await userEvent.click(checkedBoxes[0]!);
+    expect(await screen.findByText("0개")).toBeInTheDocument();
+    // And clicking it again re-selects — the control is not stuck.
+    const box = (await screen.findAllByRole("checkbox"))[0]!;
+    await userEvent.click(box);
+    expect(await screen.findByText("1개")).toBeInTheDocument();
+  });
+
   it("selects every visible account and expands the destinations", async () => {
     renderPublish();
     await userEvent.click(
@@ -207,6 +231,25 @@ describe("PublishModal", () => {
     );
     await userEvent.type(input, "https://x.test");
     expect(input).toHaveValue("https://x.test");
+  });
+
+  it("선택한 종목(시드 밖)도 이름으로 칩에 표시된다", async () => {
+    renderPublish();
+    // forum 계정이 기본 선택돼 있어 종목 칩 영역이 보인다.
+    await userEvent.click(
+      await screen.findByRole("button", { name: /종목 선택/ }),
+    );
+    // list_stocks 밖의 ETF(0193T0)를 검색해 고른다.
+    const search = await screen.findByPlaceholderText("종목명 또는 코드 검색");
+    await userEvent.type(search, "0193T0");
+    await userEvent.click(
+      await screen.findByText("KODEX SK하이닉스단일종목레버리지"),
+    );
+    await userEvent.click(await screen.findByRole("button", { name: /적용/ }));
+    // onConfirm으로 받은 이름이 칩에 그대로 표시된다(코드가 아니라 이름).
+    expect(
+      await screen.findByText("KODEX SK하이닉스단일종목레버리지"),
+    ).toBeInTheDocument();
   });
 
   it("removes a selected stock chip", async () => {
@@ -373,15 +416,15 @@ describe("PublishModal", () => {
     await userEvent.click(screen.getByText("value_invest"));
     await screen.findByPlaceholderText("가입 카페 선택");
     await pickOption(0, "개미투자 카페");
-    // forum + band + naver = 3곳.
+    // forum + naver = 2곳 (밴드 계정은 선택됐지만 게시할 밴드 미선택 → 0건).
     await screen.findByRole(
       "button",
-      { name: /^게시 \(3\)/ },
+      { name: /^게시 \(2\)/ },
       { timeout: 3000 },
     );
     await userEvent.click(await screen.findByText("예약 게시"));
     await userEvent.click(
-      await screen.findByRole("button", { name: /^예약 \(3\)/ }),
+      await screen.findByRole("button", { name: /^예약 \(2\)/ }),
     );
     const call = ipcBackend.mock.calls.find(
       (c) => c[0] === "add_queue_scheduled",
@@ -742,25 +785,22 @@ describe("PublishModal", () => {
     );
   });
 
-  it("picks a per-account cafe/board and the band destination", async () => {
+  it("picks a per-account cafe/board with a band account selected too", async () => {
     renderPublish();
     // Add a naver and a band account alongside the default forum one.
     await userEvent.click(await screen.findByText("money_lab")); // a5 naver
     await userEvent.click(screen.getByText("value_invest")); // a7 band
     await screen.findByPlaceholderText("가입 카페 선택");
-    // naver row exposes cafe (0) + board (1); band card adds the band select (2)
+    // naver row exposes cafe (0) + board (1); 밴드는 링크/실제밴드명 드롭다운(2).
     await pickOption(0, "개미투자 카페");
-    // forum (a1) + band (a7) = 2 jobs; the naver job lands once its first board
-    // is auto-selected, bringing the total to 3.
+    // forum (a1) = 1 job; the naver job lands once its first board auto-selects → 2.
+    // (밴드 계정은 선택됐지만 게시할 밴드 미선택 → 밴드 잡 0건.)
     await screen.findByRole(
       "button",
-      { name: /^게시 \(3\)/ },
+      { name: /^게시 \(2\)/ },
       { timeout: 3000 },
     );
     await pickOption(1, "공지사항");
-    await pickOption(2, "단타클럽 BAND");
-    // Mantine Select keeps a hidden duplicate input, so assert on the visible
-    // listbox inputs in order: cafe, board, band.
     const combos = [
       ...document.querySelectorAll<HTMLInputElement>(
         'input[aria-haspopup="listbox"]',
@@ -768,6 +808,68 @@ describe("PublishModal", () => {
     ];
     expect(combos[0]).toHaveValue("개미투자 카페");
     expect(combos[1]).toHaveValue("공지사항");
-    expect(combos[2]).toHaveValue("단타클럽 BAND");
+    // 밴드 링크 입력란이 있고, 시드 밴드명(단타클럽 BAND 등)은 더 이상 없다.
+    expect(screen.getByLabelText("밴드 링크")).toBeInTheDocument();
+    expect(screen.queryByText("단타클럽 BAND")).not.toBeInTheDocument();
+  });
+
+  it("requires a selected band before publishing (button disabled until then)", async () => {
+    renderPublish();
+    await userEvent.click(await screen.findByText("value_invest")); // band a7
+    // 밴드 미선택: 안내 문구 + 게시 버튼 비활성.
+    expect(screen.getByText(/게시할 밴드를 선택하세요/)).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: /^게시 \(\d+\)/ }),
+    ).toBeDisabled();
+  });
+
+  it("accumulates bands from links, multi-selects, and publishes to each", async () => {
+    renderPublish();
+    await userEvent.click(await screen.findByText("value_invest")); // band a7
+
+    const linkInput = screen.getByLabelText("밴드 링크");
+    const saveBtn = screen.getByRole("button", { name: "저장" });
+
+    // 링크 저장 → resolveName 조회 완료(옵션 등장) 후 드롭다운에서 선택 → 칩.
+    const addBand = async (link: string, name: string) => {
+      await userEvent.type(linkInput, link);
+      await waitFor(() => expect(saveBtn).toBeEnabled());
+      await userEvent.click(saveBtn);
+      await waitFor(() => expect(linkInput).toHaveValue(""));
+      // 조회 완료 시 드롭다운(Select)이 활성화된다(placeholder 변경으로 확인).
+      await screen.findByPlaceholderText("게시할 밴드 선택");
+      await pickOption(0, name); // 드롭다운(유일 listbox)에서 밴드 선택 → 칩
+    };
+
+    await addBand("https://band.us/band/103043410", "데일밴드"); // 목: 103043410→데일밴드
+    expect(await screen.findByLabelText("데일밴드 제거")).toBeInTheDocument(); // 칩
+    await addBand("https://band.us/band/999", "밴드 999");
+    expect(await screen.findByLabelText("밴드 999 제거")).toBeInTheDocument(); // 칩
+
+    // 게시 → 선택한 각 밴드 링크로 band_publish가 호출되어야 한다.
+    const publishBtn = await screen.findByRole("button", {
+      name: /^게시 \(\d+\)/,
+    });
+    await waitFor(() => expect(publishBtn).toBeEnabled());
+    await userEvent.click(publishBtn);
+    await waitFor(() => {
+      const links = ipcBackend.mock.calls
+        .filter((c) => c[0] === "band_publish")
+        .map((c) => (c[1] as { bandLink: string }).bandLink);
+      expect(links).toContain("https://band.us/band/103043410");
+      expect(links).toContain("https://band.us/band/999");
+    });
+    // 밴드 게시 결과가 알림(게시 배치)에 기록되도록 record_band_batch가 호출된다
+    // (종토방처럼 알림에 떠야 함). 선택한 두 밴드가 items로 들어간다.
+    await waitFor(() => {
+      const rec = ipcBackend.mock.calls.find(
+        (c) => c[0] === "record_band_batch",
+      );
+      expect(rec).toBeTruthy();
+      const arg = rec![1] as { items: { target: string }[] };
+      const targets = arg.items.map((i) => i.target);
+      expect(targets).toContain("데일밴드");
+      expect(targets).toContain("밴드 999");
+    });
   });
 });

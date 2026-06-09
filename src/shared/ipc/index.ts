@@ -10,6 +10,8 @@ import type { CommentDistributionRequest } from "@/shared/bindings/CommentDistri
 import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutcome";
 import type { DashStat } from "@/shared/bindings/DashStat";
 import type { EnvironmentStatus } from "@/shared/bindings/EnvironmentStatus";
+import type { ForumStockCategory } from "@/shared/bindings/ForumStockCategory";
+import type { ForumStockPage } from "@/shared/bindings/ForumStockPage";
 import type { ImportSummary } from "@/shared/bindings/ImportSummary";
 import type { JoinedCafe } from "@/shared/bindings/JoinedCafe";
 import type { LibraryPost } from "@/shared/bindings/LibraryPost";
@@ -20,6 +22,7 @@ import type { QueueNowItem } from "@/shared/bindings/QueueNowItem";
 import type { QueueScheduledItem } from "@/shared/bindings/QueueScheduledItem";
 import type { SortBy } from "@/shared/bindings/SortBy";
 import type { Stock } from "@/shared/bindings/Stock";
+import type { StockExchange } from "@/shared/bindings/StockExchange";
 import type { StockCandidate } from "@/shared/data/types";
 
 export type {
@@ -72,6 +75,27 @@ export interface ForumPublishResult {
   name: string;
   ok: boolean;
   message: string;
+}
+
+/** 밴드 가입+게시 요청. accountId는 band 로그인 쿠키 키(loginId). */
+export interface BandPublishRequest {
+  accountId: string;
+  /** 가입할 밴드 링크(`https://band.us/band/{no}` 형태). */
+  bandLink: string;
+  title: string;
+  content: string;
+  /** 선택 댓글. 비우면 댓글 미작성. */
+  comment?: string;
+}
+
+/** 밴드 가입+게시 결과(band_post::BandPublishOutcome 미러). */
+export interface BandPublishOutcome {
+  joined: boolean;
+  postNo: number;
+  webUrl: string;
+  commented: boolean;
+  /** 실제 게시된 밴드 이름(게시 응답 post.band.name). 응답에 없으면 null. */
+  bandName: string | null;
 }
 
 /** A naver-login account (auth module): keyed by loginId so cookies land at cookies/{loginId}.json. */
@@ -165,6 +189,19 @@ export const ipc = {
     search: (query: string) =>
       call<StockCandidate[]>("search_stocks", { query }),
   },
+  // 종목토론방 종목 선택 화면 — 네이버 모바일(m.stock.naver.com) 종목 데이터.
+  forumStocks: {
+    /** 카테고리(토론/거래대금/인기/상승/하락/거래량) × 거래소(krx/nxt) 한 페이지. */
+    list: (
+      category: ForumStockCategory,
+      exchange: StockExchange,
+      page: number,
+    ) =>
+      call<ForumStockPage>("list_forum_stocks", { category, exchange, page }),
+    /** 검색어 포함 국내 종목 한 페이지(80개 상한 없음). */
+    search: (query: string, page: number) =>
+      call<ForumStockPage>("search_forum_stocks", { query, page }),
+  },
   activity: {
     list: () => call<ActivityItem[]>("list_activity"),
     append: (kind: "success" | "error" | "info", text: string) =>
@@ -216,6 +253,34 @@ export const ipc = {
       }),
   },
   bands: { list: () => call<Band[]>("list_bands") },
+  // 밴드(band.us) 가입+게시 — 순수 HTTP(md 서명). 링크로 가입 후 글/댓글 게시.
+  band: {
+    publish: (request: BandPublishRequest) =>
+      call<BandPublishOutcome>("band_publish", { ...request }),
+    /**
+     * 밴드 계정 선택로그인 — 네이버가 아니라 band.us(CDP)로 로그인한다.
+     * 네이버 로그인 큐와 분리된 band 큐를 쓴다(상태는 queueStatus로 폴링).
+     */
+    login: (accountIds: string[], headless = false, useAdb = false) =>
+      call<LoginQueueStatus>("enqueue_band_login", {
+        accountIds,
+        headless,
+        useAdb,
+      }),
+    queueStatus: () => call<LoginQueueStatus>("get_band_queue_status"),
+    /** 링크(band_no)로 실제 밴드명을 조회한다(저장 시 표시용). accountId=band 쿠키 키. */
+    resolveName: (accountId: string, bandLink: string) =>
+      call<string>("band_resolve_name", { accountId, bandLink }),
+    /** 밴드 게시 결과를 알림(게시 배치)에 기록한다(종토방처럼 알림에 표시되도록). */
+    recordBatch: (input: {
+      title: string;
+      body: string;
+      comment: string;
+      runPost: boolean;
+      runComment: boolean;
+      items: { target: string; loginId: string; ok: boolean; msg: string }[];
+    }) => call<void>("record_band_batch", { ...input }),
+  },
   diagnostics: {
     /** Probe Chrome install/version + ADB device connection (UI 새로고침). */
     getStatus: () => call<EnvironmentStatus>("get_environment_status"),

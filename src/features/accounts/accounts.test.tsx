@@ -397,6 +397,46 @@ describe("Accounts", () => {
     ).toBeInTheDocument();
   });
 
+  it("runs band login (not naver) for a band-platform account", async () => {
+    await renderAccounts();
+    // 첫 행의 플랫폼을 밴드로 바꾼다 (combos[1] = 첫 행 플랫폼 select).
+    await pickOption(1, "밴드");
+    vi.mocked(ipcBackend).mockClear();
+
+    // checkbox[0]은 전체선택 헤더, [1]이 첫 데이터 행(a1).
+    const checkboxes = screen.getAllByRole("checkbox");
+    await userEvent.click(checkboxes[1]!);
+    await userEvent.click(screen.getByRole("button", { name: /선택 로그인/ }));
+
+    // 밴드 계정은 네이버가 아니라 band 로그인 큐로 enqueue 되어야 한다.
+    await waitFor(() =>
+      expect(ipcBackend).toHaveBeenCalledWith("enqueue_band_login", {
+        accountIds: ["invest_king7"],
+        headless: false,
+        useAdb: false,
+      }),
+    );
+    // 네이버 로그인(enqueue_cookie_refresh)은 호출되지 않아야 한다.
+    expect(ipcBackend).not.toHaveBeenCalledWith(
+      "enqueue_cookie_refresh",
+      expect.anything(),
+    );
+
+    // 2초 상태 폴링이 band 큐 결과로 계정을 active로 반영한다.
+    await waitFor(
+      () => {
+        const call = vi
+          .mocked(ipcBackend)
+          .mock.calls.find((c) => c[0] === "update_account");
+        expect(call).toBeTruthy();
+        expect(
+          (call![1] as { account: { status: string } }).account.status,
+        ).toBe("active");
+      },
+      { timeout: 4000 },
+    );
+  });
+
   it("runs naver login for the selected account", async () => {
     await renderAccounts();
     vi.mocked(ipcBackend).mockClear();

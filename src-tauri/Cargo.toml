@@ -26,6 +26,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ts-rs = "12"
 serde_urlencoded = "0.7"
+urlencoding = "2"
 tokio = { version = "1", features = ["full"] }
 thiserror = "1"
 # rustls-tls(순수 Rust TLS)로 Windows 크로스 컴파일 시 openssl 시스템 의존을 피한다.
@@ -50,6 +51,10 @@ tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 # 데스크톱(OS) 토스트 — 트레이 상주 중 게시 완료·놓침 능동 통지(#163)
 tauri-plugin-notification = "2"
+# band.us api `md` 서명(HMAC-SHA256 → base64). band-web `BandWebAuthModule.makeMd` 미러.
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

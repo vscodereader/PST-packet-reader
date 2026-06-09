@@ -1,0 +1,28 @@
+{
+  "isSuccess": true,
+  "result": {
+    "totalCount": 4396,
+    "page": 1,
+    "pageSize": 50,
+    "stocks": [
+      {
+        "id": "000660",
+        "name": "SK하이닉스",
+        "itemCode": "000660",
+        "stockExchangeType": "KOSPI",
+        "currentPrice": 1911000,
+        "fluctuationsType": "FALLING",
+        "fluctuationsRatio": "-7.68"
+      },
+      {
+        "id": "122630",
+        "name": "KODEX 레버리지",
+        "itemCode": "122630",
+        "stockExchangeType": "KOSPI",
+        "currentPrice": 158165,
+        "fluctuationsType": "FALLING",
+        "fluctuationsRatio": "-16.68"
+      }
+    ]
+  }
+}
