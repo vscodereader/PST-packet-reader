@@ -116,18 +116,32 @@ export function Queue({ go }: { go: GoFn }) {
   }, [now, dragId]);
 
   useEffect(() => {
-    void ipc.queue.listNow().then(setNow);
-    void ipc.queue.listScheduled().then(setSched);
+    // in-flight Promise가 언마운트 후 resolve돼 unmounted setState가 되지 않도록
+    // alive 가드를 둔다. cleanup에서 false로 만들어 이후 콜백을 무시한다.
+    let alive = true;
+    void ipc.queue.listNow().then((v) => {
+      if (alive) setNow(v);
+    });
+    void ipc.queue.listScheduled().then((v) => {
+      if (alive) setSched(v);
+    });
     // 워커 진행률·상태를 주기적으로 반영. 단 드래그 중이거나 순서 영속화 대기 중에는
     // 사용자가 맞춘 로컬 순서를 덮어쓰지 않도록 폴링을 건너뛴다.
     const timer = window.setInterval(() => {
       // 예약 큐는 드래그 대상이 아니므로 항상 폴링한다 — 스케줄러의 자동 게시(예약→now
       // 이동)와 "놓침" 표시가 화면에 실시간 반영되게 한다.
-      void ipc.queue.listScheduled().then(setSched);
+      void ipc.queue.listScheduled().then((v) => {
+        if (alive) setSched(v);
+      });
       if (dragIdRef.current !== null || persistingRef.current) return;
-      void ipc.queue.listNow().then(setNow);
+      void ipc.queue.listNow().then((v) => {
+        if (alive) setNow(v);
+      });
     }, 1500);
-    return () => window.clearInterval(timer);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
   }, []);
 
   // 대기열 순서를 백엔드에 영속화한다. 응답이 올 때까지 폴링을 막아(persistingRef)
@@ -137,6 +151,15 @@ export function Queue({ go }: { go: GoFn }) {
     void ipc.queue
       .reorderNow(orderedIds)
       .then(setNow)
+      .catch(() => {
+        // 영속화 실패 시 낙관적 순서가 백엔드와 어긋난 채 남지 않도록 현재
+        // 순서를 다시 불러와 되돌리고, 실패를 사용자에게 알린다.
+        void ipc.queue.listNow().then(setNow);
+        notifications.show({
+          message: "순서 변경을 저장하지 못했어요",
+          color: "red",
+        });
+      })
       .finally(() => {
         persistingRef.current = false;
       });
@@ -155,19 +178,24 @@ export function Queue({ go }: { go: GoFn }) {
     });
   };
   const move = (id: string, dir: -1 | 1) => {
-    const list = nowRef.current;
-    const pinned = pinnedCount(list);
-    const i = list.findIndex((x) => x.id === id);
-    const j = i + dir;
-    if (i < pinned || j < pinned || j >= list.length) return;
-    const copy = [...list];
-    const a = copy[i];
-    const b = copy[j];
-    if (!a || !b) return;
-    copy[i] = b;
-    copy[j] = a;
-    setNow(copy);
-    persistOrder(copy.map((x) => x.id));
+    // reorder()와 동일하게 함수형 업데이트 안에서 스왑해 빠른 연속 클릭 시 stale
+    // 리스트로 동작하지 않게 한다. 스왑 결과는 바깥 변수에 잡아 persistOrder에 넘긴다.
+    let swapped: QueueNowItem[] | null = null;
+    setNow((list) => {
+      const pinned = pinnedCount(list);
+      const i = list.findIndex((x) => x.id === id);
+      const j = i + dir;
+      if (i < pinned || j < pinned || j >= list.length) return list;
+      const copy = [...list];
+      const a = copy[i];
+      const b = copy[j];
+      if (!a || !b) return list;
+      copy[i] = b;
+      copy[j] = a;
+      swapped = copy;
+      return copy;
+    });
+    if (swapped) persistOrder((swapped as QueueNowItem[]).map((x) => x.id));
   };
   const cancel = (id: string) => {
     void ipc.queue.cancelNow(id).then(setNow);
@@ -270,6 +298,10 @@ export function Queue({ go }: { go: GoFn }) {
               }
               onDragStart={(e) => {
                 setDragId(q.id);
+                // 폴링 가드(dragIdRef.current !== null)가 즉시 막도록 ref도 동기 세팅.
+                // setDragId 반영용 effect는 이번 tick 이후라 그 사이 폴링이 순서를
+                // 덮어쓰는 것을 막는다.
+                dragIdRef.current = q.id;
                 e.dataTransfer.effectAllowed = "move";
               }}
               onDragOver={(e) => {
@@ -279,6 +311,7 @@ export function Queue({ go }: { go: GoFn }) {
               onDragEnd={() => {
                 const dragged = dragId !== null;
                 setDragId(null);
+                dragIdRef.current = null;
                 // 드래그로 바뀐 최종 순서를 백엔드에 영속화한다.
                 if (dragged) persistOrder(nowRef.current.map((x) => x.id));
               }}
@@ -347,7 +380,11 @@ export function Queue({ go }: { go: GoFn }) {
               {running ? (
                 <Group gap={8} wrap="nowrap">
                   <Badge size="sm" color="blue" variant="light">
-                    처리중 {q.progress?.[0]}/{q.progress?.[1]}
+                    {(() => {
+                      // progress가 아직 없으면 "처리중 /"로 깨지지 않도록 0/0 폴백.
+                      const [d, t] = q.progress ?? [0, 0];
+                      return `처리중 ${d}/${t}`;
+                    })()}
                   </Badge>
                   <Icon.chevronRight
                     size={17}
