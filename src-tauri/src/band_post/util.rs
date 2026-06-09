@@ -1,0 +1,41 @@
+//! band_post용 소량 시간 헬퍼. `band_auth::util`은 비공개 모듈이라 재사용할 수 없어
+//! 필요한 것만 복제한다.
+
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// 파일명으로 안전하도록 문자열을 정제한다(band_auth `safe_file_stem` 미러).
+pub fn safe_file_stem(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// 현재 시간을 밀리초 Unix timestamp로 반환한다(band api `ts` 쿼리용).
+pub fn now_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn now_millis_is_post_2020() {
+        assert!(now_millis() > 1_600_000_000_000);
+    }
+
+    #[test]
+    fn safe_file_stem_replaces_unsafe_chars() {
+        assert_eq!(safe_file_stem("a/b@c.com"), "a_b_c.com");
+    }
+}

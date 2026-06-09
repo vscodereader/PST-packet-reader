@@ -338,6 +338,13 @@ export function Accounts({ go }: { go: GoFn }) {
     }
     setLoggingIn(true);
     try {
+      // 플랫폼이 밴드인 계정은 네이버가 아니라 band.us로 로그인한다. 종목토론방·
+      // 네이버카페는 기존대로 네이버 로그인 큐를 쓴다(기존 동작 무수정).
+      const bandTargets = targets.filter((t) => t.platform === "band");
+      const naverTargets = targets.filter((t) => t.platform !== "band");
+
+      // 계정 자격증명은 양쪽 큐가 같은 accounts.json(id=loginId)을 읽으므로 한 번만 저장한다.
+      // save_accounts는 id 기준 병합이라 두 그룹이 서로를 덮어쓰지 않는다.
       await ipc.auth.bootstrap();
       await ipc.auth.saveAccounts(
         targets.map((t) => ({
@@ -346,13 +353,24 @@ export function Accounts({ go }: { go: GoFn }) {
           label: t.loginId,
         })),
       );
-      // 명시적 선택 계정 로그인 → force=true: 서버측에서 죽었지만 로컬 검증만 통과하는
-      // 쿠키도 실제 재로그인으로 새로 덮어쓴다(이슈 #132).
-      await ipc.auth.enqueueLogin(
-        targets.map((t) => t.loginId),
-        false,
-        true,
-      );
+
+      if (naverTargets.length > 0) {
+        // 명시적 선택 계정 로그인 → force=true: 서버측에서 죽었지만 로컬 검증만 통과하는
+        // 쿠키도 실제 재로그인으로 새로 덮어쓴다(이슈 #132).
+        await ipc.auth.enqueueLogin(
+          naverTargets.map((t) => t.loginId),
+          false,
+          true,
+        );
+      }
+      if (bandTargets.length > 0) {
+        // 밴드 선택로그인: band.us(CDP)로 로그인. 랜선만 꽂으면 되며 ADB 불필요.
+        await ipc.band.login(
+          bandTargets.map((t) => t.loginId),
+          false,
+          false,
+        );
+      }
       pollLogin(targets);
     } catch (err) {
       setLoggingIn(false);
@@ -374,13 +392,22 @@ export function Accounts({ go }: { go: GoFn }) {
     // 행 추적은 고유키 id로 한다(loginId는 유니크가 보장되지 않아 같은 loginId의 두 행이
     // 하나로 합쳐지면 한쪽만 반영된다).
     const remaining = new Set(targets.map((t) => t.id));
+    // 밴드 계정은 별도 band 큐(get_band_queue_status)에서 결과를 읽고, 나머지는 기존
+    // 네이버 큐(get_queue_status)에서 읽는다. 선택에 포함된 큐만 조회한다.
+    const needNaver = targets.some((t) => t.platform !== "band");
+    const needBand = targets.some((t) => t.platform === "band");
 
     loginPollRef.current = window.setInterval(() => {
-      void ipc.auth
-        .queueStatus()
-        .then((status) => {
+      void Promise.all([
+        needNaver ? ipc.auth.queueStatus() : Promise.resolve(null),
+        needBand ? ipc.band.queueStatus() : Promise.resolve(null),
+      ])
+        .then(([naverStatus, bandStatus]) => {
           targets.forEach((t) => {
             if (!remaining.has(t.id)) return;
+            // 계정 플랫폼에 맞는 큐 상태에서 잡을 찾는다.
+            const status = t.platform === "band" ? bandStatus : naverStatus;
+            if (!status) return;
             // 백엔드 잡은 loginId(=쿠키 키)로 식별된다. 같은 loginId를 쓰는 행들은
             // 같은 잡 결과를 각자(id별로) 반영한다.
             const job = [...status.jobs]

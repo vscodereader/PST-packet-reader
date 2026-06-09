@@ -32,7 +32,6 @@ import {
 } from "@/shared/data/helpers";
 import type {
   Account,
-  Band,
   Board,
   GoFn,
   LibraryPost,
@@ -78,6 +77,21 @@ interface NaverPick {
   boardName: string;
   menuId: number;
   boardType: string;
+}
+
+/** 저장된 밴드 링크 하나 → 조회된 실제 밴드명. 게시 대상 목록(드롭다운)을 이룬다. */
+interface ResolvedBand {
+  bandNo: string;
+  name: string;
+  link: string;
+}
+
+/** 밴드 링크에서 band_no를 뽑는다. 숫자만/`/band/{no}`/실패 시 원문 trim. */
+function bandNoFromLink(link: string): string {
+  const t = link.trim();
+  if (/^\d+$/.test(t)) return t;
+  const m = t.match(/\/band\/(\d+)/);
+  return m ? m[1]! : t;
 }
 
 function AccountRow({
@@ -138,9 +152,14 @@ function DestinationPicker({
   stockNames,
   openStockModal,
   removeStock,
-  band,
-  setBand,
-  bands,
+  bandLink,
+  setBandLink,
+  bandResolving,
+  resolvedBands,
+  selectedBands,
+  onSaveBandLink,
+  onSelectBand,
+  onRemoveBand,
   stocks,
   naverAccounts,
   joinedByAccount,
@@ -157,9 +176,14 @@ function DestinationPicker({
   stockNames: Record<string, string>;
   openStockModal: () => void;
   removeStock: (code: string) => void;
-  band: string;
-  setBand: (v: string) => void;
-  bands: Band[];
+  bandLink: string;
+  setBandLink: (v: string) => void;
+  bandResolving: boolean;
+  resolvedBands: ResolvedBand[];
+  selectedBands: string[];
+  onSaveBandLink: () => void;
+  onSelectBand: (bandNo: string) => void;
+  onRemoveBand: (bandNo: string) => void;
   stocks: Stock[];
   naverAccounts: Account[];
   joinedByAccount: Record<string, JoinedCafe[]>;
@@ -330,13 +354,83 @@ function DestinationPicker({
               밴드
             </Text>
           </Group>
-          <Box p={10}>
+          <Stack gap={8} p={10}>
+            {/* 사수 요구 흐름: 가입할 밴드 링크를 한 줄씩 입력→저장하면 실제 밴드명을
+                조회해 아래 드롭다운(사수 UI)에 누적. 거기서 게시할 밴드를 다중 선택→칩. */}
+            <Group gap={8} align="flex-end" wrap="nowrap">
+              <TextInput
+                style={{ flex: 1 }}
+                label="가입할 밴드 링크"
+                placeholder="https://band.us/band/103043410"
+                value={bandLink}
+                onChange={(e) => setBandLink(e.currentTarget.value)}
+                leftSection={<Icon.link size={14} />}
+                aria-label="밴드 링크"
+              />
+              <Button
+                variant="light"
+                color="band"
+                onClick={onSaveBandLink}
+                disabled={!bandLink.trim() || bandResolving}
+              >
+                저장
+              </Button>
+            </Group>
+            {bandResolving && (
+              <Group gap={6} wrap="nowrap">
+                <Loader size="xs" />
+                <Text fz={12} c="dimmed">
+                  밴드 정보를 확인하는 중…
+                </Text>
+              </Group>
+            )}
+            {/* 사수의 드롭다운: 저장으로 누적된 실제 밴드명 목록에서 게시할 밴드 선택 */}
             <Select
-              value={band}
-              data={bands.map((b) => b.name)}
-              onChange={(v) => setBand(v ?? "")}
+              placeholder={
+                resolvedBands.length
+                  ? "게시할 밴드 선택"
+                  : "링크를 저장하면 밴드가 여기 표시됩니다"
+              }
+              data={resolvedBands.map((b) => b.name)}
+              value={null}
+              disabled={resolvedBands.length === 0}
+              onChange={(name) => {
+                const b = resolvedBands.find((x) => x.name === name);
+                if (b) onSelectBand(b.bandNo);
+              }}
             />
-          </Box>
+            {selectedBands.length > 0 ? (
+              <Group gap={6}>
+                {selectedBands.map((no) => {
+                  const b = resolvedBands.find((x) => x.bandNo === no);
+                  return (
+                    <Badge
+                      key={no}
+                      color="band"
+                      variant="light"
+                      rightSection={
+                        <ActionIcon
+                          size={14}
+                          variant="transparent"
+                          color="band"
+                          aria-label={`${b?.name ?? no} 제거`}
+                          onClick={() => onRemoveBand(no)}
+                        >
+                          <Icon.x size={10} />
+                        </ActionIcon>
+                      }
+                    >
+                      {b?.name ?? no}
+                    </Badge>
+                  );
+                })}
+              </Group>
+            ) : (
+              <Text fz={12} c="orange.7">
+                게시할 밴드를 선택하세요.
+              </Text>
+            )}
+          </Stack>
         </Box>
       )}
     </Stack>
@@ -582,13 +676,49 @@ function scheduleMoment(
 function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [stocks, setStocks] = useState<Stock[]>([]);
-  const [bands, setBands] = useState<Band[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [stockCodes, setStockCodes] = useState<string[]>(["005930"]);
   // 라이브 검색으로 고른 종목의 이름(시드 목록에 없을 수 있어 onConfirm에서 받아둠).
   const [stockNames, setStockNames] = useState<Record<string, string>>({});
   const [stockModal, setStockModal] = useState(false);
-  const [band, setBand] = useState("");
+  // 밴드: 링크를 한 줄씩 저장하면 그 링크의 실제 밴드명을 조회해 resolvedBands에 누적하고,
+  // 사수의 드롭다운에서 게시할 밴드(selectedBands=bandNo[])를 다중 선택한다.
+  const [resolvedBands, setResolvedBands] = useState<ResolvedBand[]>([]);
+  const [selectedBands, setSelectedBands] = useState<string[]>([]);
+  const [bandLink, setBandLink] = useState("");
+  const [bandResolving, setBandResolving] = useState(false);
+
+  // 링크 저장: 링크에서 band_no를 뽑고, 선택된 밴드 계정의 쿠키로 실제 밴드명을 조회해
+  // resolvedBands에 추가한다(같은 band_no는 중복 제거). 조회 실패 시 링크를 이름으로 폴백.
+  const saveBandLink = () => {
+    const link = bandLink.trim();
+    if (!link) return;
+    const bandNo = bandNoFromLink(link);
+    const bandAcct = selected
+      .map((id) => accounts.find((a) => a.id === id))
+      .find((a): a is Account => !!a && a.platform === "band");
+    setBandLink("");
+    const add = (name: string) =>
+      setResolvedBands((prev) =>
+        prev.some((b) => b.bandNo === bandNo)
+          ? prev
+          : [...prev, { bandNo, name, link }],
+      );
+    if (!bandAcct) {
+      add(link);
+      return;
+    }
+    setBandResolving(true);
+    ipc.band
+      .resolveName(bandAcct.loginId, link)
+      .then((name) => add(name))
+      .catch(() => add(link))
+      .finally(() => setBandResolving(false));
+  };
+  const selectBand = (no: string) =>
+    setSelectedBands((s) => (s.includes(no) ? s : [...s, no]));
+  const removeBand = (no: string) =>
+    setSelectedBands((s) => s.filter((x) => x !== no));
   // Account-driven naver state: joined cafes per account, boards per cafe, and
   // each account's chosen cafe/board. Loaded live on selection and cached for
   // the modal session (the refresh control re-fetches).
@@ -636,10 +766,6 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       setSelected((s) => (s.length || !firstUsable ? s : [firstUsable.id]));
     });
     void ipc.stocks.list().then(setStocks);
-    void ipc.bands.list().then((b) => {
-      setBands(b);
-      setBand((cur) => cur || (b[0]?.name ?? ""));
-    });
   }, []);
 
   // Fetch an account's joined cafes once (cached in `joinedReqRef`); the refresh
@@ -882,13 +1008,18 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         });
       }
     } else if (a.platform === "band") {
-      jobs.push({
-        key: aid,
-        platform: "band",
-        loginId: a.loginId,
-        targetName: band,
-        board: "전체글",
-        status: a.status,
+      // 선택한 각 밴드마다 잡 1개(계정 × 밴드). 라벨은 조회된 실제 밴드명.
+      selectedBands.forEach((no) => {
+        const b = resolvedBands.find((x) => x.bandNo === no);
+        if (!b) return;
+        jobs.push({
+          key: `${aid}-${no}`,
+          platform: "band",
+          loginId: a.loginId,
+          targetName: b.name,
+          board: "전체글",
+          status: a.status,
+        });
       });
     }
   });
@@ -911,11 +1042,19 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     naverPicks,
     mode,
   );
+  // 밴드가 선택됐으면 게시할 밴드를 1개 이상 골라야 게시 가능(사수 요구 흐름).
+  // 단 예약(schedule)에서는 밴드가 plan에서 제외되므로(엔진 미연결) 선택이 필요 없다 —
+  // 즉시 게시(now)일 때만 밴드 선택을 요구한다.
+  const bandReady =
+    when === "schedule" ||
+    !selPlatforms.includes("band") ||
+    selectedBands.length > 0;
   const canPublish =
     selected.length > 0 &&
     targetsOk &&
     commentReady &&
     naverNotReady.length === 0 &&
+    bandReady &&
     jobs.length > 0;
 
   const action =
@@ -1069,8 +1208,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     // 나머지는 엔진 미구현이라 시뮬레이션(후속 작업).
     const naverJobs = jobs.filter((j) => j.platform === "naver");
     const forumJobs = jobs.filter((j) => j.platform === "forum");
+    const bandJobs = jobs.filter((j) => j.platform === "band");
     const otherJobs = jobs.filter(
-      (j) => j.platform !== "naver" && j.platform !== "forum",
+      (j) =>
+        j.platform !== "naver" &&
+        j.platform !== "forum" &&
+        j.platform !== "band",
     );
 
     // 네이버 카페: 실제 백엔드(글/댓글).
@@ -1132,7 +1275,35 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       ),
     ).then((forumArr) => forumArr.flat());
 
-    // 밴드 등 나머지: 진행 UI가 보이도록 약간 지연 후 시뮬레이션 결과를 낸다.
+    // 밴드(band.us): 저장된 링크로 가입 후 글(+댓글) 게시 — 순수 HTTP 백엔드 호출.
+    const bandComment =
+      mode === "both" || mode === "comment" ? firstComment : "";
+    const bandWork: Promise<PublishResult[]> = Promise.all(
+      bandJobs.map((j) => {
+        // 잡의 라벨(밴드명)로 해당 밴드의 가입 링크를 찾는다.
+        const link =
+          resolvedBands.find((b) => b.name === j.targetName)?.link ?? "";
+        return ipc.band
+          .publish({
+            // 백엔드는 loginId(쿠키 파일 키)로 band 로그인 쿠키를 찾는다.
+            accountId: j.loginId,
+            bandLink: link,
+            title: doc.title,
+            content: htmlToText(doc.body ?? ""),
+            ...(bandComment ? { comment: bandComment } : {}),
+          })
+          .then((out) => ({
+            ...j,
+            // 결과 라벨을 게시 응답의 실제 밴드명으로(없으면 잡의 밴드명 유지).
+            targetName: out.bandName ?? j.targetName,
+            ok: true,
+            msg: out.commented ? "글·댓글 게시 완료" : "글 게시 완료",
+          }))
+          .catch((err: unknown) => ({ ...j, ok: false, msg: errText(err) }));
+      }),
+    );
+
+    // 그 외 플랫폼(현재 없음): 진행 UI가 보이도록 지연 후 시뮬레이션 결과를 낸다.
     const mockOthers = new Promise<PublishResult[]>((resolve) => {
       window.setTimeout(
         () =>
@@ -1150,8 +1321,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       );
     });
 
-    void Promise.all([naverWork, forumWork, mockOthers]).then(([nr, fr, or]) =>
-      setFlow([...nr, ...fr, ...or]),
+    void Promise.all([naverWork, forumWork, bandWork, mockOthers]).then(
+      ([nr, fr, br, or]) => setFlow([...nr, ...fr, ...br, ...or]),
     );
   };
 
@@ -1412,9 +1583,14 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
               removeStock={(c) =>
                 setStockCodes((s) => s.filter((x) => x !== c))
               }
-              band={band}
-              setBand={setBand}
-              bands={bands}
+              bandLink={bandLink}
+              setBandLink={setBandLink}
+              bandResolving={bandResolving}
+              resolvedBands={resolvedBands}
+              selectedBands={selectedBands}
+              onSaveBandLink={saveBandLink}
+              onSelectBand={selectBand}
+              onRemoveBand={removeBand}
               stocks={stocks}
               naverAccounts={selectedNaver}
               joinedByAccount={joinedByAccount}

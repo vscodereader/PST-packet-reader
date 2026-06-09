@@ -15,6 +15,10 @@ use crate::store::JsonStore;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 pub mod auth;
+// band.us 이메일 로그인(네이버 로그인 병행 모듈).
+pub mod band_auth;
+// band.us 가입·글쓰기·댓글(순수 HTTP, md 서명). band_auth 로그인 쿠키를 소비한다.
+pub mod band_post;
 pub mod naver_cafe;
 // 네이버 증권 토론방 패킷 게시 엔진.
 pub mod discussion_batch;
@@ -392,6 +396,72 @@ fn get_queue_status(
 }
 
 #[tauri::command]
+fn enqueue_band_login<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, band_auth::BandQueueState>,
+    activity: tauri::State<'_, JsonStore<ipc::activity::ActivityItem>>,
+    account_ids: Vec<String>,
+    headless: Option<bool>,
+    use_adb: Option<bool>,
+) -> Result<auth::QueueStatus, String> {
+    let n = account_ids.len();
+    let result = band_auth::enqueue_band_accounts(
+        &state,
+        app,
+        account_ids,
+        headless.unwrap_or(false),
+        use_adb.unwrap_or(false),
+    )
+    .map_err(|e| e.to_string())?;
+    if n > 0 {
+        ipc::activity::record(
+            activity.inner(),
+            ipc::activity::ActivityType::Info,
+            format!("밴드 계정 {n}건 로그인 시작"),
+        );
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn get_band_queue_status(
+    state: tauri::State<'_, band_auth::BandQueueState>,
+) -> Result<auth::QueueStatus, String> {
+    band_auth::get_band_queue_status(&state).map_err(|e| e.to_string())
+}
+
+/// 밴드 링크로 가입한 뒤 글(+선택 댓글)을 순수 HTTP로 게시한다.
+///
+/// `account_id`는 band 로그인 쿠키 파일 키(loginId)다. `band_link`로 가입 →
+/// 제목·내용 게시 → 댓글(있으면) 순으로 진행한다(band_post::band_publish).
+#[tauri::command]
+async fn band_publish(
+    account_id: String,
+    band_link: String,
+    title: String,
+    content: String,
+    comment: Option<String>,
+) -> Result<band_post::BandPublishOutcome, String> {
+    band_post::band_publish(
+        &account_id,
+        &band_link,
+        &title,
+        &content,
+        comment.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// 링크(band_no)로 밴드 이름을 조회한다(게시 모달에서 링크 저장 시 실제 밴드명 표시용).
+#[tauri::command]
+async fn band_resolve_name(account_id: String, band_link: String) -> Result<String, String> {
+    band_post::resolve_band_name(&account_id, &band_link)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_account_cookies(account_id: String) -> Result<Option<serde_json::Value>, String> {
     auth::read_account_cookies(&account_id).map_err(|e| e.to_string())
 }
@@ -500,6 +570,10 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         save_accounts,
         enqueue_cookie_refresh,
         get_queue_status,
+        enqueue_band_login,
+        get_band_queue_status,
+        band_publish,
+        band_resolve_name,
         get_account_cookies,
         run_naver_discussion,
         parse_template_csv,
@@ -565,6 +639,8 @@ pub fn manage_stores<R: Runtime>(app: &AppHandle<R>, dir: &Path) -> std::io::Res
     app.manage(auth::QueueState::default());
     // 게시 큐 실행 워커 상태(promote 시 기동, 이슈 #144).
     app.manage(ipc::queue_runner::NowQueueRunner::default());
+    // 밴드 로그인 큐 상태.
+    app.manage(band_auth::BandQueueState::default());
     Ok(())
 }
 
