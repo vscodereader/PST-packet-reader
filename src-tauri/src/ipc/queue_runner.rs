@@ -63,6 +63,22 @@ struct CommentTargetEntry {
     article_id: u64,
 }
 
+/// 글목록 조회(latest/popular)에 실패해 댓글을 시도조차 못 한 대상. 그냥 누락하면
+/// 사용자는 "N곳 중 0곳"이 됐다는 사실조차 모르므로, 완료 로그에 실패로 남기려고 모은다.
+struct CommentFetchFailure {
+    account_id: String,
+    cafe_id: u64,
+    message: String,
+}
+
+/// 댓글 대상 수집 결과 — 실제로 댓글을 달 대상(`targets`)과, 글목록 조회 실패로 댓글을
+/// 못 단 대상(`fetch_failures`)을 함께 돌려준다. 후자는 완료 로그에 실패 항목으로 남긴다.
+#[derive(Default)]
+struct CommentCollect {
+    targets: Vec<CommentTargetEntry>,
+    fetch_failures: Vec<CommentFetchFailure>,
+}
+
 /// 종목토론방 게시 결과 1건 — 어느 계정으로 돌렸는지(login_id)와 종목별 결과를 묶는다.
 /// `ForumPublishResult`에는 계정 정보가 없으므로 워커가 계정과 짝지어 보존한다.
 struct ForumOutcome {
@@ -202,21 +218,23 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) {
         Vec::new()
     };
 
-    // 2. 카페 댓글(comment/both) 대상 확정.
-    let comment_targets = if runs_comment(plan) && item_present(app, id) {
+    // 2. 카페 댓글(comment/both) 대상 확정. 글목록 조회 실패 대상(fetch_failures)도 함께
+    // 받아 완료 로그에 실패로 남긴다(조용한 누락 방지).
+    let collected = if runs_comment(plan) && item_present(app, id) {
         collect_comment_targets(plan, &post_reports).await
     } else {
-        Vec::new()
+        CommentCollect::default()
     };
+    let comment_fetch_failures = collected.fetch_failures;
 
     // 3. 카페 댓글 작업 구성. both(쓴 글에 self-comment)는 글마다 템플릿의 **모든**
     // 댓글을 달고(writer-modal "위에서 작성한 글에 바로 댓글이 달립니다"), comment 전용은
     // 대상마다 풀에서 1개씩 분배한다(#98 "계정마다 다른 댓글"). 진행률 total은 실제
     // 만들어진 작업 수로 잡아 100%에 도달하게 한다(빈 풀로 인한 영구 미완 방지).
     let comment_jobs = if matches!(plan.kind, ModeValue::Both) {
-        build_self_comment_jobs(comment_targets, &plan.comments)
+        build_self_comment_jobs(collected.targets, &plan.comments)
     } else {
-        build_comment_jobs(comment_targets, &plan.comments)
+        build_comment_jobs(collected.targets, &plan.comments)
     };
 
     // 진행률 총계 확정(실제 카페 글 + 카페 댓글 작업 + 종목토론방 종목 수).
@@ -237,7 +255,7 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) {
     // 4. 종목토론방 게시(계정별 Chrome, 본문은 평문 = plan.body_text). 진행 중 단계는
     // 끝까지 두되, 진입 전 협조적 취소를 확인한다.
     let forum_outcomes = if !plan.forum.is_empty() && item_present(app, id) {
-        let outcomes = run_forum_targets(app, plan).await;
+        let outcomes = run_forum_targets(app, plan, id).await;
         done += outcomes.len() as u32;
         update_progress(app, id, done, total);
         outcomes
@@ -245,13 +263,14 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) {
         Vec::new()
     };
 
-    // 5. 완료 로그(LogBatch)/activity: 실제 실행한 카페 글·댓글·토론방 결과를 알림에
-    // 남긴다. 실행한 작업이 하나도 없으면(빈 plan) 빈 배치는 만들지 않는다.
+    // 5. 완료 로그(LogBatch)/activity: 실제 실행한 카페 글·댓글·토론방 결과 + 댓글 대상
+    // 조회 실패를 알림에 남긴다. 실행한 작업이 하나도 없으면(빈 plan) 빈 배치는 만들지 않는다.
     let batch = build_log_batch(
         plan,
         &post_reports,
         &comment_reports,
         &forum_outcomes,
+        &comment_fetch_failures,
         now_ms(),
         LB_SEQ.fetch_add(1, Ordering::Relaxed),
     );
@@ -262,24 +281,23 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) {
 
 /// 댓글 대상을 모은다. both 모드는 방금 게시에 성공한 글(self)에, comment 전용은
 /// 각 naver 대상의 `commentTarget`(url 직접 / latest·popular 글목록 조회)에 단다.
-async fn collect_comment_targets(
-    plan: &PublishPlan,
-    post_reports: &[JobReport],
-) -> Vec<CommentTargetEntry> {
-    let mut targets = Vec::new();
+async fn collect_comment_targets(plan: &PublishPlan, post_reports: &[JobReport]) -> CommentCollect {
+    let mut out = CommentCollect::default();
 
     if matches!(plan.kind, ModeValue::Both) {
-        // self-comment: 방금 게시에 성공한 글에 단다(즉시게시 both 동작과 동일).
+        // self-comment: 방금 게시에 성공한 글에 단다(즉시게시 both 동작과 동일). 게시에
+        // 실패한 글은 여기 없다 — 그 실패는 post_reports(글 게시 실패)로 이미 로그에 남으므로
+        // "글이 없어 댓글도 못 달았다"는 별도 항목은 만들지 않는다.
         for report in post_reports {
             if let Some(result) = &report.result {
-                targets.push(CommentTargetEntry {
+                out.targets.push(CommentTargetEntry {
                     account_id: report.account_id.clone(),
                     cafe_id: result.cafe_id,
                     article_id: result.article_id,
                 });
             }
         }
-        return targets;
+        return out;
     }
 
     // comment 전용: 대상마다 commentTarget을 해석한다.
@@ -290,7 +308,7 @@ async fn collect_comment_targets(
         match spec.mode {
             CommentTarget::Url => {
                 if let (Some(cafe_id), Some(article_id)) = (spec.cafe_id, spec.article_id) {
-                    targets.push(CommentTargetEntry {
+                    out.targets.push(CommentTargetEntry {
                         account_id: t.account_id.clone(),
                         cafe_id,
                         article_id,
@@ -303,21 +321,32 @@ async fn collect_comment_targets(
                 };
                 let count = spec.count.unwrap_or(1).max(1) as usize;
                 // 실행 시점에 상위 N개를 다시 조회한다(예약과 실행 사이 새 글 반영).
-                if let Ok(resp) =
-                    fetch_article_list_for_account(&cafe_id.to_string(), sort, &t.account_id).await
+                match fetch_article_list_for_account(&cafe_id.to_string(), sort, &t.account_id)
+                    .await
                 {
-                    for article in resp.articles.iter().take(count) {
-                        targets.push(CommentTargetEntry {
+                    Ok(resp) => {
+                        for article in resp.articles.iter().take(count) {
+                            out.targets.push(CommentTargetEntry {
+                                account_id: t.account_id.clone(),
+                                cafe_id,
+                                article_id: article.article_id,
+                            });
+                        }
+                    }
+                    // 조회 실패 → 이 대상은 댓글을 못 단다. 조용히 누락하지 않고 실패로 남긴다.
+                    Err(error) => {
+                        tracing::warn!(%cafe_id, account = %t.account_id, code = %error.code, message = %error.message, "댓글 대상 글목록 조회 실패");
+                        out.fetch_failures.push(CommentFetchFailure {
                             account_id: t.account_id.clone(),
                             cafe_id,
-                            article_id: article.article_id,
+                            message: format!("글목록 조회 실패: {}", error.message),
                         });
                     }
                 }
             }
         }
     }
-    targets
+    out
 }
 
 /// plan의 종목토론방 대상을 계정별로 묶어 `ForumPublishRequest`로 만든다. 본문은
@@ -362,16 +391,25 @@ fn plan_to_forum_requests(plan: &PublishPlan) -> Vec<ForumPublishRequest> {
 /// (run_forum_publish_now와 동일 패턴) 패킷 엔진으로 게시하고, 계정·종목별 결과를
 /// 돌려준다(완료 로그용). 단일 워커가 순차로 돌므로 Chrome 인스턴스 충돌이 없다.
 /// Chrome 기동 실패 시 그 계정의 종목들을 실패 결과로 합성해, 진행률·로그가 조용히
-/// 누락되지 않게 한다(거짓 100% 방지).
+/// 누락되지 않게 한다(거짓 100% 방지). 계정마다 게시를 시작하기 전 협조적 취소(item_present)를
+/// 확인해, 취소된 아이템의 남은 계정은 게시하지 않는다.
 async fn run_forum_targets<R: Runtime>(
     app: &AppHandle<R>,
     plan: &PublishPlan,
+    id: &str,
 ) -> Vec<ForumOutcome> {
     let mut outcomes = Vec::new();
     for req in plan_to_forum_requests(plan) {
+        // 계정별 Chrome 게시는 비싸고 비가역적이라, 시작 전마다 취소를 확인해 멈춘다.
+        if !item_present(app, id) {
+            break;
+        }
         let account_id = req.account_id.clone();
+        // spawn_blocking 태스크가 패닉(JoinError)하면 결과를 잃으므로, 합성 실패에 쓸
+        // 종목 목록을 미리 복제해 둔다(누락 대신 명시 실패).
+        let stocks_for_panic = req.stocks.clone();
         let app_for_job = app.clone();
-        let results = tauri::async_runtime::spawn_blocking(move || {
+        let results = match tauri::async_runtime::spawn_blocking(move || {
             match crate::auth::launch_debug_chrome(true) {
                 Ok(chrome) => {
                     let mut req = req;
@@ -395,7 +433,19 @@ async fn run_forum_targets<R: Runtime>(
             }
         })
         .await
-        .unwrap_or_default();
+        {
+            Ok(results) => results,
+            // 블로킹 태스크 패닉 → 빈 결과로 조용히 누락하지 않고 그 계정 종목 전부 실패로 합성.
+            Err(join_error) => stocks_for_panic
+                .iter()
+                .map(|s| ForumPublishResult {
+                    code: s.code.clone(),
+                    name: s.name.clone(),
+                    ok: false,
+                    message: format!("게시 작업이 비정상 종료됐어요: {join_error}"),
+                })
+                .collect(),
+        };
         for result in results {
             outcomes.push(ForumOutcome {
                 account_id: account_id.clone(),
@@ -462,6 +512,7 @@ fn build_log_batch(
     post_reports: &[JobReport],
     comment_reports: &[CommentJobReport],
     forum_outcomes: &[ForumOutcome],
+    comment_fetch_failures: &[CommentFetchFailure],
     at: i64,
     seq: u64,
 ) -> LogBatch {
@@ -526,6 +577,20 @@ fn build_log_batch(
                 .error
                 .as_ref()
                 .map(|e| format!("{}: {}", e.code, e.message)),
+        });
+    }
+
+    // 글목록 조회 실패로 댓글을 시도조차 못 한 대상 — 조용히 빼지 않고 실패로 남긴다.
+    for f in comment_fetch_failures {
+        items.push(BatchItem {
+            platform: PlatformId::Naver,
+            target: cafe_label(&f.cafe_id.to_string()),
+            code: None,
+            board: None,
+            login_id: f.account_id.clone(),
+            status: BatchItemStatus::Fail,
+            msg: f.message.clone(),
+            trace: Some(f.message.clone()),
         });
     }
 
@@ -853,7 +918,7 @@ mod tests {
     async fn collect_targets_both_comments_on_just_posted_articles() {
         let p = plan(ModeValue::Both, vec![naver_target("u0")]);
         let reports = vec![post_report("u0", 111, 222), post_report("u0", 111, 333)];
-        let targets = collect_comment_targets(&p, &reports).await;
+        let targets = collect_comment_targets(&p, &reports).await.targets;
         assert_eq!(targets.len(), 2);
         assert_eq!(targets[0].cafe_id, 111);
         assert_eq!(targets[0].article_id, 222);
@@ -871,7 +936,7 @@ mod tests {
             article_id: Some(555),
         });
         let p = plan(ModeValue::Comment, vec![t]);
-        let targets = collect_comment_targets(&p, &[]).await;
+        let targets = collect_comment_targets(&p, &[]).await.targets;
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].cafe_id, 444);
         assert_eq!(targets[0].article_id, 555);
@@ -983,7 +1048,7 @@ mod tests {
             post_report("u0", 123, 999),
             post_fail("u1", "456", "NO_COOKIES", "쿠키 없음"),
         ];
-        let b = build_log_batch(&p, &reports, &[], &[], 1_700_000_000_000, 0);
+        let b = build_log_batch(&p, &reports, &[], &[], &[], 1_700_000_000_000, 0);
         assert_eq!(b.id, "lb-q-1700000000000-0");
         assert_eq!(b.title, "T");
         assert_eq!(b.body.as_deref(), Some("B")); // post 모드 → 본문 스냅샷
@@ -1005,7 +1070,7 @@ mod tests {
     fn build_log_batch_comment_mode_snapshots_comment_not_body() {
         let mut p = plan(ModeValue::Comment, vec![naver_target("u0")]);
         p.comments = vec!["  ".into(), "좋은 글이네요".into()];
-        let b = build_log_batch(&p, &[], &[], &[], 1, 0);
+        let b = build_log_batch(&p, &[], &[], &[], &[], 1, 0);
         assert!(b.body.is_none()); // comment 모드 → 본문 스냅샷 없음
         assert_eq!(b.comment.as_deref(), Some("좋은 글이네요")); // 공백 항목은 건너뜀
         assert!(b.items.is_empty());
@@ -1015,7 +1080,7 @@ mod tests {
     fn build_log_batch_includes_forum_items_with_code_and_account() {
         let p = plan(ModeValue::Post, vec![]);
         let forum = vec![forum_ok("u0", "삼성전자", "005930")];
-        let b = build_log_batch(&p, &[], &[], &forum, 1, 0);
+        let b = build_log_batch(&p, &[], &[], &forum, &[], 1, 0);
         assert_eq!(b.items.len(), 1);
         assert_eq!(b.items[0].platform, PlatformId::Forum);
         assert_eq!(b.items[0].target, "삼성전자");
@@ -1034,6 +1099,24 @@ mod tests {
             article_id: None,
         });
         let p = plan(ModeValue::Comment, vec![t]);
-        assert!(collect_comment_targets(&p, &[]).await.is_empty());
+        assert!(collect_comment_targets(&p, &[]).await.targets.is_empty());
+    }
+
+    #[test]
+    fn build_log_batch_records_comment_fetch_failures_as_fail() {
+        // 글목록 조회 실패 대상은 조용히 누락되지 않고 완료 로그에 Fail 항목으로 남는다.
+        let p = plan(ModeValue::Comment, vec![naver_target("u0")]);
+        let failures = vec![CommentFetchFailure {
+            account_id: "u0".into(),
+            cafe_id: 123,
+            message: "글목록 조회 실패: timeout".into(),
+        }];
+        let b = build_log_batch(&p, &[], &[], &[], &failures, 1, 0);
+        assert_eq!(b.items.len(), 1);
+        assert_eq!(b.items[0].status, BatchItemStatus::Fail);
+        assert_eq!(b.items[0].login_id, "u0");
+        // plan에 동결된 카페명("테스트카페")으로 표시(cafe "123" 매칭).
+        assert_eq!(b.items[0].target, "테스트카페");
+        assert_eq!(b.items[0].msg, "글목록 조회 실패: timeout");
     }
 }
