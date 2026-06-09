@@ -10,5 +10,6 @@ pub mod excel;
 pub mod log_batches;
 pub mod posts;
 pub mod queue;
+pub mod queue_runner;
 pub mod stats;
 pub mod stocks;

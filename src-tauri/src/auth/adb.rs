@@ -94,7 +94,18 @@ fn airplane_mode_args(enable: bool) -> [&'static str; 5] {
 
 /// 표준 adb CLI를 실행하고 stdout을 반환한다. 실행 실패/비-0 종료는 에러로 변환한다.
 fn run_adb(args: &[&str]) -> Result<String, OrchestratorError> {
-    let output = Command::new(ADB_BIN).args(args).output().map_err(|e| {
+    let mut cmd = Command::new(ADB_BIN);
+    cmd.args(args);
+    // 윈도우에서 adb(콘솔 앱)를 실행할 때 검은 콘솔 창이 깜빡이는 것을 막는다.
+    // 알림 화면 진입 시 환경 진단이 `adb devices` 를 호출하는데, 이 플래그가 없으면
+    // 매번 콘솔 창이 잠깐 떴다 사라진다(CREATE_NO_WINDOW). 다른 OS엔 영향 없음.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = cmd.output().map_err(|e| {
         OrchestratorError::CommandFailed(format!(
             "adb 실행 실패: {e} — PATH에 adb가 있는지 확인 (winget install Google.PlatformTools)"
         ))
