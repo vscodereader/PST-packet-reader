@@ -121,7 +121,13 @@ function AccountRow({
           : "transparent",
       }}
     >
-      <Checkbox checked={selected} readOnly size="sm" disabled={disabled} />
+      <Checkbox
+        checked={selected}
+        onChange={() => !disabled && onToggle(a.id)}
+        onClick={(e) => e.stopPropagation()}
+        size="sm"
+        disabled={disabled}
+      />
       <PlatformLogo id={a.platform} size={24} />
       <Text fz={13} fw={700} ff="monospace" style={{ flexShrink: 0 }}>
         {a.loginId}
@@ -149,6 +155,7 @@ function AccountRow({
 function DestinationPicker({
   selPlatforms,
   stockCodes,
+  stockNames,
   openStockModal,
   removeStock,
   bandLink,
@@ -172,6 +179,7 @@ function DestinationPicker({
 }: {
   selPlatforms: PlatformId[];
   stockCodes: string[];
+  stockNames: Record<string, string>;
   openStockModal: () => void;
   removeStock: (code: string) => void;
   bandLink: string;
@@ -243,7 +251,9 @@ function DestinationPicker({
                     }}
                   >
                     <Text fz={12} fw={700} c="forum">
-                      {stocks.find((s) => s.code === code)?.name ?? code}
+                      {stockNames[code] ??
+                        stocks.find((s) => s.code === code)?.name ??
+                        code}
                     </Text>
                     <ActionIcon
                       size={17}
@@ -1596,6 +1606,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
             <DestinationPicker
               selPlatforms={selPlatforms}
               stockCodes={stockCodes}
+              stockNames={stockNames}
               openStockModal={() => setStockModal(true)}
               removeStock={(c) =>
                 setStockCodes((s) => s.filter((x) => x !== c))

@@ -10,7 +10,9 @@
 //! (Cookie 헤더, storage-state)을 어떤 `tracing` 필드/메시지에도 넣지
 //! 않는다 — 기존 `naver_cafe` 컨벤션과 동일하다.
 
-use std::path::Path;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use tracing_appender::non_blocking::WorkerGuard;
@@ -36,6 +38,76 @@ fn env_filter() -> EnvFilter {
     EnvFilter::try_from_env("PSTMACRO_LOG").unwrap_or_else(|_| EnvFilter::new("info"))
 }
 
+/// 외부에서 로그 파일을 지우거나 비워도 다음 기록 시 같은 날짜 파일을 자동
+/// 재생성하는 self-healing 일자별 writer.
+///
+/// `tracing_appender::rolling::daily` 와 동일하게 `<prefix>.<YYYY-MM-DD>` 파일에
+/// append 하되, 그 appender가 파일 핸들을 프로세스 수명 동안 잡고 외부 삭제를
+/// 감지하지 못하는 한계를 보완한다(매 기록 시 당일 파일 존재를 확인해, 없으면
+/// 재생성). 날짜가 바뀌면 새 날짜 파일로 롤오버한다. 날짜는 `LocalTimer` 와 동일
+/// 하게 로컬 시각 기준이라, "오늘 날짜" 파일이 직관적으로 생긴다.
+struct SelfHealingDailyWriter {
+    dir: PathBuf,
+    prefix: String,
+    /// 현재 열려 있는 `(날짜, 파일)`. 첫 기록 전엔 `None`.
+    current: Option<(String, File)>,
+}
+
+impl SelfHealingDailyWriter {
+    fn new(dir: impl Into<PathBuf>, prefix: impl Into<String>) -> Self {
+        Self {
+            dir: dir.into(),
+            prefix: prefix.into(),
+            current: None,
+        }
+    }
+
+    /// 오늘 날짜 문자열(`YYYY-MM-DD`, 로컬). `LocalTimer` 와 동일 기준.
+    fn today() -> String {
+        chrono::Local::now().format("%Y-%m-%d").to_string()
+    }
+
+    /// 당일 로그 파일이 열려 있도록 보장하고(없으면/날짜가 바뀌면/외부에서 삭제됐으면
+    /// 재오픈) 그 파일의 가변 참조를 돌려준다. 디렉터리째 지워졌을 수 있어 항상 보장한다.
+    fn ensure_open(&mut self) -> io::Result<&mut File> {
+        let date = Self::today();
+        let path = self.dir.join(format!("{}.{}", self.prefix, date));
+        let have = self.current.as_ref().map(|(d, _)| d.as_str());
+        if should_reopen(have, &date, path.exists()) {
+            std::fs::create_dir_all(&self.dir)?;
+            let file = OpenOptions::new().create(true).append(true).open(&path)?;
+            self.current = Some((date, file));
+        }
+        Ok(&mut self.current.as_mut().expect("current 는 위에서 보장됨").1)
+    }
+}
+
+/// 로그 파일을 다시 열어야 하는지 결정한다(순수 함수, 테스트 가능).
+///
+/// - 아직 연 적 없음(`None`) → `true` (첫 기록)
+/// - 같은 날짜인데 파일이 디스크에 없음 → `true` (외부 삭제 후 self-heal)
+/// - 날짜가 바뀜 → `true` (일자 롤오버, 파일 존재 여부 무관)
+/// - 같은 날짜이고 파일이 존재 → `false` (그대로 append)
+fn should_reopen(current_date: Option<&str>, today: &str, file_exists: bool) -> bool {
+    match current_date {
+        Some(d) if d == today => !file_exists,
+        _ => true,
+    }
+}
+
+impl Write for SelfHealingDailyWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.ensure_open()?.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match &mut self.current {
+            Some((_, file)) => file.flush(),
+            None => Ok(()),
+        }
+    }
+}
+
 /// `logs_dir`에 일자별 롤링 파일 로거를 설치한다(프로세스 1회).
 ///
 /// 디렉터리는 없으면 생성한다. 이미 전역 subscriber가 설치돼 있으면
@@ -50,7 +122,10 @@ pub fn init_file_logging(logs_dir: &Path) {
         return;
     }
 
-    let appender = tracing_appender::rolling::daily(logs_dir, "pstmacro.log");
+    // self-healing writer: 외부에서 로그 파일을 지우거나 비워도 다음 기록 시
+    // 같은 날짜 파일을 자동 재생성한다(앱 재시작 불필요). 일자별 파일명·append
+    // 동작은 기존 rolling::daily 와 동일하다.
+    let appender = SelfHealingDailyWriter::new(logs_dir, "pstmacro.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(appender);
     *LOG_GUARD.lock().expect("LOG_GUARD poisoned") = Some(guard);
 
@@ -171,5 +246,70 @@ mod tests {
         // 기본 필터가 INFO를 통과시키는지(레벨 문자열 포함) 확인.
         let filter = env_filter();
         assert!(format!("{filter}").contains("info"));
+    }
+
+    #[test]
+    fn should_reopen_first_write_and_stable_same_day() {
+        // 첫 기록(아직 연 적 없음) → 재오픈.
+        assert!(should_reopen(None, "2026-06-09", false));
+        assert!(should_reopen(None, "2026-06-09", true));
+        // 같은 날짜 + 파일 존재 → 그대로 append(재오픈 안 함).
+        assert!(!should_reopen(Some("2026-06-09"), "2026-06-09", true));
+    }
+
+    #[test]
+    fn should_reopen_on_deletion_or_day_change() {
+        // 같은 날짜인데 파일이 사라짐(외부 삭제) → self-heal 재오픈.
+        assert!(should_reopen(Some("2026-06-09"), "2026-06-09", false));
+        // 날짜가 바뀜 → 롤오버 재오픈(파일 존재 여부 무관).
+        assert!(should_reopen(Some("2026-06-08"), "2026-06-09", true));
+        assert!(should_reopen(Some("2026-06-08"), "2026-06-09", false));
+    }
+
+    #[test]
+    fn writer_recreates_log_file_after_external_deletion() {
+        // 핵심 동작: 로그 파일을 외부에서 지워도 다음 기록 시 같은 날짜 파일이
+        // 자동 재생성되고 이후 로그가 정상 기록된다(앱 재시작 불필요).
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("logs");
+        let mut writer = SelfHealingDailyWriter::new(&dir, "pstmacro.log");
+        let date = SelfHealingDailyWriter::today();
+        let path = dir.join(format!("pstmacro.log.{date}"));
+
+        // 1) 첫 기록 → 당일 파일 생성.
+        writer.write_all(b"first\n").unwrap();
+        writer.flush().unwrap();
+        assert!(path.exists(), "첫 기록 후 로그 파일이 생성돼야 한다");
+
+        // 2) 외부에서 파일 삭제.
+        std::fs::remove_file(&path).unwrap();
+        assert!(!path.exists());
+
+        // 3) 다시 기록 → 같은 날짜 파일이 자동 재생성되고 새 내용이 기록된다.
+        writer.write_all(b"after-delete\n").unwrap();
+        writer.flush().unwrap();
+        assert!(path.exists(), "삭제 후 재기록 시 파일이 재생성돼야 한다");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains("after-delete"),
+            "재생성된 파일에 새 로그가 있어야 한다: {body}"
+        );
+    }
+
+    #[test]
+    fn writer_appends_within_same_day_without_reopening() {
+        // 같은 날 연속 기록은 한 파일에 누적된다(불필요한 재오픈으로 내용이 날아가지 않음).
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("logs");
+        let mut writer = SelfHealingDailyWriter::new(&dir, "pstmacro.log");
+        let date = SelfHealingDailyWriter::today();
+        let path = dir.join(format!("pstmacro.log.{date}"));
+
+        writer.write_all(b"line-1\n").unwrap();
+        writer.write_all(b"line-2\n").unwrap();
+        writer.flush().unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("line-1") && body.contains("line-2"), "{body}");
     }
 }
