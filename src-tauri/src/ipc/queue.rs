@@ -265,6 +265,10 @@ pub fn cancel_queue_scheduled(
 
 /// True if `at` is no earlier than the start of the current minute. Minute
 /// precision keeps "now" (the picker default) schedulable despite seconds drift.
+///
+/// 의도된 부작용: `at`이 "현재 분"의 과거 초(최대 ~59초 전)여도 통과한다. 그런 예약은
+/// 곧바로 `pick_due`(at <= now)에 걸려 다음 tick에서 즉시 자동 게시된다 — 분 단위 picker
+/// 의 "지금" 선택을 허용하기 위한 의도적 동작이며, 초 단위 미래 예약은 지원하지 않는다.
 pub fn is_future_enough(at: i64, now: i64) -> bool {
     at >= now - now.rem_euclid(60_000)
 }
@@ -353,10 +357,25 @@ fn promote_one<R: tauri::Runtime>(
     runner: &super::queue_runner::NowQueueRunner,
     id: &str,
 ) -> bool {
-    let Some(s) = scheduled.snapshot().into_iter().find(|s| s.id == id) else {
+    // scheduled 스토어 락 안에서 원자적으로 꺼낸다: 매칭 id가 있으면 제거하며 그 항목을
+    // `taken`에 옮기고, 없으면 그대로 둔다. 수동 "즉시 처리"와 자동 스케줄러(run_due_now)는
+    // 별개 스레드에서 같은 id를 동시에 승격하려 할 수 있는데, 락 안의 take-and-remove로
+    // 실제로 제거한 쪽만 Some을 받게 해 now 큐 중복 push(=중복 게시)를 막는다.
+    let mut taken: Option<QueueScheduledItem> = None;
+    scheduled.mutate(|items| {
+        let mut kept = Vec::with_capacity(items.len());
+        for s in items {
+            if taken.is_none() && s.id == id {
+                taken = Some(s);
+            } else {
+                kept.push(s);
+            }
+        }
+        kept
+    });
+    let Some(s) = taken else {
         return false;
     };
-    scheduled.mutate(|items| apply_cancel_scheduled(items, id));
     now.mutate(|mut items| {
         items.push(to_now_item(s));
         items
@@ -401,7 +420,18 @@ pub fn reschedule_queue_scheduled(
     if !is_future_enough(at, crate::util::now_ms()) {
         return Err("예약 시각이 현재보다 과거입니다".into());
     }
-    let next = store.mutate(|items| apply_reschedule(items, &id, at, &when, &rel));
+    // 매칭되는 예약이 있었는지 락 안에서 확인한다. apply_reschedule는 비매칭 id면 리스트를
+    // 그대로 돌려주므로, 그것만으로는 성공/실패를 구분할 수 없다 — 동시 tick/취소로 막
+    // 사라진 id나 잘못된 id에 대해 "변경됨"이라는 거짓 성공을 남기지 않도록 분기한다.
+    let mut matched = false;
+    let next = store.mutate(|items| {
+        let next = apply_reschedule(items, &id, at, &when, &rel);
+        matched = next.iter().any(|s| s.id == id);
+        next
+    });
+    if !matched {
+        return Err("재예약할 예약을 찾지 못했어요".into());
+    }
     record(activity.inner(), ActivityType::Info, "예약 시각 변경됨");
     Ok(next)
 }
@@ -435,6 +465,10 @@ pub fn run_due_now<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 /// 앱 시작 reconciliation: 앱 종료 중 시각이 지난 미발행 예약을 missed로 표시하고(자동
 /// 게시하지 않음) 새로 놓친 건이 있으면 사용자에게 알림으로 남긴다. 티커 spawn 전에
 /// 동기로 호출해, 첫 tick이 이미 missed로 표시된 항목을 자동 게시하지 않게 한다.
+///
+/// 의도된 경계: 직전 1분(`MISSED_GRACE_MS`) 내에 도래한 예약은 여기서 missed로 보지 않고
+/// (mark_missed 유예), 첫 tick의 `pick_due`가 자동 게시한다. 즉 "앱이 꺼진 동안 지난 예약"
+/// 중 마지막 1분 안짝 건은 놓침이 아니라 즉시 게시되는 게 정상이다.
 pub fn reconcile_missed_on_startup<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     use tauri::Manager;
 
@@ -727,6 +761,15 @@ mod tests {
                             // 비매칭 아이템은 그대로
         let b = next.iter().find(|s| s.id == "b").unwrap();
         assert_eq!(b.at, 200);
+    }
+
+    #[test]
+    fn apply_reschedule_no_match_leaves_list_unchanged() {
+        // 비매칭 id면 리스트가 그대로다 — reschedule_queue_scheduled가 이를 보고 거짓 성공
+        // 대신 에러를 내도록 분기하는 근거(있는 id면 변경되어 달라진다).
+        let items = vec![sched_at("a", 100, true), sched_at("b", 200, false)];
+        let next = apply_reschedule(items.clone(), "zzz", 999, "내일 09:00", "내일");
+        assert_eq!(next, items);
     }
 
     #[test]
