@@ -657,6 +657,9 @@ pub fn run() {
             })),
     )
     .plugin(tauri_plugin_dialog::init())
+    // 데스크톱(OS) 토스트 — 트레이 상주 중 게시 완료·놓침을 능동 통지(#163).
+    // Rust 측에서만 발송하므로 별도 capability 권한 엔트리는 필요 없다.
+    .plugin(tauri_plugin_notification::init())
     // 부팅 자동 시작 플러그인. 자동 시작으로 실행되면 `--autostart` 인자가 붙어
     // (아래 setup에서 창을 숨긴 채 시작). 등록 on/off는 set_autostart 커맨드로 한다.
     .plugin(tauri_plugin_autostart::init(

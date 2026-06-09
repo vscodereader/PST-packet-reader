@@ -454,6 +454,9 @@ pub fn reconcile_missed_on_startup<R: tauri::Runtime>(app: &tauri::AppHandle<R>)
             ActivityType::Error,
             format!("예약 {newly}건이 앱 종료 중 시각이 지나 미발행됐습니다. 큐에서 재예약하거나 취소하세요."),
         );
+        // 창을 닫아둔(트레이) 사용자가 시작 시 놓침을 인지하도록 OS 토스트도 띄운다(#163).
+        let (toast_title, toast_body) = super::notify::missed_message(newly);
+        super::notify::notify_desktop(app, &toast_title, &toast_body);
     }
 }
 
