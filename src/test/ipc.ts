@@ -1106,6 +1106,9 @@ export const invoke = vi.fn(
           bandName: bandNo === "103043410" ? "데일밴드" : `밴드 ${bandNo}`,
         });
       }
+      case "record_band_batch":
+        // 밴드 게시 결과를 알림 배치에 기록(부작용). 테스트에선 호출 여부만 보므로 no-op.
+        return clone(null);
       case "band_resolve_name": {
         // 링크에서 band_no를 뽑아 밴드명을 만든다(103043410 → 데일밴드).
         const link = String(args!.bandLink ?? "");

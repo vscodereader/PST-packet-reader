@@ -812,5 +812,17 @@ describe("PublishModal", () => {
       expect(links).toContain("https://band.us/band/103043410");
       expect(links).toContain("https://band.us/band/999");
     });
+    // 밴드 게시 결과가 알림(게시 배치)에 기록되도록 record_band_batch가 호출된다
+    // (종토방처럼 알림에 떠야 함). 선택한 두 밴드가 items로 들어간다.
+    await waitFor(() => {
+      const rec = ipcBackend.mock.calls.find(
+        (c) => c[0] === "record_band_batch",
+      );
+      expect(rec).toBeTruthy();
+      const arg = rec![1] as { items: { target: string }[] };
+      const targets = arg.items.map((i) => i.target);
+      expect(targets).toContain("데일밴드");
+      expect(targets).toContain("밴드 999");
+    });
   });
 });

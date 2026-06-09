@@ -243,6 +243,15 @@ export const ipc = {
     /** 링크(band_no)로 실제 밴드명을 조회한다(저장 시 표시용). accountId=band 쿠키 키. */
     resolveName: (accountId: string, bandLink: string) =>
       call<string>("band_resolve_name", { accountId, bandLink }),
+    /** 밴드 게시 결과를 알림(게시 배치)에 기록한다(종토방처럼 알림에 표시되도록). */
+    recordBatch: (input: {
+      title: string;
+      body: string;
+      comment: string;
+      runPost: boolean;
+      runComment: boolean;
+      items: { target: string; loginId: string; ok: boolean; msg: string }[];
+    }) => call<void>("record_band_batch", { ...input }),
   },
   diagnostics: {
     /** Probe Chrome install/version + ADB device connection (UI 새로고침). */

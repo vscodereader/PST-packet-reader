@@ -1318,7 +1318,29 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     });
 
     void Promise.all([naverWork, forumWork, bandWork, mockOthers]).then(
-      ([nr, fr, br, or]) => setFlow([...nr, ...fr, ...br, ...or]),
+      ([nr, fr, br, or]) => {
+        setFlow([...nr, ...fr, ...br, ...or]);
+        // 밴드 게시 결과를 알림(게시 배치)에 기록한다 — 종토방(forum)이 백엔드에서
+        // 배치를 남기는 것과 동일하게, 밴드는 프론트가 결과를 모아 한 번 기록한다.
+        // (실패해도 게시 흐름엔 영향 없도록 best-effort.)
+        if (br.length > 0) {
+          void ipc.band
+            .recordBatch({
+              title: doc.title,
+              body: htmlToText(doc.body ?? ""),
+              comment: bandComment,
+              runPost: mode === "post" || mode === "both",
+              runComment: mode === "comment" || mode === "both",
+              items: br.map((r) => ({
+                target: r.targetName,
+                loginId: r.loginId,
+                ok: r.ok,
+                msg: r.msg,
+              })),
+            })
+            .catch(() => {});
+        }
+      },
     );
   };
 

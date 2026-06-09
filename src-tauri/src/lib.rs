@@ -460,6 +460,113 @@ async fn band_resolve_name(account_id: String, band_link: String) -> Result<Stri
         .map_err(|e| e.to_string())
 }
 
+/// 프론트가 보내는 밴드 게시 결과 1건(알림 배치 기록용 최소 입력).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BandBatchItemInput {
+    target: String,
+    login_id: String,
+    ok: bool,
+    msg: String,
+}
+
+/// `run_post`/`run_comment` 플래그를 배치 kind로 변환한다(순수 함수, 테스트 가능).
+fn band_batch_kind(run_post: bool, run_comment: bool) -> ipc::posts::ModeValue {
+    use ipc::posts::ModeValue;
+    if run_post && run_comment {
+        ModeValue::Both
+    } else if run_comment {
+        ModeValue::Comment
+    } else {
+        ModeValue::Post
+    }
+}
+
+/// 밴드 게시 결과를 알림(게시 배치)에 기록한다.
+///
+/// 종토방(`run_forum_publish_now`)이 백엔드에서 LogBatch를 남기는 것과 동일하게,
+/// 프론트(publish-modal)가 모든 밴드 잡을 마친 뒤 한 번 호출해 `platform: Band` 배치 +
+/// activity를 저장한다. 밴드 게시는 프론트가 잡별로 호출하므로 집계는 여기서 한 번에 한다.
+#[tauri::command]
+fn record_band_batch<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    title: String,
+    body: String,
+    comment: String,
+    run_post: bool,
+    run_comment: bool,
+    items: Vec<BandBatchItemInput>,
+) -> Result<(), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use ipc::accounts::PlatformId;
+    use ipc::log_batches::{BatchItem, BatchItemStatus, LogBatch, MAX_LOG_BATCHES};
+
+    static LB_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = LB_SEQ.fetch_add(1, Ordering::Relaxed);
+
+    let at = util::now_ms();
+    let total = items.len();
+    let ok = items.iter().filter(|i| i.ok).count();
+    let batch_items: Vec<BatchItem> = items
+        .into_iter()
+        .map(|i| BatchItem {
+            platform: PlatformId::Band,
+            target: i.target,
+            code: None,
+            board: None,
+            login_id: i.login_id,
+            status: if i.ok {
+                BatchItemStatus::Success
+            } else {
+                BatchItemStatus::Fail
+            },
+            // 실패 행은 trace에도 메시지를 실어 "자세히 보기"에서 원인을 본다.
+            trace: if i.ok { None } else { Some(i.msg.clone()) },
+            msg: i.msg,
+        })
+        .collect();
+
+    let batch = LogBatch {
+        id: format!("lb-band-{at}-{seq}"),
+        title: title.clone(),
+        // 게시 시점 원문 스냅샷: 실제 게시(run_post)한 것만 남긴다(종토방 배치와 동일 규칙).
+        body: if run_post && !body.is_empty() {
+            Some(body)
+        } else {
+            None
+        },
+        comment: if run_comment && !comment.is_empty() {
+            Some(comment)
+        } else {
+            None
+        },
+        kind: band_batch_kind(run_post, run_comment),
+        at,
+        state: None,
+        items: batch_items,
+    };
+
+    let logs = app.state::<JsonStore<LogBatch>>();
+    logs.mutate(|mut v| {
+        v.insert(0, batch);
+        v.truncate(MAX_LOG_BATCHES);
+        v
+    });
+
+    let activity = app.state::<JsonStore<ipc::activity::ActivityItem>>();
+    ipc::activity::record(
+        activity.inner(),
+        if total > 0 && ok == total {
+            ipc::activity::ActivityType::Success
+        } else {
+            ipc::activity::ActivityType::Error
+        },
+        format!("밴드 '{title}' 게시 — {total}곳 중 {ok}곳 성공"),
+    );
+    Ok(())
+}
+
 #[tauri::command]
 fn get_account_cookies(account_id: String) -> Result<Option<serde_json::Value>, String> {
     auth::read_account_cookies(&account_id).map_err(|e| e.to_string())
@@ -581,6 +688,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         run_naver_discussion_batch,
         forum_endpoint,
         run_forum_publish_now,
+        record_band_batch,
         export_accounts_xlsx,
         export_activity_xlsx,
         import_accounts_xlsx,
@@ -660,6 +768,14 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn band_batch_kind_maps_run_flags() {
+        use ipc::posts::ModeValue;
+        assert_eq!(band_batch_kind(true, false), ModeValue::Post);
+        assert_eq!(band_batch_kind(false, true), ModeValue::Comment);
+        assert_eq!(band_batch_kind(true, true), ModeValue::Both);
+    }
 
     #[test]
     fn build_publish_batch_maps_results_to_items() {
