@@ -152,7 +152,10 @@ mod tests {
     #[test]
     fn parses_captured_secret_key() {
         let key = parse_getkey_response(CAPTURED_GETKEY).expect("파싱 성공해야 함");
-        assert_eq!(key.secret_key, "krYc6CZR5GYpPFSld8a/nPYnYMZ/Y2YHYGo5gYHHLSs=");
+        assert_eq!(
+            key.secret_key,
+            "krYc6CZR5GYpPFSld8a/nPYnYMZ/Y2YHYGo5gYHHLSs="
+        );
         assert!(!key.is_jwt_type);
     }
 
@@ -221,7 +224,10 @@ mod tests {
     fn debug_does_not_leak_secret_key() {
         let key = parse_getkey_response(CAPTURED_GETKEY).unwrap();
         let dbg = format!("{key:?}");
-        assert!(!dbg.contains("krYc6CZR"), "Debug에 secretKey가 노출됨: {dbg}");
+        assert!(
+            !dbg.contains("krYc6CZR"),
+            "Debug에 secretKey가 노출됨: {dbg}"
+        );
         assert!(dbg.contains("redacted"));
     }
 }

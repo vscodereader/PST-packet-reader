@@ -157,7 +157,9 @@ async fn worker_loop<R: Runtime>(state: BandQueueState, app: AppHandle<R>) {
 
         let result = process_band_account(&app, &job.account_id, job.headless, job.use_adb).await;
         let message = match &result {
-            Ok(()) if cookie_status == BandCookieStatus::Expired => "expired; refreshed".to_string(),
+            Ok(()) if cookie_status == BandCookieStatus::Expired => {
+                "expired; refreshed".to_string()
+            }
             Ok(()) => "success".to_string(),
             Err(err) => err.to_string(),
         };

@@ -898,6 +898,18 @@ export function setArticleListFailures(cafeIds: string[]): void {
   articleListFailures = new Set(cafeIds);
 }
 
+// 테스트에서 특정 IPC 명령을 강제로 reject시켜 에러/catch 경로를 검증하기 위한 집합.
+let failCommands = new Set<string>();
+
+/**
+ * Make the given IPC commands reject (to exercise error/`.catch` paths in
+ * components). The command name is the raw Tauri command (e.g.
+ * `reorder_queue_now`). Cleared by `resetIpc`.
+ */
+export function setCommandFailures(cmds: string[]): void {
+  failCommands = new Set(cmds);
+}
+
 /** Re-seed the in-memory backend to the pristine dataset. Call in `beforeEach`. */
 export function resetIpc(): void {
   state = {
@@ -913,6 +925,7 @@ export function resetIpc(): void {
   bandLoginJobIds = [];
   loginOutcomes = {};
   articleListFailures = new Set();
+  failCommands = new Set();
 }
 
 resetIpc();
@@ -952,6 +965,9 @@ function bandQueueStatus() {
 /** Drop-in replacement for `@tauri-apps/api/core`'s `invoke`, backed by fixtures. */
 export const invoke = vi.fn(
   async (cmd: string, args?: Record<string, unknown>): Promise<unknown> => {
+    if (failCommands.has(cmd)) {
+      throw new Error(`mock failure: ${cmd}`);
+    }
     switch (cmd) {
       // --- read-only domains -------------------------------------------------
       case "list_stocks":

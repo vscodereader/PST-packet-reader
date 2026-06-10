@@ -125,4 +125,45 @@ describe("NaverAccountList", () => {
       });
     });
   });
+
+  it("shows a login error when enqueue rejects", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke)
+      .mockResolvedValueOnce(undefined) // save_accounts
+      .mockRejectedValueOnce(new Error("로그인 시작 실패")); // enqueue_cookie_refresh
+    const user = userEvent.setup();
+    render(<NaverAccountList />);
+    await user.type(screen.getByPlaceholderText("Username"), "myid");
+    await user.type(screen.getByPlaceholderText("Password"), "mypass");
+    await user.click(screen.getByRole("button", { name: /\+/ }));
+    await user.click(
+      screen.getByRole("button", { name: /run all auto login/i }),
+    );
+
+    expect(await screen.findByText("로그인 시작 실패")).toBeInTheDocument();
+  });
+
+  it("renders a failed job's status badge and error message", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke)
+      .mockResolvedValueOnce(undefined) // save_accounts
+      .mockResolvedValueOnce({
+        isRunning: false,
+        currentAccountId: null,
+        jobs: [{ accountId: "myid", status: "failed", message: "쿠키 만료" }],
+      }); // enqueue_cookie_refresh
+    const user = userEvent.setup();
+    render(<NaverAccountList />);
+    await user.type(screen.getByPlaceholderText("Username"), "myid");
+    await user.type(screen.getByPlaceholderText("Password"), "mypass");
+    await user.click(screen.getByRole("button", { name: /\+/ }));
+    await user.click(
+      screen.getByRole("button", { name: /run all auto login/i }),
+    );
+
+    expect(await screen.findByText("Failed")).toBeInTheDocument();
+    expect(screen.getByText("쿠키 만료")).toBeInTheDocument();
+  });
 });

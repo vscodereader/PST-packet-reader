@@ -233,9 +233,12 @@ fn scheduled_add_promote_and_cancel_flow() {
     );
     assert!(rejected.is_err(), "past schedule time should be rejected");
 
-    // Promote drops it from scheduled and appends to the now queue.
+    // Promote drops it from scheduled and appends to the now queue. The returned
+    // snapshot is captured before the async worker can drain a plan-less item
+    // (이슈 #181), so it deterministically contains the just-promoted item.
     let now_after = invoke_ok(&wv, "promote_queue_scheduled", json!({ "id": "qs1" }));
     assert_eq!(array(&now_after).len(), 1);
+    assert_eq!(array(&now_after)[0]["id"], "qs1");
 
     let cancelled = invoke_ok(&wv, "cancel_queue_scheduled", json!({ "id": "qs1" }));
     assert!(cancelled.is_array());
