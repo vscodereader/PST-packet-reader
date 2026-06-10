@@ -18,7 +18,7 @@ async function renderQueue(go = vi.fn()) {
     </MantineProvider>,
   );
   // now + scheduled lists load asynchronously over the IPC wrapper (mock here)
-  await screen.findByText("삼성전자 4분기 실적 기대 — 매수 관점 정리");
+  await screen.findByText("반도체 흐름 코멘트 10종");
   await screen.findByText("에코프로 조정 구간 대응 전략");
   return go;
 }
@@ -35,16 +35,6 @@ describe("Queue", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("즉시 처리 대기열")).toBeInTheDocument();
     expect(screen.getByText("예약 대기")).toBeInTheDocument();
-  });
-
-  it("opens the running batch in 알림 when its row is clicked", async () => {
-    const go = await renderQueue();
-    await userEvent.click(
-      screen.getByText("삼성전자 4분기 실적 기대 — 매수 관점 정리"),
-    );
-    expect(go).toHaveBeenCalledWith("log", {
-      logFilter: { batchId: "b0" },
-    });
   });
 
   it("navigates to posts via '새 작업 추가'", async () => {
@@ -85,6 +75,24 @@ describe("Queue", () => {
     );
     await userEvent.click(screen.getAllByTitle("예약 취소")[0]!);
     expect(screen.getByText("예약 대기")).toBeInTheDocument();
+  });
+
+  it("shows 놓침 + 재예약 for a missed schedule", async () => {
+    await renderQueue();
+    // qs3(HBM)은 missed → "놓침" 뱃지와 "재예약" 버튼이 보인다.
+    expect(screen.getByText("HBM 관련 기대 코멘트")).toBeInTheDocument();
+    expect(screen.getByText("놓침")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "재예약" })).toBeInTheDocument();
+  });
+
+  it("reschedules a missed item, clearing 놓침", async () => {
+    await renderQueue();
+    expect(screen.getByText("놓침")).toBeInTheDocument();
+    // 재예약 버튼(놓친 항목 전용)을 누르면 현재 시각으로 재예약돼 missed가 풀린다.
+    await userEvent.click(screen.getByRole("button", { name: "재예약" }));
+    await waitFor(() =>
+      expect(screen.queryByText("놓침")).not.toBeInTheDocument(),
+    );
   });
 
   it("reorders waiting items via drag and drop", async () => {

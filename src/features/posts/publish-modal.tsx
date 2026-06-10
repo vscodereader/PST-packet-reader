@@ -44,6 +44,7 @@ import type {
   Stock,
 } from "@/shared/data/types";
 import { ipc } from "@/shared/ipc";
+import { nowParts, scheduleMoment, toEpochMs } from "@/shared/schedule";
 import { DateTimePicker } from "@/shared/ui/date-time-picker";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo, PlatformPill } from "@/shared/ui/platform-logo";
@@ -640,45 +641,6 @@ function fallbackEndpoint(): { host: string; port: number } {
   return { host: "127.0.0.1", port: 9222 };
 }
 
-const pad2 = (n: number) => String(n).padStart(2, "0");
-
-/** Current date/time as the picker's `{ date, time }` strings (minute precision). */
-function nowParts(): { date: string; time: string } {
-  const n = new Date();
-  return {
-    date: `${n.getFullYear()}-${pad2(n.getMonth() + 1)}-${pad2(n.getDate())}`,
-    time: `${pad2(n.getHours())}:${pad2(n.getMinutes())}`,
-  };
-}
-
-/** Local epoch-ms for a `YYYY-MM-DD` + `HH:MM` pair (for the IPC time guard). */
-function toEpochMs(date: string, time: string): number {
-  const [y, m, d] = date.split("-").map(Number);
-  const [h, mi] = time.split(":").map(Number);
-  return new Date(y ?? 1970, (m ?? 1) - 1, d ?? 1, h ?? 0, mi ?? 0).getTime();
-}
-
-/** Turn the picked date/time into the queue's `{ when, rel }` display strings. */
-function scheduleMoment(
-  date: string,
-  time: string,
-): { label: string; when: string } {
-  const [y, m, d] = date.split("-").map(Number);
-  const target = new Date(y ?? 1970, (m ?? 1) - 1, d ?? 1);
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const diff = Math.round((target.getTime() - today.getTime()) / 86400000);
-  const label =
-    diff <= 0
-      ? "오늘"
-      : diff === 1
-        ? "내일"
-        : diff === 2
-          ? "모레"
-          : `${m}/${d}`;
-  return { label, when: `${label} ${time}` };
-}
-
 function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [stocks, setStocks] = useState<Stock[]>([]);
@@ -747,10 +709,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [date, setDate] = useState(() => nowParts().date);
   const [time, setTime] = useState(() => nowParts().time);
   const [acctFilter, setAcctFilter] = useState<"all" | PlatformId>("all");
-  // 댓글 대상 글 개수(최신글/인기글). 문서의 commentCount를 초기값으로, 없으면 1.
-  const [commentCount, setCommentCount] = useState(() =>
-    [1, 3, 5, 10].includes(doc?.commentCount ?? 0) ? doc!.commentCount! : 1,
-  );
+  // 댓글 대상 글 개수(최신글/인기글)는 댓글 템플릿(writer-modal)에서 정한 값을
+  // 그대로 쓴다. 게시 모달에서 다시 고르지 않는다(중복 UI 제거). 없거나 허용값이
+  // 아니면 1.
+  const commentCount = [1, 3, 5, 10].includes(doc?.commentCount ?? 0)
+    ? doc!.commentCount!
+    : 1;
   const [linkOverride, setLinkOverride] = useState("");
   const [showPreview, setShowPreview] = useState(false);
   const [flow, setFlow] = useState<null | "running" | PublishResult[]>(null);
@@ -1116,10 +1080,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         articleId: x.out.articleId as number,
       }));
     if (posted.length === 0) return postResults;
-    // The backend shuffles `comments` and deals one to each posted article
-    // (issue #98); `posted` already carries {accountId, cafeId, articleId}.
+    // both = "위에서 작성한 글에 바로 댓글이 달립니다": 쓴 글마다 댓글 풀 전체를 단다.
+    // 각 글을 댓글 수만큼 복제해 보내면, 백엔드 분배(셔플 후 pool[i % pool.len()])가
+    // 글 블록(길이 = 풀 크기)마다 풀 전체를 정확히 한 번씩 깔아 준다.
+    const targets = posted.flatMap((p) => comments.map(() => p));
     const couts = await ipc.cafes
-      .runCommentJobs({ targets: posted, comments })
+      .runCommentJobs({ targets, comments })
       .catch((): null => null);
     // 글이 올라간 행이라도 그 계정 댓글이 전부 성공해야 "성공"으로 둔다. 일부/전부
     // 실패를 초록 배지로 묻으면(이전 동작) 운영자가 재시도를 안 한다. 건수는 msg에.
@@ -1384,6 +1350,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         return {
           accountId: pj.accountId,
           cafe: pj.cafe,
+          // 완료 로그에 카페 ID 대신 보여줄 표시 이름(동결). pick이 없으면 대상명으로.
+          cafeName: naverPicks[j.key]?.cafeName ?? j.targetName,
           menuId: pj.menuId,
           boardType: pj.boardType,
           ...(spec ? { commentTarget: spec } : {}),
@@ -1432,6 +1400,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       kind: doc.kind,
       when: moment.when,
       rel: moment.label,
+      at: toEpochMs(date, time),
+      missed: false,
       locs,
       plan: buildPlan(),
     };
@@ -1631,38 +1601,6 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
               onRefreshJoined={refreshJoined}
             />
           </>
-        )}
-
-        {mode === "comment" && isListTarget && selectedNaver.length > 0 && (
-          <Box mt={22}>
-            <Group gap={7} mb={10}>
-              <Icon.target size={17} color="var(--mantine-color-gray-6)" />
-              <Text fz={13.5} fw={700}>
-                Comment targets
-              </Text>
-              <Badge size="sm" variant="light" color="blue">
-                {commentTargetMode === "popular" ? "Popular" : "Latest"}
-              </Badge>
-            </Group>
-            <Text fz={12} c="dimmed" mb={8}>
-              Comment on the top N{" "}
-              {commentTargetMode === "popular" ? "popular" : "latest"} articles
-              of each selected cafe.
-            </Text>
-            <SegmentedControl
-              fullWidth
-              size="sm"
-              value={String(commentCount)}
-              onChange={(v) => setCommentCount(Number(v))}
-              data={[
-                { value: "1", label: "1" },
-                { value: "3", label: "3" },
-                { value: "5", label: "5" },
-                { value: "10", label: "10" },
-              ]}
-              aria-label="comment article count"
-            />
-          </Box>
         )}
 
         {showTokens && (

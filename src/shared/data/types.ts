@@ -142,6 +142,10 @@ export interface QueueScheduledItem {
   kind: ModeValue;
   when: string;
   rel: string;
+  /** 예약 시각(epoch ms). 자동 트리거 스케줄러의 기준값. */
+  at: number;
+  /** 앱 종료 중 시각이 지나 미발행된 상태. 사용자가 재예약/취소한다. */
+  missed: boolean;
   locs: QueueLocation[];
   /** 워커가 실제 게시에 쓰는 실행 페이로드. 표시 전용 아이템은 없음. */
   plan?: PublishPlan;

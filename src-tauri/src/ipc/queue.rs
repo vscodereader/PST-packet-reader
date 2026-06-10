@@ -63,6 +63,10 @@ pub struct CommentTargetSpec {
 pub struct NaverTarget {
     pub account_id: String,
     pub cafe: String,
+    /// 카페 표시 이름(예약 시점 동결). 완료 로그에 카페 ID 대신 보여준다. 과거에
+    /// 저장된 plan에는 없을 수 있어 기본값(빈 문자열)을 허용한다.
+    #[serde(default)]
+    pub cafe_name: String,
     #[ts(type = "number")]
     pub menu_id: u64,
     pub board_type: String,
@@ -130,6 +134,15 @@ pub struct QueueScheduledItem {
     pub kind: ModeValue,
     pub when: String,
     pub rel: String,
+    /// 예약 시각(epoch ms). 자동 트리거 스케줄러가 이 값과 현재 시각을 비교한다.
+    /// 과거에 저장된(표시 전용) 아이템엔 없을 수 있어 기본값(0)을 허용한다.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub at: i64,
+    /// 앱이 꺼져 있는 동안 예약 시각이 지나 미발행된 상태. 자동 게시하지 않고 사용자가
+    /// 재예약/취소하도록 표시한다. 기본 false.
+    #[serde(default)]
+    pub missed: bool,
     pub locs: Vec<QueueLocation>,
     /// 워커가 실제 게시에 사용하는 실행 페이로드. 레거시/표시 전용 아이템은 None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -252,8 +265,57 @@ pub fn cancel_queue_scheduled(
 
 /// True if `at` is no earlier than the start of the current minute. Minute
 /// precision keeps "now" (the picker default) schedulable despite seconds drift.
+///
+/// 의도된 부작용: `at`이 "현재 분"의 과거 초(최대 ~59초 전)여도 통과한다. 그런 예약은
+/// 곧바로 `pick_due`(at <= now)에 걸려 다음 tick에서 즉시 자동 게시된다 — 분 단위 picker
+/// 의 "지금" 선택을 허용하기 위한 의도적 동작이며, 초 단위 미래 예약은 지원하지 않는다.
 pub fn is_future_enough(at: i64, now: i64) -> bool {
     at >= now - now.rem_euclid(60_000)
+}
+
+/// 시작 시 "놓침" 판정의 유예(1분). 직전 1분 내에 예약 시각이 된 아이템은 놓침으로
+/// 보지 않고 티커가 곧 게시한다(앱을 막 켠 직후의 오판 방지).
+const MISSED_GRACE_MS: i64 = 60_000;
+
+/// 지금 게시해야 할 예약 아이템의 id 목록(`at <= now` 이고 놓침이 아닌 것). 티커가
+/// 앱 실행 중 시각이 도래한 아이템을 promote하는 데 쓴다(순서 보존).
+pub fn pick_due(items: &[QueueScheduledItem], now: i64) -> Vec<String> {
+    items
+        .iter()
+        .filter(|s| !s.missed && s.at <= now)
+        .map(|s| s.id.clone())
+        .collect()
+}
+
+/// 앱 시작 시 호출: 유예를 넘겨(`at <= now - MISSED_GRACE_MS`) 미발행 상태로 지나간
+/// 예약을 `missed`로 표시한다. 게시는 하지 않는다. 멱등(이미 missed면 그대로).
+pub fn mark_missed(mut items: Vec<QueueScheduledItem>, now: i64) -> Vec<QueueScheduledItem> {
+    for item in &mut items {
+        if !item.missed && item.at <= now - MISSED_GRACE_MS {
+            item.missed = true;
+        }
+    }
+    items
+}
+
+/// 예약 시각을 변경한다(재예약): 매칭 id의 `at`/표시 문자열(`when`/`rel`)을 갱신하고
+/// `missed`를 해제한다. 매칭 없으면 원본 유지.
+pub fn apply_reschedule(
+    mut items: Vec<QueueScheduledItem>,
+    id: &str,
+    at: i64,
+    when: &str,
+    rel: &str,
+) -> Vec<QueueScheduledItem> {
+    for item in &mut items {
+        if item.id == id {
+            item.at = at;
+            item.when = when.to_owned();
+            item.rel = rel.to_owned();
+            item.missed = false;
+        }
+    }
+    items
 }
 
 /// Append a new scheduled item (used when a post is scheduled from the publish
@@ -270,6 +332,10 @@ pub fn add_queue_scheduled(
     }
     let title = item.title.clone();
     let next = store.mutate(|mut items| {
+        // 예약 시각을 아이템에 박제한다 — 자동 트리거 스케줄러가 이 값을 본다.
+        let mut item = item;
+        item.at = at;
+        item.missed = false;
         items.push(item);
         items
     });
@@ -279,6 +345,43 @@ pub fn add_queue_scheduled(
         format!("예약 추가됨 — {title}"),
     );
     Ok(next)
+}
+
+/// 예약 아이템 1건을 now 큐로 승격한다(수동 "즉시 처리"·자동 스케줄러 공용). scheduled
+/// 에서 제거 → now에 추가(plan 보존) → 워커 기동. 활동 로그는 호출부가 맥락에 맞게 남긴다
+/// (수동/자동 메시지가 다름). 아이템이 없으면(취소·중복 race) false.
+fn promote_one<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    now: &JsonStore<QueueNowItem>,
+    scheduled: &JsonStore<QueueScheduledItem>,
+    runner: &super::queue_runner::NowQueueRunner,
+    id: &str,
+) -> bool {
+    // scheduled 스토어 락 안에서 원자적으로 꺼낸다: 매칭 id가 있으면 제거하며 그 항목을
+    // `taken`에 옮기고, 없으면 그대로 둔다. 수동 "즉시 처리"와 자동 스케줄러(run_due_now)는
+    // 별개 스레드에서 같은 id를 동시에 승격하려 할 수 있는데, 락 안의 take-and-remove로
+    // 실제로 제거한 쪽만 Some을 받게 해 now 큐 중복 push(=중복 게시)를 막는다.
+    let mut taken: Option<QueueScheduledItem> = None;
+    scheduled.mutate(|items| {
+        let mut kept = Vec::with_capacity(items.len());
+        for s in items {
+            if taken.is_none() && s.id == id {
+                taken = Some(s);
+            } else {
+                kept.push(s);
+            }
+        }
+        kept
+    });
+    let Some(s) = taken else {
+        return false;
+    };
+    now.mutate(|mut items| {
+        items.push(to_now_item(s));
+        items
+    });
+    super::queue_runner::start_if_idle(runner, app.clone());
+    true
 }
 
 /// Move a scheduled item into the immediate queue ("즉시 처리"): drop it from the
@@ -293,23 +396,115 @@ pub fn promote_queue_scheduled<R: tauri::Runtime>(
     runner: tauri::State<'_, super::queue_runner::NowQueueRunner>,
     id: String,
 ) -> Vec<QueueNowItem> {
-    let found = scheduled.snapshot().into_iter().find(|s| s.id == id);
-    match found {
-        Some(s) => {
-            scheduled.mutate(|items| apply_cancel_scheduled(items, &id));
-            let next = now.mutate(|mut items| {
-                items.push(to_now_item(s));
-                items
-            });
+    if promote_one(&app, now.inner(), scheduled.inner(), runner.inner(), &id) {
+        record(
+            activity.inner(),
+            ActivityType::Info,
+            "예약을 즉시 게시로 전환",
+        );
+    }
+    now.snapshot()
+}
+
+/// 예약 시각을 변경한다(재예약). 놓친(missed) 예약을 새 시각으로 되살리거나, 대기 중인
+/// 예약의 시각을 바꾸는 데 쓴다. 과거 시각은 거부(add와 동일 가드). missed는 해제된다.
+#[tauri::command]
+pub fn reschedule_queue_scheduled(
+    store: tauri::State<'_, JsonStore<QueueScheduledItem>>,
+    activity: tauri::State<'_, JsonStore<crate::ipc::activity::ActivityItem>>,
+    id: String,
+    at: i64,
+    when: String,
+    rel: String,
+) -> Result<Vec<QueueScheduledItem>, String> {
+    if !is_future_enough(at, crate::util::now_ms()) {
+        return Err("예약 시각이 현재보다 과거입니다".into());
+    }
+    // 매칭되는 예약이 있었는지 락 안에서 확인한다. apply_reschedule는 비매칭 id면 리스트를
+    // 그대로 돌려주므로, 그것만으로는 성공/실패를 구분할 수 없다 — 동시 tick/취소로 막
+    // 사라진 id나 잘못된 id에 대해 "변경됨"이라는 거짓 성공을 남기지 않도록 분기한다.
+    let mut matched = false;
+    let next = store.mutate(|items| {
+        let next = apply_reschedule(items, &id, at, &when, &rel);
+        matched = next.iter().any(|s| s.id == id);
+        next
+    });
+    if !matched {
+        return Err("재예약할 예약을 찾지 못했어요".into());
+    }
+    record(activity.inner(), ActivityType::Info, "예약 시각 변경됨");
+    Ok(next)
+}
+
+/// 지금 게시해야 할 예약(`pick_due`)을 모두 now 큐로 승격하고 자동 게시 활동을 남긴다.
+/// 스케줄러 티커가 매 tick 호출한다. 동기 함수라 State 가드를 await 너머로 들지 않는다.
+pub fn run_due_now<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use tauri::Manager;
+
+    let scheduled = app.state::<JsonStore<QueueScheduledItem>>();
+    let now = app.state::<JsonStore<QueueNowItem>>();
+    let activity = app.state::<JsonStore<crate::ipc::activity::ActivityItem>>();
+    let runner = app.state::<super::queue_runner::NowQueueRunner>();
+
+    let snap = scheduled.snapshot();
+    for id in pick_due(&snap, crate::util::now_ms()) {
+        if promote_one(app, now.inner(), scheduled.inner(), runner.inner(), &id) {
+            let title = snap
+                .iter()
+                .find(|s| s.id == id)
+                .map_or("", |s| s.title.as_str());
             record(
                 activity.inner(),
                 ActivityType::Info,
-                "예약을 즉시 게시로 전환",
+                format!("예약 시각 도래 — 자동 게시: {title}"),
             );
-            super::queue_runner::start_if_idle(&runner, app);
-            next
         }
-        None => now.snapshot(),
+    }
+}
+
+/// 앱 시작 reconciliation: 앱 종료 중 시각이 지난 미발행 예약을 missed로 표시하고(자동
+/// 게시하지 않음) 새로 놓친 건이 있으면 사용자에게 알림으로 남긴다. 티커 spawn 전에
+/// 동기로 호출해, 첫 tick이 이미 missed로 표시된 항목을 자동 게시하지 않게 한다.
+///
+/// 의도된 경계: 직전 1분(`MISSED_GRACE_MS`) 내에 도래한 예약은 여기서 missed로 보지 않고
+/// (mark_missed 유예), 첫 tick의 `pick_due`가 자동 게시한다. 즉 "앱이 꺼진 동안 지난 예약"
+/// 중 마지막 1분 안짝 건은 놓침이 아니라 즉시 게시되는 게 정상이다.
+pub fn reconcile_missed_on_startup<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use tauri::Manager;
+
+    let scheduled = app.state::<JsonStore<QueueScheduledItem>>();
+    let activity = app.state::<JsonStore<crate::ipc::activity::ActivityItem>>();
+
+    let before = scheduled.snapshot().iter().filter(|s| s.missed).count();
+    let after = scheduled.mutate(|items| mark_missed(items, crate::util::now_ms()));
+    let newly = after
+        .iter()
+        .filter(|s| s.missed)
+        .count()
+        .saturating_sub(before);
+    if newly > 0 {
+        record(
+            activity.inner(),
+            ActivityType::Error,
+            format!("예약 {newly}건이 앱 종료 중 시각이 지나 미발행됐습니다. 큐에서 재예약하거나 취소하세요."),
+        );
+        // 창을 닫아둔(트레이) 사용자가 시작 시 놓침을 인지하도록 OS 토스트도 띄운다(#163).
+        let (toast_title, toast_body) = super::notify::missed_message(newly);
+        super::notify::notify_desktop(app, &toast_title, &toast_body);
+    }
+}
+
+/// 스케줄러 검사 주기(초). 예약 시각보다 최대 이만큼 늦게 게시될 수 있다(게시 용도엔 충분).
+const SCHEDULER_TICK_SECS: u64 = 30;
+
+/// 백그라운드 예약 스케줄러. 앱 시작 시 한 번 spawn되어 앱 수명 동안 `SCHEDULER_TICK_SECS`
+/// 마다 예약 시각이 도래한 아이템을 자동 게시한다(`run_due_now`). interval의 첫 tick은
+/// 즉시 발화하지만, 시작 reconciliation이 먼저 끝나므로 미발행 예약을 잘못 게시하지 않는다.
+pub async fn scheduler_loop<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(SCHEDULER_TICK_SECS));
+    loop {
+        tick.tick().await;
+        run_due_now(&app);
     }
 }
 
@@ -345,6 +540,8 @@ mod tests {
             kind: ModeValue::Both,
             when: "오늘 18:30".into(),
             rel: "5시간 후".into(),
+            at: 1_700_000_000_000,
+            missed: false,
             locs: vec![loc(PlatformId::Forum, "에코프로", Some("086520"))],
             plan: None,
         }
@@ -360,6 +557,7 @@ mod tests {
             naver: vec![NaverTarget {
                 account_id: "user01".into(),
                 cafe: "12345".into(),
+                cafe_name: "주식투자연구소".into(),
                 menu_id: 7,
                 board_type: "L".into(),
                 comment_target: Some(CommentTargetSpec {
@@ -510,5 +708,82 @@ mod tests {
         assert!(json.contains("\"postId\":\"p1\""));
         assert!(json.contains("\"bodyText\":\"본문\""));
         assert!(json.contains("\"commentTarget\""));
+    }
+
+    fn sched_at(id: &str, at: i64, missed: bool) -> QueueScheduledItem {
+        let mut s = sample_scheduled_item(id);
+        s.at = at;
+        s.missed = missed;
+        s
+    }
+
+    #[test]
+    fn pick_due_returns_past_non_missed_in_order() {
+        let now = 1_000_000;
+        let items = vec![
+            sched_at("a", now, false),       // 경계: at == now → 포함
+            sched_at("b", now + 1, false),   // 미래 → 제외
+            sched_at("c", now - 50, true),   // 과거지만 missed → 제외
+            sched_at("d", now - 100, false), // 과거 → 포함
+        ];
+        assert_eq!(pick_due(&items, now), vec!["a", "d"]);
+        assert!(pick_due(&[], now).is_empty());
+    }
+
+    #[test]
+    fn mark_missed_flags_only_past_grace_unmissed() {
+        let now = 10_000_000;
+        let items = vec![
+            sched_at("grace", now - MISSED_GRACE_MS + 1, false), // 유예 내 → 유지
+            sched_at("old", now - MISSED_GRACE_MS - 1, false),   // 유예 초과 → missed
+            sched_at("already", now - 1_000_000, true),          // 이미 missed → 유지
+            sched_at("future", now + 10_000, false),             // 미래 → 유지
+            sched_at("legacy", 0, false),                        // 레거시 at=0 → missed
+        ];
+        let next = mark_missed(items, now);
+        let by = |id: &str| next.iter().find(|s| s.id == id).unwrap().missed;
+        assert!(!by("grace"));
+        assert!(by("old"));
+        assert!(by("already"));
+        assert!(!by("future"));
+        assert!(by("legacy"));
+    }
+
+    #[test]
+    fn apply_reschedule_updates_time_and_clears_missed() {
+        let items = vec![sched_at("a", 100, true), sched_at("b", 200, false)];
+        let next = apply_reschedule(items, "a", 999, "내일 09:00", "내일");
+        let a = next.iter().find(|s| s.id == "a").unwrap();
+        assert_eq!(a.at, 999);
+        assert_eq!(a.when, "내일 09:00");
+        assert_eq!(a.rel, "내일");
+        assert!(!a.missed); // 재예약 시 놓침 해제
+                            // 비매칭 아이템은 그대로
+        let b = next.iter().find(|s| s.id == "b").unwrap();
+        assert_eq!(b.at, 200);
+    }
+
+    #[test]
+    fn apply_reschedule_no_match_leaves_list_unchanged() {
+        // 비매칭 id면 리스트가 그대로다 — reschedule_queue_scheduled가 이를 보고 거짓 성공
+        // 대신 에러를 내도록 분기하는 근거(있는 id면 변경되어 달라진다).
+        let items = vec![sched_at("a", 100, true), sched_at("b", 200, false)];
+        let next = apply_reschedule(items.clone(), "zzz", 999, "내일 09:00", "내일");
+        assert_eq!(next, items);
+    }
+
+    #[test]
+    fn scheduled_item_defaults_at_and_missed_when_absent() {
+        // 구버전 JSON(at/missed 없음) → at=0, missed=false 로 역직렬화(serde default).
+        let json =
+            r#"{"id":"q1","title":"t","kind":"post","when":"오늘 18:30","rel":"오늘","locs":[]}"#;
+        let item: QueueScheduledItem = serde_json::from_str(json).unwrap();
+        assert_eq!(item.at, 0);
+        assert!(!item.missed);
+        // 전체 라운드트립도 보존.
+        let full = sched_at("q2", 1_700_000_000_000, true);
+        let back: QueueScheduledItem =
+            serde_json::from_str(&serde_json::to_string(&full).unwrap()).unwrap();
+        assert_eq!(full, back);
     }
 }

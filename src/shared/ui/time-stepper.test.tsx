@@ -34,16 +34,22 @@ describe("TimeStepper", () => {
     expect(onChange).toHaveBeenCalledWith({ h: 0, m: 0 });
   });
 
-  it("steps minutes up by 5, wrapping 55 → 0", async () => {
-    const onChange = renderStepper({ h: 0, m: 55 });
+  it("increments the minute by 1", async () => {
+    const onChange = renderStepper({ h: 0, m: 51 });
+    await userEvent.click(screen.getByLabelText("분 증가"));
+    expect(onChange).toHaveBeenCalledWith({ h: 0, m: 52 });
+  });
+
+  it("wraps the minute from 59 to 0", async () => {
+    const onChange = renderStepper({ h: 0, m: 59 });
     await userEvent.click(screen.getByLabelText("분 증가"));
     expect(onChange).toHaveBeenCalledWith({ h: 0, m: 0 });
   });
 
-  it("steps minutes down by 5, wrapping 0 → 55", async () => {
+  it("steps the minute down by 1, wrapping 0 → 59", async () => {
     const onChange = renderStepper({ h: 0, m: 0 });
     await userEvent.click(screen.getByLabelText("분 감소"));
-    expect(onChange).toHaveBeenCalledWith({ h: 0, m: 55 });
+    expect(onChange).toHaveBeenCalledWith({ h: 0, m: 59 });
   });
 
   it("clamps out-of-range direct input", () => {

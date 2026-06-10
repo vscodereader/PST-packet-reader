@@ -8,6 +8,7 @@ pub mod cafes;
 pub mod diagnostics;
 pub mod excel;
 pub mod log_batches;
+pub mod notify;
 pub mod posts;
 pub mod queue;
 pub mod queue_runner;

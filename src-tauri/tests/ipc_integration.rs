@@ -241,6 +241,43 @@ fn scheduled_add_promote_and_cancel_flow() {
     assert!(cancelled.is_array());
 }
 
+// 예약 시각(at)이 아이템에 박제되고(자동 트리거 스케줄러의 근거), 재예약 커맨드가
+// 시각·표시 문자열을 갱신하며 missed를 해제하는지 end-to-end로 확인한다(이슈 #154).
+#[test]
+fn add_persists_at_and_reschedule_updates_it() {
+    let (app, _dir) = mock_app();
+    let wv = main_webview(&app);
+
+    let at1 = 4_102_444_800_000_i64; // 2100-01-01
+    invoke_ok(
+        &wv,
+        "add_queue_scheduled",
+        json!({ "item": sample_scheduled_item("qs1"), "at": at1 }),
+    );
+    let listed = invoke_ok(&wv, "list_queue_scheduled", json!({}));
+    assert_eq!(array(&listed)[0]["at"].as_i64(), Some(at1));
+    assert_eq!(array(&listed)[0]["missed"].as_bool(), Some(false));
+
+    // 재예약: 새 시각/표시로 갱신.
+    let at2 = 4_102_531_200_000_i64; // 다음날
+    let after = invoke_ok(
+        &wv,
+        "reschedule_queue_scheduled",
+        json!({ "id": "qs1", "at": at2, "when": "내일 09:00", "rel": "내일" }),
+    );
+    assert_eq!(array(&after)[0]["at"].as_i64(), Some(at2));
+    assert_eq!(array(&after)[0]["when"], "내일 09:00");
+    assert_eq!(array(&after)[0]["missed"].as_bool(), Some(false));
+
+    // 과거 시각 재예약은 거부된다(add와 동일 가드).
+    let rejected = invoke(
+        &wv,
+        "reschedule_queue_scheduled",
+        json!({ "id": "qs1", "at": 0_i64, "when": "x", "rel": "y" }),
+    );
+    assert!(rejected.is_err(), "past reschedule time should be rejected");
+}
+
 // 실행 페이로드(plan)가 IPC 경계(역직렬화)와 저장소를 통과해 그대로 복원되고,
 // promote(to_now_item) 후에도 보존되는지 end-to-end로 확인한다. 본문 동결 정책의
 // 핵심이라, 프론트가 보내는 camelCase JSON(menuId number, commentTarget 등)이

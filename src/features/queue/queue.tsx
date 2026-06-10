@@ -25,8 +25,16 @@ import type {
   QueueScheduledItem,
 } from "@/shared/data/types";
 import { ipc } from "@/shared/ipc";
+import { nowParts, scheduleMoment, toEpochMs } from "@/shared/schedule";
+import { DateTimePicker } from "@/shared/ui/date-time-picker";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformPill } from "@/shared/ui/platform-logo";
+
+// 실행 중(running) 아이템은 워커가 처리 중이라 맨 앞에 고정한다. 단 실행 중인 게
+// 없으면(워커 idle) 첫 대기 아이템도 자유롭게 옮길 수 있어야 하므로, index 0을 무조건
+// 막지 않고 "선두 running 개수"만큼만 고정한다(백엔드 apply_reorder_now와 일치).
+const pinnedCount = (list: QueueNowItem[]) =>
+  list[0]?.state === "running" ? 1 : 0;
 
 function LocSummary({
   locs,
@@ -53,6 +61,45 @@ function LocSummary({
   );
 }
 
+/**
+ * Inline re-schedule control for a "missed" item: a date/time picker seeded to
+ * "now" plus a confirm button. Local state keeps the pick until the user commits
+ * so we don't fire a reschedule on every adjustment.
+ */
+function RescheduleControl({
+  onSubmit,
+}: {
+  onSubmit: (date: string, time: string) => void;
+}) {
+  const [date, setDate] = useState(() => nowParts().date);
+  const [time, setTime] = useState(() => nowParts().time);
+  // 사용자가 picker를 건드리지 않아 시드("지금")가 현재보다 과거가 됐으면(컨트롤이 오래
+  // 열려 있던 경우) 제출 시 현재 시각으로 올려, 백엔드 과거-시각 거부를 피한다.
+  const submit = () => {
+    const fresh = nowParts();
+    if (toEpochMs(date, time) < toEpochMs(fresh.date, fresh.time)) {
+      onSubmit(fresh.date, fresh.time);
+    } else {
+      onSubmit(date, time);
+    }
+  };
+  return (
+    <Group gap={6} wrap="nowrap">
+      <DateTimePicker
+        date={date}
+        time={time}
+        onChange={(v) => {
+          setDate(v.date);
+          setTime(v.time);
+        }}
+      />
+      <Button size="sm" color="blue" onClick={submit}>
+        재예약
+      </Button>
+    </Group>
+  );
+}
+
 export function Queue({ go }: { go: GoFn }) {
   const [now, setNow] = useState<QueueNowItem[]>([]);
   const [sched, setSched] = useState<QueueScheduledItem[]>([]);
@@ -69,15 +116,32 @@ export function Queue({ go }: { go: GoFn }) {
   }, [now, dragId]);
 
   useEffect(() => {
-    void ipc.queue.listNow().then(setNow);
-    void ipc.queue.listScheduled().then(setSched);
+    // in-flight Promise가 언마운트 후 resolve돼 unmounted setState가 되지 않도록
+    // alive 가드를 둔다. cleanup에서 false로 만들어 이후 콜백을 무시한다.
+    let alive = true;
+    void ipc.queue.listNow().then((v) => {
+      if (alive) setNow(v);
+    });
+    void ipc.queue.listScheduled().then((v) => {
+      if (alive) setSched(v);
+    });
     // 워커 진행률·상태를 주기적으로 반영. 단 드래그 중이거나 순서 영속화 대기 중에는
     // 사용자가 맞춘 로컬 순서를 덮어쓰지 않도록 폴링을 건너뛴다.
     const timer = window.setInterval(() => {
+      // 예약 큐는 드래그 대상이 아니므로 항상 폴링한다 — 스케줄러의 자동 게시(예약→now
+      // 이동)와 "놓침" 표시가 화면에 실시간 반영되게 한다.
+      void ipc.queue.listScheduled().then((v) => {
+        if (alive) setSched(v);
+      });
       if (dragIdRef.current !== null || persistingRef.current) return;
-      void ipc.queue.listNow().then(setNow);
+      void ipc.queue.listNow().then((v) => {
+        if (alive) setNow(v);
+      });
     }, 1500);
-    return () => window.clearInterval(timer);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
   }, []);
 
   // 대기열 순서를 백엔드에 영속화한다. 응답이 올 때까지 폴링을 막아(persistingRef)
@@ -87,6 +151,15 @@ export function Queue({ go }: { go: GoFn }) {
     void ipc.queue
       .reorderNow(orderedIds)
       .then(setNow)
+      .catch(() => {
+        // 영속화 실패 시 낙관적 순서가 백엔드와 어긋난 채 남지 않도록 현재
+        // 순서를 다시 불러와 되돌리고, 실패를 사용자에게 알린다.
+        void ipc.queue.listNow().then(setNow);
+        notifications.show({
+          message: "순서 변경을 저장하지 못했어요",
+          color: "red",
+        });
+      })
       .finally(() => {
         persistingRef.current = false;
       });
@@ -96,28 +169,33 @@ export function Queue({ go }: { go: GoFn }) {
     setNow((list) => {
       const from = list.findIndex((x) => x.id === id);
       const to = list.findIndex((x) => x.id === targetId);
-      if (from < 0 || to < 0 || from === to || to === 0) return list;
+      const pinned = pinnedCount(list);
+      if (from < pinned || to < pinned || from === to) return list;
       const copy = [...list];
       const [m] = copy.splice(from, 1);
       if (m) copy.splice(to, 0, m);
       return copy;
     });
   };
-  // running 아이템은 항상 맨 앞(index 0)에 고정된다(워커는 한 번에 하나만 실행).
-  // 따라서 index 0은 건드리지 않고 대기 아이템끼리만 자리를 바꾼다.
   const move = (id: string, dir: -1 | 1) => {
-    const list = nowRef.current;
-    const i = list.findIndex((x) => x.id === id);
-    const j = i + dir;
-    if (i < 1 || j < 1 || j >= list.length) return;
-    const copy = [...list];
-    const a = copy[i];
-    const b = copy[j];
-    if (!a || !b) return;
-    copy[i] = b;
-    copy[j] = a;
-    setNow(copy);
-    persistOrder(copy.map((x) => x.id));
+    // reorder()와 동일하게 함수형 업데이트 안에서 스왑해 빠른 연속 클릭 시 stale
+    // 리스트로 동작하지 않게 한다. 스왑 결과는 바깥 변수에 잡아 persistOrder에 넘긴다.
+    let swapped: QueueNowItem[] | null = null;
+    setNow((list) => {
+      const pinned = pinnedCount(list);
+      const i = list.findIndex((x) => x.id === id);
+      const j = i + dir;
+      if (i < pinned || j < pinned || j >= list.length) return list;
+      const copy = [...list];
+      const a = copy[i];
+      const b = copy[j];
+      if (!a || !b) return list;
+      copy[i] = b;
+      copy[j] = a;
+      swapped = copy;
+      return copy;
+    });
+    if (swapped) persistOrder((swapped as QueueNowItem[]).map((x) => x.id));
   };
   const cancel = (id: string) => {
     void ipc.queue.cancelNow(id).then(setNow);
@@ -136,6 +214,26 @@ export function Queue({ go }: { go: GoFn }) {
   const cancelScheduled = (id: string) => {
     void ipc.queue.cancelScheduled(id).then(setSched);
     notifications.show({ message: "예약을 취소했어요", color: "blue" });
+  };
+  // 놓친 예약을 새 시각으로 되살린다(또는 대기 예약의 시각 변경). 백엔드가 과거 시각을
+  // 거부하면 알림으로 알린다.
+  const reschedule = (id: string, date: string, time: string) => {
+    const m = scheduleMoment(date, time);
+    void ipc.queue
+      .reschedule(id, toEpochMs(date, time), m.when, m.label)
+      .then((next) => {
+        setSched(next);
+        notifications.show({
+          message: "예약 시각을 변경했어요",
+          color: "green",
+        });
+      })
+      .catch(() => {
+        notifications.show({
+          message: "지난 시각으로는 예약할 수 없어요",
+          color: "red",
+        });
+      });
   };
 
   const waiting = now.filter((q) => q.state !== "running");
@@ -200,6 +298,10 @@ export function Queue({ go }: { go: GoFn }) {
               }
               onDragStart={(e) => {
                 setDragId(q.id);
+                // 폴링 가드(dragIdRef.current !== null)가 즉시 막도록 ref도 동기 세팅.
+                // setDragId 반영용 effect는 이번 tick 이후라 그 사이 폴링이 순서를
+                // 덮어쓰는 것을 막는다.
+                dragIdRef.current = q.id;
                 e.dataTransfer.effectAllowed = "move";
               }}
               onDragOver={(e) => {
@@ -209,6 +311,7 @@ export function Queue({ go }: { go: GoFn }) {
               onDragEnd={() => {
                 const dragged = dragId !== null;
                 setDragId(null);
+                dragIdRef.current = null;
                 // 드래그로 바뀐 최종 순서를 백엔드에 영속화한다.
                 if (dragged) persistOrder(nowRef.current.map((x) => x.id));
               }}
@@ -277,7 +380,11 @@ export function Queue({ go }: { go: GoFn }) {
               {running ? (
                 <Group gap={8} wrap="nowrap">
                   <Badge size="sm" color="blue" variant="light">
-                    처리중 {q.progress?.[0]}/{q.progress?.[1]}
+                    {(() => {
+                      // progress가 아직 없으면 "처리중 /"로 깨지지 않도록 0/0 폴백.
+                      const [d, t] = q.progress ?? [0, 0];
+                      return `처리중 ${d}/${t}`;
+                    })()}
                   </Badge>
                   <Icon.chevronRight
                     size={17}
@@ -389,17 +496,30 @@ export function Queue({ go }: { go: GoFn }) {
                 </Group>
                 <LocSummary locs={q.locs} />
               </Box>
-              <Badge size="sm" color="yellow" variant="light">
-                예약됨
-              </Badge>
-              <Button
-                size="sm"
-                variant="default"
-                leftSection={<Icon.bolt size={14} />}
-                onClick={() => promote(q.id)}
-              >
-                즉시 처리
-              </Button>
+              {q.missed ? (
+                <>
+                  <Badge size="sm" color="red" variant="light">
+                    놓침
+                  </Badge>
+                  <RescheduleControl
+                    onSubmit={(date, time) => reschedule(q.id, date, time)}
+                  />
+                </>
+              ) : (
+                <>
+                  <Badge size="sm" color="yellow" variant="light">
+                    예약됨
+                  </Badge>
+                  <Button
+                    size="sm"
+                    variant="default"
+                    leftSection={<Icon.bolt size={14} />}
+                    onClick={() => promote(q.id)}
+                  >
+                    즉시 처리
+                  </Button>
+                </>
+              )}
               <ActionIcon
                 size="md"
                 variant="subtle"
