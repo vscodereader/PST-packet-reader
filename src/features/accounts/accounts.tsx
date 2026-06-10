@@ -21,7 +21,11 @@ import { notifications } from "@mantine/notifications";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { STATUS_ACCOUNT, STATUS_ACCOUNT_ORDER } from "@/shared/data/config";
+import {
+  STATUS_ACCOUNT,
+  STATUS_ACCOUNT_CYCLE,
+  STATUS_GUIDE,
+} from "@/shared/data/config";
 import type {
   Account,
   AccountStatus,
@@ -187,27 +191,35 @@ function PwCell({
 
 function StatusBadge({
   value,
+  statusMsg,
   onChange,
 }: {
   value: AccountStatus;
+  statusMsg?: string | undefined;
   onChange: (v: AccountStatus) => void;
 }) {
   const st = STATUS_ACCOUNT[value] ?? { t: value, c: "gray" };
+  // tooltip: 상태별 조치 안내 + (있으면) 백엔드가 남긴 상세 사유.
+  const guide = STATUS_GUIDE[value] ?? "클릭하여 상태 변경";
+  const tip = statusMsg ? `${guide}\n${statusMsg}` : guide;
+  // 클릭 순환은 사용자 의미 상태(STATUS_ACCOUNT_CYCLE)만 돈다. 현재 값이 cycle 밖(로그인
+  // 워커가 자동 설정한 badCredentials/challenge/error)이면 첫 값으로 보낸다.
+  const cycle = () => {
+    const i = STATUS_ACCOUNT_CYCLE.indexOf(value);
+    const next =
+      i === -1
+        ? STATUS_ACCOUNT_CYCLE[0]
+        : STATUS_ACCOUNT_CYCLE[(i + 1) % STATUS_ACCOUNT_CYCLE.length];
+    if (next) onChange(next as AccountStatus);
+  };
   return (
     <Badge
       size="sm"
       color={st.c}
       variant="light"
-      style={{ cursor: "pointer" }}
-      title="클릭하여 상태 변경"
-      onClick={() => {
-        const next =
-          STATUS_ACCOUNT_ORDER[
-            (STATUS_ACCOUNT_ORDER.indexOf(value) + 1) %
-              STATUS_ACCOUNT_ORDER.length
-          ];
-        onChange(next as AccountStatus);
-      }}
+      style={{ cursor: "pointer", whiteSpace: "pre-line" }}
+      title={tip}
+      onClick={cycle}
     >
       {st.t}
     </Badge>
@@ -284,12 +296,6 @@ export function Accounts({ go }: { go: GoFn }) {
   const [page, setPage] = useState(1);
   const [loggingIn, setLoggingIn] = useState(false);
   const loginPollRef = useRef<number | null>(null);
-  // 로그인 폴링은 한 번 만들어진 인터벌 클로저에서 돈다. 그 안에서 "현재" 행을 보려면
-  // 클로저에 갇힌 rows 대신 이 ref를 참조한다(아래 effect가 최신 rows로 동기화).
-  const rowsRef = useRef(rows);
-  useEffect(() => {
-    rowsRef.current = rows;
-  }, [rows]);
 
   // 화면을 떠날 때 로그인 상태 폴링 타이머를 정리한다.
   useEffect(() => {
@@ -302,9 +308,16 @@ export function Accounts({ go }: { go: GoFn }) {
   // Optimistically patch the row for snappy editing, then persist over IPC and
   // reconcile with the authoritative list the backend returns.
   const update = (id: string, patch: Partial<Account>) => {
+    // 사용자가 status를 직접 바꾸면 워커가 남긴 사유(statusMsg)는 더 이상 유효하지 않으므로
+    // 키를 제거한다 — 배지는 active인데 tooltip엔 옛 차단 사유가 남는 모순을 막는다.
+    const merge = (base: Account): Account => {
+      const next = { ...base, ...patch };
+      if ("status" in patch) delete next.statusMsg;
+      return next;
+    };
     const cur = rows.find((r) => r.id === id);
-    setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
-    if (cur) void ipc.accounts.update({ ...cur, ...patch }).then(setRows);
+    setRows((rs) => rs.map((r) => (r.id === id ? merge(r) : r)));
+    if (cur) void ipc.accounts.update(merge(cur)).then(setRows);
   };
 
   const addRow = () => {
@@ -403,6 +416,7 @@ export function Accounts({ go }: { go: GoFn }) {
         needBand ? ipc.band.queueStatus() : Promise.resolve(null),
       ])
         .then(([naverStatus, bandStatus]) => {
+          let resolvedThisTick = false;
           targets.forEach((t) => {
             if (!remaining.has(t.id)) return;
             // 계정 플랫폼에 맞는 큐 상태에서 잡을 찾는다.
@@ -417,23 +431,19 @@ export function Accounts({ go }: { go: GoFn }) {
               return;
 
             remaining.delete(t.id);
+            resolvedThisTick = true;
             const ok = job.status === "success" || job.status === "expired";
-            const nextStatus = ok ? "active" : "error";
-            // 폴링(수 초~분) 중 사용자가 같은 행을 편집했을 수 있으므로, 클릭 시점 스냅샷(t)이
-            // 아니라 "현재" 행에 status만 머지하고 권위 리스트로 reconcile한다(다른 핸들러와 동일).
-            const cur = rowsRef.current.find((r) => r.id === t.id);
-            setRows((rs) =>
-              rs.map((r) => (r.id === t.id ? { ...r, status: nextStatus } : r)),
-            );
-            if (cur)
-              void ipc.accounts
-                .update({ ...cur, status: nextStatus })
-                .then(setRows);
             toast(
               `${t.loginId}: ${ok ? "로그인 성공" : "로그인 실패 — " + job.message}`,
               ok ? "green" : "red",
             );
           });
+
+          // 이번 틱에 하나라도 완료됐으면 권위 계정 리스트를 한 번만 재조회해 배지·tooltip에
+          // 세밀 상태(active/blocked/challenge/badCredentials)와 사유를 반영한다. 백엔드
+          // worker_loop가 큐 상태를 finished로 바꾸기 전에 계정 store를 먼저 기록하므로,
+          // 여기서 읽으면 최신 상태가 보인다(틱당 1회 — 행별 중복 list 호출 방지).
+          if (resolvedThisTick) void ipc.accounts.list().then(setRows);
 
           if (remaining.size === 0) {
             if (loginPollRef.current !== null) {
@@ -779,6 +789,7 @@ export function Accounts({ go }: { go: GoFn }) {
                 <Table.Td ta="center">
                   <StatusBadge
                     value={r.status}
+                    statusMsg={r.statusMsg}
                     onChange={(v) => update(r.id, { status: v })}
                   />
                 </Table.Td>

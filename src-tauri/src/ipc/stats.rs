@@ -55,6 +55,15 @@ fn is_today(at: i64) -> bool {
     (0..86_400_000).contains(&(now - at))
 }
 
+/// 대시보드 "오류" 타일에 집계할 문제 상태. 사용자 조치가 필요한 실패 계열(비번오류·차단·
+/// 기타 오류)을 포함한다. `challenge`(추가 인증 진행 중)는 일시 단계라 제외한다.
+fn is_problem_status(s: &AccountStatus) -> bool {
+    matches!(
+        s,
+        AccountStatus::Error | AccountStatus::BadCredentials | AccountStatus::Blocked
+    )
+}
+
 /// Derive the four dashboard tiles from the live domain data.
 pub fn compute(
     accounts: &[Account],
@@ -67,7 +76,7 @@ pub fn compute(
         .count();
     let errors = accounts
         .iter()
-        .filter(|a| a.status == AccountStatus::Error)
+        .filter(|a| is_problem_status(&a.status))
         .count();
 
     let next = scheduled
@@ -164,6 +173,7 @@ mod tests {
             login_id: "u".into(),
             pw: "p".into(),
             status,
+            status_msg: None,
             last: "—".into(),
             tags: vec![],
         }
@@ -242,6 +252,21 @@ mod tests {
         let stats = compute(&accounts, &[], &[]);
         assert_eq!(stats[0].value, StatValue::Num(2.0));
         assert_eq!(stats[0].sub, "전체 4개 · 오류 1");
+    }
+
+    #[test]
+    fn error_tile_counts_blocked_and_bad_credentials_but_not_challenge() {
+        let accounts = vec![
+            acc(AccountStatus::Active),
+            acc(AccountStatus::Error),
+            acc(AccountStatus::BadCredentials),
+            acc(AccountStatus::Blocked),
+            acc(AccountStatus::Challenge), // 진행 중 — 오류로 세지 않음
+        ];
+        let stats = compute(&accounts, &[], &[]);
+        // 활성 1, 오류 계열 3(error/badCredentials/blocked), challenge 제외.
+        assert_eq!(stats[0].value, StatValue::Num(1.0));
+        assert_eq!(stats[0].sub, "전체 5개 · 오류 3");
     }
 
     #[test]

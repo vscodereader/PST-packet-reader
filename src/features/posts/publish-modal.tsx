@@ -24,7 +24,7 @@ import type { JoinedCafe } from "@/shared/bindings/JoinedCafe";
 import type { NaverTarget } from "@/shared/bindings/NaverTarget";
 import type { PostJob } from "@/shared/bindings/PostJob";
 import type { PublishOutcome } from "@/shared/bindings/PublishOutcome";
-import { KIND, STATUS_ACCOUNT } from "@/shared/data/config";
+import { isPostable, KIND, STATUS_ACCOUNT } from "@/shared/data/config";
 import {
   acctPlatforms,
   hasToken,
@@ -105,7 +105,9 @@ function AccountRow({
   onToggle: (id: string) => void;
 }) {
   const st = STATUS_ACCOUNT[a.status] ?? { t: a.status, c: "gray" };
-  const disabled = a.status === "error";
+  // 로그인 실패 계열(error/badCredentials/challenge/blocked)은 게시 대상에서 막는다.
+  // active(정상)와 new(아직 미로그인, 게시 시 로그인 시도)만 선택 가능.
+  const disabled = !isPostable(a.status);
   return (
     <Group
       gap={9}
@@ -732,8 +734,16 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       });
     void ipc.accounts.list().then((a) => {
       setAccounts(a);
-      const firstUsable = a.find((x) => x.status !== "error");
-      setSelected((s) => (s.length || !firstUsable ? s : [firstUsable.id]));
+      // 게시 가능한 계정만 선택 대상이다. 기존 선택에서 로그인 실패 계열을 걸러내고
+      // (모달 진입 시 실패 계정이 체크된 채 게시 위치가 파생되는 것을 막는다), 남은 게
+      // 없으면 첫 게시 가능 계정 하나를 기본 선택한다.
+      const postable = a.filter((x) => isPostable(x.status));
+      const postableIds = new Set(postable.map((x) => x.id));
+      setSelected((s) => {
+        const kept = s.filter((id) => postableIds.has(id));
+        if (kept.length) return kept;
+        return postable[0] ? [postable[0].id] : [];
+      });
     });
     void ipc.stocks.list().then(setStocks);
   }, []);
@@ -820,12 +830,23 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     commentTargetMode === "latest" || commentTargetMode === "popular";
   const urlTarget =
     commentTargetMode === "url" ? parseCafeArticleUrl(doc.commentUrl) : null;
-  const toggle = (id: string) =>
+  const toggle = (id: string) => {
+    // 게시 불가 계정(로그인 실패 계열)은 선택에 넣지 않는다 — 방어선(클릭은 disabled로
+    // 이미 막히지만, 어떤 경로로도 실패 계정이 selected에 들어오지 못하게 한다).
+    const acc = accounts.find((x) => x.id === id);
+    if (acc && !isPostable(acc.status)) return;
     setSelected((s) =>
       s.includes(id) ? s.filter((x) => x !== id) : [...s, id],
     );
-  const selPlatforms = acctPlatforms(selected, accounts);
-  const selectedNaver = selected
+  };
+  // 게시 위치·잡 산출은 게시 가능한 선택 계정만 본다. selected는 위에서 정화되지만,
+  // 파생 지점에서도 한 번 더 걸러 실패 계정이 게시 위치에 절대 새어 나오지 않게 한다.
+  const usableSelected = selected.filter((id) => {
+    const acc = accounts.find((x) => x.id === id);
+    return !!acc && isPostable(acc.status);
+  });
+  const selPlatforms = acctPlatforms(usableSelected, accounts);
+  const selectedNaver = usableSelected
     .map((id) => accounts.find((a) => a.id === id))
     .filter((a): a is Account => !!a && a.platform === "naver");
 
@@ -911,7 +932,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     (a) => acctFilter === "all" || a.platform === acctFilter,
   );
   const visUsable = visibleAccts
-    .filter((a) => a.status !== "error")
+    .filter((a) => isPostable(a.status))
     .map((a) => a.id);
   const allVisibleOn =
     visUsable.length > 0 && visUsable.every((id) => selected.includes(id));
@@ -923,7 +944,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     );
 
   const jobs: PublishJob[] = [];
-  selected.forEach((aid) => {
+  usableSelected.forEach((aid) => {
     const a = accounts.find((x) => x.id === aid);
     if (!a) return;
     if (a.platform === "forum") {
@@ -1007,7 +1028,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   // 게시판이 아직 안 정해진 네이버 계정은 job 생성에서 빠진다. 이들이 있으면 게시를
   // 막아 "일부만 올라가고 나머지는 결과에도 안 뜨는" 조용한 부분 게시를 방지한다.
   const naverNotReady = unreadyNaverAccountIds(
-    selected,
+    usableSelected,
     accounts,
     naverPicks,
     mode,
@@ -1020,7 +1041,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     !selPlatforms.includes("band") ||
     selectedBands.length > 0;
   const canPublish =
-    selected.length > 0 &&
+    usableSelected.length > 0 &&
     targetsOk &&
     commentReady &&
     naverNotReady.length === 0 &&

@@ -40,9 +40,16 @@ pub(crate) enum ChallengeKind {
 
 /// 로그인 결과.
 pub(crate) enum LoginOutcome {
-    Ok { cookies: Vec<Value> },
-    ChallengeRequired { kind: ChallengeKind },
+    Ok {
+        cookies: Vec<Value>,
+    },
+    ChallengeRequired {
+        kind: ChallengeKind,
+    },
     BadCredentials,
+    /// 로그인 접근이 차단된 상태(폼이 사라지고 세션도 없음). 일반 오류와 구분해 계정
+    /// 상태를 `blocked`로 표시하기 위해 별도 variant로 둔다.
+    Blocked,
     Error(String),
 }
 
@@ -247,11 +254,7 @@ fn run_inner(
                 return Ok(LoginOutcome::ChallengeRequired { kind });
             }
             LoopDecision::ConfirmedBad => return Ok(LoginOutcome::BadCredentials),
-            LoopDecision::ConfirmedBlocked => {
-                return Ok(LoginOutcome::Error(
-                    "로그인 접근이 차단되었습니다.".to_owned(),
-                ));
-            }
+            LoopDecision::ConfirmedBlocked => return Ok(LoginOutcome::Blocked),
             LoopDecision::KeepWaiting(next) => last_negative = next,
         }
 
