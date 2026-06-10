@@ -108,7 +108,10 @@ mod tests {
 
     #[test]
     fn make_md_matches_captured_create_comment() {
-        let md = make_md(CAPTURED_SECRET_KEY, "/v2.3.0/create_comment?ts=1780890998911");
+        let md = make_md(
+            CAPTURED_SECRET_KEY,
+            "/v2.3.0/create_comment?ts=1780890998911",
+        );
         assert_eq!(md, "nojSU1DGFjhI6Nw9v0QCqMNFMtUcTebqWROqEKoh57Q=");
     }
 

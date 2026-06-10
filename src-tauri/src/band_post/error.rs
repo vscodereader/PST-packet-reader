@@ -26,7 +26,10 @@ impl std::fmt::Display for BandPostError {
                 write!(f, "밴드 링크에서 밴드 번호를 찾지 못했습니다: {link}")
             }
             BandPostError::NoSession => {
-                write!(f, "밴드 로그인 세션이 없습니다. 먼저 밴드 로그인을 해주세요.")
+                write!(
+                    f,
+                    "밴드 로그인 세션이 없습니다. 먼저 밴드 로그인을 해주세요."
+                )
             }
             BandPostError::NoSecretKey(detail) => {
                 write!(f, "밴드 서명 키 발급에 실패했습니다(getKey). {detail}")

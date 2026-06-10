@@ -139,10 +139,7 @@ pub fn band_api_headers() -> Vec<(String, String)> {
             "32400000".to_string(),
         ),
         ("accept".to_string(), "application/json".to_string()),
-        (
-            "origin".to_string(),
-            "https://www.band.us".to_string(),
-        ),
+        ("origin".to_string(), "https://www.band.us".to_string()),
     ]
 }
 
@@ -216,10 +213,7 @@ mod tests {
     #[test]
     fn headers_include_fixed_akey() {
         let h = band_api_headers();
-        assert_eq!(
-            header(&h, "akey"),
-            Some("bbc59b0b5f7a1c6efe950f6236ccda35")
-        );
+        assert_eq!(header(&h, "akey"), Some("bbc59b0b5f7a1c6efe950f6236ccda35"));
     }
 
     #[test]
@@ -235,10 +229,7 @@ mod tests {
     fn headers_include_device_time_zone() {
         let h = band_api_headers();
         assert_eq!(header(&h, "device-time-zone-id"), Some("Asia/Seoul"));
-        assert_eq!(
-            header(&h, "device-time-zone-ms-offset"),
-            Some("32400000")
-        );
+        assert_eq!(header(&h, "device-time-zone-ms-offset"), Some("32400000"));
     }
 
     #[test]

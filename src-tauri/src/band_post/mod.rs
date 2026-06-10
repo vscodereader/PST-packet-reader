@@ -148,10 +148,7 @@ async fn band_publish_inner(
 ///
 /// 저장된 band 로그인 쿠키 → getKey → `get_band_information`. 응답에 이름이 없으면
 /// `band_no`를 그대로 돌려준다(프론트가 항상 무언가 표시하도록).
-pub async fn resolve_band_name(
-    account_id: &str,
-    band_link: &str,
-) -> Result<String, BandPostError> {
+pub async fn resolve_band_name(account_id: &str, band_link: &str) -> Result<String, BandPostError> {
     let band_no = band_no_from_link(band_link)
         .ok_or_else(|| BandPostError::InvalidLink(band_link.to_string()))?;
 

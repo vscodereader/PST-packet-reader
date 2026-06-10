@@ -118,8 +118,10 @@ mod tests {
     #[test]
     fn join_success_returns_result_data() {
         // 캡처: {"result_code":1,"result_data":{"message":"밴드에 가입했습니다."}}
-        let data = parse_band_result(r#"{"result_code":1,"result_data":{"message":"밴드에 가입했습니다."}}"#)
-            .expect("성공이어야 함");
+        let data = parse_band_result(
+            r#"{"result_code":1,"result_data":{"message":"밴드에 가입했습니다."}}"#,
+        )
+        .expect("성공이어야 함");
         assert_eq!(data.get("message").unwrap(), "밴드에 가입했습니다.");
     }
 
