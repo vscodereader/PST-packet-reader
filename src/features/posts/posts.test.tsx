@@ -92,6 +92,18 @@ describe("Posts", () => {
     ).toBeInTheDocument();
   });
 
+  it("opens the writer to edit from the row menu", async () => {
+    await renderPosts();
+    const dots = screen
+      .getAllByRole("button")
+      .find((b) => b.textContent === "")!;
+    await userEvent.click(dots);
+    await userEvent.click(await screen.findByText("편집"));
+    expect(
+      await screen.findByPlaceholderText("제목을 입력하세요"),
+    ).toBeInTheDocument();
+  });
+
   it("duplicates a post from the row menu", async () => {
     await renderPosts();
     const dots = screen
