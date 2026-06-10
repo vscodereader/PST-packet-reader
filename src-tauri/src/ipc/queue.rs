@@ -350,13 +350,17 @@ pub fn add_queue_scheduled(
 /// 예약 아이템 1건을 now 큐로 승격한다(수동 "즉시 처리"·자동 스케줄러 공용). scheduled
 /// 에서 제거 → now에 추가(plan 보존) → 워커 기동. 활동 로그는 호출부가 맥락에 맞게 남긴다
 /// (수동/자동 메시지가 다름). 아이템이 없으면(취소·중복 race) false.
+/// 성공 시 **워커 기동 직전** now 큐 스냅샷(`Some`)을 돌려준다. 기동 후 `now.snapshot()`을
+/// 다시 읽으면 워커가 막 승격한 아이템을 실행·제거하는 것과 레이스가 나, 반환값이
+/// 비결정적이 된다(즉시처리 직후 UI에서 항목이 사라져 보이고 통합테스트가 flaky). 매칭
+/// id가 없으면 `None`.
 fn promote_one<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     now: &JsonStore<QueueNowItem>,
     scheduled: &JsonStore<QueueScheduledItem>,
     runner: &super::queue_runner::NowQueueRunner,
     id: &str,
-) -> bool {
+) -> Option<Vec<QueueNowItem>> {
     // scheduled 스토어 락 안에서 원자적으로 꺼낸다: 매칭 id가 있으면 제거하며 그 항목을
     // `taken`에 옮기고, 없으면 그대로 둔다. 수동 "즉시 처리"와 자동 스케줄러(run_due_now)는
     // 별개 스레드에서 같은 id를 동시에 승격하려 할 수 있는데, 락 안의 take-and-remove로
@@ -373,15 +377,14 @@ fn promote_one<R: tauri::Runtime>(
         }
         kept
     });
-    let Some(s) = taken else {
-        return false;
-    };
-    now.mutate(|mut items| {
+    let s = taken?;
+    // 워커 기동 전 append 시점 스냅샷을 잡아 반환한다(위 doc의 레이스 방지).
+    let snapshot = now.mutate(|mut items| {
         items.push(to_now_item(s));
         items
     });
     super::queue_runner::start_if_idle(runner, app.clone());
-    true
+    Some(snapshot)
 }
 
 /// Move a scheduled item into the immediate queue ("즉시 처리"): drop it from the
@@ -396,14 +399,18 @@ pub fn promote_queue_scheduled<R: tauri::Runtime>(
     runner: tauri::State<'_, super::queue_runner::NowQueueRunner>,
     id: String,
 ) -> Vec<QueueNowItem> {
-    if promote_one(&app, now.inner(), scheduled.inner(), runner.inner(), &id) {
-        record(
-            activity.inner(),
-            ActivityType::Info,
-            "예약을 즉시 게시로 전환",
-        );
+    match promote_one(&app, now.inner(), scheduled.inner(), runner.inner(), &id) {
+        Some(snapshot) => {
+            record(
+                activity.inner(),
+                ActivityType::Info,
+                "예약을 즉시 게시로 전환",
+            );
+            snapshot
+        }
+        // 매칭 id가 없으면(이미 처리/취소됨) 현재 now 큐를 그대로 돌려준다.
+        None => now.snapshot(),
     }
-    now.snapshot()
 }
 
 /// 예약 시각을 변경한다(재예약). 놓친(missed) 예약을 새 시각으로 되살리거나, 대기 중인
@@ -448,7 +455,7 @@ pub fn run_due_now<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 
     let snap = scheduled.snapshot();
     for id in pick_due(&snap, crate::util::now_ms()) {
-        if promote_one(app, now.inner(), scheduled.inner(), runner.inner(), &id) {
+        if promote_one(app, now.inner(), scheduled.inner(), runner.inner(), &id).is_some() {
             let title = snap
                 .iter()
                 .find(|s| s.id == id)
