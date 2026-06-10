@@ -43,7 +43,7 @@ tungstenite = "0.21"
 url = "2"
 # 엑셀(.xlsx) 입출력
 rust_xlsxwriter = "0.79"
-calamine = "0.26"
+calamine = "0.35"
 # 네이티브 파일 다이얼로그
 tauri-plugin-dialog = "2"
 tauri-plugin-autostart = "2"
