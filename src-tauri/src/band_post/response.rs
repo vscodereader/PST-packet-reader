@@ -92,6 +92,36 @@ pub fn name_from_band_info(result_data: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// 피드 응답(`get_posts_and_announcements` / `get_popular_posts`)에서 게시물 번호 목록을
+/// 추출한다. `result_data.items[].post.post_no`를 응답 순서대로(최신글=최신순, 인기글=인기순).
+pub fn post_nos_from_feed(result_data: &Value) -> Vec<u64> {
+    result_data
+        .get("items")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|it| {
+                    it.get("post")
+                        .and_then(|p| p.get("post_no"))
+                        .and_then(Value::as_u64)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 인기글 페이징의 다음 페이지 토큰(`paging.next_params.feed_next_param`)을 추출한다.
+/// 마지막 페이지면(`next_params`가 null/없음) `None`.
+pub fn feed_next_param_from_result(result_data: &Value) -> Option<String> {
+    result_data
+        .get("paging")
+        .and_then(|p| p.get("next_params"))
+        .and_then(|n| n.get("feed_next_param"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 fn extract_error_message(value: &Value) -> String {
     // band 오류는 result_data.message 또는 message에 담기는 경우가 있다.
     value
@@ -190,5 +220,42 @@ mod tests {
     fn post_no_none_when_absent() {
         let data = serde_json::json!({"something": 1});
         assert!(post_no_from_result(&data).is_none());
+    }
+
+    #[test]
+    fn feed_extracts_post_nos_in_order() {
+        // 캡처 형태: result_data.items[].post.post_no (응답 순서 보존).
+        let data = parse_band_result(
+            r#"{"result_code":1,"result_data":{"items":[{"post":{"post_no":8}},{"post":{"post_no":7}},{"post":{"post_no":6}}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(post_nos_from_feed(&data), vec![8, 7, 6]);
+    }
+
+    #[test]
+    fn feed_post_nos_empty_when_no_items() {
+        let data = serde_json::json!({"paging": {}});
+        assert!(post_nos_from_feed(&data).is_empty());
+    }
+
+    #[test]
+    fn feed_next_param_extracted_when_present() {
+        // 인기글 다음 페이지 토큰(offset) 추출.
+        let data = parse_band_result(
+            r#"{"result_code":1,"result_data":{"paging":{"next_params":{"feed_next_param":"{\"offset\":4}"}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            feed_next_param_from_result(&data).as_deref(),
+            Some("{\"offset\":4}")
+        );
+    }
+
+    #[test]
+    fn feed_next_param_none_on_last_page() {
+        let data =
+            parse_band_result(r#"{"result_code":1,"result_data":{"paging":{"next_params":null}}}"#)
+                .unwrap();
+        assert!(feed_next_param_from_result(&data).is_none());
     }
 }

@@ -999,7 +999,14 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         });
       }
     } else if (a.platform === "band") {
-      // 선택한 각 밴드마다 잡 1개(계정 × 밴드). 라벨은 조회된 실제 밴드명.
+      // 선택한 각 밴드마다 잡 1개(계정 × 밴드). 라벨은 조회된 실제 밴드명. 댓글 전용 모드면
+      // 대상(최신글/인기글 + 개수)을, 그 외엔 "전체글"을 board 라벨로 둔다.
+      const bandBoard =
+        mode === "comment"
+          ? commentTargetMode === "popular"
+            ? `인기글 ${commentCount}건`
+            : `최신글 ${commentCount}건`
+          : "전체글";
       selectedBands.forEach((no) => {
         const b = resolvedBands.find((x) => x.bandNo === no);
         if (!b) return;
@@ -1008,7 +1015,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
           platform: "band",
           loginId: a.loginId,
           targetName: b.name,
-          board: "전체글",
+          board: bandBoard,
           status: a.status,
         });
       });
@@ -1021,10 +1028,18 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   // a cafe (the list source) — top-N extraction handles short lists gracefully.
   const listTargetReady =
     selectedNaver.length > 0 && selectedNaver.every((a) => !!naverPicks[a.id]);
+  // 밴드만 선택된 댓글 전용(네이버 list 대상이 없음)은 밴드 대상(최신/인기)으로 충분하다.
+  // 밴드는 url 미지원이라 latest/popular(isListTarget)일 때만 준비된 것으로 본다.
+  const bandOnlyCommentReady =
+    selectedNaver.length === 0 &&
+    selPlatforms.includes("band") &&
+    selectedBands.length > 0 &&
+    isListTarget;
   const commentReady =
     mode !== "comment" ||
     (comments.length > 0 &&
-      (isListTarget ? listTargetReady : urlTarget !== null));
+      ((isListTarget ? listTargetReady : urlTarget !== null) ||
+        bandOnlyCommentReady));
   // 게시판이 아직 안 정해진 네이버 계정은 job 생성에서 빠진다. 이들이 있으면 게시를
   // 막아 "일부만 올라가고 나머지는 결과에도 안 뜨는" 조용한 부분 게시를 방지한다.
   const naverNotReady = unreadyNaverAccountIds(
@@ -1268,14 +1283,38 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       ),
     ).then((forumArr) => forumArr.flat());
 
-    // 밴드(band.us): 저장된 링크로 가입 후 글(+댓글) 게시 — 순수 HTTP 백엔드 호출.
-    const bandComment =
-      mode === "both" || mode === "comment" ? firstComment : "";
+    // 밴드(band.us): comment 모드는 기존 글(최신글/인기글) 상위 N개에 댓글(band_comment),
+    // 그 외(post/both)는 가입 후 글(+댓글) 게시(band_publish) — 모두 순수 HTTP 백엔드 호출.
+    const bandPostComment = mode === "both" ? firstComment : ""; // post/both 단일 댓글
+    const bandCommentPool = (doc.comments ?? []).filter((c) => c.trim());
+    const bandMode: "latest" | "popular" =
+      commentTargetMode === "popular" ? "popular" : "latest";
     const bandWork: Promise<PublishResult[]> = Promise.all(
       bandJobs.map((j) => {
         // 잡의 라벨(밴드명)로 해당 밴드의 가입 링크를 찾는다.
         const link =
           resolvedBands.find((b) => b.name === j.targetName)?.link ?? "";
+        if (mode === "comment") {
+          // 댓글 전용: 기존 글(최신/인기) 상위 count개에 댓글 풀을 1개씩 분배해 단다.
+          return ipc.band
+            .comment({
+              accountId: j.loginId,
+              bandLink: link,
+              mode: bandMode,
+              count: commentCount,
+              comments: bandCommentPool,
+            })
+            .then((out) => ({
+              ...j,
+              targetName: out.bandName ?? j.targetName,
+              ok: out.commentedCount > 0,
+              msg:
+                out.commentedCount > 0
+                  ? `${out.targetCount}글 중 댓글 ${out.commentedCount}개 게시 완료`
+                  : "댓글 대상 글을 찾지 못했어요",
+            }))
+            .catch((err: unknown) => ({ ...j, ok: false, msg: errText(err) }));
+        }
         return ipc.band
           .publish({
             // 백엔드는 loginId(쿠키 파일 키)로 band 로그인 쿠키를 찾는다.
@@ -1283,7 +1322,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
             bandLink: link,
             title: doc.title,
             content: htmlToText(doc.body ?? ""),
-            ...(bandComment ? { comment: bandComment } : {}),
+            ...(bandPostComment ? { comment: bandPostComment } : {}),
           })
           .then((out) => ({
             ...j,
@@ -1325,7 +1364,11 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
             .recordBatch({
               title: doc.title,
               body: htmlToText(doc.body ?? ""),
-              comment: bandComment,
+              // 로그 스냅샷 대표 댓글: comment 모드는 풀 첫 항목, both는 단일 댓글.
+              comment:
+                mode === "comment"
+                  ? (bandCommentPool[0] ?? "")
+                  : bandPostComment,
               runPost: mode === "post" || mode === "both",
               runComment: mode === "comment" || mode === "both",
               items: br.map((r) => ({

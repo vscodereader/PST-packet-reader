@@ -23,6 +23,8 @@ use client::BandHttpClient;
 use cookies::load_band_cookie_header;
 use error::BandPostError;
 use link::band_no_from_link;
+// 카페 comment-only와 동일한 댓글 분배(셔플 후 1개씩 라운드로빈)를 재사용한다.
+use crate::naver_cafe::distribute::{distribute_comments, mulberry32, seed_from_clock};
 
 /// band 게시 결과(프론트로 반환).
 #[derive(Debug, Clone, Serialize)]
@@ -38,6 +40,27 @@ pub struct BandPublishOutcome {
     pub commented: bool,
     /// 실제 게시된 밴드 이름(게시 응답 `post.band.name`). 응답에 없으면 `None`.
     pub band_name: Option<String>,
+}
+
+/// 밴드 댓글 전용 게시 결과(프론트로 반환). 기존 글(최신글/인기글)에 댓글을 단 결과.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BandCommentOutcome {
+    /// 댓글 대상으로 조회된 글 수(상위 N개).
+    pub target_count: usize,
+    /// 실제로 게시에 성공한 댓글 개수(best-effort, 글마다 1개씩 분배).
+    pub commented_count: usize,
+    /// 실제 밴드 이름(`get_band_information`). 없으면 `None`.
+    pub band_name: Option<String>,
+}
+
+/// 밴드 댓글 전용 모드의 대상 글 정렬 기준.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BandFeedSort {
+    /// 최신글(`get_posts_and_announcements`, created_at_desc).
+    Latest,
+    /// 인기글(`get_popular_posts`, 공감·댓글 기반).
+    Popular,
 }
 
 /// 밴드 링크로 가입한 뒤 글(+선택 댓글)을 게시한다.
@@ -144,6 +167,120 @@ async fn band_publish_inner(
     })
 }
 
+/// 밴드의 기존 글(최신글/인기글) 상위 N개를 조회해 댓글을 단다(댓글 전용 모드).
+///
+/// 흐름: 링크 → `band_no` → 쿠키/서명키 → 대상 글(post_no) 상위 N개 조회(sort) →
+/// 댓글 풀을 글 수만큼 분배(글마다 1개) → 각 글에 `create_comment`(best-effort). 카페
+/// comment-only(latest/popular)를 밴드에 미러한 것으로, 새 글은 만들지 않는다.
+pub async fn band_comment(
+    account_id: &str,
+    band_link: &str,
+    sort: BandFeedSort,
+    count: u32,
+    comments: &[String],
+) -> Result<BandCommentOutcome, BandPostError> {
+    match band_comment_inner(account_id, band_link, sort, count, comments).await {
+        Ok(outcome) => {
+            tracing::info!(
+                "{}",
+                comment_success_log(
+                    account_id,
+                    outcome.band_name.as_deref(),
+                    outcome.target_count,
+                    outcome.commented_count,
+                )
+            );
+            Ok(outcome)
+        }
+        Err(e) => {
+            tracing::warn!("[BAND] ❌ 댓글 전용 게시 실패 — 계정 {account_id} ({e})");
+            Err(e)
+        }
+    }
+}
+
+/// 댓글 전용 게시 성공 로그 문구(순수 함수, 테스트 가능).
+fn comment_success_log(
+    account_id: &str,
+    band_name: Option<&str>,
+    target_count: usize,
+    commented_count: usize,
+) -> String {
+    let band = band_name.unwrap_or("밴드");
+    format!(
+        "[BAND] ✅ \"{band}\" 댓글 게시 성공 — 계정 {account_id}, 대상 {target_count}글 중 댓글 {commented_count}개"
+    )
+}
+
+async fn band_comment_inner(
+    account_id: &str,
+    band_link: &str,
+    sort: BandFeedSort,
+    count: u32,
+    comments: &[String],
+) -> Result<BandCommentOutcome, BandPostError> {
+    let band_no = band_no_from_link(band_link)
+        .ok_or_else(|| BandPostError::InvalidLink(band_link.to_string()))?;
+
+    let cookie_header = load_band_cookie_header(account_id)
+        .map_err(|e| BandPostError::Transport(e.to_string()))?
+        .ok_or(BandPostError::NoSession)?;
+
+    let client = BandHttpClient::new();
+    tracing::info!("[BAND] 댓글 전용 시작 — 계정 {account_id}, band_no {band_no}, sort {sort:?}");
+    let key = client.fetch_secret_key(&cookie_header).await?;
+
+    // 대상 글(post_no) 상위 N개 조회. 최신글은 limit=N 단일 호출, 인기글은 offset 누적.
+    let n = count.max(1);
+    let post_nos = match sort {
+        BandFeedSort::Latest => {
+            client
+                .get_latest_posts(&band_no, n, &key, &cookie_header)
+                .await?
+        }
+        BandFeedSort::Popular => {
+            client
+                .get_popular_posts(&band_no, n, &key, &cookie_header)
+                .await?
+        }
+    };
+
+    // 댓글 풀을 대상 글 수만큼 분배(글마다 1개, 카페 comment-only와 동일 규칙). 풀이 비면
+    // 빈 목록 → 댓글 0건.
+    let mut rng = mulberry32(seed_from_clock());
+    let contents = distribute_comments(post_nos.len(), comments, &mut rng);
+
+    // best-effort: 한 글 댓글 실패가 다른 글을 막지 않고 성공 개수만 센다.
+    let mut commented_count = 0usize;
+    for (post_no, content) in post_nos.iter().zip(contents.iter()) {
+        if content.trim().is_empty() {
+            continue;
+        }
+        match client
+            .create_comment(&band_no, *post_no, content, &key, &cookie_header)
+            .await
+        {
+            Ok(()) => commented_count += 1,
+            Err(error) => tracing::warn!(
+                "[BAND] 댓글 게시 실패 — 계정 {account_id}, post_no {post_no} ({error})"
+            ),
+        }
+    }
+
+    // 결과 라벨용 실제 밴드명(조회 실패해도 게시는 성공이므로 best-effort).
+    let band_name = client
+        .get_band_name(&band_no, &key, &cookie_header)
+        .await
+        .ok()
+        .flatten();
+
+    Ok(BandCommentOutcome {
+        target_count: post_nos.len(),
+        commented_count,
+        band_name,
+    })
+}
+
 /// 링크(band_no)로 밴드 이름을 조회한다(게시 전 저장 시점에 실제 밴드명 확인용).
 ///
 /// 저장된 band 로그인 쿠키 → getKey → `get_band_information`. 응답에 이름이 없으면
@@ -212,5 +349,22 @@ mod tests {
         assert!(s.contains("\"밴드\" 글 게시 성공"), "{s}");
         assert!(!s.contains("글+댓글"), "{s}");
         assert!(s.contains("post_no 7"), "{s}");
+    }
+
+    #[test]
+    fn comment_success_log_mentions_targets_and_count() {
+        let s = comment_success_log("cho****", Some("데일밴드"), 3, 3);
+        assert!(s.contains("[BAND] ✅"), "{s}");
+        assert!(s.contains("데일밴드"), "{s}");
+        assert!(s.contains("댓글 게시 성공"), "{s}");
+        assert!(s.contains("대상 3글"), "{s}");
+        assert!(s.contains("댓글 3개"), "{s}");
+        assert!(s.contains("cho****"), "{s}");
+    }
+
+    #[test]
+    fn comment_success_log_falls_back_to_band_label() {
+        let s = comment_success_log("acc", None, 0, 0);
+        assert!(s.contains("\"밴드\" 댓글 게시 성공"), "{s}");
     }
 }

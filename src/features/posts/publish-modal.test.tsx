@@ -872,4 +872,52 @@ describe("PublishModal", () => {
       expect(targets).toContain("밴드 999");
     });
   });
+
+  it("밴드 댓글 전용 모드는 기존 글(최신글)에 band_comment로 댓글을 단다", async () => {
+    // 밴드만 선택한 댓글 전용 — 새 글(band_publish)이 아니라 기존 글 조회+댓글(band_comment).
+    const commentDoc: LibraryPost = {
+      ...postDoc,
+      id: "l-band-comment",
+      kind: "comment",
+      comments: ["좋아요", "멋지네요"],
+      commentTarget: "latest",
+      commentCount: 3,
+    };
+    renderPublish({ doc: commentDoc });
+    await userEvent.click(await screen.findByText("value_invest")); // band a7
+
+    const linkInput = screen.getByLabelText("밴드 링크");
+    const saveBtn = screen.getByRole("button", { name: "저장" });
+    await userEvent.type(linkInput, "https://band.us/band/103043410");
+    await waitFor(() => expect(saveBtn).toBeEnabled());
+    await userEvent.click(saveBtn);
+    await waitFor(() => expect(linkInput).toHaveValue(""));
+    await screen.findByPlaceholderText("게시할 밴드 선택");
+    await pickOption(0, "데일밴드");
+    await screen.findByLabelText("데일밴드 제거");
+
+    const publishBtn = await screen.findByRole("button", {
+      name: /^게시 \(\d+\)/,
+    });
+    await waitFor(() => expect(publishBtn).toBeEnabled());
+    await userEvent.click(publishBtn);
+
+    // band_comment(기존 글에 댓글)가 최신글/개수/댓글 풀과 함께 호출된다.
+    await waitFor(() => {
+      const call = ipcBackend.mock.calls.find((c) => c[0] === "band_comment");
+      expect(call).toBeDefined();
+      const arg = call![1] as {
+        mode: string;
+        count: number;
+        comments: string[];
+      };
+      expect(arg.mode).toBe("latest");
+      expect(arg.count).toBe(3);
+      expect(arg.comments).toEqual(["좋아요", "멋지네요"]);
+    });
+    // 댓글 전용은 새 글을 만들지 않는다 — band_publish 미호출.
+    expect(
+      ipcBackend.mock.calls.find((c) => c[0] === "band_publish"),
+    ).toBeUndefined();
+  });
 });

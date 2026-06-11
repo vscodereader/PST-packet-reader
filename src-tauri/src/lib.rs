@@ -458,6 +458,25 @@ async fn band_publish(
     .map_err(|e| e.to_string())
 }
 
+/// 밴드 댓글 전용: 기존 글(최신글/인기글) 상위 `count`개를 조회해 댓글을 단다.
+/// `mode`는 `"latest"`(최신글) 또는 `"popular"`(인기글).
+#[tauri::command]
+async fn band_comment(
+    account_id: String,
+    band_link: String,
+    mode: String,
+    count: u32,
+    comments: Vec<String>,
+) -> Result<band_post::BandCommentOutcome, String> {
+    let sort = match mode.as_str() {
+        "popular" => band_post::BandFeedSort::Popular,
+        _ => band_post::BandFeedSort::Latest,
+    };
+    band_post::band_comment(&account_id, &band_link, sort, count, &comments)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// 링크(band_no)로 밴드 이름을 조회한다(게시 모달에서 링크 저장 시 실제 밴드명 표시용).
 #[tauri::command]
 async fn band_resolve_name(account_id: String, band_link: String) -> Result<String, String> {
@@ -686,6 +705,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         enqueue_band_login,
         get_band_queue_status,
         band_publish,
+        band_comment,
         band_resolve_name,
         get_account_cookies,
         run_naver_discussion,
