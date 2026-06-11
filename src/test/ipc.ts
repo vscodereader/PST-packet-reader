@@ -1119,11 +1119,14 @@ export const invoke = vi.fn(
         const comments = Array.isArray(args!.comments)
           ? (args!.comments as string[])
           : [];
+        const trimmed = comments.filter((c) => c.trim());
         return clone({
           joined: true,
           postNo: 1,
           webUrl: `https://band.us/band/${bandNo}/post/1`,
-          commentedCount: comments.filter((c) => c.trim()).length,
+          // 목은 모든 댓글이 성공한다고 가정 → commentedCount == commentTotal.
+          commentedCount: trimmed.length,
+          commentTotal: trimmed.length,
           bandName: bandNo === "103043410" ? "데일밴드" : `밴드 ${bandNo}`,
         });
       }

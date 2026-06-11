@@ -1270,10 +1270,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
 
     // 밴드(band.us): 저장된 링크로 가입 후 글(+댓글) 게시 — 순수 HTTP 백엔드 호출.
     // 댓글 모드(both/comment)면 비어있지 않은 댓글을 모두 같은 글에 단다(카페 both와 동일).
-    const bandComments =
-      mode === "both" || mode === "comment"
-        ? (doc.comments ?? []).filter((c) => c.trim())
-        : [];
+    // 댓글 풀은 카페와 동일하게 위에서 만든 `comments`를 재사용한다.
+    const bandComments = mode === "both" || mode === "comment" ? comments : [];
     const bandWork: Promise<PublishResult[]> = Promise.all(
       bandJobs.map((j) => {
         // 잡의 라벨(밴드명)로 해당 밴드의 가입 링크를 찾는다.
@@ -1292,11 +1290,14 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
             ...j,
             // 결과 라벨을 게시 응답의 실제 밴드명으로(없으면 잡의 밴드명 유지).
             targetName: out.bandName ?? j.targetName,
-            ok: true,
+            // 댓글을 의도했으면 전부 성공해야 ok(카페 commentsAllOk와 동일 정책).
+            // 부분/전량 실패는 초록 배지로 묻지 않는다.
+            ok:
+              out.commentTotal === 0 || out.commentedCount === out.commentTotal,
             msg:
-              out.commentedCount > 0
-                ? `글·댓글 ${out.commentedCount}개 게시 완료`
-                : "글 게시 완료",
+              out.commentTotal === 0
+                ? "글 게시 완료"
+                : `글·댓글 ${out.commentedCount}/${out.commentTotal}개 게시 완료`,
           }))
           .catch((err: unknown) => ({ ...j, ok: false, msg: errText(err) }));
       }),

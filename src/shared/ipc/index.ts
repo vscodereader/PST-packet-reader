@@ -95,6 +95,8 @@ export interface BandPublishOutcome {
   webUrl: string;
   /** 같은 글에 단 댓글 중 성공한 개수(0이면 미작성). */
   commentedCount: number;
+  /** 시도한 댓글 수. commentedCount와 비교해 "N/M건"·부분 실패 판정에 쓴다. */
+  commentTotal: number;
   /** 실제 게시된 밴드 이름(게시 응답 post.band.name). 응답에 없으면 null. */
   bandName: string | null;
 }

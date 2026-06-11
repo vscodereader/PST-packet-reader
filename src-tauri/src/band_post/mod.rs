@@ -17,12 +17,19 @@ pub mod response;
 pub mod signature;
 pub mod util;
 
+use std::time::Duration;
+
 use serde::Serialize;
+use tokio::time::sleep;
 
 use client::BandHttpClient;
 use cookies::load_band_cookie_header;
 use error::BandPostError;
 use link::band_no_from_link;
+
+/// 같은 글에 댓글을 연속으로 달 때 band.us의 연속요청/도배 차단으로 두 번째 이후가
+/// 거부되는 것을 피하려고 댓글 사이에 두는 기본 간격(카페 `COMMENT_JOB_DELAY`와 동일).
+const BAND_COMMENT_DELAY: Duration = Duration::from_millis(2000);
 
 /// band 게시 결과(프론트로 반환).
 #[derive(Debug, Clone, Serialize)]
@@ -37,6 +44,9 @@ pub struct BandPublishOutcome {
     /// 같은 글에 단 댓글 중 **성공한 개수**(0이면 미작성). best-effort라 일부 댓글이
     /// 실패해도 글 게시는 성공으로 남고 성공분만 센다.
     pub commented_count: usize,
+    /// 시도한 댓글 수(비어있지 않은 댓글 풀의 크기). 프론트가 `commented_count`와
+    /// 비교해 "N/M건"을 표시하고 부분 실패를 성공으로 묻지 않도록 한다(카페와 동일).
+    pub comment_total: usize,
     /// 실제 게시된 밴드 이름(게시 응답 `post.band.name`). 응답에 없으면 `None`.
     pub band_name: Option<String>,
 }
@@ -75,6 +85,7 @@ pub async fn band_publish(
                     outcome.band_name.as_deref(),
                     outcome.post_no,
                     outcome.commented_count,
+                    outcome.comment_total,
                 )
             );
             Ok(outcome)
@@ -86,16 +97,18 @@ pub async fn band_publish(
     }
 }
 
-/// 게시 성공 로그 문구를 만든다(순수 함수, 테스트 가능). 댓글 성공 개수와 밴드명을
-/// 반영한다(밴드명이 없으면 "밴드"로 대체).
+/// 게시 성공 로그 문구를 만든다(순수 함수, 테스트 가능). 댓글 성공/시도 개수와 밴드명을
+/// 반영한다(밴드명이 없으면 "밴드"로 대체). 시도한 댓글이 있으면 "글+댓글 N/M개"로
+/// 부분 실패까지 드러낸다.
 fn publish_success_log(
     account_id: &str,
     band_name: Option<&str>,
     post_no: u64,
     comment_count: usize,
+    comment_total: usize,
 ) -> String {
-    let what = if comment_count > 0 {
-        format!("글+댓글 {comment_count}개")
+    let what = if comment_total > 0 {
+        format!("글+댓글 {comment_count}/{comment_total}개")
     } else {
         "글".to_owned()
     };
@@ -136,8 +149,14 @@ async fn band_publish_inner(
 
     // 비어있지 않은 댓글을 모두 같은 글(post_no)에 순서대로 단다(카페 both와 동일).
     // best-effort: 한 댓글 실패가 글 게시나 다른 댓글을 막지 않고, 성공한 개수만 센다.
+    // 같은 글 연속 댓글은 도배 차단을 부르므로 첫 댓글 이후 간격을 둔다(카페와 동일).
+    let targets: Vec<&String> = comments.iter().filter(|c| !c.trim().is_empty()).collect();
+    let comment_total = targets.len();
     let mut commented_count = 0usize;
-    for body in comments.iter().filter(|c| !c.trim().is_empty()) {
+    for (index, body) in targets.iter().enumerate() {
+        if index > 0 {
+            sleep(BAND_COMMENT_DELAY).await;
+        }
         match client
             .create_comment(&band_no, post_no, body, &key, &cookie_header)
             .await
@@ -154,6 +173,7 @@ async fn band_publish_inner(
         post_no,
         web_url: format!("https://band.us/band/{band_no}/post/{post_no}"),
         commented_count,
+        comment_total,
         band_name: created.band_name,
     })
 }
@@ -211,19 +231,26 @@ mod tests {
 
     #[test]
     fn success_log_mentions_band_post_no_and_comment_count() {
-        let s = publish_success_log("cho****", Some("데일밴드"), 42, 3);
+        let s = publish_success_log("cho****", Some("데일밴드"), 42, 3, 3);
         assert!(s.contains("[BAND] ✅"), "{s}");
         assert!(s.contains("데일밴드"), "{s}");
-        // 댓글 3개 → "글+댓글 3개".
-        assert!(s.contains("글+댓글 3개"), "{s}");
+        // 댓글 3개 모두 성공 → "글+댓글 3/3개".
+        assert!(s.contains("글+댓글 3/3개"), "{s}");
         assert!(s.contains("post_no 42"), "{s}");
         assert!(s.contains("cho****"), "{s}");
     }
 
     #[test]
+    fn success_log_shows_partial_comment_failure_as_n_over_m() {
+        // 댓글 3개 중 1개만 성공 → "글+댓글 1/3개"로 부분 실패를 드러낸다.
+        let s = publish_success_log("acc", Some("데일밴드"), 9, 1, 3);
+        assert!(s.contains("글+댓글 1/3개"), "{s}");
+    }
+
+    #[test]
     fn success_log_without_comment_falls_back_to_band_label() {
-        let s = publish_success_log("acc", None, 7, 0);
-        // 댓글 0개 → "글"만(글+댓글 아님), 밴드명 없음 → "밴드" 대체.
+        let s = publish_success_log("acc", None, 7, 0, 0);
+        // 시도 댓글 0개 → "글"만(글+댓글 아님), 밴드명 없음 → "밴드" 대체.
         assert!(s.contains("\"밴드\" 글 게시 성공"), "{s}");
         assert!(!s.contains("글+댓글"), "{s}");
         assert!(s.contains("post_no 7"), "{s}");
