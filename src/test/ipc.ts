@@ -1120,18 +1120,26 @@ export const invoke = vi.fn(
           postNo: 1,
           webUrl: `https://band.us/band/${bandNo}/post/1`,
           commented: Boolean(String(args!.comment ?? "").trim()),
-          bandName: bandNo === "103043410" ? "데일밴드" : `밴드 ${bandNo}`,
+          // 103043410·103084867은 둘 다 "데일밴드"(동명·다른 band_no) — 동명 밴드 처리 검증용.
+          bandName:
+            bandNo === "103043410" || bandNo === "103084867"
+              ? "데일밴드"
+              : `밴드 ${bandNo}`,
         });
       }
       case "record_band_batch":
         // 밴드 게시 결과를 알림 배치에 기록(부작용). 테스트에선 호출 여부만 보므로 no-op.
         return clone(null);
       case "band_resolve_name": {
-        // 링크에서 band_no를 뽑아 밴드명을 만든다(103043410 → 데일밴드).
+        // 링크에서 band_no를 뽑아 밴드명을 만든다(103043410·103084867 → 데일밴드, 동명).
         const link = String(args!.bandLink ?? "");
         const m = link.match(/\/band\/(\d+)|^(\d+)$/);
         const bandNo = m ? (m[1] ?? m[2]) : "0";
-        return clone(bandNo === "103043410" ? "데일밴드" : `밴드 ${bandNo}`);
+        return clone(
+          bandNo === "103043410" || bandNo === "103084867"
+            ? "데일밴드"
+            : `밴드 ${bandNo}`,
+        );
       }
       case "get_environment_status":
         return clone(SEED_ENV_STATUS);
