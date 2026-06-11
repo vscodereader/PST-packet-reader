@@ -44,6 +44,7 @@ async fn process_band_account<R: Runtime>(
     account_id: &str,
     headless: bool,
     use_adb: bool,
+    force: bool,
 ) -> Result<LoginResolution, OrchestratorError> {
     let accounts = load_accounts()?;
     let account = accounts
@@ -51,8 +52,10 @@ async fn process_band_account<R: Runtime>(
         .find(|account| account.id == account_id)
         .ok_or_else(|| OrchestratorError::AccountNotFound(account_id.to_string()))?;
 
-    // 이미 유효한 band 쿠키가 있으면 재로그인하지 않는다(이미 로그인된 상태 = active).
-    if account_band_cookie_status(account_id)? == BandCookieStatus::Valid {
+    // 유효한 band 쿠키가 있으면 재로그인을 건너뛴다(이미 로그인 = active). 단 명시적
+    // 재로그인(force)이면 로컬 쿠키가 유효해 보여도 단락하지 않고 실제 로그인으로 새
+    // 비밀번호를 검증한다 — 바뀐/죽은 자격증명을 잡는다(네이버 #132와 동일).
+    if !force && account_band_cookie_status(account_id)? == BandCookieStatus::Valid {
         return Ok(LoginResolution::active());
     }
 

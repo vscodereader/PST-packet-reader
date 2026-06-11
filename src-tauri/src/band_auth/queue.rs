@@ -54,6 +54,7 @@ pub fn enqueue_band_accounts<R: Runtime>(
     account_ids: Vec<String>,
     headless: bool,
     use_adb: bool,
+    force: bool,
 ) -> Result<QueueStatus, crate::auth::OrchestratorError> {
     let should_start = {
         let mut inner = state
@@ -65,8 +66,9 @@ pub fn enqueue_band_accounts<R: Runtime>(
                 account_id,
                 headless,
                 use_adb,
-                // band 큐는 자체 쿠키 만료 검사로 재로그인 여부를 정하므로 force는 항상 false.
-                force: false,
+                // 명시적 재로그인(force)이면 유효 쿠키여도 스킵하지 않고 실제 로그인으로
+                // 새 비밀번호를 검증한다(네이버 #132 미러). 자동 갱신 경로는 force=false.
+                force,
                 status: QueueJobStatus::Pending,
                 message: "queued".to_string(),
                 queued_at: now_millis(),
@@ -155,7 +157,8 @@ async fn worker_loop<R: Runtime>(state: BandQueueState, app: AppHandle<R>) {
             tracing::info!("[BAND] 쿠키 만료 — 재로그인 진행 (계정 {})", job.account_id);
         }
 
-        let result = process_band_account(&app, &job.account_id, job.headless, job.use_adb).await;
+        let result =
+            process_band_account(&app, &job.account_id, job.headless, job.use_adb, job.force).await;
 
         // 계정 세밀 상태/사유(active/badCredentials/blocked/error) — 큐 상태와 별개로 IPC
         // 계정 store에 기록한다. 인프라 오류(Err)는 error로 본다(네이버 auth/queue.rs 미러).
