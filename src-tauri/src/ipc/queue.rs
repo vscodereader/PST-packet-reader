@@ -86,6 +86,20 @@ pub struct ForumTarget {
     pub code: String,
 }
 
+/// 밴드(band.us) 게시 대상 1건 (`band_post::band_publish`의 재료). `account_id`는 band
+/// 로그인 쿠키 키(= loginId) 규약을 따른다. 밴드는 forum처럼 글/댓글 분리 개념이 아니라
+/// 항상 글을 쓰고(comment/both면 그 글에 댓글), `kind`와 독립적으로 동작한다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
+#[serde(rename_all = "camelCase")]
+pub struct BandTarget {
+    pub account_id: String,
+    /// 밴드 표시 이름(예약 시점 동결). 완료 로그/큐 표시에 ID 대신 보여준다.
+    pub name: String,
+    /// band.us 가입·게시 링크(또는 band_no). `band_publish`가 여기서 band_no를 추출한다.
+    pub link: String,
+}
+
 /// 큐 아이템을 실제로 게시하는 데 필요한 동결된 실행 페이로드.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../src/shared/bindings/")]
@@ -102,6 +116,8 @@ pub struct PublishPlan {
     pub naver: Vec<NaverTarget>,
     #[serde(default)]
     pub forum: Vec<ForumTarget>,
+    #[serde(default)]
+    pub band: Vec<BandTarget>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -579,6 +595,11 @@ mod tests {
                 account_id: "user01".into(),
                 name: "삼성전자".into(),
                 code: "005930".into(),
+            }],
+            band: vec![BandTarget {
+                account_id: "user01".into(),
+                name: "투자밴드".into(),
+                link: "https://band.us/band/12345678".into(),
             }],
         }
     }
