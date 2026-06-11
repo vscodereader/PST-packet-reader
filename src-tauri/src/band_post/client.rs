@@ -308,7 +308,11 @@ impl BandHttpClient {
     }
 
     /// 최신글의 게시물 번호를 최대 `limit`개 조회한다(`get_posts_and_announcements`,
-    /// `order_by=created_at_desc&limit=N`). 서버가 limit을 적용하므로 단일 호출로 충분하다.
+    /// `order_by=created_at_desc&limit=N`). 단일 호출.
+    ///
+    /// 밴드 서버는 `limit`을 엄격히 지키지 않고 공지/고정글을 포함한 기본 페이지를 더
+    /// 많이 돌려줄 수 있어, 인기글([`get_popular_posts`])과 동일하게 클라이언트에서도
+    /// `limit`으로 잘라 요청 개수를 보장한다(안 자르면 "1개 선택했는데 5글에 댓글" 회귀).
     pub async fn get_latest_posts(
         &self,
         band_no: &str,
@@ -322,7 +326,10 @@ impl BandHttpClient {
         );
         let referer = format!("https://www.band.us/band/{band_no}/post");
         let data = self.get_signed(&path, &referer, key, cookie_header).await?;
-        Ok(super::response::post_nos_from_feed(&data))
+        let mut post_nos = super::response::post_nos_from_feed(&data);
+        // 서버가 limit을 무시하고 더 보내도 요청 개수로 캡한다.
+        post_nos.truncate(limit as usize);
+        Ok(post_nos)
     }
 
     /// 인기글의 게시물 번호를 최대 `count`개 조회한다(`get_popular_posts`). 인기글은 `limit`이
@@ -546,6 +553,28 @@ mod tests {
         let client = BandHttpClient::with_base_urls(api.uri(), "http://unused");
         let posts = client
             .get_latest_posts("103043410", 3, &test_key(), FAKE_COOKIE)
+            .await
+            .expect("최신글 조회 성공이어야 함");
+        assert_eq!(posts, vec![8, 7]);
+    }
+
+    #[tokio::test]
+    async fn get_latest_posts_truncates_when_server_returns_more_than_limit() {
+        // 회귀 방지: 서버가 limit을 무시하고 5건을 줘도 요청 개수(2)로 잘라야 한다.
+        // ("최신글 1·3개 선택했는데 5글에 댓글" 버그의 근본 원인.)
+        let api = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/v2\.0\.0/get_posts_and_announcements"))
+            .and(header_exists("md"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"result_code":1,"result_data":{"items":[{"post":{"post_no":8}},{"post":{"post_no":7}},{"post":{"post_no":6}},{"post":{"post_no":5}},{"post":{"post_no":4}}]}}"#,
+            ))
+            .mount(&api)
+            .await;
+
+        let client = BandHttpClient::with_base_urls(api.uri(), "http://unused");
+        let posts = client
+            .get_latest_posts("103043410", 2, &test_key(), FAKE_COOKIE)
             .await
             .expect("최신글 조회 성공이어야 함");
         assert_eq!(posts, vec![8, 7]);
