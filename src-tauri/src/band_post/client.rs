@@ -555,11 +555,12 @@ mod tests {
     async fn get_popular_posts_truncates_to_count_and_stops_on_null_next() {
         let api = MockServer::start().await;
         // 한 페이지에 3건 + 다음 토큰 없음(null) → count=2면 앞 2건만, 추가 호출 없음.
+        // 인기글 실제 구조: 항목 자체가 글이라 post_no가 최상위(post 래퍼 없음).
         Mock::given(method("GET"))
             .and(path_regex(r"^/v2\.0\.0/get_popular_posts"))
             .and(header_exists("md"))
             .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"{"result_code":1,"result_data":{"paging":{"next_params":null},"items":[{"post":{"post_no":3709}},{"post":{"post_no":3710}},{"post":{"post_no":3711}}]}}"#,
+                r#"{"result_code":1,"result_data":{"paging":{"next_params":null},"items":[{"post_no":3709},{"post_no":3710},{"post_no":3711}]}}"#,
             ))
             .mount(&api)
             .await;

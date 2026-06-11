@@ -93,7 +93,10 @@ pub fn name_from_band_info(result_data: &Value) -> Option<String> {
 }
 
 /// 피드 응답(`get_posts_and_announcements` / `get_popular_posts`)에서 게시물 번호 목록을
-/// 추출한다. `result_data.items[].post.post_no`를 응답 순서대로(최신글=최신순, 인기글=인기순).
+/// 추출한다(응답 순서대로 — 최신글=최신순, 인기글=인기순).
+///
+/// 두 엔드포인트의 항목 구조가 다르다: 최신글은 `items[].post.post_no`(post 래퍼),
+/// 인기글은 항목 자체가 글이라 `items[].post_no`(최상위). 양쪽을 모두 받는다.
 pub fn post_nos_from_feed(result_data: &Value) -> Vec<u64> {
     result_data
         .get("items")
@@ -105,6 +108,7 @@ pub fn post_nos_from_feed(result_data: &Value) -> Vec<u64> {
                     it.get("post")
                         .and_then(|p| p.get("post_no"))
                         .and_then(Value::as_u64)
+                        .or_else(|| it.get("post_no").and_then(Value::as_u64))
                 })
                 .collect()
         })
@@ -230,6 +234,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(post_nos_from_feed(&data), vec![8, 7, 6]);
+    }
+
+    #[test]
+    fn feed_extracts_post_nos_from_popular_shape() {
+        // 인기글(get_popular_posts)은 항목 자체가 글이라 post_no가 최상위에 있다(post 래퍼 없음).
+        // 캡처: band_no 72247938 인기글 응답 구조.
+        let data = parse_band_result(
+            r#"{"result_code":1,"result_data":{"items":[{"content":"a","post_no":3709},{"content":"b","post_no":3710},{"content":"c","post_no":3711}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(post_nos_from_feed(&data), vec![3709, 3710, 3711]);
     }
 
     #[test]
