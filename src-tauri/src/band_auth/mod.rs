@@ -7,12 +7,14 @@
 mod cookies;
 mod login;
 mod login_flow;
+mod outcome;
 mod paths;
 mod queue;
 mod util;
 
 use tauri::{AppHandle, Runtime};
 
+use crate::auth::outcome::LoginResolution;
 use crate::auth::{
     app_data_root, assert_adb_device, config, paths_for_root, toggle_airplane_mode, Account,
     OrchestratorError,
@@ -42,16 +44,16 @@ async fn process_band_account<R: Runtime>(
     account_id: &str,
     headless: bool,
     use_adb: bool,
-) -> Result<(), OrchestratorError> {
+) -> Result<LoginResolution, OrchestratorError> {
     let accounts = load_accounts()?;
     let account = accounts
         .into_iter()
         .find(|account| account.id == account_id)
         .ok_or_else(|| OrchestratorError::AccountNotFound(account_id.to_string()))?;
 
-    // 이미 유효한 band 쿠키가 있으면 재로그인하지 않는다.
+    // 이미 유효한 band 쿠키가 있으면 재로그인하지 않는다(이미 로그인된 상태 = active).
     if account_band_cookie_status(account_id)? == BandCookieStatus::Valid {
-        return Ok(());
+        return Ok(LoginResolution::active());
     }
 
     let cookies_dir = band_cookies_dir_for_app_data()?;

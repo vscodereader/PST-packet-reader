@@ -156,26 +156,55 @@ async fn worker_loop<R: Runtime>(state: BandQueueState, app: AppHandle<R>) {
         }
 
         let result = process_band_account(&app, &job.account_id, job.headless, job.use_adb).await;
-        let message = match &result {
-            Ok(()) if cookie_status == BandCookieStatus::Expired => {
-                "expired; refreshed".to_string()
-            }
-            Ok(()) => "success".to_string(),
-            Err(err) => err.to_string(),
+
+        // 계정 세밀 상태/사유(active/badCredentials/blocked/error) — 큐 상태와 별개로 IPC
+        // 계정 store에 기록한다. 인프라 오류(Err)는 error로 본다(네이버 auth/queue.rs 미러).
+        let (account_status, account_msg) = match &result {
+            Ok(res) => (res.status.clone(), res.message.clone()),
+            Err(err) => (crate::ipc::accounts::AccountStatus::Error, err.to_string()),
         };
-        let status = if result.is_ok() && cookie_status == BandCookieStatus::Expired {
+        let succeeded = matches!(&result, Ok(res) if res.succeeded);
+
+        // 큐 상태/메시지는 기존 의미(성공/만료갱신/실패)를 유지해 프론트 폴링 호환성을 지킨다.
+        let message = if succeeded && cookie_status == BandCookieStatus::Expired {
+            "expired; refreshed".to_string()
+        } else if succeeded {
+            "success".to_string()
+        } else {
+            account_msg.clone()
+        };
+        let status = if succeeded && cookie_status == BandCookieStatus::Expired {
             QueueJobStatus::Expired
-        } else if result.is_ok() {
+        } else if succeeded {
             QueueJobStatus::Success
         } else {
             QueueJobStatus::Failed
         };
 
-        match &result {
-            Ok(()) => tracing::info!("[BAND] ✅ 로그인 성공 — 계정 {}", job.account_id),
-            Err(err) => {
-                tracing::info!("[BAND] ❌ 로그인 실패 — 계정 {} ({err})", job.account_id)
-            }
+        if succeeded {
+            tracing::info!("[BAND] ✅ 로그인 성공 — 계정 {}", job.account_id);
+        } else {
+            tracing::info!(
+                "[BAND] ❌ 로그인 실패 — 계정 {} ({message})",
+                job.account_id
+            );
+        }
+
+        // 계정 세밀 상태/사유를 큐 상태보다 먼저 IPC 계정 store에 기록한다(네이버와 동일 순서).
+        // 프론트 폴링이 큐 잡을 finished로 보고 계정 리스트를 재조회할 때 이미 최신 상태가
+        // 보이도록 race 창을 좁힌다. loginId(=잡 식별자)가 일치하는 모든 행에 반영한다.
+        {
+            use crate::ipc::accounts::{apply_status_by_login_id, Account};
+            use crate::store::JsonStore;
+            let accounts = app.state::<JsonStore<Account>>();
+            accounts.mutate(|list| {
+                apply_status_by_login_id(
+                    list,
+                    &job.account_id,
+                    account_status.clone(),
+                    Some(account_msg.clone()),
+                )
+            });
         }
 
         if let Ok(mut inner) = state.inner.lock() {
