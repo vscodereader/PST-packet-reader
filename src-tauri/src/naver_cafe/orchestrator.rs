@@ -473,8 +473,19 @@ impl CookieHeaderCache {
 pub async fn run_post_jobs(jobs: &[PostJob]) -> Vec<JobReport> {
     let orchestrator = CafeOrchestrator::new();
     let mut cookies = CookieHeaderCache::default();
-    let mut reports = Vec::with_capacity(jobs.len());
-    for job in jobs {
+    let total = jobs.len();
+    let mut reports = Vec::with_capacity(total);
+    for (index, job) in jobs.iter().enumerate() {
+        // 각 글 등록의 시도/성공/실패를 tracing으로 남겨, 게시 실패 시 네이버 오류
+        // 코드/사유를 로그에서 확인할 수 있게 한다(댓글 경로와 대칭). 쿠키 값·본문은
+        // 절대 로그에 포함하지 않는다.
+        tracing::info!(
+            seq = index + 1,
+            total,
+            cafe = %job.cafe,
+            menu_id = job.menu_id,
+            "글 등록 시도"
+        );
         // 계정 쿠키 해석(배치 내 1회 캐시). 없거나 오류면 건너뛴다.
         let report = match cookies.resolve(&job.account_id) {
             // 보안: cookie_header 값은 로그/보고에 노출하지 않는다.
@@ -494,6 +505,16 @@ pub async fn run_post_jobs(jobs: &[PostJob]) -> Vec<JobReport> {
                 JobReport::failure(job, no_cookies_error(&job.account_id, Some(msg)))
             }
         };
+        match &report.error {
+            None => tracing::info!(seq = index + 1, total, "글 등록 성공"),
+            Some(err) => tracing::warn!(
+                seq = index + 1,
+                total,
+                error_code = %err.code,
+                error_message = %err.message,
+                "글 등록 실패"
+            ),
+        }
         reports.push(report);
     }
     reports

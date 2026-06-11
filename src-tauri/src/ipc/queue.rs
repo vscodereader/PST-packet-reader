@@ -426,6 +426,7 @@ pub fn promote_queue_scheduled<R: tauri::Runtime>(
             );
             after
         }
+        // 매칭 id가 없으면(이미 처리/취소됨) 현재 now 큐를 그대로 돌려준다.
         None => now.snapshot(),
     }
 }

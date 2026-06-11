@@ -25,7 +25,9 @@ use crate::naver_automation::types::DiscussionStock;
 use crate::naver_cafe::article_list::models::SortBy;
 use crate::naver_cafe::distribute::{distribute_comments, mulberry32, seed_from_clock};
 use crate::naver_cafe::orchestrator::{CommentJob, CommentJobReport, JobReport, PostJob};
-use crate::naver_cafe::{fetch_article_list_for_account, run_comment_jobs, run_post_jobs};
+use crate::naver_cafe::{
+    fetch_article_list_for_account, run_comment_jobs, run_post_jobs, NaverCafeCommonErrorData,
+};
 use crate::store::JsonStore;
 use crate::util::now_ms;
 
@@ -574,6 +576,130 @@ fn status_of(ok: bool) -> BatchItemStatus {
     }
 }
 
+/// 매핑되지 않은 알 수 없는 실패의 메인 라인 폴백(#169). 원문(영어/개발자 메시지)을
+/// 사용자에게 쏟지 않고, 일반 안내 + "자세히 보기"(trace)로 유도한다.
+const GENERIC_REASON: &str = "알 수 없는 오류가 발생했습니다. 자세히 보기를 확인해 주세요";
+
+/// HTTP 상태코드를 사용자용 한국어 사유로 매핑한다(#169).
+fn status_reason(status: u16) -> &'static str {
+    match status {
+        400 => "요청 형식이 올바르지 않습니다",
+        401 | 403 => "권한이 없거나 로그인이 만료되었습니다",
+        404 => "해당 게시판을 찾을 수 없습니다",
+        429 => "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요",
+        500..=599 => "네이버 서버에 문제가 발생했습니다",
+        _ => "네이버에서 요청을 거부했습니다",
+    }
+}
+
+/// 네이버 API errorCode를 사용자용 한국어 사유로 매핑한다(#169). 이 매핑은 네이버
+/// 원문보다 **우선**한다 — 원문이 영어("Page Not Found")거나, 한국어여도 모호한
+/// ("알 수 없는 오류" = 0001) 경우를 행동 가능한 문구로 덮어쓴다. 매핑에 없는 코드는
+/// 네이버 한국어 원문을 그대로 살린다(예: 4003 "삭제되었거나 존재하지 않는 게시글입니다").
+fn naver_code_reason(api_code: &str) -> Option<&'static str> {
+    match api_code {
+        "10404" => Some("해당 게시판 또는 게시물이 존재하지 않습니다"),
+        "9999" => Some("네이버에서 요청을 거부했습니다"),
+        // 0001: 네이버가 "알 수 없는 오류"로만 답하는 일반 코드 — 잘못된 댓글 대상에서 관측됨.
+        "0001" => Some("댓글 대상을 찾을 수 없거나 잘못된 요청입니다"),
+        _ => None,
+    }
+}
+
+/// 내부 오류 코드(HTTP 단계 이전 실패)를 사용자용 한국어 사유로 매핑한다(#169).
+/// 개발자용 원본 message("contentJson…")가 그대로 노출되지 않게 코드로 치환한다.
+fn internal_code_reason(code: &str) -> Option<&'static str> {
+    match code {
+        "SESSION_INVALID" => Some("로그인이 만료되었습니다. 다시 로그인해 주세요"),
+        "NO_COOKIES" => Some("로그인 정보가 없습니다. 먼저 로그인해 주세요"),
+        "CONTENT_BUILD_FAILED" | "FORM_BUILD_FAILED" => {
+            Some("글 내용을 구성하는 중 문제가 발생했습니다")
+        }
+        "REGISTER_PARSE_ERROR" | "COMMENT_PARSE_ERROR" | "PARSE_ERROR" => {
+            Some("네이버 응답을 처리하지 못했습니다")
+        }
+        "HTTP_TRANSPORT_ERROR" => Some("네트워크 연결에 문제가 있습니다"),
+        "INVALID_CAFE_INPUT" => Some("카페 또는 게시판 정보가 올바르지 않습니다"),
+        _ => None,
+    }
+}
+
+/// 문자열에 한글(음절/자모)이 들어 있는지. 네이버가 준 실패 사유가 한국어면(댓글
+/// `reason`처럼 이미 친절) 그대로 노출하고, 영어/기술 메시지("Page Not Found")일 때만
+/// 우리 매핑으로 치환하기 위한 판별(#169).
+fn contains_hangul(s: &str) -> bool {
+    s.chars().any(|c| {
+        matches!(c,
+            '\u{AC00}'..='\u{D7A3}'   // 완성형 음절
+            | '\u{1100}'..='\u{11FF}' // 자모
+            | '\u{3130}'..='\u{318F}' // 호환 자모
+        )
+    })
+}
+
+/// 실패한 게시/댓글의 사용자용 메인 라인 사유. 한국어 사유 뒤에 식별 코드를 짧게 붙여,
+/// "알 수 없는 오류"처럼 모호한 경우에도 무슨 에러인지 추적할 수 있게 한다(#169). 코드는
+/// 네이버 숫자 errorCode를 우선 쓰고, 없으면 내부 오류 코드(예: SESSION_INVALID)를 쓴다.
+fn failure_reason(code: &str, cafe: Option<&NaverCafeCommonErrorData>) -> String {
+    let reason = resolve_failure_reason(code, cafe);
+    let tag = cafe
+        .and_then(|c| c.api_error_code.as_deref())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(code);
+    format!("{reason} ({tag})")
+}
+
+/// 메인 라인의 한국어 사유 본문을 고른다(코드 태그 제외). 우선순위: 네이버 errorCode
+/// 매핑(모호/영어 코드 치환) → 네이버 원문이 한국어면 그대로 → HTTP status(4xx/5xx)
+/// 매핑 → 내부 코드 매핑 → 일반 폴백. 영어/기술 원문이나 개발자 `message`는 넣지 않고,
+/// 디버그 원문은 `failure_trace`(자세히 보기)에만 보존한다.
+fn resolve_failure_reason(code: &str, cafe: Option<&NaverCafeCommonErrorData>) -> String {
+    let Some(cafe) = cafe else {
+        return internal_code_reason(code)
+            .unwrap_or(GENERIC_REASON)
+            .to_owned();
+    };
+    // 1. 알려진 네이버 errorCode 매핑이 최우선 — 원문이 영어거나 한국어여도 모호한
+    //    코드(0001 등)를 행동 가능한 문구로 덮어쓴다.
+    if let Some(reason) = cafe.api_error_code.as_deref().and_then(naver_code_reason) {
+        return reason.to_owned();
+    }
+    // 2. 매핑에 없으면, 네이버 원문이 한국어인 경우 그대로 노출(4003 등 이미 친절한 사유).
+    //    개행·연속 공백 정리, 길이 가드로 파싱 실패 폴백의 원문 바디 방지.
+    if let Some(msg) = cafe.api_error_message.as_deref() {
+        let cleaned = msg.split_whitespace().collect::<Vec<_>>().join(" ");
+        if contains_hangul(&cleaned) && cleaned.chars().count() <= 200 {
+            return cleaned;
+        }
+    }
+    // 3. HTTP 오류 status 기반 한국어. 2xx("200 OK + 에러 본문")는 status에 오류 의미가
+    //    없으므로 건너뛴다.
+    if let Some(status) = cafe.http_status {
+        if status >= 400 {
+            return status_reason(status).to_owned();
+        }
+    }
+    // 4. HTTP 이전 내부 오류 코드 → 그조차 없으면 일반 폴백.
+    internal_code_reason(code)
+        .unwrap_or(GENERIC_REASON)
+        .to_owned()
+}
+
+/// "자세히보기"용 개발자 trace를 만든다(#169). 코드·HTTP status·api 코드·원본
+/// 메시지를 한 줄로 남겨, 사용자 사유와 별개로 실제 응답을 그대로 확인할 수 있게 한다.
+fn failure_trace(code: &str, message: &str, cafe: Option<&NaverCafeCommonErrorData>) -> String {
+    match cafe {
+        Some(c) => format!(
+            "{code} · HTTP {} · {} · {}",
+            c.http_status
+                .map_or_else(|| "-".to_owned(), |s| s.to_string()),
+            c.api_error_code.as_deref().unwrap_or("-"),
+            c.api_error_message.as_deref().unwrap_or(message),
+        ),
+        None => format!("{code}: {message}"),
+    }
+}
+
 /// 카페 글·댓글·종목토론방·밴드 실행 결과를 알림 배치(`LogBatch`) 한 건으로 묶는다.
 /// 본문/댓글 스냅샷은 실제 그 작업을 돌린 모드일 때만 남긴다(즉시게시 forum 경로와 동일).
 // 플랫폼별 결과 슬라이스(글/댓글/forum/band)와 조회 실패·시각·seq를 그대로 받는다.
@@ -621,14 +747,17 @@ fn build_log_batch(
             msg: if r.success {
                 "글 게시 완료".to_owned()
             } else {
-                r.error
-                    .as_ref()
-                    .map_or_else(|| "글 게시 실패".to_owned(), |e| e.message.clone())
+                match r.error.as_ref() {
+                    Some(e) => format!(
+                        "글 게시 실패 — {}",
+                        failure_reason(&e.code, e.error_data.as_ref().map(|d| &d.cafe))
+                    ),
+                    None => "글 게시 실패".to_owned(),
+                }
             },
-            trace: r
-                .error
-                .as_ref()
-                .map(|e| format!("{}: {}", e.code, e.message)),
+            trace: r.error.as_ref().map(|e| {
+                failure_trace(&e.code, &e.message, e.error_data.as_ref().map(|d| &d.cafe))
+            }),
         });
     }
 
@@ -643,14 +772,17 @@ fn build_log_batch(
             msg: if r.success {
                 "댓글 게시 완료".to_owned()
             } else {
-                r.error
-                    .as_ref()
-                    .map_or_else(|| "댓글 게시 실패".to_owned(), |e| e.message.clone())
+                match r.error.as_ref() {
+                    Some(e) => format!(
+                        "댓글 게시 실패 — {}",
+                        failure_reason(&e.code, e.error_data.as_ref().map(|d| &d.cafe))
+                    ),
+                    None => "댓글 게시 실패".to_owned(),
+                }
             },
-            trace: r
-                .error
-                .as_ref()
-                .map(|e| format!("{}: {}", e.code, e.message)),
+            trace: r.error.as_ref().map(|e| {
+                failure_trace(&e.code, &e.message, e.error_data.as_ref().map(|d| &d.cafe))
+            }),
         });
     }
 
@@ -1198,8 +1330,203 @@ mod tests {
         assert_eq!(b.items[1].status, BatchItemStatus::Fail);
         // plan에 없는 카페("456")는 ID로 폴백.
         assert_eq!(b.items[1].target, "456");
-        assert_eq!(b.items[1].msg, "쿠키 없음");
+        // error_data가 없으면 내부 코드(NO_COOKIES)를 한국어 사유로 치환하고 식별 코드를 붙인다.
+        assert_eq!(
+            b.items[1].msg,
+            "글 게시 실패 — 로그인 정보가 없습니다. 먼저 로그인해 주세요 (NO_COOKIES)"
+        );
+        // 디버그 원문은 자세히 보기(trace)에 보존.
         assert_eq!(b.items[1].trace.as_deref(), Some("NO_COOKIES: 쿠키 없음"));
+    }
+
+    /// `api_error_message`/`http_status`를 담은 게시 실패 리포트(REGISTER_HTTP_ERROR 형태).
+    fn cafe_error(
+        status: Option<u16>,
+        api_code: Option<&str>,
+        api_message: Option<&str>,
+    ) -> NaverCafeCommonErrorData {
+        NaverCafeCommonErrorData {
+            target: None,
+            http_status: status,
+            api_error_code: api_code.map(str::to_owned),
+            api_error_message: api_message.map(str::to_owned),
+            retryable: false,
+        }
+    }
+
+    fn post_fail_api(account: &str, cafe: &str, cafe_err: NaverCafeCommonErrorData) -> JobReport {
+        use crate::naver_cafe::post::error::PostErrorData;
+        use crate::naver_cafe::ErrorEnvelope;
+        JobReport {
+            account_id: account.into(),
+            cafe: cafe.into(),
+            menu_id: 7,
+            success: false,
+            result: None,
+            error: Some(ErrorEnvelope {
+                trace_id: "t".into(),
+                code: "REGISTER_HTTP_ERROR".into(),
+                message: "오류 응답은 apiErrorMessage를 확인하세요".into(),
+                error_data: Some(PostErrorData {
+                    cafe: cafe_err,
+                    menu_id: None,
+                    subject: None,
+                    validation_errors: vec![],
+                }),
+            }),
+        }
+    }
+
+    #[test]
+    fn failure_reason_maps_naver_code_to_korean_without_english_or_http() {
+        // 네이버 원문이 영어("Page Not Found")여도 errorCode(10404)로 한국어 치환하고
+        // HTTP status는 메인 라인에 넣지 않는다.
+        let cafe = cafe_error(Some(404), Some("10404"), Some("Page Not Found"));
+        let reason = failure_reason("REGISTER_HTTP_ERROR", Some(&cafe));
+        // 한국어 사유 + 식별 코드(네이버 errorCode 우선).
+        assert_eq!(
+            reason,
+            "해당 게시판 또는 게시물이 존재하지 않습니다 (10404)"
+        );
+        assert!(!reason.contains("Page Not Found"));
+        assert!(!reason.contains("HTTP"));
+    }
+
+    #[test]
+    fn failure_reason_unknown_naver_code_falls_back_to_http_status() {
+        // 매핑 안 된 errorCode면 HTTP status 기반 한국어 문구로.
+        let cafe = cafe_error(Some(403), Some("88888"), Some("Forbidden"));
+        assert_eq!(
+            failure_reason("REGISTER_HTTP_ERROR", Some(&cafe)),
+            "권한이 없거나 로그인이 만료되었습니다 (88888)"
+        );
+    }
+
+    #[test]
+    fn failure_reason_no_http_uses_internal_code() {
+        // HTTP 단계 이전 실패(SESSION_INVALID)는 내부 코드로 한국어 치환(원문 message 미노출).
+        let cafe = cafe_error(None, None, None);
+        // api_error_code가 없으면 식별 코드로 내부 코드를 쓴다.
+        assert_eq!(
+            failure_reason("SESSION_INVALID", Some(&cafe)),
+            "로그인이 만료되었습니다. 다시 로그인해 주세요 (SESSION_INVALID)"
+        );
+    }
+
+    #[test]
+    fn failure_reason_no_error_data_uses_internal_code() {
+        assert_eq!(
+            failure_reason("NO_COOKIES", None),
+            "로그인 정보가 없습니다. 먼저 로그인해 주세요 (NO_COOKIES)"
+        );
+    }
+
+    #[test]
+    fn failure_reason_unknown_everything_uses_generic_hint() {
+        // 코드도 status도 모르면 개발자 원문 대신 일반 안내 + 자세히 보기 유도 + 식별 코드.
+        assert_eq!(
+            failure_reason("WEIRD_UNKNOWN_CODE", None),
+            format!("{GENERIC_REASON} (WEIRD_UNKNOWN_CODE)")
+        );
+    }
+
+    #[test]
+    fn failure_reason_never_leaks_developer_message() {
+        // 개발자 message("contentJson…")가 메인 라인에 새지 않는다.
+        let cafe = cafe_error(None, None, None);
+        let reason = failure_reason("CONTENT_BUILD_FAILED", Some(&cafe));
+        assert_eq!(
+            reason,
+            "글 내용을 구성하는 중 문제가 발생했습니다 (CONTENT_BUILD_FAILED)"
+        );
+        assert!(!reason.contains("contentJson"));
+    }
+
+    #[test]
+    fn failure_reason_passes_through_unmapped_korean_naver_message() {
+        // 매핑에 없는 코드는 네이버 한국어 원문을 그대로 노출(이미 친절). 4003 실측 케이스.
+        let deleted = cafe_error(
+            Some(200),
+            Some("4003"),
+            Some("삭제되었거나 존재하지 않는 게시글입니다."),
+        );
+        assert_eq!(
+            failure_reason("COMMENT_HTTP_ERROR", Some(&deleted)),
+            "삭제되었거나 존재하지 않는 게시글입니다. (4003)"
+        );
+    }
+
+    #[test]
+    fn failure_reason_overrides_vague_naver_code() {
+        // 0001은 네이버가 "알 수 없는 오류"로만 답하는 모호 코드 — 한국어여도 우리 행동가능
+        // 문구로 덮어쓴다(매핑이 한글 패스스루보다 우선). 댓글 "200 OK + 에러 본문" 실측.
+        let vague = cafe_error(
+            Some(200),
+            Some("0001"),
+            Some("알 수 없는 오류가 발생했습니다."),
+        );
+        assert_eq!(
+            failure_reason("COMMENT_HTTP_ERROR", Some(&vague)),
+            "댓글 대상을 찾을 수 없거나 잘못된 요청입니다 (0001)"
+        );
+    }
+
+    #[test]
+    fn failure_reason_2xx_non_korean_skips_status_and_uses_generic() {
+        // 200(에러 본문) + 한글 아님 + 미매핑 코드 → status(200)는 오류의미 없어 건너뛰고 일반 폴백.
+        let cafe = cafe_error(Some(200), Some("7777"), Some("Weird error"));
+        assert_eq!(
+            failure_reason("COMMENT_HTTP_ERROR", Some(&cafe)),
+            format!("{GENERIC_REASON} (7777)")
+        );
+    }
+
+    #[test]
+    fn failure_reason_oversized_korean_body_falls_back_to_status() {
+        // 파싱 실패 폴백의 긴 한국어 원문 바디는 메인 라인에 쏟지 않고 status 문구로.
+        let huge = "가".repeat(300);
+        let cafe = cafe_error(Some(500), None, Some(&huge));
+        assert_eq!(
+            failure_reason("REGISTER_HTTP_ERROR", Some(&cafe)),
+            "네이버 서버에 문제가 발생했습니다 (REGISTER_HTTP_ERROR)"
+        );
+    }
+
+    #[test]
+    fn failure_trace_includes_status_code_and_api_detail() {
+        let cafe = cafe_error(Some(403), Some("9999"), Some("권한이 없는 게시판입니다"));
+        assert_eq!(
+            failure_trace("REGISTER_HTTP_ERROR", "일반 안내문", Some(&cafe)),
+            "REGISTER_HTTP_ERROR · HTTP 403 · 9999 · 권한이 없는 게시판입니다"
+        );
+    }
+
+    #[test]
+    fn failure_trace_falls_back_to_code_message_without_error_data() {
+        assert_eq!(
+            failure_trace("NO_COOKIES", "쿠키 없음", None),
+            "NO_COOKIES: 쿠키 없음"
+        );
+    }
+
+    #[test]
+    fn build_log_batch_post_fail_surfaces_korean_reason_in_msg_and_keeps_debug_trace() {
+        let p = plan(ModeValue::Post, vec![naver_target("u0")]);
+        // 네이버 원문은 영어("Page Not Found"), errorCode 10404.
+        let cafe = cafe_error(Some(404), Some("10404"), Some("Page Not Found"));
+        let reports = vec![post_fail_api("u0", "123", cafe)];
+        let b = build_log_batch(&p, &reports, &[], &[], &[], 1, 0);
+        assert_eq!(b.items[0].status, BatchItemStatus::Fail);
+        // 메인 라인: 영어 원문·HTTP 없이 한국어 사유 + 식별 코드.
+        assert_eq!(
+            b.items[0].msg,
+            "글 게시 실패 — 해당 게시판 또는 게시물이 존재하지 않습니다 (10404)"
+        );
+        // 자세히보기: 개발자 디버그(영어 원문 포함)는 그대로 보존.
+        assert_eq!(
+            b.items[0].trace.as_deref(),
+            Some("REGISTER_HTTP_ERROR · HTTP 404 · 10404 · Page Not Found")
+        );
     }
 
     #[test]
