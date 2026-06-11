@@ -920,4 +920,83 @@ describe("PublishModal", () => {
       ipcBackend.mock.calls.find((c) => c[0] === "band_publish"),
     ).toBeUndefined();
   });
+
+  it("밴드 댓글 전용 인기글 대상은 band_comment에 mode=popular로 전달한다", async () => {
+    const commentDoc: LibraryPost = {
+      ...postDoc,
+      id: "l-band-comment-popular",
+      kind: "comment",
+      comments: ["좋아요", "멋지네요"],
+      commentTarget: "popular",
+      commentCount: 5,
+    };
+    renderPublish({ doc: commentDoc });
+    await userEvent.click(await screen.findByText("value_invest")); // band a7
+
+    const linkInput = screen.getByLabelText("밴드 링크");
+    const saveBtn = screen.getByRole("button", { name: "저장" });
+    await userEvent.type(linkInput, "https://band.us/band/103043410");
+    await waitFor(() => expect(saveBtn).toBeEnabled());
+    await userEvent.click(saveBtn);
+    await waitFor(() => expect(linkInput).toHaveValue(""));
+    await screen.findByPlaceholderText("게시할 밴드 선택");
+    await pickOption(0, "데일밴드");
+    await screen.findByLabelText("데일밴드 제거");
+
+    const publishBtn = await screen.findByRole("button", {
+      name: /^게시 \(\d+\)/,
+    });
+    await waitFor(() => expect(publishBtn).toBeEnabled());
+    await userEvent.click(publishBtn);
+
+    await waitFor(() => {
+      const call = ipcBackend.mock.calls.find((c) => c[0] === "band_comment");
+      expect(call).toBeDefined();
+      const arg = call![1] as { mode: string; count: number };
+      expect(arg.mode).toBe("popular");
+      expect(arg.count).toBe(5);
+    });
+  });
+
+  it("밴드는 url 댓글 대상을 지원하지 않아 latest로 오라우팅하지 않고 실패로 표기한다", async () => {
+    // 네이버+밴드 혼합 댓글 전용 — 네이버는 url 글에 댓글이 가능하지만 밴드는 불가.
+    const commentDoc: LibraryPost = {
+      ...postDoc,
+      id: "l-band-comment-url",
+      kind: "comment",
+      comments: ["좋아요", "멋지네요"],
+      commentTarget: "url",
+      commentUrl: "https://cafe.naver.com/ca-fe/cafes/31732304/articles/9",
+    };
+    renderPublish({ doc: commentDoc });
+    await userEvent.click(await screen.findByText("money_lab")); // naver
+    await userEvent.click(await screen.findByText("value_invest")); // band a7
+
+    const linkInput = screen.getByLabelText("밴드 링크");
+    const saveBtn = screen.getByRole("button", { name: "저장" });
+    await userEvent.type(linkInput, "https://band.us/band/103043410");
+    await waitFor(() => expect(saveBtn).toBeEnabled());
+    await userEvent.click(saveBtn);
+    await waitFor(() => expect(linkInput).toHaveValue(""));
+    await screen.findByPlaceholderText("게시할 밴드 선택");
+    await pickOption(0, "데일밴드");
+    await screen.findByLabelText("데일밴드 제거");
+
+    const publishBtn = await screen.findByRole("button", {
+      name: /^게시 \(\d+\)/,
+    });
+    await waitFor(() => expect(publishBtn).toBeEnabled());
+    await userEvent.click(publishBtn);
+
+    // 밴드에 url 댓글을 시도하지 않고(=band_comment 미호출) 실패 사유를 보여준다.
+    // 결과 행은 "{loginId} · {msg}" 한 줄이라 부분 일치로 찾는다.
+    expect(
+      await screen.findByText((t) =>
+        t.includes("밴드는 특정 글(URL) 댓글을 지원하지 않아요"),
+      ),
+    ).toBeInTheDocument();
+    expect(
+      ipcBackend.mock.calls.find((c) => c[0] === "band_comment"),
+    ).toBeUndefined();
+  });
 });

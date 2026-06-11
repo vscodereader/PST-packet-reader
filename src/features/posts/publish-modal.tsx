@@ -1295,6 +1295,15 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         const link =
           resolvedBands.find((b) => b.name === j.targetName)?.link ?? "";
         if (mode === "comment") {
+          // 밴드는 url(특정 글) 댓글을 지원하지 않는다. latest로 조용히 떨어뜨리면 엉뚱한
+          // 최신글에 댓글이 달리므로, 오라우팅 대신 실패로 표기한다.
+          if (commentTargetMode === "url") {
+            return Promise.resolve({
+              ...j,
+              ok: false,
+              msg: "밴드는 특정 글(URL) 댓글을 지원하지 않아요",
+            });
+          }
           // 댓글 전용: 기존 글(최신/인기) 상위 count개에 댓글 풀을 1개씩 분배해 단다.
           return ipc.band
             .comment({
