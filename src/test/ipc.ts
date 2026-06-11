@@ -1111,15 +1111,19 @@ export const invoke = vi.fn(
       case "list_bands":
         return clone(SEED_BANDS);
       case "band_publish": {
-        // 밴드 가입+게시 목: 링크에서 band_no를 뽑아 성공 결과를 만든다.
+        // 밴드 가입+게시 목: 링크에서 band_no를 뽑아 성공 결과를 만든다. 비어있지 않은
+        // 댓글 개수를 commentedCount로 돌려준다(엔진이 같은 글에 전부 다는 동작 미러).
         const link = String(args!.bandLink ?? "");
         const m = link.match(/\/band\/(\d+)|^(\d+)$/);
         const bandNo = m ? (m[1] ?? m[2]) : "0";
+        const comments = Array.isArray(args!.comments)
+          ? (args!.comments as string[])
+          : [];
         return clone({
           joined: true,
           postNo: 1,
           webUrl: `https://band.us/band/${bandNo}/post/1`,
-          commented: Boolean(String(args!.comment ?? "").trim()),
+          commentedCount: comments.filter((c) => c.trim()).length,
           bandName: bandNo === "103043410" ? "데일밴드" : `밴드 ${bandNo}`,
         });
       }

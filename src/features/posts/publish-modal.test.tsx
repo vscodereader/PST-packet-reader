@@ -872,4 +872,43 @@ describe("PublishModal", () => {
       expect(targets).toContain("밴드 999");
     });
   });
+
+  it("밴드 즉시게시(글+댓글)는 댓글을 모두 같은 글에 보낸다", async () => {
+    // 회귀: 댓글을 2개 이상 써도 1개만 게시되던 문제 — comments 풀 전체를 백엔드에 전달.
+    const bothDoc: LibraryPost = {
+      ...postDoc,
+      id: "l-band-multi",
+      kind: "both",
+      body: "<p>본문</p>",
+      comments: ["첫 번째 댓글", "두 번째 댓글"],
+    };
+    renderPublish({ doc: bothDoc });
+    await userEvent.click(await screen.findByText("value_invest")); // band a7
+
+    const linkInput = screen.getByLabelText("밴드 링크");
+    const saveBtn = screen.getByRole("button", { name: "저장" });
+    await userEvent.type(linkInput, "https://band.us/band/103043410");
+    await waitFor(() => expect(saveBtn).toBeEnabled());
+    await userEvent.click(saveBtn);
+    await waitFor(() => expect(linkInput).toHaveValue(""));
+    await screen.findByPlaceholderText("게시할 밴드 선택");
+    await pickOption(0, "데일밴드");
+    await screen.findByLabelText("데일밴드 제거");
+
+    const publishBtn = await screen.findByRole("button", {
+      name: /^게시 \(\d+\)/,
+    });
+    await waitFor(() => expect(publishBtn).toBeEnabled());
+    await userEvent.click(publishBtn);
+
+    // band_publish에 댓글 풀 전체가 같은 글로 전달된다(1개만 X).
+    await waitFor(() => {
+      const call = ipcBackend.mock.calls.find((c) => c[0] === "band_publish");
+      expect(call).toBeDefined();
+      expect((call![1] as { comments: string[] }).comments).toEqual([
+        "첫 번째 댓글",
+        "두 번째 댓글",
+      ]);
+    });
+  });
 });

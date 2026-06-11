@@ -1269,8 +1269,11 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     ).then((forumArr) => forumArr.flat());
 
     // 밴드(band.us): 저장된 링크로 가입 후 글(+댓글) 게시 — 순수 HTTP 백엔드 호출.
-    const bandComment =
-      mode === "both" || mode === "comment" ? firstComment : "";
+    // 댓글 모드(both/comment)면 비어있지 않은 댓글을 모두 같은 글에 단다(카페 both와 동일).
+    const bandComments =
+      mode === "both" || mode === "comment"
+        ? (doc.comments ?? []).filter((c) => c.trim())
+        : [];
     const bandWork: Promise<PublishResult[]> = Promise.all(
       bandJobs.map((j) => {
         // 잡의 라벨(밴드명)로 해당 밴드의 가입 링크를 찾는다.
@@ -1283,14 +1286,17 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
             bandLink: link,
             title: doc.title,
             content: htmlToText(doc.body ?? ""),
-            ...(bandComment ? { comment: bandComment } : {}),
+            comments: bandComments,
           })
           .then((out) => ({
             ...j,
             // 결과 라벨을 게시 응답의 실제 밴드명으로(없으면 잡의 밴드명 유지).
             targetName: out.bandName ?? j.targetName,
             ok: true,
-            msg: out.commented ? "글·댓글 게시 완료" : "글 게시 완료",
+            msg:
+              out.commentedCount > 0
+                ? `글·댓글 ${out.commentedCount}개 게시 완료`
+                : "글 게시 완료",
           }))
           .catch((err: unknown) => ({ ...j, ok: false, msg: errText(err) }));
       }),
@@ -1325,7 +1331,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
             .recordBatch({
               title: doc.title,
               body: htmlToText(doc.body ?? ""),
-              comment: bandComment,
+              // 로그 스냅샷은 대표로 첫 댓글만 남긴다(실제 게시는 위에서 전체 전달).
+              comment: bandComments[0] ?? "",
               runPost: mode === "post" || mode === "both",
               runComment: mode === "comment" || mode === "both",
               items: br.map((r) => ({
