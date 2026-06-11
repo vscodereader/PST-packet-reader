@@ -5,4 +5,9 @@ import type { PlatformId } from "./PlatformId";
 /**
  * `camelCase` so field names match the frontend (`loginId`, not `login_id`).
  */
-export type Account = { id: string, platform: PlatformId, loginId: string, pw: string, status: AccountStatus, last: string, tags: Array<string>, };
+export type Account = { id: string, platform: PlatformId, loginId: string, pw: string, status: AccountStatus, 
+/**
+ * 마지막 상태 변경 사유(동결). 로그인 워커가 채운다 — 차단/타임아웃 원문이나 조치
+ * 안내. UI가 배지 tooltip에 보여준다. 과거 JSON엔 없을 수 있어 기본값 None.
+ */
+statusMsg?: string, last: string, tags: Array<string>, };

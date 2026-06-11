@@ -3,6 +3,7 @@
 
 use serde_json::json;
 
+use crate::ipc::accounts::AccountStatus;
 use crate::naver_automation::CdpClient;
 
 use super::{
@@ -10,16 +11,19 @@ use super::{
     chrome,
     error::OrchestratorError,
     login_flow::{self, LoginOutcome},
+    outcome::{resolve_non_ok, LoginResolution},
     types::{Account, RuntimePaths},
     util::{now_secs, safe_file_stem},
 };
 
-/// 한 계정을 로그인하고 쿠키를 저장한다(승격 루프 포함).
+/// 한 계정을 로그인하고 쿠키를 저장한다(승격 루프 포함). 결과는 계정 상태/안내로 해석해
+/// [`LoginResolution`]으로 돌려준다 — 실패 계열(비번오류/인증/차단)도 `Err`로 뭉개지 않고
+/// 세분화된 상태를 보존한다.
 pub(crate) fn login(
     paths: &RuntimePaths,
     account: &Account,
     headless: bool,
-) -> Result<(), OrchestratorError> {
+) -> Result<LoginResolution, OrchestratorError> {
     let outcome = attempt(&account.id, &account.password, headless)?;
 
     // headless에서 챌린지가 나오면 headed로 승격해 사용자가 직접 해결하도록 재실행.
@@ -51,12 +55,14 @@ fn attempt(id: &str, pw: &str, headless: bool) -> Result<LoginOutcome, Orchestra
     Ok(outcome)
 }
 
-// 결과에 따라 쿠키를 저장하거나 명확한 오류를 반환한다.
+// 결과를 해석한다: 성공이면 쿠키를 저장하고, 그 외(인증필요/비번오류/차단/오류)는
+// 세분화된 [`LoginResolution`]으로 보존한다. `Err`은 진짜 인프라 오류(파일 쓰기/쿠키 검증
+// IO 실패)에만 쓴다 — 로그인 결과 자체는 `Ok(LoginResolution)`로 흐른다.
 fn finalize(
     paths: &RuntimePaths,
     account: &Account,
     outcome: LoginOutcome,
-) -> Result<(), OrchestratorError> {
+) -> Result<LoginResolution, OrchestratorError> {
     match outcome {
         LoginOutcome::Ok { cookies } => {
             let path = paths
@@ -70,19 +76,14 @@ fn finalize(
             std::fs::write(&path, serde_json::to_string_pretty(&payload)?)?;
 
             if has_valid_cookie_file(&path)? {
-                Ok(())
+                Ok(LoginResolution::active())
             } else {
-                Err(OrchestratorError::CommandFailed(
-                    "저장된 쿠키에 유효한 네이버 세션이 없습니다.".to_owned(),
+                Ok(LoginResolution::failure(
+                    AccountStatus::Error,
+                    "저장된 쿠키에 유효한 네이버 세션이 없습니다.",
                 ))
             }
         }
-        LoginOutcome::ChallengeRequired { kind } => Err(OrchestratorError::CommandFailed(format!(
-            "추가 인증이 필요합니다({kind:?}). 열린 Chrome 창에서 직접 완료한 뒤 다시 실행하세요."
-        ))),
-        LoginOutcome::BadCredentials => Err(OrchestratorError::CommandFailed(
-            "아이디 또는 비밀번호가 올바르지 않습니다.".to_owned(),
-        )),
-        LoginOutcome::Error(message) => Err(OrchestratorError::CommandFailed(message)),
+        other => Ok(resolve_non_ok(other)),
     }
 }

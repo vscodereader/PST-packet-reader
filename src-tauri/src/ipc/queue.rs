@@ -349,11 +349,12 @@ pub fn add_queue_scheduled(
 
 /// 예약 아이템 1건을 now 큐로 승격한다(수동 "즉시 처리"·자동 스케줄러 공용). scheduled
 /// 에서 제거 → now에 추가(plan 보존) → 워커 기동. 활동 로그는 호출부가 맥락에 맞게 남긴다
-/// (수동/자동 메시지가 다름). 아이템이 없으면(취소·중복 race) false.
-/// 성공 시 **워커 기동 직전** now 큐 스냅샷(`Some`)을 돌려준다. 기동 후 `now.snapshot()`을
-/// 다시 읽으면 워커가 막 승격한 아이템을 실행·제거하는 것과 레이스가 나, 반환값이
-/// 비결정적이 된다(즉시처리 직후 UI에서 항목이 사라져 보이고 통합테스트가 flaky). 매칭
-/// id가 없으면 `None`.
+/// (수동/자동 메시지가 다름). 아이템이 없으면(취소·중복 race) `None`.
+///
+/// 성공 시 **워커 기동 직전에 잡은** now 큐 스냅샷을 `Some`으로 돌려준다. 워커는 비동기로
+/// 큐를 비우므로(특히 plan이 없는 아이템은 즉시 완료·제거), 기동 후 `now.snapshot()`을
+/// 다시 읽으면 막 승격한 항목이 사라져 있을 수 있다(반환값 비결정성). push 직후의 스냅샷을
+/// 반환해 호출부가 '방금 승격된 상태'를 결정적으로 받게 한다(이슈 #181).
 fn promote_one<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     now: &JsonStore<QueueNowItem>,
@@ -378,13 +379,14 @@ fn promote_one<R: tauri::Runtime>(
         kept
     });
     let s = taken?;
-    // 워커 기동 전 append 시점 스냅샷을 잡아 반환한다(위 doc의 레이스 방지).
-    let snapshot = now.mutate(|mut items| {
+    // 워커 기동(start_if_idle) 전에 스냅샷을 잡는다 — 기동 후 워커가 큐를 비우면 반환값이
+    // 비결정적이 되므로(이슈 #181), push 결과(mutate 반환)를 그대로 돌려준다.
+    let after = now.mutate(|mut items| {
         items.push(to_now_item(s));
         items
     });
     super::queue_runner::start_if_idle(runner, app.clone());
-    Some(snapshot)
+    Some(after)
 }
 
 /// Move a scheduled item into the immediate queue ("즉시 처리"): drop it from the
@@ -400,13 +402,13 @@ pub fn promote_queue_scheduled<R: tauri::Runtime>(
     id: String,
 ) -> Vec<QueueNowItem> {
     match promote_one(&app, now.inner(), scheduled.inner(), runner.inner(), &id) {
-        Some(snapshot) => {
+        Some(after) => {
             record(
                 activity.inner(),
                 ActivityType::Info,
                 "예약을 즉시 게시로 전환",
             );
-            snapshot
+            after
         }
         // 매칭 id가 없으면(이미 처리/취소됨) 현재 now 큐를 그대로 돌려준다.
         None => now.snapshot(),

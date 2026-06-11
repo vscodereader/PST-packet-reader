@@ -164,18 +164,47 @@ async fn worker_loop<R: Runtime>(state: QueueState, app: AppHandle<R>) {
 
         let result =
             process_account(&app, &job.account_id, job.headless, job.use_adb, job.force).await;
-        let message = match &result {
-            Ok(()) if cookie_status == CookieStatus::Expired => "expired; refreshed".to_string(),
-            Ok(()) => "success".to_string(),
-            Err(err) => err.to_string(),
+
+        // 계정 세밀 상태/사유(active/badCredentials/challenge/blocked/error) — 큐 상태와
+        // 별개로 IPC 계정 store에 기록한다. 인프라 오류(Err)는 error로 본다.
+        let (account_status, account_msg) = match &result {
+            Ok(res) => (res.status.clone(), res.message.clone()),
+            Err(err) => (crate::ipc::accounts::AccountStatus::Error, err.to_string()),
         };
-        let status = if result.is_ok() && cookie_status == CookieStatus::Expired {
+        let succeeded = matches!(&result, Ok(res) if res.succeeded);
+
+        // 큐 상태/메시지는 기존 의미(성공/만료갱신/실패)를 유지해 프론트 폴링 호환성을 지킨다.
+        let message = if succeeded && cookie_status == CookieStatus::Expired {
+            "expired; refreshed".to_string()
+        } else if succeeded {
+            "success".to_string()
+        } else {
+            account_msg.clone()
+        };
+        let status = if succeeded && cookie_status == CookieStatus::Expired {
             QueueJobStatus::Expired
-        } else if result.is_ok() {
+        } else if succeeded {
             QueueJobStatus::Success
         } else {
             QueueJobStatus::Failed
         };
+
+        // 계정 세밀 상태/사유를 큐 상태보다 먼저 IPC 계정 store에 기록한다. 프론트 폴링이
+        // 큐 잡을 finished로 보고 계정 리스트를 재조회할 때 이미 최신 상태가 보이도록 해
+        // race 창을 좁힌다. loginId(=잡 식별자)가 일치하는 모든 행에 반영한다.
+        {
+            use crate::ipc::accounts::{apply_status_by_login_id, Account};
+            use crate::store::JsonStore;
+            let accounts = app.state::<JsonStore<Account>>();
+            accounts.mutate(|list| {
+                apply_status_by_login_id(
+                    list,
+                    &job.account_id,
+                    account_status.clone(),
+                    Some(account_msg.clone()),
+                )
+            });
+        }
 
         if let Ok(mut inner) = state.inner.lock() {
             if let Some(existing) = inner
@@ -199,22 +228,18 @@ async fn worker_loop<R: Runtime>(state: QueueState, app: AppHandle<R>) {
             _ => tracing::info!("[LOGIN] {label}  로그인 실패 ❌ — {message}"),
         }
 
-        // Log login result to the activity feed.
+        // 같은 사실을 활동 피드에도 상태별 타입으로 남긴다(순서 무관 — 폴링이 보지 않음).
         {
-            use crate::ipc::activity::{record, ActivityItem, ActivityType};
+            use super::outcome::{activity_message, status_activity_type};
+            use crate::ipc::activity::{record, ActivityItem};
             use crate::store::JsonStore;
+
             let activity = app.state::<JsonStore<ActivityItem>>();
-            let (ty, msg) = match status {
-                QueueJobStatus::Success | QueueJobStatus::Expired => (
-                    ActivityType::Success,
-                    format!("계정 {} 로그인 성공", job.account_id),
-                ),
-                _ => (
-                    ActivityType::Error,
-                    format!("계정 {} 로그인 실패 — {message}", job.account_id),
-                ),
-            };
-            record(activity.inner(), ty, msg);
+            record(
+                activity.inner(),
+                status_activity_type(&account_status),
+                activity_message(&job.account_id, &account_status, &account_msg),
+            );
         }
     }
 }

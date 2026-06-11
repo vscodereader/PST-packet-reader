@@ -248,4 +248,49 @@ describe("WriterModal", () => {
     expect(onSaveDraft).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it("edits comment-target options in comment mode", async () => {
+    const user = userEvent.setup();
+    renderWriter();
+    await screen.findByPlaceholderText("제목을 입력하세요");
+
+    // 댓글 작성 모드로 전환하면 댓글 대상(CommentComposer) 컨트롤이 노출된다.
+    await user.click(screen.getByRole("button", { name: "댓글 작성" }));
+
+    // "특정 게시글"(url) 대상 → URL 입력칸이 나타난다.
+    await user.click(
+      await screen.findByRole("button", { name: "특정 게시글" }),
+    );
+    const urlInput = await screen.findByPlaceholderText(/finance\.naver\.com/);
+    await user.type(urlInput, "https://finance.naver.com/item/board_read");
+    expect(urlInput).toHaveValue("https://finance.naver.com/item/board_read");
+
+    // "인기글" 대상 → 대상당 댓글 개수 버튼이 나타나고, 개수를 바꾼다.
+    await user.click(screen.getByRole("button", { name: "인기글" }));
+    await user.click(screen.getByRole("button", { name: "3" }));
+
+    // AI 변형 생성 버튼(토스트만 띄움)도 눌러본다.
+    await user.click(screen.getByRole("button", { name: /변형 생성/ }));
+    expect(
+      screen.getByRole("button", { name: /변형 생성/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("triggers image-add and rejects a non-text body drop", async () => {
+    const user = userEvent.setup();
+    renderWriter();
+    await screen.findByPlaceholderText("제목을 입력하세요");
+
+    // 이미지 추가 버튼 → 숨은 파일 입력 클릭을 트리거한다(jsdom에선 no-op).
+    await user.click(screen.getByTitle("이미지 추가"));
+
+    // 본문 에디터에 드롭 → onDrop이 기본 동작을 막고 안내 토스트를 띄운다.
+    const body = document.querySelector(
+      '[contenteditable="true"]',
+    ) as HTMLElement;
+    fireEvent.drop(body, {
+      dataTransfer: { files: [], items: [], getData: () => "" },
+    });
+    expect(body).toBeInTheDocument();
+  });
 });

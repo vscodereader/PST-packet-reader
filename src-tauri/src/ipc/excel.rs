@@ -33,6 +33,9 @@ fn status_str(s: &AccountStatus) -> &'static str {
     match s {
         New => "new",
         Active => "active",
+        BadCredentials => "badCredentials",
+        Challenge => "challenge",
+        Blocked => "blocked",
         Error => "error",
     }
 }
@@ -133,6 +136,7 @@ pub fn import_accounts(
             login_id: login.clone(),
             pw,
             status: AccountStatus::New,
+            status_msg: None,
             last: "—".into(),
             tags,
         };
@@ -386,6 +390,7 @@ mod tests {
             login_id: login.into(),
             pw: "pw123".into(),
             status: AccountStatus::Active,
+            status_msg: None,
             last: "—".into(),
             tags: vec!["반도체".into(), "대형주".into()],
         }
@@ -604,6 +609,9 @@ mod tests {
     fn status_str_all_arms() {
         assert_eq!(status_str(&AccountStatus::New), "new");
         assert_eq!(status_str(&AccountStatus::Active), "active");
+        assert_eq!(status_str(&AccountStatus::BadCredentials), "badCredentials");
+        assert_eq!(status_str(&AccountStatus::Challenge), "challenge");
+        assert_eq!(status_str(&AccountStatus::Blocked), "blocked");
         assert_eq!(status_str(&AccountStatus::Error), "error");
     }
 
@@ -748,6 +756,7 @@ mod tests {
             login_id: "existing_user".into(),
             pw: "oldpw".into(),
             status: AccountStatus::Active,
+            status_msg: None,
             last: "—".into(),
             tags: vec![],
         }];

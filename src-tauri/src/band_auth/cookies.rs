@@ -144,7 +144,10 @@ mod tests {
         });
 
         assert!(has_valid_band_session_cookies(&value, now));
-        assert_eq!(cookie_status_from_value(&value, now), BandCookieStatus::Valid);
+        assert_eq!(
+            cookie_status_from_value(&value, now),
+            BandCookieStatus::Valid
+        );
     }
 
     #[test]
@@ -213,7 +216,10 @@ mod tests {
         });
 
         // expires <= 0 또는 누락은 세션 쿠키로 간주 → 만료되지 않음.
-        assert_eq!(cookie_status_from_value(&value, now), BandCookieStatus::Valid);
+        assert_eq!(
+            cookie_status_from_value(&value, now),
+            BandCookieStatus::Valid
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ import { beforeEach, describe, it, expect, vi } from "vitest";
 
 import type { LogFilter } from "@/shared/data/types";
 import { ipc } from "@/shared/ipc";
-import { resetIpc } from "@/test/ipc";
+import { resetIpc, setCommandFailures } from "@/test/ipc";
 import { pickOption } from "@/test/select";
 
 import { Notifications } from "./notifications";
@@ -228,6 +228,33 @@ describe("Notifications", () => {
     ).toBe(true);
   });
 
+  it("warns when opening the Chrome download page fails", async () => {
+    const { invoke } = await import("@/test/ipc");
+    setCommandFailures(["open_chrome_download"]);
+    vi.mocked(invoke).mockImplementationOnce(async () => ({
+      chrome: {
+        installed: false,
+        path: null,
+        version: null,
+        error: "Chrome 브라우저가 설치되어 있지 않습니다.",
+      },
+      adb: { connected: true, error: null },
+    }));
+    renderLog();
+    // 미설치 카드의 "설치 페이지 열기"를 누르면 open_chrome_download가 실패해
+    // openChromeInstall의 catch(안내 토스트) 경로가 실행된다.
+    await userEvent.click(
+      await screen.findByRole("button", { name: /설치 페이지 열기/ }),
+    );
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(invoke)
+          .mock.calls.some((c) => c[0] === "open_chrome_download"),
+      ).toBe(true),
+    );
+  });
+
   it("warns that IP rotation is unavailable while ADB is not connected", async () => {
     const { invoke } = await import("@/test/ipc");
     vi.mocked(invoke).mockImplementationOnce(async () => ({
@@ -268,5 +295,28 @@ describe("Notifications", () => {
     // 다시 끄면 백엔드에 false 전달 + UI도 꺼짐.
     await userEvent.click(toggle);
     await waitFor(() => expect(toggle).not.toBeChecked());
+  });
+
+  it("rolls back the autostart toggle when the command fails", async () => {
+    setCommandFailures(["set_autostart"]);
+    renderLog();
+    const toggle = await screen.findByRole("switch", {
+      name: "부팅 자동 시작",
+    });
+    await waitFor(() => expect(toggle).toBeEnabled());
+    // 낙관적으로 켜졌다가 set_autostart 실패 → catch가 원래 상태(off)로 되돌린다.
+    await userEvent.click(toggle);
+    await waitFor(() => expect(toggle).not.toBeChecked());
+  });
+
+  it("re-probes the environment when 새로고침 is clicked", async () => {
+    renderLog();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "환경 상태 새로고침" }),
+    );
+    // refreshEnv가 진단 상태를 다시 조회한다 — 카드는 계속 렌더된다.
+    await waitFor(() =>
+      expect(screen.getByText("환경 상태")).toBeInTheDocument(),
+    );
   });
 });

@@ -113,6 +113,9 @@ fn forum_endpoint() -> ForumEndpoint {
     }
 }
 
+// 게시 결과를 LogBatch로 묶는 단일 호출 빌더라, 인자가 8개여도 구조체로 묶을 실익이
+// 적다. clippy 한도(7)만 넘으므로 이 함수에 한해 허용한다.
+#[allow(clippy::too_many_arguments)]
 fn build_publish_batch(
     title: &str,
     run_post: bool,

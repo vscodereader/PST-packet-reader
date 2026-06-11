@@ -87,9 +87,52 @@ export const BOARDS: Record<string, string[]> = {
 export const STATUS_ACCOUNT: Record<string, { t: string; c: string }> = {
   new: { t: "사용전", c: "gray" },
   active: { t: "활성", c: "green" },
+  badCredentials: { t: "비번오류", c: "orange" },
+  challenge: { t: "인증필요", c: "yellow" },
+  blocked: { t: "차단", c: "red" },
   error: { t: "에러", c: "red" },
 };
-export const STATUS_ACCOUNT_ORDER = ["new", "active", "error"];
+export const STATUS_ACCOUNT_ORDER = [
+  "new",
+  "active",
+  "badCredentials",
+  "challenge",
+  "blocked",
+  "error",
+];
+
+// 사용자가 배지를 클릭해 순환시킬 수 있는 "사람이 정하는" 상태만 둔다. 비번오류/인증필요/
+// 에러는 로그인 워커가 자동으로 설정하는 표시 전용 상태라 수동 순환에서 제외한다.
+export const STATUS_ACCOUNT_CYCLE = ["new", "active", "blocked"];
+
+// 상태별 사용자 조치 안내(정적). 백엔드 `auth::outcome::guide`와 의미를 맞춘다. 배지
+// tooltip에 보여, 사용자가 다음에 무엇을 해야 할지 알 수 있게 한다.
+export const STATUS_GUIDE: Record<string, string> = {
+  active: "정상적으로 로그인되었습니다.",
+  badCredentials:
+    "아이디 또는 비밀번호가 올바르지 않습니다. 계정 정보를 확인하세요.",
+  challenge:
+    "추가 인증이 필요합니다. 열린 창에서 캡차/2차 인증을 완료한 뒤 다시 실행하세요.",
+  blocked:
+    "계정 접근이 차단되었습니다. 잠시 후 다시 시도하거나 계정 상태를 확인하세요.",
+  error: "로그인 중 오류가 발생했습니다. 네트워크/환경을 확인하세요.",
+  new: "아직 로그인하지 않은 계정입니다.",
+};
+
+// 대시보드 "오류" 집계 대상. 백엔드 `stats.rs::is_problem_status`와 일치시킨다 — 사용자
+// 조치가 필요한 실패 계열(비번오류·차단·기타 오류). challenge는 진행 중 단계라 제외.
+export const PROBLEM_STATUSES = ["error", "badCredentials", "blocked"];
+export function isProblemStatus(status: string): boolean {
+  return PROBLEM_STATUSES.includes(status);
+}
+
+// 게시 대상으로 쓸 수 있는 계정 상태 — 정상(active)과 미로그인(new, 게시 시 로그인 시도)만.
+// 로그인 실패 계열(error/badCredentials/challenge/blocked)은 게시 위치·잡에서 완전히 제외해,
+// 로그인되지 않은 계정으로 글이 올라가는 것을 막는다.
+export const POSTABLE_STATUSES = ["active", "new"];
+export function isPostable(status: string): boolean {
+  return POSTABLE_STATUSES.includes(status);
+}
 
 export const STATUS_LABEL: Record<string, { t: string; c: string }> = {
   draft: { t: "임시저장", c: "gray" },

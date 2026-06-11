@@ -91,11 +91,7 @@ impl BandHttpClient {
                 status.as_u16(),
                 snippet
             );
-            BandPostError::NoSecretKey(format!(
-                "status={} 응답앞부분={}",
-                status.as_u16(),
-                snippet
-            ))
+            BandPostError::NoSecretKey(format!("status={} 응답앞부분={}", status.as_u16(), snippet))
         })
     }
 
@@ -390,9 +386,11 @@ mod tests {
         let api = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path_regex(r"^/v2\.3\.0/create_comment"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"{"result_code":1,"result_data":{"comment":{"comment_id":1}}}"#,
-            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(
+                    r#"{"result_code":1,"result_data":{"comment":{"comment_id":1}}}"#,
+                ),
+            )
             .mount(&api)
             .await;
 

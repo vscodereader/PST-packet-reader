@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
-import { resetIpc } from "@/test/ipc";
+import { resetIpc, setCommandFailures } from "@/test/ipc";
 
 import { Queue } from "./queue";
 
@@ -114,6 +114,38 @@ describe("Queue", () => {
     expect(
       q3El.compareDocumentPosition(q2El) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+
+  it("reverts to the backend order and warns when persisting a reorder fails", async () => {
+    setCommandFailures(["reorder_queue_now"]);
+    await renderQueue();
+    const q2 = "반도체 흐름 코멘트 10종";
+    const q3 = "오늘의 특징주 정리 — 장 마감 요약";
+    // 낙관적으로 q2를 내렸다가, 영속화 실패(reorder_queue_now reject) → catch가 백엔드
+    // 순서를 다시 불러와 원래 순서(q2가 q3보다 앞)로 되돌린다.
+    await userEvent.click(screen.getAllByTitle("우선순위 내리기")[0]!);
+    await waitFor(() => {
+      const q2El = screen.getByText(q2);
+      const q3El = screen.getByText(q3);
+      expect(
+        q2El.compareDocumentPosition(q3El) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    });
+  });
+
+  it("keeps the 놓침 badge when a reschedule fails", async () => {
+    setCommandFailures(["reschedule_queue_scheduled"]);
+    const { invoke } = await import("@tauri-apps/api/core");
+    await renderQueue();
+    await userEvent.click(screen.getByRole("button", { name: "재예약" }));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "reschedule_queue_scheduled",
+        expect.anything(),
+      ),
+    );
+    // 실패 시 setSched를 부르지 않으므로 missed(놓침)가 그대로 남는다.
+    expect(screen.getByText("놓침")).toBeInTheDocument();
   });
 
   it("persists the new order so it survives a reload", async () => {

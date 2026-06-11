@@ -97,14 +97,12 @@ describe("Accounts", () => {
   it("cycles account status when the badge is clicked", async () => {
     await renderAccounts();
     const row = screen.getAllByRole("row")[1]!;
-    expect(within(row).getByTitle("클릭하여 상태 변경")).toHaveTextContent(
-      "활성",
-    );
-    await userEvent.click(within(row).getByTitle("클릭하여 상태 변경"));
+    // 배지는 상태 라벨 텍스트로 찾는다(title은 이제 상태별 안내 문구로 동적).
+    expect(within(row).getByText("활성")).toBeInTheDocument();
+    await userEvent.click(within(row).getByText("활성"));
+    // 수동 순환은 사용자 의미 상태(new→active→blocked)만 돈다 — active 다음은 차단.
     await waitFor(() =>
-      expect(within(row).getByTitle("클릭하여 상태 변경")).toHaveTextContent(
-        "에러",
-      ),
+      expect(within(row).getByText("차단")).toBeInTheDocument(),
     );
   });
 
@@ -422,18 +420,23 @@ describe("Accounts", () => {
       expect.anything(),
     );
 
-    // 2초 상태 폴링이 band 큐 결과로 계정을 active로 반영한다.
+    // 2초 상태 폴링이 band 큐 결과를 받으면, 권위 계정 목록을 재조회(list_accounts)해
+    // 배지·상태를 반영한다(feat/155: 로컬 update_account 대신 재조회로 일원화).
     await waitFor(
       () => {
         const call = vi
           .mocked(ipcBackend)
-          .mock.calls.find((c) => c[0] === "update_account");
+          .mock.calls.find((c) => c[0] === "list_accounts");
         expect(call).toBeTruthy();
-        expect(
-          (call![1] as { account: { status: string } }).account.status,
-        ).toBe("active");
       },
       { timeout: 4000 },
+    );
+    // 밴드 로그인 성공 시 녹색 토스트가 뜬다.
+    expect(notifShow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        color: "green",
+        message: expect.stringContaining("로그인 성공"),
+      }),
     );
   });
 
@@ -457,17 +460,16 @@ describe("Accounts", () => {
       }),
     );
 
-    // the 2s status poll fires and reconciles the result back to the account
-    // as active (not merely "update_account was called").
+    // the 2s status poll fires; on completion the row is reconciled by re-fetching
+    // the authoritative account list — the backend worker writes the fine-grained
+    // status (active/blocked/challenge/badCredentials) to the store, so the frontend
+    // just re-reads it instead of computing a binary active/error locally.
     await waitFor(
       () => {
         const call = vi
           .mocked(ipcBackend)
-          .mock.calls.find((c) => c[0] === "update_account");
+          .mock.calls.find((c) => c[0] === "list_accounts");
         expect(call).toBeTruthy();
-        expect(
-          (call![1] as { account: { status: string } }).account.status,
-        ).toBe("active");
       },
       { timeout: 4000 },
     );
@@ -480,7 +482,7 @@ describe("Accounts", () => {
     );
   });
 
-  it("marks the account as error and red-toasts on a failed login", async () => {
+  it("red-toasts and re-syncs the account list on a failed login", async () => {
     await renderAccounts();
     // Simulate the auth queue reporting a failure for this account.
     setLoginOutcomes({
@@ -506,14 +508,12 @@ describe("Accounts", () => {
         ),
       { timeout: 4000 },
     );
-    // and the row is persisted as error.
+    // and the row is reconciled by re-fetching the authoritative account list
+    // (the backend worker persisted the fine-grained status to the store).
     const call = vi
       .mocked(ipcBackend)
-      .mock.calls.find((c) => c[0] === "update_account");
+      .mock.calls.find((c) => c[0] === "list_accounts");
     expect(call).toBeTruthy();
-    expect((call![1] as { account: { status: string } }).account.status).toBe(
-      "error",
-    );
   });
 
   it("stops the spinner and red-toasts when the status poll itself errors", async () => {
