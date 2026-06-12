@@ -86,7 +86,7 @@ describe("StockCrawlModal", () => {
   it("기본 진입 시 거래대금 카테고리를 KRX로 로드한다", async () => {
     renderModal();
     await waitFor(() =>
-      expect(listMock).toHaveBeenCalledWith("tradingValue", "krx", 1),
+      expect(listMock).toHaveBeenCalledWith("tradingValue", "krx", "all", 1),
     );
     expect(await screen.findByText("SK하이닉스")).toBeInTheDocument();
   });
@@ -96,20 +96,48 @@ describe("StockCrawlModal", () => {
     await waitFor(() => expect(listMock).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "상승" }));
     await waitFor(() =>
-      expect(listMock).toHaveBeenCalledWith("rising", "krx", 1),
+      expect(listMock).toHaveBeenCalledWith("rising", "krx", "all", 1),
     );
   });
 
   it("거래소 버튼 → 모달에서 NXT 선택 시 nxt로 재호출한다", async () => {
     renderModal();
     await waitFor(() =>
-      expect(listMock).toHaveBeenCalledWith("tradingValue", "krx", 1),
+      expect(listMock).toHaveBeenCalledWith("tradingValue", "krx", "all", 1),
     );
     fireEvent.click(screen.getByRole("button", { name: /KRX/ }));
     fireEvent.click(await screen.findByRole("button", { name: "NXT" }));
     await waitFor(() =>
-      expect(listMock).toHaveBeenCalledWith("tradingValue", "nxt", 1),
+      expect(listMock).toHaveBeenCalledWith("tradingValue", "nxt", "all", 1),
     );
+  });
+
+  it("코스피 토글을 누르면 market=kospi로 재호출한다", async () => {
+    renderModal();
+    await waitFor(() =>
+      expect(listMock).toHaveBeenCalledWith("tradingValue", "krx", "all", 1),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "코스피" }));
+    await waitFor(() =>
+      expect(listMock).toHaveBeenCalledWith("tradingValue", "krx", "kospi", 1),
+    );
+  });
+
+  it("토론 탭에서는 코스피/코스닥이 비활성이고 market=all로 호출된다", async () => {
+    renderModal();
+    await waitFor(() => expect(listMock).toHaveBeenCalled());
+    // 먼저 코스피를 골라둔다.
+    fireEvent.click(screen.getByRole("button", { name: "코스피" }));
+    await waitFor(() =>
+      expect(listMock).toHaveBeenCalledWith("tradingValue", "krx", "kospi", 1),
+    );
+    // 토론 탭으로 전환 → 시장 분리 미지원이라 전체로 강제.
+    fireEvent.click(screen.getByRole("button", { name: "토론" }));
+    await waitFor(() =>
+      expect(listMock).toHaveBeenCalledWith("discussion", "krx", "all", 1),
+    );
+    expect(screen.getByRole("button", { name: "코스피" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "코스닥" })).toBeDisabled();
   });
 
   it("검색어 입력 시 search로 전환하고 결과를 렌더한다", async () => {
@@ -154,7 +182,7 @@ describe("StockCrawlModal", () => {
     expect(await screen.findByText("SK하이닉스")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "더보기" }));
     await waitFor(() =>
-      expect(listMock).toHaveBeenCalledWith("tradingValue", "krx", 2),
+      expect(listMock).toHaveBeenCalledWith("tradingValue", "krx", "all", 2),
     );
     expect(await screen.findByText("삼성전자")).toBeInTheDocument();
     expect(screen.getByText("SK하이닉스")).toBeInTheDocument();

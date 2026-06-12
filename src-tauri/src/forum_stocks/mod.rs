@@ -45,6 +45,28 @@ impl StockExchange {
     }
 }
 
+/// 시장 구분(전체/코스피/코스닥). 프론트는 "all"/"kospi"/"kosdaq"로 전달한다.
+/// 토론(Discussion)은 네이버가 시장 분리를 제공하지 않으므로 이 값을 무시한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
+#[serde(rename_all = "lowercase")]
+pub enum StockMarket {
+    All,
+    Kospi,
+    Kosdaq,
+}
+
+impl StockMarket {
+    /// 네이버 `category` 파라미터 값(`all` / `KOSPI` / `KOSDAQ`).
+    fn as_query(self) -> &'static str {
+        match self {
+            StockMarket::All => "all",
+            StockMarket::Kospi => "KOSPI",
+            StockMarket::Kosdaq => "KOSDAQ",
+        }
+    }
+}
+
 /// 종목 한 줄(선택 가능한 종목). 프론트가 그대로 렌더한다.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../src/shared/bindings/")]
@@ -91,12 +113,16 @@ async fn fetch_list_with(
     client: &ForumStockClient,
     category: ForumStockCategory,
     exchange: StockExchange,
+    market: StockMarket,
     page: u32,
 ) -> Result<ForumStockPage, String> {
     match category {
+        // 토론은 시장 분리가 없어 market을 무시한다(네이버 API 한계).
         ForumStockCategory::Discussion => client.fetch_discussion_page(exchange, page).await,
         _ => {
-            let mut result = client.fetch_category_page(category, exchange, page).await?;
+            let mut result = client
+                .fetch_category_page(category, exchange, market, page)
+                .await?;
             let hot = client.fetch_hot_codes().await;
             merge_hot(&mut result.stocks, &hot);
             Ok(result)
@@ -119,9 +145,10 @@ async fn fetch_search_with(
 pub async fn list_forum_stocks(
     category: ForumStockCategory,
     exchange: StockExchange,
+    market: StockMarket,
     page: u32,
 ) -> Result<ForumStockPage, String> {
-    fetch_list_with(&ForumStockClient::new(), category, exchange, page).await
+    fetch_list_with(&ForumStockClient::new(), category, exchange, market, page).await
 }
 
 /// IPC: 전체 검색(국내).
@@ -145,6 +172,19 @@ mod tests {
     fn exchange_query_values() {
         assert_eq!(StockExchange::Krx.as_query(), "KRX");
         assert_eq!(StockExchange::Nxt.as_query(), "NXT");
+    }
+
+    #[test]
+    fn market_query_values() {
+        assert_eq!(StockMarket::All.as_query(), "all");
+        assert_eq!(StockMarket::Kospi.as_query(), "KOSPI");
+        assert_eq!(StockMarket::Kosdaq.as_query(), "KOSDAQ");
+    }
+
+    #[test]
+    fn market_deserializes_from_lowercase() {
+        let m: StockMarket = serde_json::from_str("\"kospi\"").unwrap();
+        assert_eq!(m, StockMarket::Kospi);
     }
 
     #[test]
@@ -230,6 +270,7 @@ mod tests {
             &client,
             ForumStockCategory::TradingValue,
             StockExchange::Krx,
+            StockMarket::All,
             1,
         )
         .await
@@ -264,6 +305,7 @@ mod tests {
             &client,
             ForumStockCategory::Discussion,
             StockExchange::Krx,
+            StockMarket::All,
             1,
         )
         .await

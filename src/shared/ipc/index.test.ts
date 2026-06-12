@@ -117,17 +117,18 @@ describe("ipc facade", () => {
     );
   });
 
-  it("forumStocks.list invokes list_forum_stocks with category/exchange/page", async () => {
+  it("forumStocks.list invokes list_forum_stocks with category/exchange/market/page", async () => {
     mockInvoke.mockResolvedValueOnce({
       stocks: [],
       totalCount: 0,
       page: 1,
       hasNext: false,
     });
-    await ipc.forumStocks.list("tradingValue", "krx", 1);
+    await ipc.forumStocks.list("tradingValue", "krx", "kospi", 1);
     expect(mockInvoke).toHaveBeenCalledWith("list_forum_stocks", {
       category: "tradingValue",
       exchange: "krx",
+      market: "kospi",
       page: 1,
     });
   });
