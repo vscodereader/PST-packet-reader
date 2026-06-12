@@ -137,7 +137,9 @@ export function Queue({ go }: { go: GoFn }) {
       void ipc.queue.listNow().then((v) => {
         if (alive) setNow(v);
       });
-    }, 1500);
+      // 워커가 글/댓글 1건마다 진행률을 올리므로(0/N→1/N→…), 빠른 작업도 중간 진행이 보이도록
+      // 비교적 촘촘히(750ms) 폴링한다. now 큐 조회는 로컬 JSON 스토어 읽기라 비용이 작다.
+    }, 750);
     return () => {
       alive = false;
       window.clearInterval(timer);

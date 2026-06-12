@@ -471,6 +471,16 @@ impl CookieHeaderCache {
 }
 
 pub async fn run_post_jobs(jobs: &[PostJob]) -> Vec<JobReport> {
+    run_post_jobs_with_progress(jobs, |_| {}).await
+}
+
+/// [`run_post_jobs`]와 같지만 글 1건을 끝낼 때마다 `on_each(누적_완료수)`를 호출해 진행률을
+/// 보고한다 — 게시 큐 워커가 진행률을 0/N→1/N→…로 1건 단위로 갱신하는 데 쓴다(배치 완료만
+/// 반영해 0/N에서 곧장 사라지지 않게).
+pub async fn run_post_jobs_with_progress<F: FnMut(usize)>(
+    jobs: &[PostJob],
+    mut on_each: F,
+) -> Vec<JobReport> {
     let orchestrator = CafeOrchestrator::new();
     let mut cookies = CookieHeaderCache::default();
     let total = jobs.len();
@@ -516,6 +526,7 @@ pub async fn run_post_jobs(jobs: &[PostJob]) -> Vec<JobReport> {
             ),
         }
         reports.push(report);
+        on_each(reports.len());
     }
     reports
 }
@@ -530,7 +541,16 @@ pub async fn run_post_jobs(jobs: &[PostJob]) -> Vec<JobReport> {
 const COMMENT_JOB_DELAY: Duration = Duration::from_millis(2000);
 
 pub async fn run_comment_jobs(jobs: &[CommentJob]) -> Vec<CommentJobReport> {
-    run_comment_jobs_with_delay(jobs, COMMENT_JOB_DELAY).await
+    run_comment_jobs_with_progress(jobs, |_| {}).await
+}
+
+/// [`run_comment_jobs`]와 같지만 댓글 1건을 끝낼 때마다 `on_each(누적_완료수)`를 호출해
+/// 진행률을 보고한다(글 러너의 progress 버전과 대칭). 작업 간 안티스팸 간격은 그대로 지킨다.
+pub async fn run_comment_jobs_with_progress<F: FnMut(usize)>(
+    jobs: &[CommentJob],
+    on_each: F,
+) -> Vec<CommentJobReport> {
+    run_comment_jobs_with_delay(jobs, COMMENT_JOB_DELAY, on_each).await
 }
 
 /// [`run_comment_jobs`]의 본체. 작업 간 간격을 인자로 받아 테스트에서 0으로 둘 수 있다.
@@ -538,9 +558,10 @@ pub async fn run_comment_jobs(jobs: &[CommentJob]) -> Vec<CommentJobReport> {
 /// 각 작업의 시도/성공/실패를 `tracing`으로 남겨, 두 번째 이후 댓글이 누락될 때
 /// 네이버가 돌려준 오류 코드/사유를 로그에서 확인할 수 있게 한다. 쿠키 값은 절대
 /// 로그에 포함하지 않는다(본문 `content`도 남기지 않는다).
-async fn run_comment_jobs_with_delay(
+async fn run_comment_jobs_with_delay<F: FnMut(usize)>(
     jobs: &[CommentJob],
     delay: Duration,
+    mut on_each: F,
 ) -> Vec<CommentJobReport> {
     let client = CafeCommentClient::new();
     let mut cookies = CookieHeaderCache::default();
@@ -576,6 +597,7 @@ async fn run_comment_jobs_with_delay(
             ),
         }
         reports.push(report);
+        on_each(reports.len());
     }
     reports
 }
@@ -942,7 +964,7 @@ mod tests {
         ];
 
         // 지연 0으로 둬 테스트가 작업 간 간격을 기다리지 않게 한다(여러 건이어도 즉시 보고).
-        let reports = run_comment_jobs_with_delay(&jobs, Duration::ZERO).await;
+        let reports = run_comment_jobs_with_delay(&jobs, Duration::ZERO, |_| {}).await;
 
         assert_eq!(reports.len(), 2, "작업 수만큼 보고가 나와야 함");
         for report in &reports {

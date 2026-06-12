@@ -332,20 +332,6 @@ pub(crate) fn comment_outcome_from_report(report: &CommentJobReport) -> CommentP
     }
 }
 
-/// Result of one "지금 바로 게시"(immediate publish) run for naver cafe — the slim
-/// post and comment outcomes the publish modal renders inline. The alert-log
-/// recording is already done backend-side (see `run_cafe_publish_now` in
-/// `queue_runner`) from the rich reports, so this carries only what the UI needs.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../../src/shared/bindings/")]
-#[serde(rename_all = "camelCase")]
-pub struct CafePublishNowResult {
-    /// Article-post results (post/both modes). Empty for comment-only runs.
-    pub posts: Vec<PublishOutcome>,
-    /// Comment results (comment/both modes). Empty for post-only runs.
-    pub comments: Vec<CommentPublishOutcome>,
-}
-
 /// One comment destination — the account plus the numeric cafe/article it will
 /// comment on. The comment *text* is not chosen here: the backend deals it from
 /// the pool (see [`run_comment_jobs`]). Comes either from a just-posted article
@@ -684,34 +670,5 @@ mod tests {
         let cafe = sample();
         let back: Cafe = serde_json::from_str(&serde_json::to_string(&cafe).unwrap()).unwrap();
         assert_eq!(cafe, back);
-    }
-
-    #[test]
-    fn cafe_publish_now_result_serializes_with_camel_case_keys() {
-        // 즉시 게시 결과는 글·댓글 슬림 outcome을 그대로 담아 camelCase로 직렬화된다.
-        let result = CafePublishNowResult {
-            posts: vec![outcome_from_report(&success_report())],
-            comments: vec![comment_outcome_from_report(&comment_success_report())],
-        };
-        let value = serde_json::to_value(&result).unwrap();
-        assert_eq!(
-            value,
-            json!({
-                "posts": [{
-                    "accountId": "acc1",
-                    "cafe": "cafe.naver.com/x",
-                    "menuId": 1,
-                    "success": true,
-                    "articleId": 55
-                }],
-                "comments": [{
-                    "accountId": "acc1",
-                    "cafeId": 31732304,
-                    "articleId": 9,
-                    "success": true,
-                    "commentId": 62628988
-                }]
-            })
-        );
     }
 }
