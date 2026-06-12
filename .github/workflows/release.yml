@@ -1,0 +1,76 @@
+name: release
+
+# Windows 인스톨러를 버전에 맞춰 GitHub Releases에 업로드한다.
+# 수동 실행 전용(workflow_dispatch) — 릴리스 시점을 명시적으로 통제한다.
+# 태그/릴리스 버전은 package.json에서 읽되, tauri.conf.json과 일치하는지
+# 빌드 전에 검증해 태그와 인스톨러 파일명이 어긋나지 않도록 보장한다.
+# CI 검증용 다중 OS 빌드는 tauri-build.yml이 따로 담당한다.
+on:
+  workflow_dispatch:
+
+# 같은 버전을 동시에 두 번 게시하지 않도록 직렬화한다.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # 릴리스 생성·에셋 업로드에 필요
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+    steps:
+      # 임의 브랜치에서 dispatch하면 그 커밋에 v{version} 태그가 찍혀버린다.
+      # 릴리스는 기본 브랜치 커밋에서만 게시한다.
+      - name: Guard against non-default branch
+        if: github.ref != 'refs/heads/master' && github.ref != 'refs/heads/main'
+        shell: bash
+        run: |
+          echo "::error::release must be dispatched from master/main (got ${{ github.ref }})"
+          exit 1
+
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # 태그는 package.json에서 읽지만 인스톨러 버전은 tauri.conf.json이 정한다.
+      # 둘이 어긋나면 태그와 에셋 파일명이 불일치하므로 빌드 전에 막는다.
+      - name: Verify version sources are in sync
+        shell: bash
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+          CONF=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          if [ "$PKG" != "$CONF" ]; then
+            echo "::error::version mismatch: package.json=$PKG tauri.conf.json=$CONF"
+            exit 1
+          fi
+          echo "version sources agree: $PKG"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Read version from package.json
+        id: ver
+        shell: bash
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v${{ steps.ver.outputs.version }}
+          releaseName: pstmacro v${{ steps.ver.outputs.version }}
+          releaseBody: 에셋의 Windows 인스톨러(.exe 또는 .msi)를 내려받아 설치하세요.
+          # draft로 게시한 뒤 에셋을 사람이 확인하고 수동으로 publish한다.
+          releaseDraft: true
+          prerelease: false
