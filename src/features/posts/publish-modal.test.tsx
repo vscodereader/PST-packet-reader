@@ -1057,4 +1057,74 @@ describe("PublishModal", () => {
       ipcBackend.mockImplementation(real);
     }
   });
+
+  it("밴드 즉시게시에서 글 게시가 실패(reject)하면 실패로 표기한다", async () => {
+    // 회귀: 가입/글 게시 단계가 통째로 실패(reject)하면 초록으로 묻지 않고
+    // 에러 사유 + 재시도로 드러낸다(부분실패와 별개로 publish 자체 거부 경로).
+    const real = ipcBackend.getMockImplementation()!;
+    ipcBackend.mockImplementation(
+      (cmd: string, args?: Record<string, unknown>) =>
+        cmd === "band_publish"
+          ? Promise.reject(new Error("밴드 가입에 실패했습니다"))
+          : real(cmd, args),
+    );
+    try {
+      renderPublish();
+      await userEvent.click(await screen.findByText("value_invest"));
+
+      const linkInput = screen.getByLabelText("밴드 링크");
+      const saveBtn = screen.getByRole("button", { name: "저장" });
+      await userEvent.type(linkInput, "https://band.us/band/103043410");
+      await waitFor(() => expect(saveBtn).toBeEnabled());
+      await userEvent.click(saveBtn);
+      await waitFor(() => expect(linkInput).toHaveValue(""));
+      await screen.findByPlaceholderText("게시할 밴드 선택");
+      await pickOption(0, "데일밴드");
+      await screen.findByLabelText("데일밴드 제거");
+
+      const publishBtn = await screen.findByRole("button", {
+        name: /^게시 \(\d+\)/,
+      });
+      await waitFor(() => expect(publishBtn).toBeEnabled());
+      await userEvent.click(publishBtn);
+
+      // reject → ok:false라 에러 사유가 그대로 뜨고 행은 재시도로 남는다.
+      const msgEl = await screen.findByText(/밴드 가입에 실패했습니다/);
+      const row = msgEl.parentElement!.parentElement!;
+      expect(
+        within(row).getByRole("button", { name: "재시도" }),
+      ).toBeInTheDocument();
+    } finally {
+      ipcBackend.mockImplementation(real);
+    }
+  });
+
+  it("밴드 링크 저장 시 밴드명 조회가 실패하면 링크를 이름으로 폴백한다", async () => {
+    // 회귀: band_resolve_name 실패 시 빈 이름이 아니라 원문 링크를 표시명으로 쓴다.
+    const real = ipcBackend.getMockImplementation()!;
+    ipcBackend.mockImplementation(
+      (cmd: string, args?: Record<string, unknown>) =>
+        cmd === "band_resolve_name"
+          ? Promise.reject(new Error("조회 실패"))
+          : real(cmd, args),
+    );
+    try {
+      renderPublish();
+      await userEvent.click(await screen.findByText("value_invest"));
+
+      const linkInput = screen.getByLabelText("밴드 링크");
+      const saveBtn = screen.getByRole("button", { name: "저장" });
+      await userEvent.type(linkInput, "https://band.us/band/103043410");
+      await waitFor(() => expect(saveBtn).toBeEnabled());
+      await userEvent.click(saveBtn);
+      await waitFor(() => expect(linkInput).toHaveValue(""));
+      await screen.findByPlaceholderText("게시할 밴드 선택");
+
+      // 조회 실패 → 링크가 표시명으로 폴백된다(옵션·칩 라벨이 링크).
+      await pickOption(0, "https://band.us/band/103043410");
+      await screen.findByLabelText("https://band.us/band/103043410 제거");
+    } finally {
+      ipcBackend.mockImplementation(real);
+    }
+  });
 });
