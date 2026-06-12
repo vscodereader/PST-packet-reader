@@ -5,7 +5,8 @@
 //!
 //! 범위: 워커 골격 + 카페 글(`run_post_jobs`) + 카페 댓글(both=방금 쓴 글에 self /
 //! latest·popular=글목록 조회 / url) + 종목토론방 게시(`run_forum_publish`, 계정별
-//! Chrome) + 완료 로그(`LogBatch`)/activity 기록(아이템별 결과를 알림에 남긴다).
+//! Chrome) + 밴드 게시(`band_publish`, 순수 HTTP) + 완료 로그(`LogBatch`)/activity
+//! 기록(아이템별 결과를 알림에 남긴다).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -17,12 +18,16 @@ use super::activity::{record, ActivityItem, ActivityType};
 use super::log_batches::{BatchItem, BatchItemStatus, LogBatch, MAX_LOG_BATCHES};
 use super::posts::{CommentTarget, ModeValue};
 use super::queue::{apply_cancel_now, PublishPlan, QueueNowItem, QueueState};
+use crate::band_post::error::BandPostError;
+use crate::band_post::{band_publish, BandPublishOutcome};
 use crate::discussion_batch::{run_forum_publish, ForumPublishRequest, ForumPublishResult};
 use crate::naver_automation::types::DiscussionStock;
 use crate::naver_cafe::article_list::models::SortBy;
 use crate::naver_cafe::distribute::{distribute_comments, mulberry32, seed_from_clock};
 use crate::naver_cafe::orchestrator::{CommentJob, CommentJobReport, JobReport, PostJob};
-use crate::naver_cafe::{fetch_article_list_for_account, run_comment_jobs, run_post_jobs};
+use crate::naver_cafe::{
+    fetch_article_list_for_account, run_comment_jobs, run_post_jobs, NaverCafeCommonErrorData,
+};
 use crate::store::JsonStore;
 use crate::util::now_ms;
 
@@ -84,6 +89,16 @@ struct CommentCollect {
 struct ForumOutcome {
     account_id: String,
     result: ForumPublishResult,
+}
+
+/// 밴드 게시 결과 1건 — 어느 계정·밴드(표시 이름)로 돌렸는지와 `band_publish` 결과를
+/// 묶는다. 성공/실패 모두 완료 로그(`PlatformId::Band`)에 남기려고 보존한다. 게시 응답에
+/// 실제 밴드명이 와도(`outcome.band_name`) 로그 라벨은 예약 시점에 동결된 `band_name`을
+/// 우선 쓴다(forum이 동결 이름을 쓰는 것과 일관).
+struct BandOutcome {
+    account_id: String,
+    band_name: String,
+    result: Result<BandPublishOutcome, BandPostError>,
 }
 
 /// 위에서부터 첫 `Waiting` 아이템을 고른다(`Running`은 건너뛴다).
@@ -237,8 +252,9 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) {
         build_comment_jobs(collected.targets, &plan.comments)
     };
 
-    // 진행률 총계 확정(실제 카페 글 + 카페 댓글 작업 + 종목토론방 종목 수).
-    let total = (post_reports.len() + comment_jobs.len() + plan.forum.len()) as u32;
+    // 진행률 총계 확정(실제 카페 글 + 카페 댓글 작업 + 종목토론방 종목 수 + 밴드 수).
+    let total =
+        (post_reports.len() + comment_jobs.len() + plan.forum.len() + plan.band.len()) as u32;
     let mut done = post_reports.len() as u32;
     update_progress(app, id, done, total);
 
@@ -263,13 +279,24 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) {
         Vec::new()
     };
 
-    // 5. 완료 로그(LogBatch)/activity: 실제 실행한 카페 글·댓글·토론방 결과 + 댓글 대상
+    // 5. 밴드 게시(band.us, 순수 HTTP). 진행 중 단계는 끝까지 두되 진입 전 협조적 취소를 확인한다.
+    let band_outcomes = if !plan.band.is_empty() && item_present(app, id) {
+        let outcomes = run_band_targets(app, plan, id).await;
+        done += outcomes.len() as u32;
+        update_progress(app, id, done, total);
+        outcomes
+    } else {
+        Vec::new()
+    };
+
+    // 6. 완료 로그(LogBatch)/activity: 실제 실행한 카페 글·댓글·토론방·밴드 결과 + 댓글 대상
     // 조회 실패를 알림에 남긴다. 실행한 작업이 하나도 없으면(빈 plan) 빈 배치는 만들지 않는다.
     let batch = build_log_batch(
         plan,
         &post_reports,
         &comment_reports,
         &forum_outcomes,
+        &band_outcomes,
         &comment_fetch_failures,
         now_ms(),
         LB_SEQ.fetch_add(1, Ordering::Relaxed),
@@ -456,6 +483,47 @@ async fn run_forum_targets<R: Runtime>(
     outcomes
 }
 
+/// plan의 밴드 대상을 순차로 게시한다. 밴드는 순수 async HTTP라 forum처럼 Chrome/
+/// spawn_blocking이 필요 없어 루프에서 직접 await한다. 댓글은 즉시게시(runNow) 경로와
+/// 동일하게 comment/both 모드일 때만 댓글 풀 전체를 게시한 글에 모두 단다(밴드는 항상 글을
+/// 새로 쓰고 그 글에 self-comment만 가능). 각 대상 게시 전 협조적 취소(item_present)를
+/// 확인해, 취소된 아이템의 남은 밴드는 게시하지 않는다.
+async fn run_band_targets<R: Runtime>(
+    app: &AppHandle<R>,
+    plan: &PublishPlan,
+    id: &str,
+) -> Vec<BandOutcome> {
+    // comment/both면 댓글 풀 전체를 넘긴다. 즉시게시(runNow)와 동일하게 band_publish가
+    // 비어있지 않은 댓글을 모두 같은 글에 순서대로 단다(공백은 내부에서 무시). post 전용
+    // 모드면 빈 슬라이스라 댓글을 달지 않는다(같은 입력, 다른 결과 방지).
+    let comments: &[String] = if runs_comment(plan) {
+        &plan.comments
+    } else {
+        &[]
+    };
+    let mut outcomes = Vec::new();
+    for t in &plan.band {
+        // 밴드 게시도 비가역적이라, 시작 전마다 취소를 확인해 멈춘다(forum과 동일).
+        if !item_present(app, id) {
+            break;
+        }
+        let result = band_publish(
+            &t.account_id,
+            &t.link,
+            &plan.title,
+            &plan.body_text,
+            comments,
+        )
+        .await;
+        outcomes.push(BandOutcome {
+            account_id: t.account_id.clone(),
+            band_name: t.name.clone(),
+            result,
+        });
+    }
+    outcomes
+}
+
 /// 댓글 대상에 댓글 풀(comments)을 분배해 작업으로 만든다. 풀이 비면 빈 목록을 내
 /// 댓글 작업이 0건이 되며, 호출부의 진행률 total이 실제 작업 수로 잡혀 영구 미완을 피한다.
 fn build_comment_jobs(targets: Vec<CommentTargetEntry>, comments: &[String]) -> Vec<CommentJob> {
@@ -505,13 +573,142 @@ fn status_of(ok: bool) -> BatchItemStatus {
     }
 }
 
-/// 카페 글·댓글·종목토론방 실행 결과를 알림 배치(`LogBatch`) 한 건으로 묶는다.
+/// 매핑되지 않은 알 수 없는 실패의 메인 라인 폴백(#169). 원문(영어/개발자 메시지)을
+/// 사용자에게 쏟지 않고, 일반 안내 + "자세히 보기"(trace)로 유도한다.
+const GENERIC_REASON: &str = "알 수 없는 오류가 발생했습니다. 자세히 보기를 확인해 주세요";
+
+/// HTTP 상태코드를 사용자용 한국어 사유로 매핑한다(#169).
+fn status_reason(status: u16) -> &'static str {
+    match status {
+        400 => "요청 형식이 올바르지 않습니다",
+        401 | 403 => "권한이 없거나 로그인이 만료되었습니다",
+        404 => "해당 게시판을 찾을 수 없습니다",
+        429 => "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요",
+        500..=599 => "네이버 서버에 문제가 발생했습니다",
+        _ => "네이버에서 요청을 거부했습니다",
+    }
+}
+
+/// 네이버 API errorCode를 사용자용 한국어 사유로 매핑한다(#169). 이 매핑은 네이버
+/// 원문보다 **우선**한다 — 원문이 영어("Page Not Found")거나, 한국어여도 모호한
+/// ("알 수 없는 오류" = 0001) 경우를 행동 가능한 문구로 덮어쓴다. 매핑에 없는 코드는
+/// 네이버 한국어 원문을 그대로 살린다(예: 4003 "삭제되었거나 존재하지 않는 게시글입니다").
+fn naver_code_reason(api_code: &str) -> Option<&'static str> {
+    match api_code {
+        "10404" => Some("해당 게시판 또는 게시물이 존재하지 않습니다"),
+        "9999" => Some("네이버에서 요청을 거부했습니다"),
+        // 0001: 네이버가 "알 수 없는 오류"로만 답하는 일반 코드 — 잘못된 댓글 대상에서 관측됨.
+        "0001" => Some("댓글 대상을 찾을 수 없거나 잘못된 요청입니다"),
+        _ => None,
+    }
+}
+
+/// 내부 오류 코드(HTTP 단계 이전 실패)를 사용자용 한국어 사유로 매핑한다(#169).
+/// 개발자용 원본 message("contentJson…")가 그대로 노출되지 않게 코드로 치환한다.
+fn internal_code_reason(code: &str) -> Option<&'static str> {
+    match code {
+        "SESSION_INVALID" => Some("로그인이 만료되었습니다. 다시 로그인해 주세요"),
+        "NO_COOKIES" => Some("로그인 정보가 없습니다. 먼저 로그인해 주세요"),
+        "CONTENT_BUILD_FAILED" | "FORM_BUILD_FAILED" => {
+            Some("글 내용을 구성하는 중 문제가 발생했습니다")
+        }
+        "REGISTER_PARSE_ERROR" | "COMMENT_PARSE_ERROR" | "PARSE_ERROR" => {
+            Some("네이버 응답을 처리하지 못했습니다")
+        }
+        "HTTP_TRANSPORT_ERROR" => Some("네트워크 연결에 문제가 있습니다"),
+        "INVALID_CAFE_INPUT" => Some("카페 또는 게시판 정보가 올바르지 않습니다"),
+        _ => None,
+    }
+}
+
+/// 문자열에 한글(음절/자모)이 들어 있는지. 네이버가 준 실패 사유가 한국어면(댓글
+/// `reason`처럼 이미 친절) 그대로 노출하고, 영어/기술 메시지("Page Not Found")일 때만
+/// 우리 매핑으로 치환하기 위한 판별(#169).
+fn contains_hangul(s: &str) -> bool {
+    s.chars().any(|c| {
+        matches!(c,
+            '\u{AC00}'..='\u{D7A3}'   // 완성형 음절
+            | '\u{1100}'..='\u{11FF}' // 자모
+            | '\u{3130}'..='\u{318F}' // 호환 자모
+        )
+    })
+}
+
+/// 실패한 게시/댓글의 사용자용 메인 라인 사유. 한국어 사유 뒤에 식별 코드를 짧게 붙여,
+/// "알 수 없는 오류"처럼 모호한 경우에도 무슨 에러인지 추적할 수 있게 한다(#169). 코드는
+/// 네이버 숫자 errorCode를 우선 쓰고, 없으면 내부 오류 코드(예: SESSION_INVALID)를 쓴다.
+fn failure_reason(code: &str, cafe: Option<&NaverCafeCommonErrorData>) -> String {
+    let reason = resolve_failure_reason(code, cafe);
+    let tag = cafe
+        .and_then(|c| c.api_error_code.as_deref())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(code);
+    format!("{reason} ({tag})")
+}
+
+/// 메인 라인의 한국어 사유 본문을 고른다(코드 태그 제외). 우선순위: 네이버 errorCode
+/// 매핑(모호/영어 코드 치환) → 네이버 원문이 한국어면 그대로 → HTTP status(4xx/5xx)
+/// 매핑 → 내부 코드 매핑 → 일반 폴백. 영어/기술 원문이나 개발자 `message`는 넣지 않고,
+/// 디버그 원문은 `failure_trace`(자세히 보기)에만 보존한다.
+fn resolve_failure_reason(code: &str, cafe: Option<&NaverCafeCommonErrorData>) -> String {
+    let Some(cafe) = cafe else {
+        return internal_code_reason(code)
+            .unwrap_or(GENERIC_REASON)
+            .to_owned();
+    };
+    // 1. 알려진 네이버 errorCode 매핑이 최우선 — 원문이 영어거나 한국어여도 모호한
+    //    코드(0001 등)를 행동 가능한 문구로 덮어쓴다.
+    if let Some(reason) = cafe.api_error_code.as_deref().and_then(naver_code_reason) {
+        return reason.to_owned();
+    }
+    // 2. 매핑에 없으면, 네이버 원문이 한국어인 경우 그대로 노출(4003 등 이미 친절한 사유).
+    //    개행·연속 공백 정리, 길이 가드로 파싱 실패 폴백의 원문 바디 방지.
+    if let Some(msg) = cafe.api_error_message.as_deref() {
+        let cleaned = msg.split_whitespace().collect::<Vec<_>>().join(" ");
+        if contains_hangul(&cleaned) && cleaned.chars().count() <= 200 {
+            return cleaned;
+        }
+    }
+    // 3. HTTP 오류 status 기반 한국어. 2xx("200 OK + 에러 본문")는 status에 오류 의미가
+    //    없으므로 건너뛴다.
+    if let Some(status) = cafe.http_status {
+        if status >= 400 {
+            return status_reason(status).to_owned();
+        }
+    }
+    // 4. HTTP 이전 내부 오류 코드 → 그조차 없으면 일반 폴백.
+    internal_code_reason(code)
+        .unwrap_or(GENERIC_REASON)
+        .to_owned()
+}
+
+/// "자세히보기"용 개발자 trace를 만든다(#169). 코드·HTTP status·api 코드·원본
+/// 메시지를 한 줄로 남겨, 사용자 사유와 별개로 실제 응답을 그대로 확인할 수 있게 한다.
+fn failure_trace(code: &str, message: &str, cafe: Option<&NaverCafeCommonErrorData>) -> String {
+    match cafe {
+        Some(c) => format!(
+            "{code} · HTTP {} · {} · {}",
+            c.http_status
+                .map_or_else(|| "-".to_owned(), |s| s.to_string()),
+            c.api_error_code.as_deref().unwrap_or("-"),
+            c.api_error_message.as_deref().unwrap_or(message),
+        ),
+        None => format!("{code}: {message}"),
+    }
+}
+
+/// 카페 글·댓글·종목토론방·밴드 실행 결과를 알림 배치(`LogBatch`) 한 건으로 묶는다.
 /// 본문/댓글 스냅샷은 실제 그 작업을 돌린 모드일 때만 남긴다(즉시게시 forum 경로와 동일).
+// 플랫폼별 결과 슬라이스(글/댓글/forum/band)와 조회 실패·시각·seq를 그대로 받는다.
+// 플랫폼이 늘며 인자가 7개를 넘지만, 한 곳에서 LogBatch로 합치는 평탄한 빌더라 묶음
+// 구조체로 감싸기보다 인자로 두는 편이 읽기 쉽다.
+#[allow(clippy::too_many_arguments)]
 fn build_log_batch(
     plan: &PublishPlan,
     post_reports: &[JobReport],
     comment_reports: &[CommentJobReport],
     forum_outcomes: &[ForumOutcome],
+    band_outcomes: &[BandOutcome],
     comment_fetch_failures: &[CommentFetchFailure],
     at: i64,
     seq: u64,
@@ -547,14 +744,17 @@ fn build_log_batch(
             msg: if r.success {
                 "글 게시 완료".to_owned()
             } else {
-                r.error
-                    .as_ref()
-                    .map_or_else(|| "글 게시 실패".to_owned(), |e| e.message.clone())
+                match r.error.as_ref() {
+                    Some(e) => format!(
+                        "글 게시 실패 — {}",
+                        failure_reason(&e.code, e.error_data.as_ref().map(|d| &d.cafe))
+                    ),
+                    None => "글 게시 실패".to_owned(),
+                }
             },
-            trace: r
-                .error
-                .as_ref()
-                .map(|e| format!("{}: {}", e.code, e.message)),
+            trace: r.error.as_ref().map(|e| {
+                failure_trace(&e.code, &e.message, e.error_data.as_ref().map(|d| &d.cafe))
+            }),
         });
     }
 
@@ -569,14 +769,17 @@ fn build_log_batch(
             msg: if r.success {
                 "댓글 게시 완료".to_owned()
             } else {
-                r.error
-                    .as_ref()
-                    .map_or_else(|| "댓글 게시 실패".to_owned(), |e| e.message.clone())
+                match r.error.as_ref() {
+                    Some(e) => format!(
+                        "댓글 게시 실패 — {}",
+                        failure_reason(&e.code, e.error_data.as_ref().map(|d| &d.cafe))
+                    ),
+                    None => "댓글 게시 실패".to_owned(),
+                }
             },
-            trace: r
-                .error
-                .as_ref()
-                .map(|e| format!("{}: {}", e.code, e.message)),
+            trace: r.error.as_ref().map(|e| {
+                failure_trace(&e.code, &e.message, e.error_data.as_ref().map(|d| &d.cafe))
+            }),
         });
     }
 
@@ -607,6 +810,40 @@ fn build_log_batch(
                 None
             } else {
                 Some(o.result.message.clone())
+            },
+        });
+    }
+
+    for o in band_outcomes {
+        // 댓글 부분 실패도 드러낸다(카페 commentsAllOk와 동일): 시도한 댓글이 있는데
+        // 성공분이 모자라면(commented_count < comment_total) 성공으로 묻지 않고 실패로 둔다.
+        let band_comments_failed = matches!(
+            &o.result,
+            Ok(out) if out.comment_total > 0 && out.commented_count < out.comment_total
+        );
+        items.push(BatchItem {
+            platform: PlatformId::Band,
+            target: o.band_name.clone(),
+            code: None,
+            board: None,
+            login_id: o.account_id.clone(),
+            status: match &o.result {
+                Ok(_) if !band_comments_failed => BatchItemStatus::Success,
+                _ => BatchItemStatus::Fail,
+            },
+            // 글·댓글 성공/시도 개수를 "N/M개"로 보여준다(즉시게시 runNow 문구와 동일).
+            // 댓글을 시도하지 않았으면 "글 게시 완료". 실패 시 BandPostError 메시지를 그대로.
+            msg: match &o.result {
+                Ok(out) if out.comment_total > 0 => format!(
+                    "글·댓글 {}/{}개 게시 완료",
+                    out.commented_count, out.comment_total
+                ),
+                Ok(_) => "글 게시 완료".to_owned(),
+                Err(e) => e.to_string(),
+            },
+            trace: match &o.result {
+                Ok(_) => None,
+                Err(e) => Some(e.to_string()),
             },
         });
     }
@@ -700,7 +937,7 @@ fn estimate_total(plan: &PublishPlan) -> u32 {
     } else {
         0
     };
-    (posts + comments + plan.forum.len()) as u32
+    (posts + comments + plan.forum.len() + plan.band.len()) as u32
 }
 
 /// 아이템을 `Running`으로 전이하고 진행률을 `(0, 추정 total)`로 초기화한다. execute_item이
@@ -738,7 +975,7 @@ fn set_progress_value(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::queue::{CommentTargetSpec, NaverTarget};
+    use crate::ipc::queue::{BandTarget, CommentTargetSpec, NaverTarget};
     use crate::naver_cafe::orchestrator::JobReport;
     use crate::naver_cafe::post::parser::ArticleRegisterResult;
 
@@ -762,6 +999,7 @@ mod tests {
             comments: vec!["c1".into()],
             naver,
             forum: vec![],
+            band: vec![],
         }
     }
 
@@ -819,6 +1057,42 @@ mod tests {
                 ok: true,
                 message: "게시 완료".into(),
             },
+        }
+    }
+
+    fn band_target(account: &str, name: &str, link: &str) -> BandTarget {
+        BandTarget {
+            account_id: account.into(),
+            name: name.into(),
+            link: link.into(),
+        }
+    }
+
+    fn band_ok(
+        account: &str,
+        name: &str,
+        commented_count: usize,
+        comment_total: usize,
+    ) -> BandOutcome {
+        BandOutcome {
+            account_id: account.into(),
+            band_name: name.into(),
+            result: Ok(BandPublishOutcome {
+                joined: true,
+                post_no: 100,
+                web_url: "https://band.us/band/1/post/100".into(),
+                commented_count,
+                comment_total,
+                band_name: Some(name.into()),
+            }),
+        }
+    }
+
+    fn band_fail(account: &str, name: &str) -> BandOutcome {
+        BandOutcome {
+            account_id: account.into(),
+            band_name: name.into(),
+            result: Err(BandPostError::NoSession),
         }
     }
 
@@ -906,6 +1180,12 @@ mod tests {
             code: "005930".into(),
         }];
         assert_eq!(estimate_total(&p), 2); // 글 1 + 종목 1
+                                           // 밴드 대상 수도 더한다(kind와 무관하게 항상 1 대상 = 1).
+        p.band = vec![
+            band_target("u0", "투자밴드", "https://band.us/band/1"),
+            band_target("u0", "정보밴드", "https://band.us/band/2"),
+        ];
+        assert_eq!(estimate_total(&p), 4); // 글 1 + 종목 1 + 밴드 2
     }
 
     #[test]
@@ -1048,7 +1328,7 @@ mod tests {
             post_report("u0", 123, 999),
             post_fail("u1", "456", "NO_COOKIES", "쿠키 없음"),
         ];
-        let b = build_log_batch(&p, &reports, &[], &[], &[], 1_700_000_000_000, 0);
+        let b = build_log_batch(&p, &reports, &[], &[], &[], &[], 1_700_000_000_000, 0);
         assert_eq!(b.id, "lb-q-1700000000000-0");
         assert_eq!(b.title, "T");
         assert_eq!(b.body.as_deref(), Some("B")); // post 모드 → 본문 스냅샷
@@ -1062,15 +1342,210 @@ mod tests {
         assert_eq!(b.items[1].status, BatchItemStatus::Fail);
         // plan에 없는 카페("456")는 ID로 폴백.
         assert_eq!(b.items[1].target, "456");
-        assert_eq!(b.items[1].msg, "쿠키 없음");
+        // error_data가 없으면 내부 코드(NO_COOKIES)를 한국어 사유로 치환하고 식별 코드를 붙인다.
+        assert_eq!(
+            b.items[1].msg,
+            "글 게시 실패 — 로그인 정보가 없습니다. 먼저 로그인해 주세요 (NO_COOKIES)"
+        );
+        // 디버그 원문은 자세히 보기(trace)에 보존.
         assert_eq!(b.items[1].trace.as_deref(), Some("NO_COOKIES: 쿠키 없음"));
+    }
+
+    /// `api_error_message`/`http_status`를 담은 게시 실패 리포트(REGISTER_HTTP_ERROR 형태).
+    fn cafe_error(
+        status: Option<u16>,
+        api_code: Option<&str>,
+        api_message: Option<&str>,
+    ) -> NaverCafeCommonErrorData {
+        NaverCafeCommonErrorData {
+            target: None,
+            http_status: status,
+            api_error_code: api_code.map(str::to_owned),
+            api_error_message: api_message.map(str::to_owned),
+            retryable: false,
+        }
+    }
+
+    fn post_fail_api(account: &str, cafe: &str, cafe_err: NaverCafeCommonErrorData) -> JobReport {
+        use crate::naver_cafe::post::error::PostErrorData;
+        use crate::naver_cafe::ErrorEnvelope;
+        JobReport {
+            account_id: account.into(),
+            cafe: cafe.into(),
+            menu_id: 7,
+            success: false,
+            result: None,
+            error: Some(ErrorEnvelope {
+                trace_id: "t".into(),
+                code: "REGISTER_HTTP_ERROR".into(),
+                message: "오류 응답은 apiErrorMessage를 확인하세요".into(),
+                error_data: Some(PostErrorData {
+                    cafe: cafe_err,
+                    menu_id: None,
+                    subject: None,
+                    validation_errors: vec![],
+                }),
+            }),
+        }
+    }
+
+    #[test]
+    fn failure_reason_maps_naver_code_to_korean_without_english_or_http() {
+        // 네이버 원문이 영어("Page Not Found")여도 errorCode(10404)로 한국어 치환하고
+        // HTTP status는 메인 라인에 넣지 않는다.
+        let cafe = cafe_error(Some(404), Some("10404"), Some("Page Not Found"));
+        let reason = failure_reason("REGISTER_HTTP_ERROR", Some(&cafe));
+        // 한국어 사유 + 식별 코드(네이버 errorCode 우선).
+        assert_eq!(
+            reason,
+            "해당 게시판 또는 게시물이 존재하지 않습니다 (10404)"
+        );
+        assert!(!reason.contains("Page Not Found"));
+        assert!(!reason.contains("HTTP"));
+    }
+
+    #[test]
+    fn failure_reason_unknown_naver_code_falls_back_to_http_status() {
+        // 매핑 안 된 errorCode면 HTTP status 기반 한국어 문구로.
+        let cafe = cafe_error(Some(403), Some("88888"), Some("Forbidden"));
+        assert_eq!(
+            failure_reason("REGISTER_HTTP_ERROR", Some(&cafe)),
+            "권한이 없거나 로그인이 만료되었습니다 (88888)"
+        );
+    }
+
+    #[test]
+    fn failure_reason_no_http_uses_internal_code() {
+        // HTTP 단계 이전 실패(SESSION_INVALID)는 내부 코드로 한국어 치환(원문 message 미노출).
+        let cafe = cafe_error(None, None, None);
+        // api_error_code가 없으면 식별 코드로 내부 코드를 쓴다.
+        assert_eq!(
+            failure_reason("SESSION_INVALID", Some(&cafe)),
+            "로그인이 만료되었습니다. 다시 로그인해 주세요 (SESSION_INVALID)"
+        );
+    }
+
+    #[test]
+    fn failure_reason_no_error_data_uses_internal_code() {
+        assert_eq!(
+            failure_reason("NO_COOKIES", None),
+            "로그인 정보가 없습니다. 먼저 로그인해 주세요 (NO_COOKIES)"
+        );
+    }
+
+    #[test]
+    fn failure_reason_unknown_everything_uses_generic_hint() {
+        // 코드도 status도 모르면 개발자 원문 대신 일반 안내 + 자세히 보기 유도 + 식별 코드.
+        assert_eq!(
+            failure_reason("WEIRD_UNKNOWN_CODE", None),
+            format!("{GENERIC_REASON} (WEIRD_UNKNOWN_CODE)")
+        );
+    }
+
+    #[test]
+    fn failure_reason_never_leaks_developer_message() {
+        // 개발자 message("contentJson…")가 메인 라인에 새지 않는다.
+        let cafe = cafe_error(None, None, None);
+        let reason = failure_reason("CONTENT_BUILD_FAILED", Some(&cafe));
+        assert_eq!(
+            reason,
+            "글 내용을 구성하는 중 문제가 발생했습니다 (CONTENT_BUILD_FAILED)"
+        );
+        assert!(!reason.contains("contentJson"));
+    }
+
+    #[test]
+    fn failure_reason_passes_through_unmapped_korean_naver_message() {
+        // 매핑에 없는 코드는 네이버 한국어 원문을 그대로 노출(이미 친절). 4003 실측 케이스.
+        let deleted = cafe_error(
+            Some(200),
+            Some("4003"),
+            Some("삭제되었거나 존재하지 않는 게시글입니다."),
+        );
+        assert_eq!(
+            failure_reason("COMMENT_HTTP_ERROR", Some(&deleted)),
+            "삭제되었거나 존재하지 않는 게시글입니다. (4003)"
+        );
+    }
+
+    #[test]
+    fn failure_reason_overrides_vague_naver_code() {
+        // 0001은 네이버가 "알 수 없는 오류"로만 답하는 모호 코드 — 한국어여도 우리 행동가능
+        // 문구로 덮어쓴다(매핑이 한글 패스스루보다 우선). 댓글 "200 OK + 에러 본문" 실측.
+        let vague = cafe_error(
+            Some(200),
+            Some("0001"),
+            Some("알 수 없는 오류가 발생했습니다."),
+        );
+        assert_eq!(
+            failure_reason("COMMENT_HTTP_ERROR", Some(&vague)),
+            "댓글 대상을 찾을 수 없거나 잘못된 요청입니다 (0001)"
+        );
+    }
+
+    #[test]
+    fn failure_reason_2xx_non_korean_skips_status_and_uses_generic() {
+        // 200(에러 본문) + 한글 아님 + 미매핑 코드 → status(200)는 오류의미 없어 건너뛰고 일반 폴백.
+        let cafe = cafe_error(Some(200), Some("7777"), Some("Weird error"));
+        assert_eq!(
+            failure_reason("COMMENT_HTTP_ERROR", Some(&cafe)),
+            format!("{GENERIC_REASON} (7777)")
+        );
+    }
+
+    #[test]
+    fn failure_reason_oversized_korean_body_falls_back_to_status() {
+        // 파싱 실패 폴백의 긴 한국어 원문 바디는 메인 라인에 쏟지 않고 status 문구로.
+        let huge = "가".repeat(300);
+        let cafe = cafe_error(Some(500), None, Some(&huge));
+        assert_eq!(
+            failure_reason("REGISTER_HTTP_ERROR", Some(&cafe)),
+            "네이버 서버에 문제가 발생했습니다 (REGISTER_HTTP_ERROR)"
+        );
+    }
+
+    #[test]
+    fn failure_trace_includes_status_code_and_api_detail() {
+        let cafe = cafe_error(Some(403), Some("9999"), Some("권한이 없는 게시판입니다"));
+        assert_eq!(
+            failure_trace("REGISTER_HTTP_ERROR", "일반 안내문", Some(&cafe)),
+            "REGISTER_HTTP_ERROR · HTTP 403 · 9999 · 권한이 없는 게시판입니다"
+        );
+    }
+
+    #[test]
+    fn failure_trace_falls_back_to_code_message_without_error_data() {
+        assert_eq!(
+            failure_trace("NO_COOKIES", "쿠키 없음", None),
+            "NO_COOKIES: 쿠키 없음"
+        );
+    }
+
+    #[test]
+    fn build_log_batch_post_fail_surfaces_korean_reason_in_msg_and_keeps_debug_trace() {
+        let p = plan(ModeValue::Post, vec![naver_target("u0")]);
+        // 네이버 원문은 영어("Page Not Found"), errorCode 10404.
+        let cafe = cafe_error(Some(404), Some("10404"), Some("Page Not Found"));
+        let reports = vec![post_fail_api("u0", "123", cafe)];
+        let b = build_log_batch(&p, &reports, &[], &[], &[], &[], 1, 0);
+        assert_eq!(b.items[0].status, BatchItemStatus::Fail);
+        // 메인 라인: 영어 원문·HTTP 없이 한국어 사유 + 식별 코드.
+        assert_eq!(
+            b.items[0].msg,
+            "글 게시 실패 — 해당 게시판 또는 게시물이 존재하지 않습니다 (10404)"
+        );
+        // 자세히보기: 개발자 디버그(영어 원문 포함)는 그대로 보존.
+        assert_eq!(
+            b.items[0].trace.as_deref(),
+            Some("REGISTER_HTTP_ERROR · HTTP 404 · 10404 · Page Not Found")
+        );
     }
 
     #[test]
     fn build_log_batch_comment_mode_snapshots_comment_not_body() {
         let mut p = plan(ModeValue::Comment, vec![naver_target("u0")]);
         p.comments = vec!["  ".into(), "좋은 글이네요".into()];
-        let b = build_log_batch(&p, &[], &[], &[], &[], 1, 0);
+        let b = build_log_batch(&p, &[], &[], &[], &[], &[], 1, 0);
         assert!(b.body.is_none()); // comment 모드 → 본문 스냅샷 없음
         assert_eq!(b.comment.as_deref(), Some("좋은 글이네요")); // 공백 항목은 건너뜀
         assert!(b.items.is_empty());
@@ -1080,13 +1555,50 @@ mod tests {
     fn build_log_batch_includes_forum_items_with_code_and_account() {
         let p = plan(ModeValue::Post, vec![]);
         let forum = vec![forum_ok("u0", "삼성전자", "005930")];
-        let b = build_log_batch(&p, &[], &[], &forum, &[], 1, 0);
+        let b = build_log_batch(&p, &[], &[], &forum, &[], &[], 1, 0);
         assert_eq!(b.items.len(), 1);
         assert_eq!(b.items[0].platform, PlatformId::Forum);
         assert_eq!(b.items[0].target, "삼성전자");
         assert_eq!(b.items[0].code.as_deref(), Some("005930"));
         assert_eq!(b.items[0].login_id, "u0");
         assert_eq!(b.items[0].status, BatchItemStatus::Success);
+    }
+
+    #[test]
+    fn build_log_batch_maps_band_success_with_comment_and_failure() {
+        // 밴드는 forum과 별개 platform으로, 동결된 밴드명·계정과 함께 성공/실패를 남긴다.
+        // 댓글 부분 실패(commented_count < comment_total)는 성공으로 묻지 않고 Fail로 둔다.
+        let p = plan(ModeValue::Both, vec![]);
+        let bands = vec![
+            band_ok("u0", "투자밴드", 2, 2),  // 글+댓글 전부 성공
+            band_ok("u1", "정보밴드", 0, 0),  // 글만 성공(댓글 미시도)
+            band_ok("u3", "부분밴드", 1, 2),  // 댓글 일부 실패 → Fail 표기
+            band_fail("u2", "실패밴드"),      // 게시 실패
+        ];
+        let b = build_log_batch(&p, &[], &[], &[], &bands, &[], 1, 0);
+        assert_eq!(b.items.len(), 4);
+
+        assert_eq!(b.items[0].platform, PlatformId::Band);
+        assert_eq!(b.items[0].target, "투자밴드");
+        assert_eq!(b.items[0].login_id, "u0");
+        assert_eq!(b.items[0].status, BatchItemStatus::Success);
+        assert_eq!(b.items[0].msg, "글·댓글 2/2개 게시 완료");
+        assert!(b.items[0].trace.is_none());
+
+        assert_eq!(b.items[1].status, BatchItemStatus::Success);
+        assert_eq!(b.items[1].msg, "글 게시 완료");
+
+        // 댓글 일부 실패: 성공으로 묻지 않고 Fail + "N/M개"로 드러낸다(카페 commentsAllOk 동일).
+        assert_eq!(b.items[2].target, "부분밴드");
+        assert_eq!(b.items[2].status, BatchItemStatus::Fail);
+        assert_eq!(b.items[2].msg, "글·댓글 1/2개 게시 완료");
+
+        assert_eq!(b.items[3].platform, PlatformId::Band);
+        assert_eq!(b.items[3].target, "실패밴드");
+        assert_eq!(b.items[3].status, BatchItemStatus::Fail);
+        // 실패는 BandPostError 메시지를 msg/trace에 남긴다(조용한 누락 방지).
+        assert!(b.items[3].trace.is_some());
+        assert!(!b.items[3].msg.is_empty());
     }
 
     #[tokio::test]
@@ -1111,7 +1623,7 @@ mod tests {
             cafe_id: 123,
             message: "글목록 조회 실패: timeout".into(),
         }];
-        let b = build_log_batch(&p, &[], &[], &[], &failures, 1, 0);
+        let b = build_log_batch(&p, &[], &[], &[], &[], &failures, 1, 0);
         assert_eq!(b.items.len(), 1);
         assert_eq!(b.items[0].status, BatchItemStatus::Fail);
         assert_eq!(b.items[0].login_id, "u0");

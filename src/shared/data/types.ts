@@ -112,6 +112,9 @@ export interface PublishJob {
   loginId: string;
   targetName: string;
   code?: string;
+  /** band 플랫폼 전용: 가입·게시 링크. 잡 생성 시점에 동결해, 이후 밴드명이 같은
+   *  다른 밴드와 헷갈려 링크를 잘못 재조회하는 일을 막는다(이름 lookup 제거). */
+  bandLink?: string;
   board: string;
   status: AccountStatus;
 }
