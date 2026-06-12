@@ -26,10 +26,11 @@ const DEFAULT_REFERER: &str = "https://stock.naver.com/discussion";
 const DEFAULT_PROFILE_INTRODUCTION: &str = "2222";
 
 // 글쓰기 form(txId)·add 가 다종목 연속 게시 때 간헐적으로 429를 반환하므로
-// 일시적 실패(429·5xx)에 한해 지수 백오프로 재시도한다. 최대 4회(=3회 재시도).
+// 일시적 실패(429·5xx)에 한해 70초 대기 후 재시도한다. 네이버 레이트리밋 창이
+// 종목 간 대기(60초)보다 길어, 사수 요청대로 백오프를 70초로 고정한다. 최대 4회(=3회 재시도).
 const POST_RETRY_MAX_ATTEMPTS: u32 = 4;
-const POST_RETRY_BASE: Duration = Duration::from_millis(400);
-const POST_RETRY_MAX_DELAY: Duration = Duration::from_secs(8);
+const POST_RETRY_BASE: Duration = Duration::from_secs(70);
+const POST_RETRY_MAX_DELAY: Duration = Duration::from_secs(70);
 
 // Chrome에서 수거한 쿠키 한 개(도메인까지 보존). 이름만으로 합치면 서브도메인별
 // host-scoped 동일 이름 쿠키(NNB, 서비스별 세션/CSRF 등)가 last-write-wins로 뭉개져
@@ -716,8 +717,8 @@ fn is_retryable_status(status: u16) -> bool {
     status == 429 || (500..=599).contains(&status)
 }
 
-// 시도 횟수에 따른 지수 백오프 대기시간(상한 POST_RETRY_MAX_DELAY)을 계산하는 함수입니다.
-// attempt=1 → 400ms, 2 → 800ms, 3 → 1600ms ...
+// 재시도 대기시간을 계산하는 함수입니다. POST_RETRY_BASE=POST_RETRY_MAX_DELAY=70초이므로
+// 모든 시도에서 70초로 고정된다(사수 요청). 상수를 다시 벌리면 지수 백오프로 동작.
 fn backoff_delay(attempt: u32) -> Duration {
     let shift = attempt.saturating_sub(1).min(5);
     let scaled = POST_RETRY_BASE.saturating_mul(1u32 << shift);
@@ -1219,13 +1220,12 @@ mod tests {
     }
 
     #[test]
-    fn backoff_delay_grows_exponentially_then_caps() {
-        assert_eq!(backoff_delay(1), Duration::from_millis(400));
-        assert_eq!(backoff_delay(2), Duration::from_millis(800));
-        assert_eq!(backoff_delay(3), Duration::from_millis(1600));
-        assert!(backoff_delay(1) < backoff_delay(2));
-        // 시도 횟수가 커져도 상한(8s)을 넘지 않는다.
-        assert_eq!(backoff_delay(99), POST_RETRY_MAX_DELAY);
+    fn backoff_delay_is_fixed_seventy_seconds() {
+        // 사수 요청: 429 백오프를 70초로 고정.
+        assert_eq!(POST_RETRY_MAX_DELAY, Duration::from_secs(70));
+        assert_eq!(backoff_delay(1), Duration::from_secs(70));
+        assert_eq!(backoff_delay(2), Duration::from_secs(70));
+        assert_eq!(backoff_delay(99), Duration::from_secs(70));
     }
 
     #[test]
