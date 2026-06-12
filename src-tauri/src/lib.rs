@@ -447,17 +447,11 @@ async fn band_publish(
     band_link: String,
     title: String,
     content: String,
-    comment: Option<String>,
+    comments: Vec<String>,
 ) -> Result<band_post::BandPublishOutcome, String> {
-    band_post::band_publish(
-        &account_id,
-        &band_link,
-        &title,
-        &content,
-        comment.as_deref(),
-    )
-    .await
-    .map_err(|e| e.to_string())
+    band_post::band_publish(&account_id, &band_link, &title, &content, &comments)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 링크(band_no)로 밴드 이름을 조회한다(게시 모달에서 링크 저장 시 실제 밴드명 표시용).

@@ -18,6 +18,7 @@ import {
 import { notifications } from "@mantine/notifications";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import type { BandTarget } from "@/shared/bindings/BandTarget";
 import type { CommentTargetSpec } from "@/shared/bindings/CommentTargetSpec";
 import type { ForumTarget } from "@/shared/bindings/ForumTarget";
 import type { JoinedCafe } from "@/shared/bindings/JoinedCafe";
@@ -393,19 +394,23 @@ function DestinationPicker({
                 </Text>
               </Group>
             )}
-            {/* 사수의 드롭다운: 저장으로 누적된 실제 밴드명 목록에서 게시할 밴드 선택 */}
+            {/* 사수의 드롭다운: 저장으로 누적된 실제 밴드명 목록에서 게시할 밴드 선택.
+                옵션 value는 고유한 band_no, label은 표시용 밴드명 — 이름이 같은 밴드가
+                둘 이상이어도 value가 겹치지 않아 Select가 깨지지(흰 화면) 않는다. */}
             <Select
               placeholder={
                 resolvedBands.length
                   ? "게시할 밴드 선택"
                   : "링크를 저장하면 밴드가 여기 표시됩니다"
               }
-              data={resolvedBands.map((b) => b.name)}
+              data={resolvedBands.map((b) => ({
+                value: b.bandNo,
+                label: b.name,
+              }))}
               value={null}
               disabled={resolvedBands.length === 0}
-              onChange={(name) => {
-                const b = resolvedBands.find((x) => x.name === name);
-                if (b) onSelectBand(b.bandNo);
+              onChange={(no) => {
+                if (no) onSelectBand(no);
               }}
             />
             {selectedBands.length > 0 ? (
@@ -1008,6 +1013,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
           platform: "band",
           loginId: a.loginId,
           targetName: b.name,
+          // 가입 링크를 잡에 동결한다(밴드명이 같은 다른 밴드와의 오조회 방지).
+          bandLink: b.link,
           board: "전체글",
           status: a.status,
         });
@@ -1034,12 +1041,9 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     mode,
   );
   // 밴드가 선택됐으면 게시할 밴드를 1개 이상 골라야 게시 가능(사수 요구 흐름).
-  // 단 예약(schedule)에서는 밴드가 plan에서 제외되므로(엔진 미연결) 선택이 필요 없다 —
-  // 즉시 게시(now)일 때만 밴드 선택을 요구한다.
-  const bandReady =
-    when === "schedule" ||
-    !selPlatforms.includes("band") ||
-    selectedBands.length > 0;
+  // 예약(schedule)도 이제 밴드를 plan에 싣으므로 면제하지 않는다 — 즉시·예약 공통으로
+  // 밴드 플랫폼이 선택됐다면 최소 1개의 밴드를 골라야 게시할 수 있다.
+  const bandReady = !selPlatforms.includes("band") || selectedBands.length > 0;
   const canPublish =
     usableSelected.length > 0 &&
     targetsOk &&
@@ -1193,12 +1197,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     }));
   };
 
-  // Publish now: naver cafe(글/댓글)와 종목토론방(forum)은 실제 백엔드를 호출하고,
-  // 밴드 등 나머지는 엔진이 없어 시뮬레이션으로 표시한다.
+  // Publish now: naver cafe(글/댓글)·종목토론방(forum)·밴드(band)는 실제 백엔드를
+  // 호출하고, 그 외 플랫폼(현재 없음)은 엔진이 없어 시뮬레이션으로 표시한다.
   const runNow = () => {
     setFlow("running");
-    // 플랫폼별로 갈래를 나눈다: 네이버 카페·종목토론방은 실제 백엔드, 밴드 등
-    // 나머지는 엔진 미구현이라 시뮬레이션(후속 작업).
+    // 플랫폼별로 갈래를 나눈다: 네이버 카페·종목토론방·밴드는 실제 백엔드,
+    // 그 외 나머지는 엔진 미구현이라 시뮬레이션(후속 작업).
     const naverJobs = jobs.filter((j) => j.platform === "naver");
     const forumJobs = jobs.filter((j) => j.platform === "forum");
     const bandJobs = jobs.filter((j) => j.platform === "band");
@@ -1269,13 +1273,13 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     ).then((forumArr) => forumArr.flat());
 
     // 밴드(band.us): 저장된 링크로 가입 후 글(+댓글) 게시 — 순수 HTTP 백엔드 호출.
-    const bandComment =
-      mode === "both" || mode === "comment" ? firstComment : "";
+    // 댓글 모드(both/comment)면 비어있지 않은 댓글을 모두 같은 글에 단다(카페 both와 동일).
+    // 댓글 풀은 카페와 동일하게 위에서 만든 `comments`를 재사용한다.
+    const bandComments = mode === "both" || mode === "comment" ? comments : [];
     const bandWork: Promise<PublishResult[]> = Promise.all(
       bandJobs.map((j) => {
-        // 잡의 라벨(밴드명)로 해당 밴드의 가입 링크를 찾는다.
-        const link =
-          resolvedBands.find((b) => b.name === j.targetName)?.link ?? "";
+        // 잡 생성 시 동결한 가입 링크를 쓴다(밴드명 재조회 없이 정확한 밴드).
+        const link = j.bandLink ?? "";
         return ipc.band
           .publish({
             // 백엔드는 loginId(쿠키 파일 키)로 band 로그인 쿠키를 찾는다.
@@ -1283,14 +1287,20 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
             bandLink: link,
             title: doc.title,
             content: htmlToText(doc.body ?? ""),
-            ...(bandComment ? { comment: bandComment } : {}),
+            comments: bandComments,
           })
           .then((out) => ({
             ...j,
             // 결과 라벨을 게시 응답의 실제 밴드명으로(없으면 잡의 밴드명 유지).
             targetName: out.bandName ?? j.targetName,
-            ok: true,
-            msg: out.commented ? "글·댓글 게시 완료" : "글 게시 완료",
+            // 댓글을 의도했으면 전부 성공해야 ok(카페 commentsAllOk와 동일 정책).
+            // 부분/전량 실패는 초록 배지로 묻지 않는다.
+            ok:
+              out.commentTotal === 0 || out.commentedCount === out.commentTotal,
+            msg:
+              out.commentTotal === 0
+                ? "글 게시 완료"
+                : `글·댓글 ${out.commentedCount}/${out.commentTotal}개 게시 완료`,
           }))
           .catch((err: unknown) => ({ ...j, ok: false, msg: errText(err) }));
       }),
@@ -1325,7 +1335,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
             .recordBatch({
               title: doc.title,
               body: htmlToText(doc.body ?? ""),
-              comment: bandComment,
+              // 로그 스냅샷은 대표로 첫 댓글만 남긴다(실제 게시는 위에서 전체 전달).
+              comment: bandComments[0] ?? "",
               runPost: mode === "post" || mode === "both",
               runComment: mode === "comment" || mode === "both",
               items: br.map((r) => ({
@@ -1360,8 +1371,9 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   };
 
   // 예약 plan(동결 실행 페이로드): 본문은 모달이 이미 평문화한 값을 박제하고,
-  // 엔진이 있는 naver/forum 대상만 싣는다(band 등은 제외). naver의 cafe/menuId/
-  // boardType은 toPostJob과 동일하게 naverPicks에서 구한다.
+  // 엔진이 있는 naver/forum/band 대상을 모두 싣는다. naver의 cafe/menuId/
+  // boardType은 toPostJob과 동일하게 naverPicks에서 구하고, band 링크는
+  // 즉시 게시(runNow)와 동일하게 resolvedBands에서 밴드명으로 찾는다.
   const buildPlan = (): PublishPlan => {
     const naver: NaverTarget[] = jobs
       .filter((j) => j.platform === "naver")
@@ -1385,6 +1397,14 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         name: j.targetName,
         code: j.code ?? "",
       }));
+    const band: BandTarget[] = jobs
+      .filter((j) => j.platform === "band")
+      .map((j) => ({
+        accountId: j.loginId,
+        name: j.targetName,
+        // 잡 생성 시 동결한 링크를 그대로 싣는다(밴드명 재조회 없음).
+        link: j.bandLink ?? "",
+      }));
     return {
       postId: doc.id,
       kind: doc.kind,
@@ -1393,6 +1413,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       comments: doc.comments ?? [],
       naver,
       forum,
+      band,
     };
   };
 
