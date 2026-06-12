@@ -1004,7 +1004,14 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         });
       }
     } else if (a.platform === "band") {
-      // 선택한 각 밴드마다 잡 1개(계정 × 밴드). 라벨은 조회된 실제 밴드명.
+      // 선택한 각 밴드마다 잡 1개(계정 × 밴드). 라벨은 조회된 실제 밴드명. 댓글 전용 모드면
+      // 대상(최신글/인기글 + 개수)을, 그 외엔 "전체글"을 board 라벨로 둔다.
+      const bandBoard =
+        mode === "comment"
+          ? commentTargetMode === "popular"
+            ? `인기글 ${commentCount}건`
+            : `최신글 ${commentCount}건`
+          : "전체글";
       selectedBands.forEach((no) => {
         const b = resolvedBands.find((x) => x.bandNo === no);
         if (!b) return;
@@ -1015,7 +1022,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
           targetName: b.name,
           // 가입 링크를 잡에 동결한다(밴드명이 같은 다른 밴드와의 오조회 방지).
           bandLink: b.link,
-          board: "전체글",
+          board: bandBoard,
           status: a.status,
         });
       });
@@ -1028,10 +1035,18 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   // a cafe (the list source) — top-N extraction handles short lists gracefully.
   const listTargetReady =
     selectedNaver.length > 0 && selectedNaver.every((a) => !!naverPicks[a.id]);
+  // 밴드만 선택된 댓글 전용(네이버 list 대상이 없음)은 밴드 대상(최신/인기)으로 충분하다.
+  // 밴드는 url 미지원이라 latest/popular(isListTarget)일 때만 준비된 것으로 본다.
+  const bandOnlyCommentReady =
+    selectedNaver.length === 0 &&
+    selPlatforms.includes("band") &&
+    selectedBands.length > 0 &&
+    isListTarget;
   const commentReady =
     mode !== "comment" ||
     (comments.length > 0 &&
-      (isListTarget ? listTargetReady : urlTarget !== null));
+      ((isListTarget ? listTargetReady : urlTarget !== null) ||
+        bandOnlyCommentReady));
   // 게시판이 아직 안 정해진 네이버 계정은 job 생성에서 빠진다. 이들이 있으면 게시를
   // 막아 "일부만 올라가고 나머지는 결과에도 안 뜨는" 조용한 부분 게시를 방지한다.
   const naverNotReady = unreadyNaverAccountIds(
@@ -1272,14 +1287,46 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       ),
     ).then((forumArr) => forumArr.flat());
 
-    // 밴드(band.us): 저장된 링크로 가입 후 글(+댓글) 게시 — 순수 HTTP 백엔드 호출.
-    // 댓글 모드(both/comment)면 비어있지 않은 댓글을 모두 같은 글에 단다(카페 both와 동일).
-    // 댓글 풀은 카페와 동일하게 위에서 만든 `comments`를 재사용한다.
+    // 밴드(band.us): comment 모드는 기존 글(최신글/인기글) 상위 N개에 댓글(band_comment),
+    // 그 외(post/both)는 가입 후 글(+댓글) 게시(band_publish) — 모두 순수 HTTP 백엔드 호출.
+    // both/comment면 비어있지 않은 댓글을 모두 같은 글에 단다(카페 both와 동일, #192).
     const bandComments = mode === "both" || mode === "comment" ? comments : [];
+    const bandMode: "latest" | "popular" =
+      commentTargetMode === "popular" ? "popular" : "latest";
     const bandWork: Promise<PublishResult[]> = Promise.all(
       bandJobs.map((j) => {
         // 잡 생성 시 동결한 가입 링크를 쓴다(밴드명 재조회 없이 정확한 밴드).
         const link = j.bandLink ?? "";
+        if (mode === "comment") {
+          // 밴드는 url(특정 글) 댓글을 지원하지 않는다. latest로 조용히 떨어뜨리면 엉뚱한
+          // 최신글에 댓글이 달리므로, 오라우팅 대신 실패로 표기한다.
+          if (commentTargetMode === "url") {
+            return Promise.resolve({
+              ...j,
+              ok: false,
+              msg: "밴드는 특정 글(URL) 댓글을 지원하지 않아요",
+            });
+          }
+          // 댓글 전용: 기존 글(최신/인기) 상위 count개에 댓글 풀을 1개씩 분배해 단다.
+          return ipc.band
+            .comment({
+              accountId: j.loginId,
+              bandLink: link,
+              mode: bandMode,
+              count: commentCount,
+              comments: bandComments,
+            })
+            .then((out) => ({
+              ...j,
+              targetName: out.bandName ?? j.targetName,
+              ok: out.commentedCount > 0,
+              msg:
+                out.commentedCount > 0
+                  ? `${out.targetCount}글 중 댓글 ${out.commentedCount}개 게시 완료`
+                  : "댓글 대상 글을 찾지 못했어요",
+            }))
+            .catch((err: unknown) => ({ ...j, ok: false, msg: errText(err) }));
+        }
         return ipc.band
           .publish({
             // 백엔드는 loginId(쿠키 파일 키)로 band 로그인 쿠키를 찾는다.
@@ -1370,6 +1417,15 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     return { mode: commentTargetMode, count: commentCount, cafeId };
   };
 
+  // 밴드 댓글 전용(comment) 모드의 동결 대상. 밴드는 기존 글(최신/인기)에만 댓글을 달고
+  // url 댓글은 지원하지 않아 url이면 latest로 편다(백엔드 run_band_targets도 동일 폴백).
+  // cafeId/articleId는 밴드에서 쓰지 않으므로 비운다(백엔드는 mode/count만 본다).
+  const bandCommentSpecFor = (): CommentTargetSpec | undefined => {
+    if (mode !== "comment") return undefined;
+    const m = commentTargetMode === "popular" ? "popular" : "latest";
+    return { mode: m, count: commentCount };
+  };
+
   // 예약 plan(동결 실행 페이로드): 본문은 모달이 이미 평문화한 값을 박제하고,
   // 엔진이 있는 naver/forum/band 대상을 모두 싣는다. naver의 cafe/menuId/
   // boardType은 toPostJob과 동일하게 naverPicks에서 구하고, band 링크는
@@ -1397,14 +1453,25 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         name: j.targetName,
         code: j.code ?? "",
       }));
-    const band: BandTarget[] = jobs
-      .filter((j) => j.platform === "band")
-      .map((j) => ({
-        accountId: j.loginId,
-        name: j.targetName,
-        // 잡 생성 시 동결한 링크를 그대로 싣는다(밴드명 재조회 없음).
-        link: j.bandLink ?? "",
-      }));
+    const bandSpec = bandCommentSpecFor();
+    // 밴드는 url(특정 글) 댓글을 지원하지 않는다 — runNow는 실패로 표기한다(위 1303행).
+    // 예약 plan은 url 모드일 때 밴드 대상을 싣지 않는다(안 그러면 bandCommentSpecFor가
+    // latest로 접혀 엉뚱한 최신글에 댓글이 달린다). 카페 url 대상은 그대로 실린다.
+    const bandUrlUnsupported =
+      mode === "comment" && commentTargetMode === "url";
+    const band: BandTarget[] = bandUrlUnsupported
+      ? []
+      : jobs
+          .filter((j) => j.platform === "band")
+          .map((j) => ({
+            accountId: j.loginId,
+            name: j.targetName,
+            // 잡 생성 시 동결한 링크를 그대로 싣는다(밴드명 재조회 없음).
+            link: j.bandLink ?? "",
+            // 댓글 전용 모드면 기존 글(최신/인기) 대상을 동결한다(없으면 워커가 새 글을 쓰는
+            // band_publish로 가 리더 승인제 밴드에서 1003이 난다).
+            ...(bandSpec ? { commentTarget: bandSpec } : {}),
+          }));
     return {
       postId: doc.id,
       kind: doc.kind,

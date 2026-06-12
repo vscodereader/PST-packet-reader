@@ -101,6 +101,28 @@ export interface BandPublishOutcome {
   bandName: string | null;
 }
 
+/** 밴드 댓글 전용 요청 — 기존 글(최신글/인기글) 상위 count개에 댓글. */
+export interface BandCommentRequest {
+  accountId: string;
+  bandLink: string;
+  /** 대상 글 정렬: 최신글(latest)/인기글(popular). */
+  mode: "latest" | "popular";
+  /** 상위 몇 개 글에 댓글을 달지. */
+  count: number;
+  /** 댓글 풀(대상 글마다 1개씩 분배). */
+  comments: string[];
+}
+
+/** 밴드 댓글 전용 결과(band_post::BandCommentOutcome 미러). */
+export interface BandCommentOutcome {
+  /** 댓글 대상으로 조회된 글 수(상위 N개). */
+  targetCount: number;
+  /** 성공한 댓글 개수. */
+  commentedCount: number;
+  /** 실제 밴드 이름. 없으면 null. */
+  bandName: string | null;
+}
+
 /** A naver-login account (auth module): keyed by loginId so cookies land at cookies/{loginId}.json. */
 export interface AuthAccount {
   id: string;
@@ -260,6 +282,9 @@ export const ipc = {
   band: {
     publish: (request: BandPublishRequest) =>
       call<BandPublishOutcome>("band_publish", { ...request }),
+    /** 밴드 댓글 전용 — 기존 글(최신글/인기글) 상위 count개에 댓글을 단다. */
+    comment: (request: BandCommentRequest) =>
+      call<BandCommentOutcome>("band_comment", { ...request }),
     /**
      * 밴드 계정 선택로그인 — 네이버가 아니라 band.us(CDP)로 로그인한다.
      * 네이버 로그인 큐와 분리된 band 큐를 쓴다(상태는 queueStatus로 폴링).

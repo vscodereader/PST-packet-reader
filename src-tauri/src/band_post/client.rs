@@ -264,6 +264,113 @@ impl BandHttpClient {
         }
         Ok(name)
     }
+
+    /// 서명된 GET 요청을 보내고 `result_data`를 반환한다(`get_band_name`과 동일 규약:
+    /// path+ts를 md로 서명). `path`는 `?ts=...`까지 포함한 전체 경로여야 한다 — 서명 대상이
+    /// 곧 전송 경로라, 인기글 `feed_next_param`처럼 인코딩이 필요한 값도 일치한다.
+    async fn get_signed(
+        &self,
+        path: &str,
+        referer: &str,
+        key: &BandAuthKey,
+        cookie_header: &str,
+    ) -> Result<Value, BandPostError> {
+        let md = if key.is_jwt_type {
+            make_md_jwt(&key.secret_key, path)
+        } else {
+            make_md(&key.secret_key, path)
+        };
+        let url = format!("{}{}", self.api_base, path);
+
+        let mut req = self.http.get(&url);
+        for (name, value) in band_api_headers() {
+            req = req.header(&name, &value);
+        }
+        req = req
+            .header("md", md)
+            .header("Cookie", cookie_header)
+            .header("Origin", API_ORIGIN)
+            .header("Referer", referer)
+            .header("User-Agent", BROWSER_USER_AGENT);
+
+        let resp = req.send().await.map_err(transport)?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(transport)?;
+        let endpoint = path.split('?').next().unwrap_or(path);
+        tracing::info!("[BAND] GET {} → status={}", endpoint, status.as_u16());
+        if !status.is_success() {
+            return Err(BandPostError::Http {
+                status: status.as_u16(),
+                body: text,
+            });
+        }
+        Ok(parse_band_result(&text)?)
+    }
+
+    /// 최신글의 게시물 번호를 최대 `limit`개 조회한다(`get_posts_and_announcements`,
+    /// `order_by=created_at_desc&limit=N`). 단일 호출.
+    ///
+    /// 밴드 서버는 `limit`을 엄격히 지키지 않고 공지/고정글을 포함한 기본 페이지를 더
+    /// 많이 돌려줄 수 있어, 인기글([`get_popular_posts`])과 동일하게 클라이언트에서도
+    /// `limit`으로 잘라 요청 개수를 보장한다(안 자르면 "1개 선택했는데 5글에 댓글" 회귀).
+    pub async fn get_latest_posts(
+        &self,
+        band_no: &str,
+        limit: u32,
+        key: &BandAuthKey,
+        cookie_header: &str,
+    ) -> Result<Vec<u64>, BandPostError> {
+        let ts = now_millis();
+        let path = format!(
+            "/v2.0.0/get_posts_and_announcements?ts={ts}&band_no={band_no}&order_by=created_at_desc&limit={limit}&resolution_type=4"
+        );
+        let referer = format!("https://www.band.us/band/{band_no}/post");
+        let data = self.get_signed(&path, &referer, key, cookie_header).await?;
+        let mut post_nos = super::response::post_nos_from_feed(&data);
+        // 서버가 limit을 무시하고 더 보내도 요청 개수로 캡한다.
+        post_nos.truncate(limit as usize);
+        Ok(post_nos)
+    }
+
+    /// 인기글의 게시물 번호를 최대 `count`개 조회한다(`get_popular_posts`). 인기글은 `limit`이
+    /// 없어 `feed_next_param.offset`을 따라 페이지를 이어 받아 누적한다. 한 페이지가 비거나
+    /// 다음 토큰이 없으면(마지막) 멈춘다.
+    pub async fn get_popular_posts(
+        &self,
+        band_no: &str,
+        count: u32,
+        key: &BandAuthKey,
+        cookie_header: &str,
+    ) -> Result<Vec<u64>, BandPostError> {
+        let mut collected: Vec<u64> = Vec::new();
+        let mut next_param: Option<String> = None;
+        // 페이지 폭주 방지 가드(한 페이지 3~4개 기준 넉넉히).
+        let mut guard = 0;
+        while (collected.len() as u32) < count && guard < 20 {
+            guard += 1;
+            let ts = now_millis();
+            let mut path = format!(
+                "/v2.0.0/get_popular_posts?ts={ts}&band_no={band_no}&direction=before&resolution_type=4"
+            );
+            if let Some(fp) = &next_param {
+                // feed_next_param(JSON)을 퍼센트 인코딩해 경로에 싣고, 그 경로 그대로 서명·전송한다.
+                path.push_str(&format!("&feed_next_param={}", urlencoding::encode(fp)));
+            }
+            let referer = format!("https://www.band.us/band/{band_no}/post");
+            let data = self.get_signed(&path, &referer, key, cookie_header).await?;
+            let page = super::response::post_nos_from_feed(&data);
+            if page.is_empty() {
+                break;
+            }
+            collected.extend(page);
+            match super::response::feed_next_param_from_result(&data) {
+                Some(fp) => next_param = Some(fp),
+                None => break, // 마지막 페이지
+            }
+        }
+        collected.truncate(count as usize);
+        Ok(collected)
+    }
 }
 
 impl Default for BandHttpClient {
@@ -429,6 +536,70 @@ mod tests {
             .await
             .expect("조회 성공이어야 함");
         assert_eq!(name.as_deref(), Some("데일밴드"));
+    }
+
+    #[tokio::test]
+    async fn get_latest_posts_returns_post_nos() {
+        let api = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/v2\.0\.0/get_posts_and_announcements"))
+            .and(header_exists("md"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"result_code":1,"result_data":{"items":[{"post":{"post_no":8}},{"post":{"post_no":7}}]}}"#,
+            ))
+            .mount(&api)
+            .await;
+
+        let client = BandHttpClient::with_base_urls(api.uri(), "http://unused");
+        let posts = client
+            .get_latest_posts("103043410", 3, &test_key(), FAKE_COOKIE)
+            .await
+            .expect("최신글 조회 성공이어야 함");
+        assert_eq!(posts, vec![8, 7]);
+    }
+
+    #[tokio::test]
+    async fn get_latest_posts_truncates_when_server_returns_more_than_limit() {
+        // 회귀 방지: 서버가 limit을 무시하고 5건을 줘도 요청 개수(2)로 잘라야 한다.
+        // ("최신글 1·3개 선택했는데 5글에 댓글" 버그의 근본 원인.)
+        let api = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/v2\.0\.0/get_posts_and_announcements"))
+            .and(header_exists("md"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"result_code":1,"result_data":{"items":[{"post":{"post_no":8}},{"post":{"post_no":7}},{"post":{"post_no":6}},{"post":{"post_no":5}},{"post":{"post_no":4}}]}}"#,
+            ))
+            .mount(&api)
+            .await;
+
+        let client = BandHttpClient::with_base_urls(api.uri(), "http://unused");
+        let posts = client
+            .get_latest_posts("103043410", 2, &test_key(), FAKE_COOKIE)
+            .await
+            .expect("최신글 조회 성공이어야 함");
+        assert_eq!(posts, vec![8, 7]);
+    }
+
+    #[tokio::test]
+    async fn get_popular_posts_truncates_to_count_and_stops_on_null_next() {
+        let api = MockServer::start().await;
+        // 한 페이지에 3건 + 다음 토큰 없음(null) → count=2면 앞 2건만, 추가 호출 없음.
+        // 인기글 실제 구조: 항목 자체가 글이라 post_no가 최상위(post 래퍼 없음).
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/v2\.0\.0/get_popular_posts"))
+            .and(header_exists("md"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"result_code":1,"result_data":{"paging":{"next_params":null},"items":[{"post_no":3709},{"post_no":3710},{"post_no":3711}]}}"#,
+            ))
+            .mount(&api)
+            .await;
+
+        let client = BandHttpClient::with_base_urls(api.uri(), "http://unused");
+        let posts = client
+            .get_popular_posts("72247938", 2, &test_key(), FAKE_COOKIE)
+            .await
+            .expect("인기글 조회 성공이어야 함");
+        assert_eq!(posts, vec![3709, 3710]);
     }
 
     #[tokio::test]

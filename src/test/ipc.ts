@@ -1134,6 +1134,23 @@ export const invoke = vi.fn(
               : `밴드 ${bandNo}`,
         });
       }
+      case "band_comment": {
+        // 밴드 댓글 전용 목: 대상 count개 글에 댓글 풀을 1개씩 분배(엔진 동작 미러).
+        // 댓글 풀이 비어있지 않으면 count개 글 모두 성공으로 본다.
+        const link = String(args!.bandLink ?? "");
+        const m = link.match(/\/band\/(\d+)|^(\d+)$/);
+        const bandNo = m ? (m[1] ?? m[2]) : "0";
+        const count = Number(args!.count ?? 0);
+        const comments = Array.isArray(args!.comments)
+          ? (args!.comments as string[])
+          : [];
+        const hasComment = comments.some((c) => c.trim());
+        return clone({
+          targetCount: count,
+          commentedCount: hasComment ? count : 0,
+          bandName: bandNo === "103043410" ? "데일밴드" : `밴드 ${bandNo}`,
+        });
+      }
       case "record_band_batch":
         // 밴드 게시 결과를 알림 배치에 기록(부작용). 테스트에선 호출 여부만 보므로 no-op.
         return clone(null);

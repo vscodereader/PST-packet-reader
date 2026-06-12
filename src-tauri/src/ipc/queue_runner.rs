@@ -19,7 +19,9 @@ use super::log_batches::{BatchItem, BatchItemStatus, LogBatch, MAX_LOG_BATCHES};
 use super::posts::{CommentTarget, ModeValue};
 use super::queue::{apply_cancel_now, PublishPlan, QueueNowItem, QueueState};
 use crate::band_post::error::BandPostError;
-use crate::band_post::{band_publish, BandPublishOutcome};
+use crate::band_post::{
+    band_comment, band_publish, BandCommentOutcome, BandFeedSort, BandPublishOutcome,
+};
 use crate::discussion_batch::{run_forum_publish, ForumPublishRequest, ForumPublishResult};
 use crate::naver_automation::types::DiscussionStock;
 use crate::naver_cafe::article_list::models::SortBy;
@@ -91,14 +93,22 @@ struct ForumOutcome {
     result: ForumPublishResult,
 }
 
-/// 밴드 게시 결과 1건 — 어느 계정·밴드(표시 이름)로 돌렸는지와 `band_publish` 결과를
-/// 묶는다. 성공/실패 모두 완료 로그(`PlatformId::Band`)에 남기려고 보존한다. 게시 응답에
-/// 실제 밴드명이 와도(`outcome.band_name`) 로그 라벨은 예약 시점에 동결된 `band_name`을
-/// 우선 쓴다(forum이 동결 이름을 쓰는 것과 일관).
+/// 밴드 실행 1건의 결과 — post/both는 새 글 게시(`BandPublishOutcome`), comment 전용은
+/// 기존 글(최신/인기)에 댓글(`BandCommentOutcome`). 둘은 로그 문구·성공 판정이 달라
+/// 구분해 보존한다.
+enum BandJobResult {
+    Published(BandPublishOutcome),
+    Commented(BandCommentOutcome),
+}
+
+/// 밴드 게시 결과 1건 — 어느 계정·밴드(표시 이름)로 돌렸는지와 실행 결과를 묶는다.
+/// 성공/실패 모두 완료 로그(`PlatformId::Band`)에 남기려고 보존한다. 게시 응답에 실제
+/// 밴드명이 와도 로그 라벨은 예약 시점에 동결된 `band_name`을 우선 쓴다(forum이 동결
+/// 이름을 쓰는 것과 일관).
 struct BandOutcome {
     account_id: String,
     band_name: String,
-    result: Result<BandPublishOutcome, BandPostError>,
+    result: Result<BandJobResult, BandPostError>,
 }
 
 /// 위에서부터 첫 `Waiting` 아이템을 고른다(`Running`은 건너뛴다).
@@ -493,28 +503,51 @@ async fn run_band_targets<R: Runtime>(
     plan: &PublishPlan,
     id: &str,
 ) -> Vec<BandOutcome> {
-    // comment/both면 댓글 풀 전체를 넘긴다. 즉시게시(runNow)와 동일하게 band_publish가
-    // 비어있지 않은 댓글을 모두 같은 글에 순서대로 단다(공백은 내부에서 무시). post 전용
-    // 모드면 빈 슬라이스라 댓글을 달지 않는다(같은 입력, 다른 결과 방지).
+    // comment/both면 댓글 풀 전체를 넘긴다. post/both는 새 글에, comment 전용은 기존
+    // 글(최신/인기)에 같은 풀을 분배해 단다. post 전용 모드면 빈 슬라이스라 댓글 없음.
     let comments: &[String] = if runs_comment(plan) {
         &plan.comments
     } else {
         &[]
     };
+    // 댓글 전용 모드는 새 글을 쓰지 않는다. band_publish(create_post)는 리더 승인제
+    // 밴드에서 result_code=1003("리더 승인 후 등록")을 부르므로, 기존 글에 댓글을 다는
+    // band_comment로 간다(즉시게시 runNow의 댓글 전용 경로와 동일).
+    let comment_only = matches!(plan.kind, ModeValue::Comment);
     let mut outcomes = Vec::new();
     for t in &plan.band {
         // 밴드 게시도 비가역적이라, 시작 전마다 취소를 확인해 멈춘다(forum과 동일).
         if !item_present(app, id) {
             break;
         }
-        let result = band_publish(
-            &t.account_id,
-            &t.link,
-            &plan.title,
-            &plan.body_text,
-            comments,
-        )
-        .await;
+        let result = if comment_only {
+            // 대상 spec에서 정렬·개수를 꺼낸다. 밴드는 url 미지원이라 latest로 편다.
+            // spec이 없으면(비정상) 최신글 1개 기본 — 어떤 경우에도 새 글은 쓰지 않는다.
+            let (sort, count) = match &t.comment_target {
+                Some(spec) => (
+                    if matches!(spec.mode, CommentTarget::Popular) {
+                        BandFeedSort::Popular
+                    } else {
+                        BandFeedSort::Latest
+                    },
+                    spec.count.unwrap_or(1).max(1),
+                ),
+                None => (BandFeedSort::Latest, 1),
+            };
+            band_comment(&t.account_id, &t.link, sort, count, comments)
+                .await
+                .map(BandJobResult::Commented)
+        } else {
+            band_publish(
+                &t.account_id,
+                &t.link,
+                &plan.title,
+                &plan.body_text,
+                comments,
+            )
+            .await
+            .map(BandJobResult::Published)
+        };
         outcomes.push(BandOutcome {
             account_id: t.account_id.clone(),
             band_name: t.name.clone(),
@@ -815,32 +848,43 @@ fn build_log_batch(
     }
 
     for o in band_outcomes {
-        // 댓글 부분 실패도 드러낸다(카페 commentsAllOk와 동일): 시도한 댓글이 있는데
-        // 성공분이 모자라면(commented_count < comment_total) 성공으로 묻지 않고 실패로 둔다.
-        let band_comments_failed = matches!(
-            &o.result,
-            Ok(out) if out.comment_total > 0 && out.commented_count < out.comment_total
-        );
+        // post/both는 새 글(+댓글), comment 전용은 기존 글 댓글. 둘 다 부분 실패를 드러낸다
+        // (성공분이 모자라면 성공으로 묻지 않는다). 즉시게시 runNow 문구와 동일하게 "N/M개".
+        let (status, msg) = match &o.result {
+            Ok(BandJobResult::Published(out)) => {
+                let ok = out.comment_total == 0 || out.commented_count >= out.comment_total;
+                let msg = if out.comment_total > 0 {
+                    format!(
+                        "글·댓글 {}/{}개 게시 완료",
+                        out.commented_count, out.comment_total
+                    )
+                } else {
+                    "글 게시 완료".to_owned()
+                };
+                (status_of(ok), msg)
+            }
+            Ok(BandJobResult::Commented(out)) => {
+                // 한 건도 못 달면(대상 글 없음/전부 실패) 실패로 둔다(즉시게시 판정과 동일).
+                let msg = if out.target_count > 0 {
+                    format!(
+                        "댓글 {}/{}개 게시 완료",
+                        out.commented_count, out.target_count
+                    )
+                } else {
+                    "댓글 대상 글 없음".to_owned()
+                };
+                (status_of(out.commented_count > 0), msg)
+            }
+            Err(e) => (BatchItemStatus::Fail, e.to_string()),
+        };
         items.push(BatchItem {
             platform: PlatformId::Band,
             target: o.band_name.clone(),
             code: None,
             board: None,
             login_id: o.account_id.clone(),
-            status: match &o.result {
-                Ok(_) if !band_comments_failed => BatchItemStatus::Success,
-                _ => BatchItemStatus::Fail,
-            },
-            // 글·댓글 성공/시도 개수를 "N/M개"로 보여준다(즉시게시 runNow 문구와 동일).
-            // 댓글을 시도하지 않았으면 "글 게시 완료". 실패 시 BandPostError 메시지를 그대로.
-            msg: match &o.result {
-                Ok(out) if out.comment_total > 0 => format!(
-                    "글·댓글 {}/{}개 게시 완료",
-                    out.commented_count, out.comment_total
-                ),
-                Ok(_) => "글 게시 완료".to_owned(),
-                Err(e) => e.to_string(),
-            },
+            status,
+            msg,
             trace: match &o.result {
                 Ok(_) => None,
                 Err(e) => Some(e.to_string()),
@@ -1065,6 +1109,7 @@ mod tests {
             account_id: account.into(),
             name: name.into(),
             link: link.into(),
+            comment_target: None,
         }
     }
 
@@ -1077,14 +1122,31 @@ mod tests {
         BandOutcome {
             account_id: account.into(),
             band_name: name.into(),
-            result: Ok(BandPublishOutcome {
+            result: Ok(BandJobResult::Published(BandPublishOutcome {
                 joined: true,
                 post_no: 100,
                 web_url: "https://band.us/band/1/post/100".into(),
                 commented_count,
                 comment_total,
                 band_name: Some(name.into()),
-            }),
+            })),
+        }
+    }
+
+    fn band_commented(
+        account: &str,
+        name: &str,
+        commented_count: usize,
+        target_count: usize,
+    ) -> BandOutcome {
+        BandOutcome {
+            account_id: account.into(),
+            band_name: name.into(),
+            result: Ok(BandJobResult::Commented(BandCommentOutcome {
+                target_count,
+                commented_count,
+                band_name: Some(name.into()),
+            })),
         }
     }
 
@@ -1599,6 +1661,34 @@ mod tests {
         // 실패는 BandPostError 메시지를 msg/trace에 남긴다(조용한 누락 방지).
         assert!(b.items[3].trace.is_some());
         assert!(!b.items[3].msg.is_empty());
+    }
+
+    #[test]
+    fn build_log_batch_maps_band_comment_only_outcomes() {
+        // 댓글 전용(comment) 모드: 새 글을 쓰지 않고 기존 글에 댓글을 단 결과를 남긴다.
+        // 한 건도 못 달면(대상 0/전부 실패) 성공으로 묻지 않고 Fail로 둔다(즉시게시 판정 동일).
+        let p = plan(ModeValue::Comment, vec![]);
+        let bands = vec![
+            band_commented("u0", "투자밴드", 3, 3), // 대상 3글 전부 성공
+            band_commented("u1", "정보밴드", 0, 2), // 대상 있었으나 전부 실패 → Fail
+            band_commented("u2", "빈밴드", 0, 0),   // 댓글 대상 글 없음 → Fail
+        ];
+        let b = build_log_batch(&p, &[], &[], &[], &bands, &[], 1, 0);
+        assert_eq!(b.items.len(), 3);
+
+        assert_eq!(b.items[0].platform, PlatformId::Band);
+        assert_eq!(b.items[0].target, "투자밴드");
+        assert_eq!(b.items[0].status, BatchItemStatus::Success);
+        assert_eq!(b.items[0].msg, "댓글 3/3개 게시 완료");
+        assert!(b.items[0].trace.is_none());
+
+        // 대상은 있었으나 전부 실패: Fail + "0/N개"로 드러낸다.
+        assert_eq!(b.items[1].status, BatchItemStatus::Fail);
+        assert_eq!(b.items[1].msg, "댓글 0/2개 게시 완료");
+
+        // 댓글 대상 글 자체가 없음: Fail + 전용 문구.
+        assert_eq!(b.items[2].status, BatchItemStatus::Fail);
+        assert_eq!(b.items[2].msg, "댓글 대상 글 없음");
     }
 
     #[tokio::test]
