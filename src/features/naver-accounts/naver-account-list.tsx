@@ -82,10 +82,10 @@ export function NaverAccountList() {
       const status = await invoke<QueueStatus>("enqueue_cookie_refresh", {
         accountIds: accounts.map((a) => a.id),
         headless: false,
-        // IP 로테이션 스위치: false=폰 없이 로그인만(로테이션 안 함). 계정마다 모바일
-        // IP를 바꾸려면 true로 — 단 폰 USB 연결 + PATH에 adb 필요(winget Google.PlatformTools).
+        // IP 로테이션 스위치: true=계정마다 모바일 IP를 바꾼 뒤 로그인한다(#196). 폰 USB
+        // 연결 + PATH에 adb 필요(winget Google.PlatformTools) — 없으면 로그인이 실패한다.
         // 백엔드: src-tauri/src/auth/adb.rs toggle_airplane_mode.
-        useAdb: false,
+        useAdb: true,
       });
       setQueueStatus(status);
     } catch (err) {

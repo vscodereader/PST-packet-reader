@@ -121,7 +121,7 @@ describe("NaverAccountList", () => {
       expect(invoke).toHaveBeenCalledWith("enqueue_cookie_refresh", {
         accountIds: ["myid"],
         headless: false,
-        useAdb: false,
+        useAdb: true,
       });
     });
   });
