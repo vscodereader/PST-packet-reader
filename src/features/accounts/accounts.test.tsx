@@ -406,12 +406,14 @@ describe("Accounts", () => {
     await userEvent.click(checkboxes[1]!);
     await userEvent.click(screen.getByRole("button", { name: /선택 로그인/ }));
 
-    // 밴드 계정은 네이버가 아니라 band 로그인 큐로 enqueue 되어야 한다.
+    // 밴드 계정은 네이버가 아니라 band 로그인 큐로 enqueue 되어야 한다. 명시적 재로그인
+    // 이므로 force=true로 보내 유효 쿠키여도 실제 로그인해 비밀번호를 검증한다(#132 미러).
     await waitFor(() =>
       expect(ipcBackend).toHaveBeenCalledWith("enqueue_band_login", {
         accountIds: ["invest_king7"],
         headless: false,
         useAdb: false,
+        force: true,
       }),
     );
     // 네이버 로그인(enqueue_cookie_refresh)은 호출되지 않아야 한다.

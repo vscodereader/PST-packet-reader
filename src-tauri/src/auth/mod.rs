@@ -5,7 +5,8 @@ pub mod config;
 mod error;
 mod login;
 mod login_flow;
-mod outcome;
+// band_auth가 로그인 결과 매핑(`LoginResolution`)을 재사용하도록 크레이트 내부에 공개한다.
+pub(crate) mod outcome;
 mod paths;
 mod queue;
 mod types;

@@ -378,10 +378,13 @@ export function Accounts({ go }: { go: GoFn }) {
       }
       if (bandTargets.length > 0) {
         // 밴드 선택로그인: band.us(CDP)로 로그인. 랜선만 꽂으면 되며 ADB 불필요.
+        // force=true: 명시적 재로그인이므로 유효 쿠키여도 실제 로그인해 새 비밀번호를
+        // 검증한다(틀린 비번으로 바꾼 뒤 재로그인이 그대로 성공하던 문제 방지, 네이버 #132).
         await ipc.band.login(
           bandTargets.map((t) => t.loginId),
           false,
           false,
+          true,
         );
       }
       pollLogin(targets);

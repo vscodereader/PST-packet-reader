@@ -6,22 +6,26 @@ use std::path::Path;
 
 use serde_json::json;
 
+use crate::auth::outcome::LoginResolution;
 use crate::auth::{launch_debug_chrome, Account, OrchestratorError};
+use crate::ipc::accounts::AccountStatus;
 use crate::naver_automation::CdpClient;
 
 use super::{
     cookies::has_valid_band_cookie_file,
     login_flow::{self, BandLoginOutcome},
+    outcome::resolve_band_failure,
     paths::{band_cookie_file_path, ensure_band_cookies_dir},
     util::now_secs,
 };
 
-/// 한 계정을 band에 로그인하고 쿠키를 저장한다.
+/// 한 계정을 band에 로그인하고 쿠키를 저장한다. 성공/실패를 세분 상태(`LoginResolution`)로
+/// 돌려줘 호출부가 계정 status(active/badCredentials/blocked/error)에 반영하게 한다.
 pub(crate) fn login(
     cookies_dir: &Path,
     account: &Account,
     headless: bool,
-) -> Result<(), OrchestratorError> {
+) -> Result<LoginResolution, OrchestratorError> {
     let outcome = attempt(&account.id, &account.password, headless)?;
     finalize(cookies_dir, account, outcome)
 }
@@ -44,12 +48,13 @@ fn attempt(id: &str, pw: &str, headless: bool) -> Result<BandLoginOutcome, Orche
     Ok(outcome)
 }
 
-// 결과에 따라 쿠키를 저장하거나 명확한 오류를 반환한다.
+// 결과를 세분 상태로 해석한다. 쿠키 저장 IO 오류만 인프라 Err(`?`)로 올리고, 로그인 결과
+// (성공/비번오류/차단/오류)는 `LoginResolution`으로 돌려준다(네이버 `auth/queue.rs` 패턴).
 fn finalize(
     cookies_dir: &Path,
     account: &Account,
     outcome: BandLoginOutcome,
-) -> Result<(), OrchestratorError> {
+) -> Result<LoginResolution, OrchestratorError> {
     match outcome {
         BandLoginOutcome::Ok { cookies } => {
             ensure_band_cookies_dir(cookies_dir)?;
@@ -62,19 +67,16 @@ fn finalize(
             std::fs::write(&path, serde_json::to_string_pretty(&payload)?)?;
 
             if has_valid_band_cookie_file(&path)? {
-                Ok(())
+                Ok(LoginResolution::active())
             } else {
-                Err(OrchestratorError::CommandFailed(
-                    "저장된 쿠키에 유효한 band 세션(band_session)이 없습니다.".to_owned(),
+                // 쿠키는 저장됐지만 유효 세션이 없다 — 인프라 오류가 아닌 로그인 실패(error)로 본다.
+                Ok(LoginResolution::failure(
+                    AccountStatus::Error,
+                    "저장된 쿠키에 유효한 band 세션(band_session)이 없습니다.",
                 ))
             }
         }
-        BandLoginOutcome::BadCredentials => Err(OrchestratorError::CommandFailed(
-            "이메일 또는 비밀번호가 올바르지 않습니다.".to_owned(),
-        )),
-        BandLoginOutcome::Blocked => Err(OrchestratorError::CommandFailed(
-            "로그인 접근이 차단되었습니다(계정 상태 확인 필요).".to_owned(),
-        )),
-        BandLoginOutcome::Error(message) => Err(OrchestratorError::CommandFailed(message)),
+        // 실패 계열(비번오류/차단/오류)은 순수 매핑으로 세분 상태를 만든다.
+        other => Ok(resolve_band_failure(&other)),
     }
 }

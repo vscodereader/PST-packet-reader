@@ -260,12 +260,19 @@ export const ipc = {
     /**
      * 밴드 계정 선택로그인 — 네이버가 아니라 band.us(CDP)로 로그인한다.
      * 네이버 로그인 큐와 분리된 band 큐를 쓴다(상태는 queueStatus로 폴링).
+     * `force=true`면 유효 쿠키여도 실제 재로그인해 새 비밀번호를 검증한다(네이버 #132 미러).
      */
-    login: (accountIds: string[], headless = false, useAdb = false) =>
+    login: (
+      accountIds: string[],
+      headless = false,
+      useAdb = false,
+      force = false,
+    ) =>
       call<LoginQueueStatus>("enqueue_band_login", {
         accountIds,
         headless,
         useAdb,
+        force,
       }),
     queueStatus: () => call<LoginQueueStatus>("get_band_queue_status"),
     /** 링크(band_no)로 실제 밴드명을 조회한다(저장 시 표시용). accountId=band 쿠키 키. */
