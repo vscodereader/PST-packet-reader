@@ -1570,10 +1570,10 @@ mod tests {
         // 댓글 부분 실패(commented_count < comment_total)는 성공으로 묻지 않고 Fail로 둔다.
         let p = plan(ModeValue::Both, vec![]);
         let bands = vec![
-            band_ok("u0", "투자밴드", 2, 2),  // 글+댓글 전부 성공
-            band_ok("u1", "정보밴드", 0, 0),  // 글만 성공(댓글 미시도)
-            band_ok("u3", "부분밴드", 1, 2),  // 댓글 일부 실패 → Fail 표기
-            band_fail("u2", "실패밴드"),      // 게시 실패
+            band_ok("u0", "투자밴드", 2, 2), // 글+댓글 전부 성공
+            band_ok("u1", "정보밴드", 0, 0), // 글만 성공(댓글 미시도)
+            band_ok("u3", "부분밴드", 1, 2), // 댓글 일부 실패 → Fail 표기
+            band_fail("u2", "실패밴드"),     // 게시 실패
         ];
         let b = build_log_batch(&p, &[], &[], &[], &bands, &[], 1, 0);
         assert_eq!(b.items.len(), 4);
