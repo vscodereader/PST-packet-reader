@@ -19,6 +19,7 @@ import { notifications } from "@mantine/notifications";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { BandTarget } from "@/shared/bindings/BandTarget";
+import type { CafePublishNowResult } from "@/shared/bindings/CafePublishNowResult";
 import type { CommentTargetSpec } from "@/shared/bindings/CommentTargetSpec";
 import type { ForumTarget } from "@/shared/bindings/ForumTarget";
 import type { JoinedCafe } from "@/shared/bindings/JoinedCafe";
@@ -1071,130 +1072,103 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     };
   };
 
-  // post / both: post each naver article. For `both`, then comment on every
-  // successfully-posted article and fold a "댓글 N/M건" summary into its row.
-  const runNaverPosts = async (
+  // 카페 즉시 게시("지금 바로")용 plan을 만든다. 예약 경로와 같은 buildPlan을 재사용하되,
+  // comment 모드의 최신글/인기글 대상만 프론트가 지금 조회해(조회 실패는 즉시 토스트) 각 글을
+  // url 대상으로 박제한다 — 나머지(글/글+댓글/url 댓글)는 백엔드가 plan을 보고 처리한다.
+  // (글+댓글 self-comment 대상은 백엔드가 방금 쓴 글에서 잡으므로 여기서 다루지 않는다.)
+  const buildCafeNowPlan = async (): Promise<PublishPlan> => {
+    const plan = buildPlan();
+    if (mode !== "comment" || !isListTarget) return plan;
+    const sortBy = commentTargetMode === "popular" ? "popular" : "latest";
+    // 계정별로 cafe의 상위 N개 글을 조회해 각 글을 url 대상으로 펼친다. 조회 실패/빈 목록은
+    // 그 계정 대상이 0개가 된다(완료 로그/요약에서 "댓글 없음"으로 읽힌다).
+    const expanded = await Promise.all(
+      plan.naver.map(async (t) => {
+        const cafeId = t.commentTarget?.cafeId;
+        if (cafeId == null) return [];
+        const list = await ipc.cafes
+          .listArticles(cafeId, sortBy, t.accountId)
+          .catch((err) => {
+            notifications.show({
+              message: `${t.accountId} ${
+                sortBy === "popular" ? "인기글" : "최신글"
+              } 목록을 불러오지 못했어요: ${errText(err)}`,
+              color: "red",
+            });
+            return null;
+          });
+        if (!list) return [];
+        return topNArticles(list.articles, commentCount).map(
+          (a): NaverTarget => ({
+            ...t,
+            commentTarget: { mode: "url", cafeId, articleId: a.articleId },
+          }),
+        );
+      }),
+    );
+    return { ...plan, naver: expanded.flat() };
+  };
+
+  // 백엔드 통합 커맨드 결과(글/댓글 슬림 outcome)를 잡별 행으로 매핑한다. 인라인 결과패널이
+  // 기존(runPostJobs/runCommentJobs 직접 호출)과 동일하게 보이도록 같은 헬퍼를 재사용한다.
+  const mapCafeResult = (
     naverJobs: PublishJob[],
-  ): Promise<PublishResult[]> => {
-    if (!naverJobs.length) return [];
-    const outs = await ipc.cafes
-      .runPostJobs(naverJobs.map(toPostJob))
-      .catch((): null => null);
-    if (!outs) {
+    result: CafePublishNowResult,
+  ): PublishResult[] => {
+    if (mode === "comment") {
       return naverJobs.map((j) => ({
         ...j,
-        ok: false,
-        msg: "게시 실패 — 잠시 후 재시도",
+        // 한 계정의 댓글이 여러 건이면 모두 성공해야 성공으로 본다(일부 성공을 초록 배지로
+        // 묻지 않는다). 자세한 건수는 msg에.
+        ok: commentsAllOk(result.comments, j.loginId),
+        msg: commentSummary(result.comments, j.loginId),
       }));
     }
     const postResults = naverJobs.map((j, i) =>
-      outcomeToResult(j, outs[i], action),
+      outcomeToResult(j, result.posts[i], action),
     );
+    // 댓글이 없으면(both이지만 댓글 풀이 빔) 글 결과를 그대로 둔다 — 백엔드도 댓글을 달지
+    // 않으므로, 성공한 글을 "댓글 없음"으로 접어 실패처럼 보이게 하지 않는다.
     if (mode !== "both" || comments.length === 0) return postResults;
-
-    // Comment on each post that actually landed, reusing its returned articleId.
-    const posted = naverJobs
-      .map((j, i) => ({ j, out: outs[i] }))
-      .filter(
-        (x): x is { j: PublishJob; out: PublishOutcome } =>
-          !!x.out && x.out.success && x.out.articleId != null,
-      )
-      .map((x) => ({
-        accountId: x.j.loginId,
-        cafeId: naverPicks[x.j.key]?.cafeId ?? 0,
-        articleId: x.out.articleId as number,
-      }));
-    if (posted.length === 0) return postResults;
-    // both = "위에서 작성한 글에 바로 댓글이 달립니다": 쓴 글마다 댓글 풀 전체를 단다.
-    // 각 글을 댓글 수만큼 복제해 보내면, 백엔드 분배(셔플 후 pool[i % pool.len()])가
-    // 글 블록(길이 = 풀 크기)마다 풀 전체를 정확히 한 번씩 깔아 준다.
-    const targets = posted.flatMap((p) => comments.map(() => p));
-    const couts = await ipc.cafes
-      .runCommentJobs({ targets, comments })
-      .catch((): null => null);
-    // 글이 올라간 행이라도 그 계정 댓글이 전부 성공해야 "성공"으로 둔다. 일부/전부
-    // 실패를 초록 배지로 묻으면(이전 동작) 운영자가 재시도를 안 한다. 건수는 msg에.
+    // 글이 올라간 행이라도 그 계정 댓글이 전부 성공해야 "성공"으로 둔다(기존 정책 유지).
     return postResults.map((r) =>
       r.ok
         ? {
             ...r,
-            ok: commentsAllOk(couts, r.loginId),
-            msg: `${r.msg} · ${commentSummary(couts, r.loginId)}`,
+            ok: commentsAllOk(result.comments, r.loginId),
+            msg: `${r.msg} · ${commentSummary(result.comments, r.loginId)}`,
           }
         : r,
     );
   };
 
-  // comment-only: build the comment jobs from the chosen target, then run them.
-  //  • url            → the single parsed article, shared by every account.
-  //  • latest/popular → each account's picked cafe is queried for its
-  //                     latest/popular list, and the top-N (commentCount)
-  //                     articles become that account's targets (fewer than N →
-  //                     only what the list returned).
-  const runNaverComments = async (
+  // 네이버 카페 즉시 게시 진입점: plan을 구성해 백엔드 통합 커맨드(run_cafe_publish_now)를
+  // 호출한다. 글/댓글 게시와 알림 로그(LogBatch) 기록을 백엔드가 한 번에 수행하므로(#194),
+  // 밴드처럼 프론트가 recordBatch를 따로 호출하지 않는다 — 실패 사유 문구도 예약 게시와 일관.
+  const runNaverCafe = async (
     naverJobs: PublishJob[],
   ): Promise<PublishResult[]> => {
     if (!naverJobs.length) return [];
-    if (comments.length === 0 || (!isListTarget && !urlTarget)) {
+    if (
+      mode === "comment" &&
+      (comments.length === 0 || (!isListTarget && !urlTarget))
+    ) {
       return naverJobs.map((j) => ({
         ...j,
         ok: false,
         msg: "댓글 대상 또는 댓글 내용이 없어요",
       }));
     }
-    // Resolve the comment targets, then let the backend shuffle `comments` and
-    // deal one per target (issue #98). url → the single parsed article shared by
-    // every account; latest/popular → each account's cafe list, top-N as targets.
-    let targets: { accountId: string; cafeId: number; articleId: number }[];
-    if (isListTarget) {
-      const sortBy = commentTargetMode === "popular" ? "popular" : "latest";
-      // Per account: fetch its cafe's list and take the top-N. A failed/empty
-      // fetch yields no targets for that account (it then reads as "댓글 없음").
-      const perAccount = await Promise.all(
-        naverJobs.map(async (j) => {
-          const cafeId = naverPicks[j.key]?.cafeId;
-          if (!cafeId) return [];
-          // Surface a fetch failure as a toast so it's distinguishable from a
-          // cafe that genuinely has no articles — both otherwise read as the
-          // benign "댓글 없음" row, hiding session/network errors.
-          const list = await ipc.cafes
-            .listArticles(cafeId, sortBy, j.loginId)
-            .catch((err) => {
-              notifications.show({
-                message: `${j.loginId} ${
-                  sortBy === "popular" ? "인기글" : "최신글"
-                } 목록을 불러오지 못했어요: ${errText(err)}`,
-                color: "red",
-              });
-              return null;
-            });
-          if (!list) return [];
-          return topNArticles(list.articles, commentCount).map((a) => ({
-            accountId: j.loginId,
-            cafeId,
-            articleId: a.articleId,
-          }));
-        }),
-      );
-      targets = perAccount.flat();
-    } else {
-      targets = naverJobs.map((j) => ({
-        accountId: j.loginId,
-        cafeId: urlTarget!.cafeId,
-        articleId: urlTarget!.articleId,
+    const plan = await buildCafeNowPlan();
+    const result = await ipc.cafes.publishNow(plan).catch((): null => null);
+    if (!result) {
+      return naverJobs.map((j) => ({
+        ...j,
+        ok: false,
+        msg: "게시 실패 — 잠시 후 재시도",
       }));
     }
-
-    const couts = await ipc.cafes
-      .runCommentJobs({ targets, comments })
-      .catch((): null => null);
-    return naverJobs.map((j) => ({
-      ...j,
-      // 한 계정의 댓글이 여러 건이면 모두 성공해야 성공으로 본다 — 일부만 올라간
-      // 경우(예: 2건 중 1건)를 성공 배지로 묻지 않는다. 자세한 건수는 msg에 표시.
-      ok: commentsAllOk(couts, j.loginId),
-      msg: commentSummary(couts, j.loginId),
-    }));
+    return mapCafeResult(naverJobs, result);
   };
 
   // Publish now: naver cafe(글/댓글)·종목토론방(forum)·밴드(band)는 실제 백엔드를
@@ -1213,11 +1187,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         j.platform !== "band",
     );
 
-    // 네이버 카페: 실제 백엔드(글/댓글).
-    const naverWork: Promise<PublishResult[]> =
-      mode === "comment"
-        ? runNaverComments(naverJobs)
-        : runNaverPosts(naverJobs);
+    // 네이버 카페: 백엔드 통합 커맨드가 글/댓글 게시 + 알림 로그 기록을 함께 수행한다(#194).
+    const naverWork: Promise<PublishResult[]> = runNaverCafe(naverJobs);
 
     // 종목토론방(forum): 패킷 게시 엔진을 계정별로 호출한다.
     const ep = endpoint;

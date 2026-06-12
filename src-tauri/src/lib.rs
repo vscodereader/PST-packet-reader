@@ -672,6 +672,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         cafes::run_comment_jobs,
         cafes::list_joined_cafes,
         cafes::list_cafe_articles,
+        ipc::queue_runner::run_cafe_publish_now,
         bands::list_bands,
         diagnostics::get_environment_status,
         diagnostics::open_chrome_download,

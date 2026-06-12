@@ -3,7 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
-import type { LibraryPost } from "@/shared/data/types";
+import type { LibraryPost, PublishPlan } from "@/shared/data/types";
 import {
   invoke as ipcBackend,
   resetIpc,
@@ -132,7 +132,7 @@ describe("PublishModal", () => {
     vi.restoreAllMocks();
   });
 
-  it("publishes naver jobs through the real run_post_jobs command", async () => {
+  it("publishes naver jobs through the cafe immediate-publish command", async () => {
     renderPublish();
     // Swap the preselected forum account for a naver one. Selecting it loads
     // that account's joined cafes; picking a cafe resolves its boards (first
@@ -154,18 +154,22 @@ describe("PublishModal", () => {
     expect(
       await screen.findByText(/글 게시 완료/, undefined, { timeout: 3000 }),
     ).toBeInTheDocument();
+    // 즉시 게시는 백엔드 통합 커맨드(run_cafe_publish_now)로 plan을 보낸다 — 글/댓글 게시와
+    // 알림 로그 기록을 한 번에 수행한다(#194). plan.naver에 동결된 글 정보가 실린다.
     expect(ipcBackend).toHaveBeenCalledWith(
-      "run_post_jobs",
+      "run_cafe_publish_now",
       expect.objectContaining({
-        jobs: [
-          expect.objectContaining({
-            // 백엔드는 쿠키 파일 키(loginId)로 계정을 찾는다 — UI 고유 id("a5")가 아니다.
-            accountId: "money_lab",
-            cafe: "11111111",
-            menuId: 1,
-            boardType: "L",
-          }),
-        ],
+        plan: expect.objectContaining({
+          naver: [
+            expect.objectContaining({
+              // 백엔드는 쿠키 파일 키(loginId)로 계정을 찾는다 — UI 고유 id("a5")가 아니다.
+              accountId: "money_lab",
+              cafe: "11111111",
+              menuId: 1,
+              boardType: "L",
+            }),
+          ],
+        }),
       }),
     );
   });
@@ -498,30 +502,58 @@ describe("PublishModal", () => {
         { timeout: 3000 },
       ),
     );
-    // post lands first…
-    expect(ipcBackend).toHaveBeenCalledWith("run_post_jobs", expect.anything());
-    // …then both 모드는 쓴 글(articleId 1000)에 댓글 풀 전체를 단다: 글을 댓글 수만큼
-    // 복제해 보내 백엔드 분배가 글마다 풀 전체를 깔게 한다(여기선 글 1개 × 댓글 2개).
-    const call = ipcBackend.mock.calls.find((c) => c[0] === "run_comment_jobs");
+    // 즉시 게시는 통합 커맨드 하나로 글+댓글을 보낸다(both): plan.kind=both, 댓글 풀 전체를
+    // 싣고, 방금 쓴 글에 self-comment를 다는 일은 백엔드가 맡는다(#194).
+    const call = ipcBackend.mock.calls.find(
+      (c) => c[0] === "run_cafe_publish_now",
+    );
     expect(call).toBeDefined();
-    const req = (
-      call?.[1] as {
-        req: {
-          targets: { accountId: string; cafeId: number; articleId: number }[];
-          comments: string[];
-        };
-      }
-    ).req;
-    expect(req.targets).toHaveLength(2);
+    const plan = (call?.[1] as { plan: PublishPlan }).plan;
+    expect(plan.kind).toBe("both");
+    expect(plan.naver).toHaveLength(1);
+    expect(plan.naver[0]).toEqual(
+      expect.objectContaining({ accountId: "money_lab", cafe: "11111111" }),
+    );
+    expect(plan.comments).toEqual(["좋네요", "굿"]);
+    // 글 1개 × 댓글 2개가 모두 성공 → 행에 "댓글 2/2건"이 보인다.
     expect(
-      req.targets.every(
-        (t) =>
-          t.accountId === "money_lab" &&
-          t.cafeId === 11111111 &&
-          t.articleId === 1000,
+      await screen.findByText(/댓글 2\/2건/, undefined, { timeout: 3000 }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a posted article successful in 'both' mode with no comment text", async () => {
+    // both 문서이지만 댓글 풀이 비면 백엔드는 글만 게시한다. 성공한 글을 "댓글 없음"으로
+    // 접어 실패처럼 보이게 하면 안 된다(commentsAllOk([])가 false라 회귀하기 쉬운 지점).
+    const bothNoComments: LibraryPost = {
+      id: "lbnc",
+      title: "글만 있는 글+댓글",
+      kind: "both",
+      updated: "방금 전",
+      words: 100,
+      status: "ready",
+      excerpt: "요약",
+      body: "<p>본문</p>",
+      comments: [],
+    };
+    renderPublish({ doc: bothNoComments });
+    await userEvent.click(await screen.findByText("invest_king7")); // drop forum
+    await userEvent.click(screen.getByText("money_lab")); // a5 naver
+    await screen.findByPlaceholderText("가입 카페 선택");
+    await pickOption(0, "주식투자연구소 카페");
+    await userEvent.click(
+      await screen.findByRole(
+        "button",
+        { name: /^게시 \(1\)/ },
+        { timeout: 3000 },
       ),
-    ).toBe(true);
-    expect(req.comments).toEqual(["좋네요", "굿"]);
+    );
+    // 글은 성공으로 떠야 하고, "댓글 없음"으로 접혀 실패가 되면 안 된다.
+    expect(
+      await screen.findByText(/글\+댓글 게시 완료/, undefined, {
+        timeout: 3000,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/댓글 없음/)).not.toBeInTheDocument();
   });
 
   it("comments on a pasted article URL in 'comment' mode", async () => {
@@ -548,26 +580,19 @@ describe("PublishModal", () => {
         { timeout: 3000 },
       ),
     );
-    // Distribution moved to the backend (issue #98): the front just sends one
-    // target per account plus the comment pool; which comment each account gets
-    // is RNG-chosen in Rust, so it's not asserted here.
-    const commentCalls = ipcBackend.mock.calls.filter(
-      (c) => c[0] === "run_comment_jobs",
+    // url 댓글 대상은 plan.naver의 commentTarget(url)에 박제돼 통합 커맨드로 전달된다.
+    // 댓글 분배(어느 계정이 어떤 댓글)는 백엔드가 RNG로 정하므로 여기선 단언하지 않는다(#98).
+    const call = ipcBackend.mock.calls.find(
+      (c) => c[0] === "run_cafe_publish_now",
     );
-    const call = commentCalls[commentCalls.length - 1];
     expect(call).toBeDefined();
-    const req = (
-      call?.[1] as { req: { targets: unknown[]; comments: string[] } }
-    ).req;
-    expect(req.targets).toHaveLength(1);
-    expect(req.targets[0]).toEqual(
-      expect.objectContaining({
-        accountId: "money_lab",
-        cafeId: 31732304,
-        articleId: 9,
-      }),
+    const plan = (call?.[1] as { plan: PublishPlan }).plan;
+    expect(plan.naver).toHaveLength(1);
+    expect(plan.naver[0]?.accountId).toBe("money_lab");
+    expect(plan.naver[0]?.commentTarget).toEqual(
+      expect.objectContaining({ mode: "url", cafeId: 31732304, articleId: 9 }),
     );
-    expect(req.comments).toEqual(["댓글1", "댓글2"]);
+    expect(plan.comments).toEqual(["댓글1", "댓글2"]);
   });
 
   it("comments on the top-N latest articles in 'comment' + 'latest' mode", async () => {
@@ -597,26 +622,25 @@ describe("PublishModal", () => {
         { timeout: 3000 },
       ),
     );
-    // Distribution moved to the backend (issue #98): the top-3 latest articles
-    // become 3 targets (articleId 8000..8002 from the mock), all for the picked
-    // cafe; the backend deals one comment from the pool to each.
-    const call = ipcBackend.mock.calls.find((c) => c[0] === "run_comment_jobs");
+    // 최신글 상위 3개를 프론트가 조회해 각각 url 대상으로 박제한다(articleId 8000..8002,
+    // mock). 통합 커맨드 plan.naver의 commentTarget에 실려 백엔드가 댓글을 분배한다(#98).
+    const call = ipcBackend.mock.calls.find(
+      (c) => c[0] === "run_cafe_publish_now",
+    );
     expect(call).toBeDefined();
-    const req = (
-      call?.[1] as {
-        req: {
-          targets: { accountId: string; cafeId: number; articleId: number }[];
-          comments: string[];
-        };
-      }
-    ).req;
-    expect(req.targets).toHaveLength(3);
-    expect(req.targets.every((t) => t.cafeId === 11111111)).toBe(true);
-    expect(req.targets.every((t) => t.accountId === "money_lab")).toBe(true);
-    expect([...new Set(req.targets.map((t) => t.articleId))].sort()).toEqual([
-      8000, 8001, 8002,
+    const targets = (call?.[1] as { plan: PublishPlan }).plan.naver;
+    expect(targets).toHaveLength(3);
+    expect(targets.every((t) => t.commentTarget?.cafeId === 11111111)).toBe(
+      true,
+    );
+    expect(targets.every((t) => t.accountId === "money_lab")).toBe(true);
+    expect(
+      [...new Set(targets.map((t) => t.commentTarget?.articleId))].sort(),
+    ).toEqual([8000, 8001, 8002]);
+    expect((call?.[1] as { plan: PublishPlan }).plan.comments).toEqual([
+      "댓글1",
+      "댓글2",
     ]);
-    expect(req.comments).toEqual(["댓글1", "댓글2"]);
   });
 
   it("queries the popular list when commentTarget is 'popular'", async () => {
@@ -653,11 +677,12 @@ describe("PublishModal", () => {
     // …and the popular ORDER must propagate into the targets: the mock reverses
     // for popular, so top-1 is 8009 (not latest's 8000). This fails if a
     // regression takes the latest slice / ignores the returned order.
-    const call = ipcBackend.mock.calls.find((c) => c[0] === "run_comment_jobs");
+    const call = ipcBackend.mock.calls.find(
+      (c) => c[0] === "run_cafe_publish_now",
+    );
     expect(call).toBeDefined();
-    const req = (call?.[1] as { req: { targets: { articleId: number }[] } })
-      .req;
-    expect(req.targets.map((t) => t.articleId)).toEqual([8009]);
+    const targets = (call?.[1] as { plan: PublishPlan }).plan.naver;
+    expect(targets.map((t) => t.commentTarget?.articleId)).toEqual([8009]);
   });
 
   it("falls back to the available articles when the list has fewer than N", async () => {
@@ -687,15 +712,16 @@ describe("PublishModal", () => {
         { timeout: 3000 },
       ),
     );
-    const call = ipcBackend.mock.calls.find((c) => c[0] === "run_comment_jobs");
+    const call = ipcBackend.mock.calls.find(
+      (c) => c[0] === "run_cafe_publish_now",
+    );
     expect(call).toBeDefined();
-    const req = (call?.[1] as { req: { targets: { articleId: number }[] } })
-      .req;
+    const targets = (call?.[1] as { plan: PublishPlan }).plan.naver;
     // 2 available articles → 2 targets (not 5).
-    expect(req.targets).toHaveLength(2);
-    expect([...new Set(req.targets.map((t) => t.articleId))].sort()).toEqual([
-      7000, 7001,
-    ]);
+    expect(targets).toHaveLength(2);
+    expect(
+      [...new Set(targets.map((t) => t.commentTarget?.articleId))].sort(),
+    ).toEqual([7000, 7001]);
   });
 
   it("surfaces a red toast and drops only the failed account when a list fetch rejects", async () => {
@@ -737,17 +763,18 @@ describe("PublishModal", () => {
     );
     // …and only the good account's article becomes a comment target — the failed
     // account contributes none (other accounts are unaffected).
-    const call = ipcBackend.mock.calls.find((c) => c[0] === "run_comment_jobs");
+    const call = ipcBackend.mock.calls.find(
+      (c) => c[0] === "run_cafe_publish_now",
+    );
     expect(call).toBeDefined();
-    const req = (
-      call?.[1] as {
-        req: { targets: { accountId: string; cafeId: number }[] };
-      }
-    ).req;
-    expect(req.targets).toEqual([
-      expect.objectContaining({ accountId: "money_lab", cafeId: 11111111 }),
+    const targets = (call?.[1] as { plan: PublishPlan }).plan.naver;
+    expect(targets).toEqual([
+      expect.objectContaining({
+        accountId: "money_lab",
+        commentTarget: expect.objectContaining({ cafeId: 11111111 }),
+      }),
     ]);
-    expect(req.targets.some((t) => t.accountId === "insight_note")).toBe(false);
+    expect(targets.some((t) => t.accountId === "insight_note")).toBe(false);
   });
 
   it("uses the template's commentCount (5) for the number of comment targets", async () => {
@@ -778,15 +805,16 @@ describe("PublishModal", () => {
         { timeout: 3000 },
       ),
     );
-    const call = ipcBackend.mock.calls.find((c) => c[0] === "run_comment_jobs");
+    const call = ipcBackend.mock.calls.find(
+      (c) => c[0] === "run_cafe_publish_now",
+    );
     expect(call).toBeDefined();
-    const req = (call?.[1] as { req: { targets: { articleId: number }[] } })
-      .req;
+    const targets = (call?.[1] as { plan: PublishPlan }).plan.naver;
     // Top-5 latest → articleId 8000..8004.
-    expect(req.targets).toHaveLength(5);
-    expect([...new Set(req.targets.map((t) => t.articleId))].sort()).toEqual([
-      8000, 8001, 8002, 8003, 8004,
-    ]);
+    expect(targets).toHaveLength(5);
+    expect(
+      [...new Set(targets.map((t) => t.commentTarget?.articleId))].sort(),
+    ).toEqual([8000, 8001, 8002, 8003, 8004]);
   });
 
   it("blocks publish while a selected naver account hasn't picked a cafe", async () => {

@@ -17,6 +17,7 @@ import type {
   DashStat,
   LibraryPost,
   LogBatch,
+  PublishPlan,
   QueueNowItem,
   QueueScheduledItem,
   Stock,
@@ -1107,6 +1108,58 @@ export const invoke = vi.fn(
           commentId: 2000 + i,
         }));
         return clone(outcomes);
+      }
+      case "run_cafe_publish_now": {
+        // 카페 즉시 게시 통합 커맨드 목(#194): 백엔드 동작을 미러한다 — post/both면 각
+        // naver 대상에 글을 쓰고(articleId 1000+i), both면 방금 쓴 글마다 댓글 풀 전체를,
+        // comment 전용이면 plan.naver의 url 대상마다 댓글 1건을 성공으로 만든다.
+        const plan = args!.plan as PublishPlan;
+        const isPost = plan.kind === "post" || plan.kind === "both";
+        const isComment = plan.kind === "comment" || plan.kind === "both";
+        const posts: PublishOutcome[] = isPost
+          ? plan.naver.map((t, i) => ({
+              accountId: t.accountId,
+              cafe: t.cafe,
+              menuId: t.menuId,
+              success: true,
+              articleId: 1000 + i,
+            }))
+          : [];
+        const pool = (plan.comments ?? []).filter((c) => c.trim());
+        const comments: CommentPublishOutcome[] = [];
+        if (isComment && plan.kind === "both") {
+          // both: 방금 쓴 글마다 댓글 풀 전체(self-comment).
+          posts.forEach((p, pi) => {
+            pool.forEach(() => {
+              comments.push({
+                accountId: p.accountId,
+                cafeId: Number(plan.naver[pi]?.cafe ?? 0),
+                articleId: p.articleId!,
+                success: true,
+                commentId: 2000 + comments.length,
+              });
+            });
+          });
+        } else if (isComment) {
+          // comment 전용: plan.naver의 url 대상마다 댓글 1건(프론트가 url로 박제해 보냄).
+          plan.naver.forEach((t, i) => {
+            const ct = t.commentTarget;
+            if (
+              ct?.mode === "url" &&
+              ct.cafeId != null &&
+              ct.articleId != null
+            ) {
+              comments.push({
+                accountId: t.accountId,
+                cafeId: ct.cafeId,
+                articleId: ct.articleId,
+                success: true,
+                commentId: 2000 + i,
+              });
+            }
+          });
+        }
+        return clone({ posts, comments });
       }
       case "list_bands":
         return clone(SEED_BANDS);

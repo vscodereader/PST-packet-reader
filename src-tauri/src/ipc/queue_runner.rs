@@ -15,6 +15,7 @@ use tauri::{AppHandle, Manager, Runtime};
 
 use super::accounts::PlatformId;
 use super::activity::{record, ActivityItem, ActivityType};
+use super::cafes::{comment_outcome_from_report, outcome_from_report, CafePublishNowResult};
 use super::log_batches::{BatchItem, BatchItemStatus, LogBatch, MAX_LOG_BATCHES};
 use super::posts::{CommentTarget, ModeValue};
 use super::queue::{apply_cancel_now, PublishPlan, QueueNowItem, QueueState};
@@ -871,6 +872,28 @@ fn build_log_batch(
     }
 }
 
+/// 완료 배치를 로그 스토어 맨 앞에 넣는다(최신순, 최대 MAX_LOG_BATCHES건 유지). 예약 큐
+/// 완료(record_completion)와 즉시 게시(record_immediate)가 공유한다.
+fn store_log_batch<R: Runtime>(app: &AppHandle<R>, batch: LogBatch) {
+    app.state::<JsonStore<LogBatch>>().mutate(|mut v| {
+        v.insert(0, batch);
+        v.truncate(MAX_LOG_BATCHES);
+        v
+    });
+}
+
+/// 성공/전체 개수로 activity 타입을 정한다 — 전부 성공이면 Success, 전부 실패면 Error,
+/// 일부 성공이면 Info.
+fn activity_type_for(ok: usize, total: usize) -> ActivityType {
+    if ok == total {
+        ActivityType::Success
+    } else if ok == 0 {
+        ActivityType::Error
+    } else {
+        ActivityType::Info
+    }
+}
+
 /// 완료 배치를 로그 스토어 맨 앞에 넣고(최신순) activity에 요약을 남긴다.
 fn record_completion<R: Runtime>(app: &AppHandle<R>, batch: LogBatch) {
     let total = batch.items.len();
@@ -881,29 +904,109 @@ fn record_completion<R: Runtime>(app: &AppHandle<R>, batch: LogBatch) {
         .count();
     let title = batch.title.clone();
 
-    app.state::<JsonStore<LogBatch>>().mutate(|mut v| {
-        v.insert(0, batch);
-        v.truncate(MAX_LOG_BATCHES);
-        v
-    });
+    store_log_batch(app, batch);
 
-    let ty = if ok == total {
-        ActivityType::Success
-    } else if ok == 0 {
-        ActivityType::Error
-    } else {
-        ActivityType::Info
-    };
     let activity = app.state::<JsonStore<ActivityItem>>();
     record(
         activity.inner(),
-        ty,
+        activity_type_for(ok, total),
         format!("'{title}' 예약 게시 — {total}곳 중 {ok}곳 성공"),
     );
 
     // 트레이 상주(창 닫힘) 중에도 결과를 인지하도록 OS 토스트도 best-effort로 띄운다(#163).
     let (toast_title, toast_body) = super::notify::completion_message(&title, total, ok);
     super::notify::notify_desktop(app, &toast_title, &toast_body);
+}
+
+/// 즉시 게시("지금 바로") 완료 로그/activity를 남긴다. record_completion과 달리 OS 토스트를
+/// 띄우지 않고(사용자가 게시 모달 앞에 있다 — 종목토론방 즉시게시와 동일), activity 문구도
+/// "예약 게시"가 아닌 "게시"로 남긴다.
+fn record_immediate<R: Runtime>(app: &AppHandle<R>, batch: LogBatch) {
+    let total = batch.items.len();
+    let ok = batch
+        .items
+        .iter()
+        .filter(|i| i.status == BatchItemStatus::Success)
+        .count();
+    let title = batch.title.clone();
+
+    store_log_batch(app, batch);
+
+    let activity = app.state::<JsonStore<ActivityItem>>();
+    record(
+        activity.inner(),
+        activity_type_for(ok, total),
+        format!("'{title}' 게시 — {total}곳 중 {ok}곳 성공"),
+    );
+}
+
+/// 카페 즉시 게시("지금 바로")를 실행하고 결과를 알림 로그에 기록한 뒤, UI용 슬림 결과를
+/// 돌려준다. 예약 큐 워커(`execute_item`)의 카페 글·댓글 단계와 같은 헬퍼
+/// (`collect_comment_targets`/`build_log_batch`)를 재사용하므로, 실패 사유 문구(#169)가
+/// 예약 게시와 일관된다. 큐를 거치지 않아(진행률·협조적 취소 없음) 게시 모달이 결과를 즉시
+/// 받아 인라인 패널에 렌더한다. 종목토론방·밴드 즉시 게시는 각자 기존 경로(lib.rs / 프론트)가
+/// 따로 기록하므로 여기선 카페 글·댓글만 다룬다(forum/band 결과는 빈 슬라이스).
+#[tauri::command]
+pub async fn run_cafe_publish_now<R: Runtime>(
+    app: AppHandle<R>,
+    plan: PublishPlan,
+) -> CafePublishNowResult {
+    // 1. 카페 글(post/both).
+    let post_reports = if runs_post(&plan) {
+        let jobs = plan_to_post_jobs(&plan);
+        if jobs.is_empty() {
+            Vec::new()
+        } else {
+            run_post_jobs(&jobs).await
+        }
+    } else {
+        Vec::new()
+    };
+
+    // 2. 카페 댓글 대상 확정. both는 방금 게시에 성공한 글(self), comment는 프론트가 박제한
+    // url(cafe_id/article_id). 글목록 조회 실패 대상(fetch_failures)도 완료 로그에 남긴다.
+    let collected = if runs_comment(&plan) {
+        collect_comment_targets(&plan, &post_reports).await
+    } else {
+        CommentCollect::default()
+    };
+
+    // 3. 댓글 작업 구성(both=글마다 댓글 풀 전체 / comment 전용=대상마다 1개 분배).
+    let comment_jobs = if matches!(plan.kind, ModeValue::Both) {
+        build_self_comment_jobs(collected.targets, &plan.comments)
+    } else {
+        build_comment_jobs(collected.targets, &plan.comments)
+    };
+    let comment_reports = if comment_jobs.is_empty() {
+        Vec::new()
+    } else {
+        run_comment_jobs(&comment_jobs).await
+    };
+
+    // 4. 완료 로그/activity. forum/band은 이 경로에서 다루지 않으므로 빈 슬라이스를 넘긴다.
+    // 실행한 작업이 하나도 없으면(빈 plan) 빈 배치는 만들지 않는다(execute_item과 동일 가드).
+    let batch = build_log_batch(
+        &plan,
+        &post_reports,
+        &comment_reports,
+        &[],
+        &[],
+        &collected.fetch_failures,
+        now_ms(),
+        LB_SEQ.fetch_add(1, Ordering::Relaxed),
+    );
+    if !batch.items.is_empty() {
+        record_immediate(&app, batch);
+    }
+
+    // 5. UI용 슬림 결과(모달 인라인 패널이 렌더). 기록은 위에서 rich report로 이미 끝냈다.
+    CafePublishNowResult {
+        posts: post_reports.iter().map(outcome_from_report).collect(),
+        comments: comment_reports
+            .iter()
+            .map(comment_outcome_from_report)
+            .collect(),
+    }
 }
 
 /// plan으로부터 진행률 total의 상한 추정치를 낸다. mark_running 시점에 `(0, total)`을
@@ -1319,6 +1422,14 @@ mod tests {
             article_id: 2,
         }];
         assert!(build_self_comment_jobs(targets, &["".into(), "   ".into()]).is_empty());
+    }
+
+    #[test]
+    fn activity_type_reflects_success_ratio() {
+        // 전부 성공 → Success, 전부 실패 → Error, 일부 성공 → Info.
+        assert!(matches!(activity_type_for(3, 3), ActivityType::Success));
+        assert!(matches!(activity_type_for(0, 3), ActivityType::Error));
+        assert!(matches!(activity_type_for(1, 3), ActivityType::Info));
     }
 
     #[test]
