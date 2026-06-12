@@ -12,6 +12,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { ForumStock } from "@/shared/bindings/ForumStock";
 import type { ForumStockCategory } from "@/shared/bindings/ForumStockCategory";
 import type { StockExchange } from "@/shared/bindings/StockExchange";
+import type { StockMarket } from "@/shared/bindings/StockMarket";
 import type { StockCandidate } from "@/shared/data/types";
 import { ipc } from "@/shared/ipc";
 import { Icon } from "@/shared/ui/icons";
@@ -32,6 +33,13 @@ const CATEGORIES: { key: ForumStockCategory; label: string }[] = [
   { key: "volume", label: "거래량" },
 ];
 
+// 시장 구분 — 네이버와 동일하게 전체 → 코스피 → 코스닥 순.
+const MARKETS: { key: StockMarket; label: string }[] = [
+  { key: "all", label: "전체" },
+  { key: "kospi", label: "코스피" },
+  { key: "kosdaq", label: "코스닥" },
+];
+
 function changeColor(t: string): string {
   if (t === "rising") return "var(--mantine-color-red-6)";
   if (t === "falling") return "var(--mantine-color-blue-6)";
@@ -45,7 +53,11 @@ function StockCrawlModalInner({
 }: StockCrawlModalProps) {
   const [category, setCategory] = useState<ForumStockCategory>("tradingValue");
   const [exchange, setExchange] = useState<StockExchange>("krx");
+  const [market, setMarket] = useState<StockMarket>("all");
   const [exchangeOpen, setExchangeOpen] = useState(false);
+  // 토론 탭은 네이버가 시장 분리를 제공하지 않으므로 전체로 강제한다.
+  const marketDisabled = category === "discussion";
+  const effectiveMarket: StockMarket = marketDisabled ? "all" : market;
   const [q, setQ] = useState("");
   const [rows, setRows] = useState<ForumStock[]>([]);
   const [page, setPage] = useState(1);
@@ -64,7 +76,7 @@ function StockCrawlModalInner({
     const id = window.setTimeout(() => {
       const req = query
         ? ipc.forumStocks.search(query, 1)
-        : ipc.forumStocks.list(category, exchange, 1);
+        : ipc.forumStocks.list(category, exchange, effectiveMarket, 1);
       void req.then((p) => {
         if (!alive) return;
         setRows(p.stocks);
@@ -76,7 +88,7 @@ function StockCrawlModalInner({
       alive = false;
       window.clearTimeout(id);
     };
-  }, [q, category, exchange]);
+  }, [q, category, exchange, effectiveMarket]);
 
   const loadMore = useCallback(() => {
     const query = q.trim();
@@ -84,7 +96,7 @@ function StockCrawlModalInner({
     setLoading(true);
     const req = query
       ? ipc.forumStocks.search(query, next)
-      : ipc.forumStocks.list(category, exchange, next);
+      : ipc.forumStocks.list(category, exchange, effectiveMarket, next);
     void req
       .then((p) => {
         setRows((prev) => [...prev, ...p.stocks]);
@@ -92,7 +104,7 @@ function StockCrawlModalInner({
         setHasNext(p.hasNext);
       })
       .finally(() => setLoading(false));
-  }, [q, category, exchange, page]);
+  }, [q, category, exchange, effectiveMarket, page]);
 
   const toggle = useCallback((s: ForumStock) => {
     setNames((m) => ({ ...m, [s.code]: s.name }));
@@ -173,6 +185,22 @@ function StockCrawlModalInner({
         >
           {exchange.toUpperCase()}
         </Button>
+      </Group>
+
+      {/* 시장 구분 — 카테고리 탭 아래, 네이버와 동일하게 전체/코스피/코스닥. */}
+      <Group gap={6} mb={8} wrap="wrap">
+        {MARKETS.map((m) => (
+          <Button
+            key={m.key}
+            size="xs"
+            variant={effectiveMarket === m.key ? "filled" : "default"}
+            color="forum"
+            disabled={searching || (marketDisabled && m.key !== "all")}
+            onClick={() => setMarket(m.key)}
+          >
+            {m.label}
+          </Button>
+        ))}
       </Group>
 
       <Box

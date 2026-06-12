@@ -25,6 +25,7 @@ import type { QueueScheduledItem } from "@/shared/bindings/QueueScheduledItem";
 import type { SortBy } from "@/shared/bindings/SortBy";
 import type { Stock } from "@/shared/bindings/Stock";
 import type { StockExchange } from "@/shared/bindings/StockExchange";
+import type { StockMarket } from "@/shared/bindings/StockMarket";
 import type { StockCandidate } from "@/shared/data/types";
 
 export type {
@@ -218,13 +219,22 @@ export const ipc = {
   },
   // 종목토론방 종목 선택 화면 — 네이버 모바일(m.stock.naver.com) 종목 데이터.
   forumStocks: {
-    /** 카테고리(토론/거래대금/인기/상승/하락/거래량) × 거래소(krx/nxt) 한 페이지. */
+    /**
+     * 카테고리(토론/거래대금/인기/상승/하락/거래량) × 거래소(krx/nxt)
+     * × 시장(all/kospi/kosdaq) 한 페이지. 토론은 시장 구분이 무시된다.
+     */
     list: (
       category: ForumStockCategory,
       exchange: StockExchange,
+      market: StockMarket,
       page: number,
     ) =>
-      call<ForumStockPage>("list_forum_stocks", { category, exchange, page }),
+      call<ForumStockPage>("list_forum_stocks", {
+        category,
+        exchange,
+        market,
+        page,
+      }),
     /** 검색어 포함 국내 종목 한 페이지(80개 상한 없음). */
     search: (query: string, page: number) =>
       call<ForumStockPage>("search_forum_stocks", { query, page }),

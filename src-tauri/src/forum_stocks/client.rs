@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use super::{ForumStock, ForumStockCategory, ForumStockPage, StockExchange};
+use super::{ForumStock, ForumStockCategory, ForumStockPage, StockExchange, StockMarket};
 
 const HOST: &str = "https://m.stock.naver.com";
 const PAGE_SIZE: u32 = 50;
@@ -104,11 +104,13 @@ impl ForumStockClient {
         &self,
         category: ForumStockCategory,
         exchange: StockExchange,
+        market: StockMarket,
         page: u32,
     ) -> Result<ForumStockPage, String> {
         let sort = sort_type(category).ok_or("토론 카테고리는 별도 경로를 사용합니다")?;
         let q = format!(
-            "/front-api/domestic/stock/list?sortType={sort}&category=all&domesticStockExchangeType={}&page={page}&pageSize={PAGE_SIZE}",
+            "/front-api/domestic/stock/list?sortType={sort}&category={}&domesticStockExchangeType={}&page={page}&pageSize={PAGE_SIZE}",
+            market.as_query(),
             exchange.as_query()
         );
         let value = self.get_json(&q).await?;
@@ -356,6 +358,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/front-api/domestic/stock/list"))
             .and(query_param("sortType", "priceTop"))
+            .and(query_param("category", "all"))
             .and(query_param("domesticStockExchangeType", "KRX"))
             .and(query_param("page", "1"))
             .respond_with(ResponseTemplate::new(200).set_body_string(LIST_FIXTURE))
@@ -364,7 +367,12 @@ mod tests {
 
         let client = ForumStockClient::with_base_url(server.uri());
         let page = client
-            .fetch_category_page(ForumStockCategory::TradingValue, StockExchange::Krx, 1)
+            .fetch_category_page(
+                ForumStockCategory::TradingValue,
+                StockExchange::Krx,
+                StockMarket::All,
+                1,
+            )
             .await
             .unwrap();
 
@@ -379,6 +387,33 @@ mod tests {
         // 🔥는 이 함수 단계에서는 아직 false(병합 전).
         assert!(!kodex.is_hot_discussion);
         assert!(page.has_next); // 50 < 4396
+    }
+
+    #[tokio::test]
+    async fn fetch_category_page_sends_market_category_param() {
+        // 코스피/코스닥 선택은 네이버 `category` 파라미터로 서버단에서 갈린다.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/front-api/domestic/stock/list"))
+            .and(query_param("sortType", "up"))
+            .and(query_param("category", "KOSDAQ"))
+            .and(query_param("domesticStockExchangeType", "NXT"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(LIST_FIXTURE))
+            .mount(&server)
+            .await;
+
+        let client = ForumStockClient::with_base_url(server.uri());
+        // category=KOSDAQ가 아니면 mock이 매치되지 않아 404 → Err로 떨어진다.
+        let page = client
+            .fetch_category_page(
+                ForumStockCategory::Rising,
+                StockExchange::Nxt,
+                StockMarket::Kosdaq,
+                1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.total_count, 4396);
     }
 
     #[tokio::test]
