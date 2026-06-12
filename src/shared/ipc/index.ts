@@ -6,6 +6,7 @@ import type { Article } from "@/shared/bindings/Article";
 import type { ArticleListResponse } from "@/shared/bindings/ArticleListResponse";
 import type { Band } from "@/shared/bindings/Band";
 import type { Cafe } from "@/shared/bindings/Cafe";
+import type { CafePublishNowResult } from "@/shared/bindings/CafePublishNowResult";
 import type { CommentDistributionRequest } from "@/shared/bindings/CommentDistributionRequest";
 import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutcome";
 import type { DashStat } from "@/shared/bindings/DashStat";
@@ -18,6 +19,7 @@ import type { LibraryPost } from "@/shared/bindings/LibraryPost";
 import type { LogBatch } from "@/shared/bindings/LogBatch";
 import type { PostJob } from "@/shared/bindings/PostJob";
 import type { PublishOutcome } from "@/shared/bindings/PublishOutcome";
+import type { PublishPlan } from "@/shared/bindings/PublishPlan";
 import type { QueueNowItem } from "@/shared/bindings/QueueNowItem";
 import type { QueueScheduledItem } from "@/shared/bindings/QueueScheduledItem";
 import type { SortBy } from "@/shared/bindings/SortBy";
@@ -257,6 +259,14 @@ export const ipc = {
      */
     runCommentJobs: (req: CommentDistributionRequest) =>
       call<CommentPublishOutcome[]>("run_comment_jobs", { req }),
+    /**
+     * 카페 즉시 게시("지금 바로"): 글/댓글 게시와 알림 로그(LogBatch) 기록을 백엔드가
+     * 일괄 수행하고(예약 게시와 같은 build_log_batch 재사용 → 실패 사유 문구 일관) UI용
+     * 슬림 결과(글/댓글 outcome)를 돌려준다. plan의 forum/band 대상은 무시한다 — 종목
+     * 토론방·밴드 즉시 게시는 각자 별도 경로가 기록한다.
+     */
+    publishNow: (plan: PublishPlan) =>
+      call<CafePublishNowResult>("run_cafe_publish_now", { plan }),
     /**
      * List every cafe `accountId` has joined (crawled across all pages),
      * using its session cookie. Rejects with the backend's error envelope
