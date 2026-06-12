@@ -68,25 +68,28 @@ impl From<tungstenite::Error> for AutomationError {
 }
 
 // 네이버 로그인 확인부터 토론방 선택, 글쓰기/댓글 등록까지 전체 흐름을 실행하는 함수입니다.
-pub fn run_naver_discussion_macro(
-    request: NaverDiscussionRequest,
-) -> AutomationResult<AutomationReport> {
-    let title = request.title.trim();
-    let body = request.body.trim();
+// 글/글+댓글 매크로가 공유하는 진입 셋업 결과(Chrome 연결·패킷 클라이언트·로그인·선택 종목).
+struct ForumDiscussionSession {
+    chrome: CdpClient,
+    packet_client: packet_client::NaverPacketClient,
+    login_profile: NaverLoginProfile,
+    selected: DiscussionSelection,
+}
 
-    if matches!(request.target, AutomationTarget::Post) && title.is_empty() {
-        return Err(AutomationError::new("제목이 비어 있습니다."));
-    }
-
-    if body.is_empty() {
-        return Err(AutomationError::new("내용이 비어 있습니다."));
-    }
-
-    let host = normalize_debug_host(&request.host);
-    let mut chrome = CdpClient::connect_to_existing_chrome(&host, request.port)?;
+// 글/글+댓글 매크로 공통 셋업: Chrome 연결 → 쿠키 주입 → 토론 페이지 → 패킷 클라이언트 →
+// 로그인 확인 → 토론방 진입까지 한 번에 수행한다. 두 경로가 동일하게 중복하던 블록을
+// 단일 함수로 합쳐 분기 누락·드리프트를 막는다(동작 변경 없음).
+fn open_discussion_session(
+    host: &str,
+    port: u16,
+    account_id: Option<&str>,
+    stock: Option<&DiscussionStock>,
+) -> AutomationResult<ForumDiscussionSession> {
+    let host = normalize_debug_host(host);
+    let mut chrome = CdpClient::connect_to_existing_chrome(&host, port)?;
     chrome.enable()?;
     // 계정 ID가 지정되면 로그인 자동화가 저장한 쿠키를 Chrome에 주입합니다.
-    if let Some(account_id) = request.account_id.as_deref() {
+    if let Some(account_id) = account_id {
         chrome.inject_account_cookies(account_id)?;
     }
     chrome.ensure_discussion_page()?;
@@ -101,10 +104,44 @@ pub fn run_naver_discussion_macro(
         )));
     }
 
-    let selected = match request.stock.as_ref() {
+    let selected = match stock {
         Some(stock) => chrome.open_selected_discussion_room(stock)?,
         None => chrome.open_random_discussion_room(&packet_client)?,
     };
+
+    Ok(ForumDiscussionSession {
+        chrome,
+        packet_client,
+        login_profile,
+        selected,
+    })
+}
+
+pub fn run_naver_discussion_macro(
+    request: NaverDiscussionRequest,
+) -> AutomationResult<AutomationReport> {
+    let title = request.title.trim();
+    let body = request.body.trim();
+
+    if matches!(request.target, AutomationTarget::Post) && title.is_empty() {
+        return Err(AutomationError::new("제목이 비어 있습니다."));
+    }
+
+    if body.is_empty() {
+        return Err(AutomationError::new("내용이 비어 있습니다."));
+    }
+
+    let ForumDiscussionSession {
+        mut chrome,
+        packet_client,
+        login_profile,
+        selected,
+    } = open_discussion_session(
+        &request.host,
+        request.port,
+        request.account_id.as_deref(),
+        request.stock.as_ref(),
+    )?;
 
     let (register_button_highlighted, submitted) = match request.target {
         AutomationTarget::Post => {
@@ -165,29 +202,17 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
         return Err(AutomationError::new("댓글 내용이 비어 있습니다."));
     }
 
-    let host = normalize_debug_host(&request.host);
-    let mut chrome = CdpClient::connect_to_existing_chrome(&host, request.port)?;
-    chrome.enable()?;
-    // 계정 ID가 지정되면 로그인 자동화가 저장한 쿠키를 Chrome에 주입합니다.
-    if let Some(account_id) = request.account_id.as_deref() {
-        chrome.inject_account_cookies(account_id)?;
-    }
-    chrome.ensure_discussion_page()?;
-
-    let packet_client = chrome.build_naver_packet_client()?;
-    let login_profile = packet_client.read_login_profile()?;
-
-    if !login_profile.logged_in {
-        return Err(AutomationError::new(format!(
-            "네이버 로그인이 확인되지 않았습니다. Chrome에서 로그인한 뒤 다시 실행하세요. ({})",
-            login_profile.message
-        )));
-    }
-
-    let selected = match request.stock.as_ref() {
-        Some(stock) => chrome.open_selected_discussion_room(stock)?,
-        None => chrome.open_random_discussion_room(&packet_client)?,
-    };
+    let ForumDiscussionSession {
+        mut chrome,
+        packet_client,
+        login_profile,
+        selected,
+    } = open_discussion_session(
+        &request.host,
+        request.port,
+        request.account_id.as_deref(),
+        request.stock.as_ref(),
+    )?;
 
     let post_url = chrome.submit_post_and_refresh(&packet_client, title, body)?;
     let post_report = AutomationReport {
