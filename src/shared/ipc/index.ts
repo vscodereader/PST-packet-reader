@@ -84,8 +84,8 @@ export interface BandPublishRequest {
   bandLink: string;
   title: string;
   content: string;
-  /** 선택 댓글. 비우면 댓글 미작성. */
-  comment?: string;
+  /** 댓글 풀. 비어있지 않은 항목을 모두 같은 글에 단다. 비우면 댓글 미작성. */
+  comments: string[];
 }
 
 /** 밴드 가입+게시 결과(band_post::BandPublishOutcome 미러). */
@@ -93,7 +93,10 @@ export interface BandPublishOutcome {
   joined: boolean;
   postNo: number;
   webUrl: string;
-  commented: boolean;
+  /** 같은 글에 단 댓글 중 성공한 개수(0이면 미작성). */
+  commentedCount: number;
+  /** 시도한 댓글 수. commentedCount와 비교해 "N/M건"·부분 실패 판정에 쓴다. */
+  commentTotal: number;
   /** 실제 게시된 밴드 이름(게시 응답 post.band.name). 응답에 없으면 null. */
   bandName: string | null;
 }
@@ -285,12 +288,19 @@ export const ipc = {
     /**
      * 밴드 계정 선택로그인 — 네이버가 아니라 band.us(CDP)로 로그인한다.
      * 네이버 로그인 큐와 분리된 band 큐를 쓴다(상태는 queueStatus로 폴링).
+     * `force=true`면 유효 쿠키여도 실제 재로그인해 새 비밀번호를 검증한다(네이버 #132 미러).
      */
-    login: (accountIds: string[], headless = false, useAdb = false) =>
+    login: (
+      accountIds: string[],
+      headless = false,
+      useAdb = false,
+      force = false,
+    ) =>
       call<LoginQueueStatus>("enqueue_band_login", {
         accountIds,
         headless,
         useAdb,
+        force,
       }),
     queueStatus: () => call<LoginQueueStatus>("get_band_queue_status"),
     /** 링크(band_no)로 실제 밴드명을 조회한다(저장 시 표시용). accountId=band 쿠키 키. */

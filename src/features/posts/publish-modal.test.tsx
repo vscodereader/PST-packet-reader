@@ -409,22 +409,34 @@ describe("PublishModal", () => {
     ]);
   });
 
-  it("includes only naver/forum targets in a scheduled plan (band excluded)", async () => {
+  it("includes naver/forum/band targets in a scheduled plan", async () => {
     renderPublish();
     // 기본 forum(a1) 유지 + naver(money_lab) + band(value_invest) 선택.
     await userEvent.click(await screen.findByText("money_lab"));
     await userEvent.click(screen.getByText("value_invest"));
     await screen.findByPlaceholderText("가입 카페 선택");
     await pickOption(0, "개미투자 카페");
-    // forum + naver = 2곳 (밴드 계정은 선택됐지만 게시할 밴드 미선택 → 0건).
+
+    // 밴드 링크를 저장하고 조회된 밴드(데일밴드)를 골라 게시 대상으로 추가한다.
+    const linkInput = screen.getByLabelText("밴드 링크");
+    const saveBtn = screen.getByRole("button", { name: "저장" });
+    await userEvent.type(linkInput, "https://band.us/band/103043410");
+    await waitFor(() => expect(saveBtn).toBeEnabled());
+    await userEvent.click(saveBtn);
+    await waitFor(() => expect(linkInput).toHaveValue(""));
+    await screen.findByPlaceholderText("게시할 밴드 선택");
+    await pickOption(0, "데일밴드");
+    await screen.findByLabelText("데일밴드 제거"); // 칩 등장 확인
+
+    // forum + naver + band = 3곳.
     await screen.findByRole(
       "button",
-      { name: /^게시 \(2\)/ },
+      { name: /^게시 \(3\)/ },
       { timeout: 3000 },
     );
     await userEvent.click(await screen.findByText("예약 게시"));
     await userEvent.click(
-      await screen.findByRole("button", { name: /^예약 \(2\)/ }),
+      await screen.findByRole("button", { name: /^예약 \(3\)/ }),
     );
     const call = ipcBackend.mock.calls.find(
       (c) => c[0] === "add_queue_scheduled",
@@ -432,14 +444,34 @@ describe("PublishModal", () => {
     expect(call).toBeDefined();
     const plan = (
       call?.[1] as {
-        item: { plan: { naver: unknown[]; forum: unknown[] } };
+        item: {
+          plan: { naver: unknown[]; forum: unknown[]; band: unknown[] };
+        };
       }
     ).item.plan;
-    // band는 엔진이 없어 plan에서 제외된다 — naver 1건, forum 1건만.
     expect(plan.naver).toHaveLength(1);
     expect(plan.forum).toEqual([
       expect.objectContaining({ accountId: "invest_king7", code: "005930" }),
     ]);
+    // 밴드도 이제 plan에 실린다 — 즉시 게시와 동일하게 밴드명으로 가입 링크를 동결한다.
+    expect(plan.band).toEqual([
+      expect.objectContaining({
+        accountId: "value_invest",
+        name: "데일밴드",
+        link: "https://band.us/band/103043410",
+      }),
+    ]);
+  });
+
+  it("blocks scheduling when a band is selected but none is picked", async () => {
+    renderPublish();
+    // 밴드 계정만 선택하고 예약 모드로 전환 — 게시할 밴드는 미선택.
+    await userEvent.click(await screen.findByText("value_invest")); // band a7
+    await userEvent.click(await screen.findByText("예약 게시"));
+    // bandReady 통일: 예약이어도 밴드 미선택이면 예약 버튼이 비활성이어야 한다.
+    expect(
+      await screen.findByRole("button", { name: /^예약 \(\d+\)/ }),
+    ).toBeDisabled();
   });
 
   it("comments every template comment on the just-posted article in 'both' mode", async () => {
@@ -998,5 +1030,228 @@ describe("PublishModal", () => {
     expect(
       ipcBackend.mock.calls.find((c) => c[0] === "band_comment"),
     ).toBeUndefined();
+  });
+
+  it("이름이 같은 밴드(다른 band_no) 둘을 등록해도 드롭다운이 깨지지 않고 각각 선택된다", async () => {
+    // 회귀: Select data를 밴드명(value)으로 쓰면 동명 밴드 2개 등록 시 중복 value로
+    // Mantine이 깨져 흰 화면이 됐다. value를 고유 band_no로 바꾼 수정의 회귀 가드.
+    renderPublish();
+    await userEvent.click(await screen.findByText("value_invest")); // band a7
+
+    const linkInput = screen.getByLabelText("밴드 링크");
+    const saveBtn = screen.getByRole("button", { name: "저장" });
+    const save = async (link: string) => {
+      await userEvent.type(linkInput, link);
+      await waitFor(() => expect(saveBtn).toBeEnabled());
+      await userEvent.click(saveBtn);
+      await waitFor(() => expect(linkInput).toHaveValue(""));
+      await screen.findByPlaceholderText("게시할 밴드 선택");
+    };
+
+    // 이름은 같지만(데일밴드) band_no가 다른 두 밴드 — 두 번째는 www. 형식 링크.
+    await save("https://band.us/band/103043410");
+    await save("https://www.band.us/band/103084867");
+
+    // 드롭다운을 열면 동명이라도 옵션 2개가 렌더된다(크래시 없음).
+    const combo = document.querySelector<HTMLInputElement>(
+      'input[aria-haspopup="listbox"]',
+    )!;
+    await userEvent.click(combo);
+    expect(
+      [...document.querySelectorAll('[role="option"]')].filter(
+        (o) => o.textContent === "데일밴드",
+      ),
+    ).toHaveLength(2);
+
+    // 두 옵션을 각각 선택 → band_no가 달라 칩이 2개 생긴다(이름은 같아도 별개 밴드).
+    const pickNth = async (n: number) => {
+      await userEvent.click(combo);
+      const opts = [...document.querySelectorAll('[role="option"]')].filter(
+        (o) => o.textContent === "데일밴드",
+      );
+      await userEvent.click(opts[n]!);
+    };
+    await pickNth(0);
+    await pickNth(1);
+    expect(await screen.findAllByLabelText("데일밴드 제거")).toHaveLength(2);
+
+    // 게시 → 서로 다른 두 밴드 링크(동결)로 band_publish가 각각 호출된다.
+    const publishBtn = await screen.findByRole("button", {
+      name: /^게시 \(\d+\)/,
+    });
+    await waitFor(() => expect(publishBtn).toBeEnabled());
+    await userEvent.click(publishBtn);
+    await waitFor(() => {
+      const links = ipcBackend.mock.calls
+        .filter((c) => c[0] === "band_publish")
+        .map((c) => (c[1] as { bandLink: string }).bandLink);
+      expect(links).toContain("https://band.us/band/103043410");
+      expect(links).toContain("https://www.band.us/band/103084867");
+    });
+  });
+
+  it("밴드 즉시게시(글+댓글)는 댓글을 모두 같은 글에 보낸다", async () => {
+    // 회귀: 댓글을 2개 이상 써도 1개만 게시되던 문제 — comments 풀 전체를 백엔드에 전달.
+    const bothDoc: LibraryPost = {
+      ...postDoc,
+      id: "l-band-multi",
+      kind: "both",
+      body: "<p>본문</p>",
+      comments: ["첫 번째 댓글", "두 번째 댓글"],
+    };
+    renderPublish({ doc: bothDoc });
+    await userEvent.click(await screen.findByText("value_invest")); // band a7
+
+    const linkInput = screen.getByLabelText("밴드 링크");
+    const saveBtn = screen.getByRole("button", { name: "저장" });
+    await userEvent.type(linkInput, "https://band.us/band/103043410");
+    await waitFor(() => expect(saveBtn).toBeEnabled());
+    await userEvent.click(saveBtn);
+    await waitFor(() => expect(linkInput).toHaveValue(""));
+    await screen.findByPlaceholderText("게시할 밴드 선택");
+    await pickOption(0, "데일밴드");
+    await screen.findByLabelText("데일밴드 제거");
+
+    const publishBtn = await screen.findByRole("button", {
+      name: /^게시 \(\d+\)/,
+    });
+    await waitFor(() => expect(publishBtn).toBeEnabled());
+    await userEvent.click(publishBtn);
+
+    // band_publish에 댓글 풀 전체가 같은 글로 전달된다(1개만 X).
+    await waitFor(() => {
+      const call = ipcBackend.mock.calls.find((c) => c[0] === "band_publish");
+      expect(call).toBeDefined();
+      expect((call![1] as { comments: string[] }).comments).toEqual([
+        "첫 번째 댓글",
+        "두 번째 댓글",
+      ]);
+    });
+  });
+
+  it("밴드 즉시게시에서 댓글이 일부 실패하면 실패로 표기한다", async () => {
+    // 회귀: 댓글을 의도했는데 일부/전량 실패면 초록 배지로 묻지 않고 "N/M개"로 드러내고
+    // 행을 실패(재시도 버튼)로 둔다 — 카페 commentsAllOk와 동일 정책.
+    const real = ipcBackend.getMockImplementation()!;
+    ipcBackend.mockImplementation(
+      (cmd: string, args?: Record<string, unknown>) =>
+        cmd === "band_publish"
+          ? Promise.resolve({
+              joined: true,
+              postNo: 1,
+              webUrl: "https://band.us/band/103043410/post/1",
+              commentedCount: 1, // 2개 시도 중 1개만 성공
+              commentTotal: 2,
+              bandName: "데일밴드",
+            })
+          : real(cmd, args),
+    );
+    try {
+      const bothDoc: LibraryPost = {
+        ...postDoc,
+        id: "l-band-partial",
+        kind: "both",
+        body: "<p>본문</p>",
+        comments: ["첫 번째 댓글", "두 번째 댓글"],
+      };
+      renderPublish({ doc: bothDoc });
+      await userEvent.click(await screen.findByText("value_invest"));
+
+      const linkInput = screen.getByLabelText("밴드 링크");
+      const saveBtn = screen.getByRole("button", { name: "저장" });
+      await userEvent.type(linkInput, "https://band.us/band/103043410");
+      await waitFor(() => expect(saveBtn).toBeEnabled());
+      await userEvent.click(saveBtn);
+      await waitFor(() => expect(linkInput).toHaveValue(""));
+      await screen.findByPlaceholderText("게시할 밴드 선택");
+      await pickOption(0, "데일밴드");
+      await screen.findByLabelText("데일밴드 제거");
+
+      const publishBtn = await screen.findByRole("button", {
+        name: /^게시 \(\d+\)/,
+      });
+      await waitFor(() => expect(publishBtn).toBeEnabled());
+      await userEvent.click(publishBtn);
+
+      // msg는 "글·댓글 1/2개", 행은 ok:false라 "재시도" 버튼이 뜬다.
+      // 그 행(Text→Box→Group)으로 범위를 좁혀 해당 행이 실패 표기인지 본다.
+      const msgEl = await screen.findByText(/글·댓글 1\/2개 게시 완료/);
+      const row = msgEl.parentElement!.parentElement!;
+      expect(
+        within(row).getByRole("button", { name: "재시도" }),
+      ).toBeInTheDocument();
+    } finally {
+      ipcBackend.mockImplementation(real);
+    }
+  });
+
+  it("밴드 즉시게시에서 글 게시가 실패(reject)하면 실패로 표기한다", async () => {
+    // 회귀: 가입/글 게시 단계가 통째로 실패(reject)하면 초록으로 묻지 않고
+    // 에러 사유 + 재시도로 드러낸다(부분실패와 별개로 publish 자체 거부 경로).
+    const real = ipcBackend.getMockImplementation()!;
+    ipcBackend.mockImplementation(
+      (cmd: string, args?: Record<string, unknown>) =>
+        cmd === "band_publish"
+          ? Promise.reject(new Error("밴드 가입에 실패했습니다"))
+          : real(cmd, args),
+    );
+    try {
+      renderPublish();
+      await userEvent.click(await screen.findByText("value_invest"));
+
+      const linkInput = screen.getByLabelText("밴드 링크");
+      const saveBtn = screen.getByRole("button", { name: "저장" });
+      await userEvent.type(linkInput, "https://band.us/band/103043410");
+      await waitFor(() => expect(saveBtn).toBeEnabled());
+      await userEvent.click(saveBtn);
+      await waitFor(() => expect(linkInput).toHaveValue(""));
+      await screen.findByPlaceholderText("게시할 밴드 선택");
+      await pickOption(0, "데일밴드");
+      await screen.findByLabelText("데일밴드 제거");
+
+      const publishBtn = await screen.findByRole("button", {
+        name: /^게시 \(\d+\)/,
+      });
+      await waitFor(() => expect(publishBtn).toBeEnabled());
+      await userEvent.click(publishBtn);
+
+      // reject → ok:false라 에러 사유가 그대로 뜨고 행은 재시도로 남는다.
+      const msgEl = await screen.findByText(/밴드 가입에 실패했습니다/);
+      const row = msgEl.parentElement!.parentElement!;
+      expect(
+        within(row).getByRole("button", { name: "재시도" }),
+      ).toBeInTheDocument();
+    } finally {
+      ipcBackend.mockImplementation(real);
+    }
+  });
+
+  it("밴드 링크 저장 시 밴드명 조회가 실패하면 링크를 이름으로 폴백한다", async () => {
+    // 회귀: band_resolve_name 실패 시 빈 이름이 아니라 원문 링크를 표시명으로 쓴다.
+    const real = ipcBackend.getMockImplementation()!;
+    ipcBackend.mockImplementation(
+      (cmd: string, args?: Record<string, unknown>) =>
+        cmd === "band_resolve_name"
+          ? Promise.reject(new Error("조회 실패"))
+          : real(cmd, args),
+    );
+    try {
+      renderPublish();
+      await userEvent.click(await screen.findByText("value_invest"));
+
+      const linkInput = screen.getByLabelText("밴드 링크");
+      const saveBtn = screen.getByRole("button", { name: "저장" });
+      await userEvent.type(linkInput, "https://band.us/band/103043410");
+      await waitFor(() => expect(saveBtn).toBeEnabled());
+      await userEvent.click(saveBtn);
+      await waitFor(() => expect(linkInput).toHaveValue(""));
+      await screen.findByPlaceholderText("게시할 밴드 선택");
+
+      // 조회 실패 → 링크가 표시명으로 폴백된다(옵션·칩 라벨이 링크).
+      await pickOption(0, "https://band.us/band/103043410");
+      await screen.findByLabelText("https://band.us/band/103043410 제거");
+    } finally {
+      ipcBackend.mockImplementation(real);
+    }
   });
 });

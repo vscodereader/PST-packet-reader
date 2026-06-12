@@ -408,6 +408,7 @@ fn enqueue_band_login<R: Runtime>(
     account_ids: Vec<String>,
     headless: Option<bool>,
     use_adb: Option<bool>,
+    force: Option<bool>,
 ) -> Result<auth::QueueStatus, String> {
     let n = account_ids.len();
     let result = band_auth::enqueue_band_accounts(
@@ -416,6 +417,7 @@ fn enqueue_band_login<R: Runtime>(
         account_ids,
         headless.unwrap_or(false),
         use_adb.unwrap_or(false),
+        force.unwrap_or(false),
     )
     .map_err(|e| e.to_string())?;
     if n > 0 {
@@ -445,17 +447,11 @@ async fn band_publish(
     band_link: String,
     title: String,
     content: String,
-    comment: Option<String>,
+    comments: Vec<String>,
 ) -> Result<band_post::BandPublishOutcome, String> {
-    band_post::band_publish(
-        &account_id,
-        &band_link,
-        &title,
-        &content,
-        comment.as_deref(),
-    )
-    .await
-    .map_err(|e| e.to_string())
+    band_post::band_publish(&account_id, &band_link, &title, &content, &comments)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 밴드 댓글 전용: 기존 글(최신글/인기글) 상위 `count`개를 조회해 댓글을 단다.
