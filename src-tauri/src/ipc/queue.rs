@@ -86,9 +86,9 @@ pub struct ForumTarget {
     pub code: String,
 }
 
-/// 밴드(band.us) 게시 대상 1건 (`band_post::band_publish`의 재료). `account_id`는 band
-/// 로그인 쿠키 키(= loginId) 규약을 따른다. 밴드는 forum처럼 글/댓글 분리 개념이 아니라
-/// 항상 글을 쓰고(comment/both면 그 글에 댓글), `kind`와 독립적으로 동작한다.
+/// 밴드(band.us) 게시 대상 1건. `account_id`는 band 로그인 쿠키 키(= loginId) 규약을
+/// 따른다. post/both 모드는 새 글을 쓰고(both면 그 글에 댓글) `band_publish`로, comment
+/// 전용 모드는 기존 글(최신/인기) 상위 N개에 댓글을 다는 `band_comment`로 처리된다.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "camelCase")]
@@ -98,6 +98,12 @@ pub struct BandTarget {
     pub name: String,
     /// band.us 가입·게시 링크(또는 band_no). `band_publish`가 여기서 band_no를 추출한다.
     pub link: String,
+    /// 댓글 전용 모드(`kind == Comment`)에서 댓글을 달 기존 글 대상. post/both면 None.
+    /// 밴드는 url 댓글을 지원하지 않아 `mode`는 latest/popular만 의미가 있다(url이면
+    /// 호출부가 latest로 폄). `cafe_id`/`article_id`는 밴드에서 쓰지 않는다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub comment_target: Option<CommentTargetSpec>,
 }
 
 /// 큐 아이템을 실제로 게시하는 데 필요한 동결된 실행 페이로드.
@@ -601,6 +607,7 @@ mod tests {
                 account_id: "user01".into(),
                 name: "투자밴드".into(),
                 link: "https://band.us/band/12345678".into(),
+                comment_target: None,
             }],
         }
     }

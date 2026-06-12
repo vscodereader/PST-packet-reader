@@ -463,6 +463,92 @@ describe("PublishModal", () => {
     ]);
   });
 
+  it("freezes a band comment target (popular + count) in a comment-mode scheduled plan", async () => {
+    const commentDoc: LibraryPost = {
+      id: "lbcs",
+      title: "밴드 댓글 예약",
+      kind: "comment",
+      updated: "방금 전",
+      words: 20,
+      status: "ready",
+      excerpt: "요약",
+      commentTarget: "popular",
+      commentCount: 5,
+      comments: ["좋아요"],
+    };
+    renderPublish({ doc: commentDoc });
+    // 밴드 계정 선택 + 링크 저장 + 게시할 밴드 선택.
+    await userEvent.click(await screen.findByText("value_invest"));
+    const linkInput = screen.getByLabelText("밴드 링크");
+    const saveBtn = screen.getByRole("button", { name: "저장" });
+    await userEvent.type(linkInput, "https://band.us/band/103043410");
+    await waitFor(() => expect(saveBtn).toBeEnabled());
+    await userEvent.click(saveBtn);
+    await waitFor(() => expect(linkInput).toHaveValue(""));
+    await screen.findByPlaceholderText("게시할 밴드 선택");
+    await pickOption(0, "데일밴드");
+    await screen.findByLabelText("데일밴드 제거");
+
+    await userEvent.click(await screen.findByText("예약 게시"));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^예약 \(\d+\)/ }),
+    );
+    const call = ipcBackend.mock.calls.find(
+      (c) => c[0] === "add_queue_scheduled",
+    );
+    expect(call).toBeDefined();
+    const plan = (
+      call?.[1] as { item: { plan: { band: { commentTarget?: unknown }[] } } }
+    ).item.plan;
+    // 댓글 전용 예약: 밴드 대상에 최신/인기 spec이 동결돼, 워커가 band_comment로 간다
+    // (새 글을 쓰는 band_publish가 아니라 → 리더 승인제 밴드 1003 회피). cafeId는 없다.
+    expect(plan.band[0]?.commentTarget).toEqual({ mode: "popular", count: 5 });
+  });
+
+  it("drops band targets from a url-mode comment plan (band has no url support)", async () => {
+    const commentDoc: LibraryPost = {
+      id: "lcsu",
+      title: "URL 댓글 + 밴드 예약",
+      kind: "comment",
+      updated: "방금 전",
+      words: 30,
+      status: "ready",
+      excerpt: "요약",
+      commentTarget: "url",
+      commentUrl: "https://cafe.naver.com/ca-fe/cafes/31732304/articles/9",
+      comments: ["댓글1"],
+    };
+    renderPublish({ doc: commentDoc });
+    // 카페 url 대상(money_lab) + 밴드(value_invest)를 함께 선택한다.
+    await userEvent.click(await screen.findByText("money_lab"));
+    await userEvent.click(await screen.findByText("value_invest"));
+    const linkInput = screen.getByLabelText("밴드 링크");
+    const saveBtn = screen.getByRole("button", { name: "저장" });
+    await userEvent.type(linkInput, "https://band.us/band/103043410");
+    await waitFor(() => expect(saveBtn).toBeEnabled());
+    await userEvent.click(saveBtn);
+    await waitFor(() => expect(linkInput).toHaveValue(""));
+    await screen.findByPlaceholderText("게시할 밴드 선택");
+    await pickOption(0, "데일밴드");
+    await screen.findByLabelText("데일밴드 제거");
+
+    await userEvent.click(await screen.findByText("예약 게시"));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^예약 \(\d+\)/ }),
+    );
+    const call = ipcBackend.mock.calls.find(
+      (c) => c[0] === "add_queue_scheduled",
+    );
+    expect(call).toBeDefined();
+    const plan = (
+      call?.[1] as { item: { plan: { naver: unknown[]; band: unknown[] } } }
+    ).item.plan;
+    // 카페 url 대상은 실리고, 밴드는 url 미지원이라 제외된다(runNow가 실패로 막는 것과
+    // 일관 — latest로 둔갑해 엉뚱한 최신글에 댓글이 달리는 것을 방지).
+    expect(plan.naver.length).toBeGreaterThan(0);
+    expect(plan.band).toEqual([]);
+  });
+
   it("blocks scheduling when a band is selected but none is picked", async () => {
     renderPublish();
     // 밴드 계정만 선택하고 예약 모드로 전환 — 게시할 밴드는 미선택.

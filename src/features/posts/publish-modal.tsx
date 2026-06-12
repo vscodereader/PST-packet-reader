@@ -1417,6 +1417,15 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     return { mode: commentTargetMode, count: commentCount, cafeId };
   };
 
+  // 밴드 댓글 전용(comment) 모드의 동결 대상. 밴드는 기존 글(최신/인기)에만 댓글을 달고
+  // url 댓글은 지원하지 않아 url이면 latest로 편다(백엔드 run_band_targets도 동일 폴백).
+  // cafeId/articleId는 밴드에서 쓰지 않으므로 비운다(백엔드는 mode/count만 본다).
+  const bandCommentSpecFor = (): CommentTargetSpec | undefined => {
+    if (mode !== "comment") return undefined;
+    const m = commentTargetMode === "popular" ? "popular" : "latest";
+    return { mode: m, count: commentCount };
+  };
+
   // 예약 plan(동결 실행 페이로드): 본문은 모달이 이미 평문화한 값을 박제하고,
   // 엔진이 있는 naver/forum/band 대상을 모두 싣는다. naver의 cafe/menuId/
   // boardType은 toPostJob과 동일하게 naverPicks에서 구하고, band 링크는
@@ -1444,14 +1453,25 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         name: j.targetName,
         code: j.code ?? "",
       }));
-    const band: BandTarget[] = jobs
-      .filter((j) => j.platform === "band")
-      .map((j) => ({
-        accountId: j.loginId,
-        name: j.targetName,
-        // 잡 생성 시 동결한 링크를 그대로 싣는다(밴드명 재조회 없음).
-        link: j.bandLink ?? "",
-      }));
+    const bandSpec = bandCommentSpecFor();
+    // 밴드는 url(특정 글) 댓글을 지원하지 않는다 — runNow는 실패로 표기한다(위 1303행).
+    // 예약 plan은 url 모드일 때 밴드 대상을 싣지 않는다(안 그러면 bandCommentSpecFor가
+    // latest로 접혀 엉뚱한 최신글에 댓글이 달린다). 카페 url 대상은 그대로 실린다.
+    const bandUrlUnsupported =
+      mode === "comment" && commentTargetMode === "url";
+    const band: BandTarget[] = bandUrlUnsupported
+      ? []
+      : jobs
+          .filter((j) => j.platform === "band")
+          .map((j) => ({
+            accountId: j.loginId,
+            name: j.targetName,
+            // 잡 생성 시 동결한 링크를 그대로 싣는다(밴드명 재조회 없음).
+            link: j.bandLink ?? "",
+            // 댓글 전용 모드면 기존 글(최신/인기) 대상을 동결한다(없으면 워커가 새 글을 쓰는
+            // band_publish로 가 리더 승인제 밴드에서 1003이 난다).
+            ...(bandSpec ? { commentTarget: bandSpec } : {}),
+          }));
     return {
       postId: doc.id,
       kind: doc.kind,
