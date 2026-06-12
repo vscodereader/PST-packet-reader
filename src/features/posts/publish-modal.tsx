@@ -1273,8 +1273,9 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     ).then((forumArr) => forumArr.flat());
 
     // 밴드(band.us): 저장된 링크로 가입 후 글(+댓글) 게시 — 순수 HTTP 백엔드 호출.
-    const bandComment =
-      mode === "both" || mode === "comment" ? firstComment : "";
+    // 댓글 모드(both/comment)면 비어있지 않은 댓글을 모두 같은 글에 단다(카페 both와 동일).
+    // 댓글 풀은 카페와 동일하게 위에서 만든 `comments`를 재사용한다.
+    const bandComments = mode === "both" || mode === "comment" ? comments : [];
     const bandWork: Promise<PublishResult[]> = Promise.all(
       bandJobs.map((j) => {
         // 잡 생성 시 동결한 가입 링크를 쓴다(밴드명 재조회 없이 정확한 밴드).
@@ -1286,14 +1287,20 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
             bandLink: link,
             title: doc.title,
             content: htmlToText(doc.body ?? ""),
-            ...(bandComment ? { comment: bandComment } : {}),
+            comments: bandComments,
           })
           .then((out) => ({
             ...j,
             // 결과 라벨을 게시 응답의 실제 밴드명으로(없으면 잡의 밴드명 유지).
             targetName: out.bandName ?? j.targetName,
-            ok: true,
-            msg: out.commented ? "글·댓글 게시 완료" : "글 게시 완료",
+            // 댓글을 의도했으면 전부 성공해야 ok(카페 commentsAllOk와 동일 정책).
+            // 부분/전량 실패는 초록 배지로 묻지 않는다.
+            ok:
+              out.commentTotal === 0 || out.commentedCount === out.commentTotal,
+            msg:
+              out.commentTotal === 0
+                ? "글 게시 완료"
+                : `글·댓글 ${out.commentedCount}/${out.commentTotal}개 게시 완료`,
           }))
           .catch((err: unknown) => ({ ...j, ok: false, msg: errText(err) }));
       }),
@@ -1328,7 +1335,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
             .recordBatch({
               title: doc.title,
               body: htmlToText(doc.body ?? ""),
-              comment: bandComment,
+              // 로그 스냅샷은 대표로 첫 댓글만 남긴다(실제 게시는 위에서 전체 전달).
+              comment: bandComments[0] ?? "",
               runPost: mode === "post" || mode === "both",
               runComment: mode === "comment" || mode === "both",
               items: br.map((r) => ({

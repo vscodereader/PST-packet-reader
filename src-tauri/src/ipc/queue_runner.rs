@@ -485,7 +485,7 @@ async fn run_forum_targets<R: Runtime>(
 
 /// plan의 밴드 대상을 순차로 게시한다. 밴드는 순수 async HTTP라 forum처럼 Chrome/
 /// spawn_blocking이 필요 없어 루프에서 직접 await한다. 댓글은 즉시게시(runNow) 경로와
-/// 동일하게 comment/both 모드일 때만 풀의 첫 항목을 게시한 글에 단다(밴드는 항상 글을
+/// 동일하게 comment/both 모드일 때만 댓글 풀 전체를 게시한 글에 모두 단다(밴드는 항상 글을
 /// 새로 쓰고 그 글에 self-comment만 가능). 각 대상 게시 전 협조적 취소(item_present)를
 /// 확인해, 취소된 아이템의 남은 밴드는 게시하지 않는다.
 async fn run_band_targets<R: Runtime>(
@@ -493,16 +493,13 @@ async fn run_band_targets<R: Runtime>(
     plan: &PublishPlan,
     id: &str,
 ) -> Vec<BandOutcome> {
-    // comment/both면 댓글을 단다. 즉시게시(runNow)와 동일하게 첫 "비어있지 않은" 댓글을
-    // 고른다 — band_publish가 공백 댓글을 무시하므로, 선두가 공백뿐이면 plan.comments.first()는
-    // 즉시게시가 다는 댓글을 예약에서 누락시킨다(같은 입력, 다른 결과 방지).
-    let comment = if runs_comment(plan) {
-        plan.comments
-            .iter()
-            .map(String::as_str)
-            .find(|c| !c.trim().is_empty())
+    // comment/both면 댓글 풀 전체를 넘긴다. 즉시게시(runNow)와 동일하게 band_publish가
+    // 비어있지 않은 댓글을 모두 같은 글에 순서대로 단다(공백은 내부에서 무시). post 전용
+    // 모드면 빈 슬라이스라 댓글을 달지 않는다(같은 입력, 다른 결과 방지).
+    let comments: &[String] = if runs_comment(plan) {
+        &plan.comments
     } else {
-        None
+        &[]
     };
     let mut outcomes = Vec::new();
     for t in &plan.band {
@@ -515,7 +512,7 @@ async fn run_band_targets<R: Runtime>(
             &t.link,
             &plan.title,
             &plan.body_text,
-            comment,
+            comments,
         )
         .await;
         outcomes.push(BandOutcome {
@@ -818,6 +815,12 @@ fn build_log_batch(
     }
 
     for o in band_outcomes {
+        // 댓글 부분 실패도 드러낸다(카페 commentsAllOk와 동일): 시도한 댓글이 있는데
+        // 성공분이 모자라면(commented_count < comment_total) 성공으로 묻지 않고 실패로 둔다.
+        let band_comments_failed = matches!(
+            &o.result,
+            Ok(out) if out.comment_total > 0 && out.commented_count < out.comment_total
+        );
         items.push(BatchItem {
             platform: PlatformId::Band,
             target: o.band_name.clone(),
@@ -825,13 +828,16 @@ fn build_log_batch(
             board: None,
             login_id: o.account_id.clone(),
             status: match &o.result {
-                Ok(_) => BatchItemStatus::Success,
-                Err(_) => BatchItemStatus::Fail,
+                Ok(_) if !band_comments_failed => BatchItemStatus::Success,
+                _ => BatchItemStatus::Fail,
             },
-            // 성공 시 댓글까지 달았는지(commented) 반영 — 즉시게시(runNow) 문구와 동일.
-            // 실패 시 BandPostError 메시지를 그대로 보여준다.
+            // 글·댓글 성공/시도 개수를 "N/M개"로 보여준다(즉시게시 runNow 문구와 동일).
+            // 댓글을 시도하지 않았으면 "글 게시 완료". 실패 시 BandPostError 메시지를 그대로.
             msg: match &o.result {
-                Ok(out) if out.commented => "글·댓글 게시 완료".to_owned(),
+                Ok(out) if out.comment_total > 0 => format!(
+                    "글·댓글 {}/{}개 게시 완료",
+                    out.commented_count, out.comment_total
+                ),
                 Ok(_) => "글 게시 완료".to_owned(),
                 Err(e) => e.to_string(),
             },
@@ -1062,7 +1068,12 @@ mod tests {
         }
     }
 
-    fn band_ok(account: &str, name: &str, commented: bool) -> BandOutcome {
+    fn band_ok(
+        account: &str,
+        name: &str,
+        commented_count: usize,
+        comment_total: usize,
+    ) -> BandOutcome {
         BandOutcome {
             account_id: account.into(),
             band_name: name.into(),
@@ -1070,7 +1081,8 @@ mod tests {
                 joined: true,
                 post_no: 100,
                 web_url: "https://band.us/band/1/post/100".into(),
-                commented,
+                commented_count,
+                comment_total,
                 band_name: Some(name.into()),
             }),
         }
@@ -1515,7 +1527,7 @@ mod tests {
         // 네이버 원문은 영어("Page Not Found"), errorCode 10404.
         let cafe = cafe_error(Some(404), Some("10404"), Some("Page Not Found"));
         let reports = vec![post_fail_api("u0", "123", cafe)];
-        let b = build_log_batch(&p, &reports, &[], &[], &[], 1, 0);
+        let b = build_log_batch(&p, &reports, &[], &[], &[], &[], 1, 0);
         assert_eq!(b.items[0].status, BatchItemStatus::Fail);
         // 메인 라인: 영어 원문·HTTP 없이 한국어 사유 + 식별 코드.
         assert_eq!(
@@ -1555,31 +1567,38 @@ mod tests {
     #[test]
     fn build_log_batch_maps_band_success_with_comment_and_failure() {
         // 밴드는 forum과 별개 platform으로, 동결된 밴드명·계정과 함께 성공/실패를 남긴다.
+        // 댓글 부분 실패(commented_count < comment_total)는 성공으로 묻지 않고 Fail로 둔다.
         let p = plan(ModeValue::Both, vec![]);
         let bands = vec![
-            band_ok("u0", "투자밴드", true),  // 글+댓글 성공
-            band_ok("u1", "정보밴드", false), // 글만 성공
+            band_ok("u0", "투자밴드", 2, 2),  // 글+댓글 전부 성공
+            band_ok("u1", "정보밴드", 0, 0),  // 글만 성공(댓글 미시도)
+            band_ok("u3", "부분밴드", 1, 2),  // 댓글 일부 실패 → Fail 표기
             band_fail("u2", "실패밴드"),      // 게시 실패
         ];
         let b = build_log_batch(&p, &[], &[], &[], &bands, &[], 1, 0);
-        assert_eq!(b.items.len(), 3);
+        assert_eq!(b.items.len(), 4);
 
         assert_eq!(b.items[0].platform, PlatformId::Band);
         assert_eq!(b.items[0].target, "투자밴드");
         assert_eq!(b.items[0].login_id, "u0");
         assert_eq!(b.items[0].status, BatchItemStatus::Success);
-        assert_eq!(b.items[0].msg, "글·댓글 게시 완료");
+        assert_eq!(b.items[0].msg, "글·댓글 2/2개 게시 완료");
         assert!(b.items[0].trace.is_none());
 
         assert_eq!(b.items[1].status, BatchItemStatus::Success);
         assert_eq!(b.items[1].msg, "글 게시 완료");
 
-        assert_eq!(b.items[2].platform, PlatformId::Band);
-        assert_eq!(b.items[2].target, "실패밴드");
+        // 댓글 일부 실패: 성공으로 묻지 않고 Fail + "N/M개"로 드러낸다(카페 commentsAllOk 동일).
+        assert_eq!(b.items[2].target, "부분밴드");
         assert_eq!(b.items[2].status, BatchItemStatus::Fail);
+        assert_eq!(b.items[2].msg, "글·댓글 1/2개 게시 완료");
+
+        assert_eq!(b.items[3].platform, PlatformId::Band);
+        assert_eq!(b.items[3].target, "실패밴드");
+        assert_eq!(b.items[3].status, BatchItemStatus::Fail);
         // 실패는 BandPostError 메시지를 msg/trace에 남긴다(조용한 누락 방지).
-        assert!(b.items[2].trace.is_some());
-        assert!(!b.items[2].msg.is_empty());
+        assert!(b.items[3].trace.is_some());
+        assert!(!b.items[3].msg.is_empty());
     }
 
     #[tokio::test]

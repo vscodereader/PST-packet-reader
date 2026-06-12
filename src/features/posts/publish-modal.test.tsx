@@ -962,4 +962,99 @@ describe("PublishModal", () => {
       expect(links).toContain("https://www.band.us/band/103084867");
     });
   });
+
+  it("밴드 즉시게시(글+댓글)는 댓글을 모두 같은 글에 보낸다", async () => {
+    // 회귀: 댓글을 2개 이상 써도 1개만 게시되던 문제 — comments 풀 전체를 백엔드에 전달.
+    const bothDoc: LibraryPost = {
+      ...postDoc,
+      id: "l-band-multi",
+      kind: "both",
+      body: "<p>본문</p>",
+      comments: ["첫 번째 댓글", "두 번째 댓글"],
+    };
+    renderPublish({ doc: bothDoc });
+    await userEvent.click(await screen.findByText("value_invest")); // band a7
+
+    const linkInput = screen.getByLabelText("밴드 링크");
+    const saveBtn = screen.getByRole("button", { name: "저장" });
+    await userEvent.type(linkInput, "https://band.us/band/103043410");
+    await waitFor(() => expect(saveBtn).toBeEnabled());
+    await userEvent.click(saveBtn);
+    await waitFor(() => expect(linkInput).toHaveValue(""));
+    await screen.findByPlaceholderText("게시할 밴드 선택");
+    await pickOption(0, "데일밴드");
+    await screen.findByLabelText("데일밴드 제거");
+
+    const publishBtn = await screen.findByRole("button", {
+      name: /^게시 \(\d+\)/,
+    });
+    await waitFor(() => expect(publishBtn).toBeEnabled());
+    await userEvent.click(publishBtn);
+
+    // band_publish에 댓글 풀 전체가 같은 글로 전달된다(1개만 X).
+    await waitFor(() => {
+      const call = ipcBackend.mock.calls.find((c) => c[0] === "band_publish");
+      expect(call).toBeDefined();
+      expect((call![1] as { comments: string[] }).comments).toEqual([
+        "첫 번째 댓글",
+        "두 번째 댓글",
+      ]);
+    });
+  });
+
+  it("밴드 즉시게시에서 댓글이 일부 실패하면 실패로 표기한다", async () => {
+    // 회귀: 댓글을 의도했는데 일부/전량 실패면 초록 배지로 묻지 않고 "N/M개"로 드러내고
+    // 행을 실패(재시도 버튼)로 둔다 — 카페 commentsAllOk와 동일 정책.
+    const real = ipcBackend.getMockImplementation()!;
+    ipcBackend.mockImplementation(
+      (cmd: string, args?: Record<string, unknown>) =>
+        cmd === "band_publish"
+          ? Promise.resolve({
+              joined: true,
+              postNo: 1,
+              webUrl: "https://band.us/band/103043410/post/1",
+              commentedCount: 1, // 2개 시도 중 1개만 성공
+              commentTotal: 2,
+              bandName: "데일밴드",
+            })
+          : real(cmd, args),
+    );
+    try {
+      const bothDoc: LibraryPost = {
+        ...postDoc,
+        id: "l-band-partial",
+        kind: "both",
+        body: "<p>본문</p>",
+        comments: ["첫 번째 댓글", "두 번째 댓글"],
+      };
+      renderPublish({ doc: bothDoc });
+      await userEvent.click(await screen.findByText("value_invest"));
+
+      const linkInput = screen.getByLabelText("밴드 링크");
+      const saveBtn = screen.getByRole("button", { name: "저장" });
+      await userEvent.type(linkInput, "https://band.us/band/103043410");
+      await waitFor(() => expect(saveBtn).toBeEnabled());
+      await userEvent.click(saveBtn);
+      await waitFor(() => expect(linkInput).toHaveValue(""));
+      await screen.findByPlaceholderText("게시할 밴드 선택");
+      await pickOption(0, "데일밴드");
+      await screen.findByLabelText("데일밴드 제거");
+
+      const publishBtn = await screen.findByRole("button", {
+        name: /^게시 \(\d+\)/,
+      });
+      await waitFor(() => expect(publishBtn).toBeEnabled());
+      await userEvent.click(publishBtn);
+
+      // msg는 "글·댓글 1/2개", 행은 ok:false라 "재시도" 버튼이 뜬다.
+      // 그 행(Text→Box→Group)으로 범위를 좁혀 해당 행이 실패 표기인지 본다.
+      const msgEl = await screen.findByText(/글·댓글 1\/2개 게시 완료/);
+      const row = msgEl.parentElement!.parentElement!;
+      expect(
+        within(row).getByRole("button", { name: "재시도" }),
+      ).toBeInTheDocument();
+    } finally {
+      ipcBackend.mockImplementation(real);
+    }
+  });
 });
