@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
 
-import { htmlToText, unreadyNaverAccountIds } from "./publish-helpers";
+import {
+  crawlToText,
+  htmlToText,
+  unreadyNaverAccountIds,
+} from "./publish-helpers";
 
 describe("htmlToText", () => {
   it("flattens block tags and <br> into newlines", () => {
@@ -25,8 +29,54 @@ describe("htmlToText", () => {
     );
   });
 
+  it("preserves <a> links as '텍스트 (URL)' instead of dropping the href", () => {
+    // The regression: 평문 변환이 <a>를 통째로 지워 링크 URL이 사라졌다.
+    expect(htmlToText('<a href="https://naver.com">네이버</a>')).toBe(
+      "네이버 (https://naver.com)",
+    );
+    // 표시 텍스트가 URL과 같으면 중복 없이 URL 하나만.
+    expect(
+      htmlToText('<a href="https://naver.com">https://naver.com</a>'),
+    ).toBe("https://naver.com");
+    // 본문 안에 섞여 있어도 주변 텍스트와 함께 보존.
+    expect(
+      htmlToText('<p>참고: <a href="https://x.com/a">여기</a> 클릭</p>'),
+    ).toBe("참고: 여기 (https://x.com/a) 클릭");
+  });
+
   it("collapses 3+ blank lines and trims", () => {
     expect(htmlToText("<p>a</p><p></p><p></p><p>b</p>")).toBe("a\n\nb");
+  });
+});
+
+describe("crawlToText", () => {
+  it("붙여넣은 일반 링크를 변환하지 않고 원문 그대로 둔다", () => {
+    const url =
+      "https://news.sbs.co.kr/news/endPage.do?news_id=N1008610332&plink=ORI&cooper=NAVER";
+    expect(crawlToText(url, [])).toBe(url);
+  });
+
+  it("URL이 아닌 임의의 텍스트도 그대로 둔다", () => {
+    expect(crawlToText("그냥 본문 내용", [])).toBe("그냥 본문 내용");
+  });
+
+  it("종목 6자리 코드 링크는 기존대로 시세 줄로 바꾼다(기능 유지)", () => {
+    const stocks = [
+      {
+        code: "005930",
+        name: "삼성전자",
+        market: "코스피",
+        posts: "0",
+        price: "70,000",
+        chg: 1.2,
+      },
+    ];
+    expect(
+      crawlToText(
+        "https://finance.naver.com/item/main.naver?code=005930",
+        stocks,
+      ),
+    ).toBe("삼성전자(005930) · 코스피 현재가 70,000 (▲1.2%)");
   });
 });
 

@@ -185,7 +185,7 @@ describe("WriterModal", () => {
     expect(body).toBeInTheDocument();
   });
 
-  it("crawls a non-stock URL to a host placeholder", async () => {
+  it("keeps a pasted non-stock URL without crashing", async () => {
     renderWriter();
     await screen.findByPlaceholderText("제목을 입력하세요");
     const body = document.querySelector("[contenteditable]") as HTMLElement;
