@@ -26,26 +26,43 @@ pub(crate) fn login(
     account: &Account,
     headless: bool,
 ) -> Result<LoginResolution, OrchestratorError> {
-    let outcome = attempt(&account.id, &account.password, headless)?;
-    finalize(cookies_dir, account, outcome)
+    let (outcome, trace) = attempt(&account.id, &account.password, headless)?;
+    finalize(cookies_dir, account, outcome, trace)
 }
 
-// Chrome을 띄워 attach하고 로그인 시퀀스를 1회 수행한다.
-fn attempt(id: &str, pw: &str, headless: bool) -> Result<BandLoginOutcome, OrchestratorError> {
+// Chrome을 띄워 attach하고 로그인 시퀀스를 1회 수행한다. 실패 시 사용자 메시지와 함께
+// "자세히 보기"용 trace(위치+백트레이스)도 돌려준다(#210, 네이버 미러).
+fn attempt(
+    id: &str,
+    pw: &str,
+    headless: bool,
+) -> Result<(BandLoginOutcome, Option<String>), OrchestratorError> {
     let handle = launch_debug_chrome(headless)?;
-    let mut client = CdpClient::connect_to_existing_chrome("127.0.0.1", handle.port)
-        .map_err(|error| OrchestratorError::CommandFailed(error.to_string()))?;
+    // CDP 연결/Page 활성화 실패는 AutomationError(백트레이스 보유)다. 인프라 Err로 뭉개지
+    // 않고 메시지/trace를 보존해 로그인 실패(Error)로 흘린다(#210).
+    let mut client = match CdpClient::connect_to_existing_chrome("127.0.0.1", handle.port) {
+        Ok(client) => client,
+        Err(error) => {
+            return Ok((
+                BandLoginOutcome::Error(error.message().to_owned()),
+                Some(error.trace()),
+            ))
+        }
+    };
     // 로그인은 Runtime.enable 을 켜지 않는다(CDP 탐지 누출 방지). Page 도메인만 활성화.
-    client
-        .enable_page_only()
-        .map_err(|error| OrchestratorError::CommandFailed(error.to_string()))?;
+    if let Err(error) = client.enable_page_only() {
+        return Ok((
+            BandLoginOutcome::Error(error.message().to_owned()),
+            Some(error.trace()),
+        ));
+    }
 
     // headed(=!headless)면 사용자가 직접 개입할 수 있도록 더 오래 기다린다.
-    let outcome = login_flow::run(&mut client, id, pw, !headless);
+    let (outcome, trace) = login_flow::run(&mut client, id, pw, !headless);
 
     drop(client);
     drop(handle); // ChromeHandle Drop이 프로세스/임시 프로필을 정리한다.
-    Ok(outcome)
+    Ok((outcome, trace))
 }
 
 // 결과를 세분 상태로 해석한다. 쿠키 저장 IO 오류만 인프라 Err(`?`)로 올리고, 로그인 결과
@@ -54,6 +71,7 @@ fn finalize(
     cookies_dir: &Path,
     account: &Account,
     outcome: BandLoginOutcome,
+    trace: Option<String>,
 ) -> Result<LoginResolution, OrchestratorError> {
     match outcome {
         BandLoginOutcome::Ok { cookies } => {
@@ -76,7 +94,8 @@ fn finalize(
                 ))
             }
         }
-        // 실패 계열(비번오류/차단/오류)은 순수 매핑으로 세분 상태를 만든다.
-        other => Ok(resolve_band_failure(&other)),
+        // 실패 계열(비번오류/차단/오류)은 순수 매핑으로 세분 상태를 만든다. CDP 실패의
+        // trace는 "자세히 보기"용으로 보존한다(#210).
+        other => Ok(resolve_band_failure(&other, trace)),
     }
 }

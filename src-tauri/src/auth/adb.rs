@@ -14,13 +14,33 @@ const ADB_BIN: &str = "adb";
 
 /// ADB 디바이스가 연결되어 있고 인증되었는지 확인한다.
 pub async fn assert_adb_device() -> Result<(), OrchestratorError> {
-    if !has_authorized_device(&run_adb(&["devices"])?) {
+    if !has_authorized_device(&run_adb_timed(vec!["devices".to_string()]).await?) {
         return Err(OrchestratorError::CommandFailed(
             "ADB 디바이스가 연결되지 않았거나 인증되지 않았습니다 (adb devices에 'device' 없음)"
                 .to_string(),
         ));
     }
     Ok(())
+}
+
+/// `run_adb`를 spawn_blocking으로 실행하고 명령 1건마다 타임아웃을 건다(#210). adb 서버가
+/// 행(hang)이면 `cmd.output()`이 무한 블록되는데, async 안에서 직접 호출하면 런타임 스레드를
+/// 막아 로그인 큐가 멈춘다. blocking 풀로 분리하고 timeout으로 상한을 둔다(초과 시 블로킹
+/// 스레드는 남을 수 있으나 호출부는 에러로 진행 — 로그인 워커가 다음 계정으로 넘어간다).
+async fn run_adb_timed(args: Vec<String>) -> Result<String, OrchestratorError> {
+    let label = args.join(" ");
+    let task = tokio::task::spawn_blocking(move || {
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_adb(&refs)
+    });
+    match tokio::time::timeout(Duration::from_secs(config::ADB_STEP_TIMEOUT_SECS), task).await {
+        Ok(joined) => joined
+            .map_err(|e| OrchestratorError::CommandFailed(format!("adb 작업 스레드 오류: {e}")))?,
+        Err(_) => Err(OrchestratorError::CommandFailed(format!(
+            "adb {label} 응답 시간 초과({}초)",
+            config::ADB_STEP_TIMEOUT_SECS
+        ))),
+    }
 }
 
 /// 진단용: ADB 디바이스가 연결되어 있는지 부작용 없이 확인한다.
@@ -49,10 +69,16 @@ pub async fn probe_adb_connection() -> Result<(), OrchestratorError> {
 pub async fn toggle_airplane_mode() -> Result<(), OrchestratorError> {
     let before = fetch_external_ip().await;
     tracing::info!("[ADB] ✈ 비행기모드 ON");
-    run_adb(&airplane_mode_args(true))?;
+    run_adb_timed(airplane_mode_args(true).iter().map(|s| s.to_string()).collect()).await?;
     sleep(Duration::from_secs(config::ADB_AIRPLANE_ENABLE_SECS)).await;
     tracing::info!("[ADB] ✈ 비행기모드 OFF — 인터넷 복구 대기");
-    run_adb(&airplane_mode_args(false))?;
+    run_adb_timed(
+        airplane_mode_args(false)
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    )
+    .await?;
     wait_for_internet_connection().await?;
     let after = fetch_external_ip().await;
 
@@ -149,7 +175,7 @@ async fn wait_for_internet_connection() -> Result<(), OrchestratorError> {
     let deadline = Instant::now() + timeout;
 
     loop {
-        if has_internet_connection()? {
+        if has_internet_connection().await? {
             return Ok(());
         }
 
@@ -164,9 +190,9 @@ async fn wait_for_internet_connection() -> Result<(), OrchestratorError> {
     }
 }
 
-fn has_internet_connection() -> Result<bool, OrchestratorError> {
+async fn has_internet_connection() -> Result<bool, OrchestratorError> {
     let probe = internet_probe_command();
-    let output = run_adb(&["shell", probe.as_str()])?;
+    let output = run_adb_timed(vec!["shell".to_string(), probe]).await?;
     Ok(output.lines().any(|line| line.trim() == "ok"))
 }
 

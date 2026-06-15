@@ -130,10 +130,14 @@ pub(crate) fn run(
     id: &str,
     pw: &str,
     wait_for_human: bool,
-) -> BandLoginOutcome {
+) -> (BandLoginOutcome, Option<String>) {
     match run_inner(client, id, pw, wait_for_human) {
-        Ok(outcome) => outcome,
-        Err(error) => BandLoginOutcome::Error(error.to_string()),
+        Ok(outcome) => (outcome, None),
+        // CDP/자동화 실패 — 메시지는 사용자용, trace(위치+백트레이스)는 "자세히 보기"용(#210).
+        Err(error) => (
+            BandLoginOutcome::Error(error.message().to_owned()),
+            Some(error.trace()),
+        ),
     }
 }
 

@@ -15,15 +15,19 @@ use devtools_connection::{normalize_debug_host, select_or_create_target, websock
 use serde_json::{json, Value};
 use std::fmt::{Display, Formatter};
 use std::io::ErrorKind;
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Runtime};
 use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{connect, Message, WebSocket};
+use tungstenite::{Message, WebSocket};
 
 const DISCUSSION_URL: &str = "https://stock.naver.com/discussion";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
+/// DevTools WebSocket 핸드셰이크 전 TCP 연결 타임아웃. tungstenite `connect()`는 연결에
+/// 타임아웃이 없어, Chrome이 떴지만 DevTools가 응답하지 않으면 무한 대기한다(#210 로그인
+/// 멈춤의 한 원인). TCP 연결을 이 시간으로 묶는다(이후 입출력은 DEFAULT_TIMEOUT).
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 type AutomationResult<T> = Result<T, AutomationError>;
 
@@ -294,11 +298,38 @@ impl CdpClient {
             AutomationError::new(format!("Chrome DevTools 대상 탭 선택 실패: {error}"))
         })?;
         let url = websocket_url_for_host(&target.web_socket_debugger_url, host, port)?;
-        let (socket, _) = connect(url.as_str()).map_err(|error| {
+
+        // tungstenite `connect()`는 TCP 연결·핸드셰이크에 타임아웃이 없다. DevTools는
+        // 127.0.0.1의 평문 ws라, TCP는 connect_timeout으로, 핸드셰이크/이후 입출력은
+        // read/write 타임아웃으로 묶어 무한 대기를 막는다(#210). read_message/send_message의
+        // WouldBlock+데드라인 루프가 이 read/write 타임아웃과 맞물려 실제로 동작하게 된다.
+        let addr = (host, port)
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut addrs| addrs.next())
+            .ok_or_else(|| {
+                AutomationError::new(format!(
+                    "Chrome DevTools 주소를 해석하지 못했습니다: {host}:{port}"
+                ))
+            })?;
+        let stream = TcpStream::connect_timeout(&addr, WS_CONNECT_TIMEOUT).map_err(|error| {
             AutomationError::new(format!(
-                "Chrome DevTools WebSocket 연결 실패({url}): {error:?}"
+                "Chrome DevTools TCP 연결 실패({host}:{port}): {error}"
             ))
         })?;
+        stream
+            .set_read_timeout(Some(DEFAULT_TIMEOUT))
+            .and_then(|()| stream.set_write_timeout(Some(DEFAULT_TIMEOUT)))
+            .map_err(|error| {
+                AutomationError::new(format!("Chrome DevTools 소켓 타임아웃 설정 실패: {error}"))
+            })?;
+
+        let (socket, _) = tungstenite::client(url.as_str(), MaybeTlsStream::Plain(stream))
+            .map_err(|error| {
+                AutomationError::new(format!(
+                    "Chrome DevTools WebSocket 연결 실패({url}): {error:?}"
+                ))
+            })?;
 
         Ok(Self { socket, next_id: 0 })
     }

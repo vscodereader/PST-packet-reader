@@ -39,7 +39,7 @@ fn load_accounts() -> Result<Vec<Account>, OrchestratorError> {
 /// 한 band 계정을 처리한다(네이버 `process_account` 미러).
 ///
 /// `_app`은 큐 워커가 넘기는 핸들로, CDP 로그인은 직접 호출하므로 본문에서는 쓰지 않는다.
-async fn process_band_account<R: Runtime>(
+pub(crate) async fn process_band_account<R: Runtime>(
     _app: &AppHandle<R>,
     account_id: &str,
     headless: bool,

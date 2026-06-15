@@ -15,6 +15,10 @@ pub(crate) struct LoginResolution {
     pub message: String,
     /// 큐 상태 판정용: 로그인이 실제로 성공해 쿠키가 저장됐는가.
     pub succeeded: bool,
+    /// "자세히 보기"용 개발자 trace(위치 앵커 + 런타임 백트레이스, #199/#210). CDP 실패
+    /// (`AutomationError`)에서만 채워지고, 비번오류/차단 등 일반 실패는 None이다. 게시 실패의
+    /// `BatchItem.trace`와 동일 역할 — 로그인 실패도 알림 로그 "자세히 보기"에 백트레이스를 띄운다.
+    pub trace: Option<String>,
 }
 
 impl LoginResolution {
@@ -24,15 +28,32 @@ impl LoginResolution {
             status: AccountStatus::Active,
             message: guide(&AccountStatus::Active).to_owned(),
             succeeded: true,
+            trace: None,
         }
     }
 
-    /// 실패 계열(비번오류/인증필요/차단/오류). 큐 상태는 실패로 본다.
+    /// 실패 계열(비번오류/인증필요/차단/오류). 큐 상태는 실패로 본다. 백트레이스가 없는
+    /// 일반 실패(비번오류/차단 등)에 쓴다 — trace는 None.
     pub(crate) fn failure(status: AccountStatus, message: impl Into<String>) -> Self {
         Self {
             status,
             message: message.into(),
             succeeded: false,
+            trace: None,
+        }
+    }
+
+    /// 백트레이스를 동반한 실패(CDP/자동화 오류). "자세히 보기"에 trace를 띄우기 위해 보존한다.
+    pub(crate) fn failure_with_trace(
+        status: AccountStatus,
+        message: impl Into<String>,
+        trace: Option<String>,
+    ) -> Self {
+        Self {
+            status,
+            message: message.into(),
+            succeeded: false,
+            trace,
         }
     }
 }
@@ -79,7 +100,7 @@ fn challenge_label(kind: &ChallengeKind) -> &'static str {
 /// 비-Ok outcome을 해석한다. 상태는 [`outcome_to_status`]를 단일 진실로 쓰고, 메시지만
 /// 종류별로 다듬는다. Ok는 쿠키 저장 IO 뒤에 호출부가 `active`/`failure`로 직접 만든다
 /// (여기 Ok 경로는 방어적 기본값).
-pub(crate) fn resolve_non_ok(outcome: LoginOutcome) -> LoginResolution {
+pub(crate) fn resolve_non_ok(outcome: LoginOutcome, trace: Option<String>) -> LoginResolution {
     let status = outcome_to_status(&outcome);
     let message = match &outcome {
         LoginOutcome::ChallengeRequired { kind } => format!(
@@ -93,7 +114,8 @@ pub(crate) fn resolve_non_ok(outcome: LoginOutcome) -> LoginResolution {
     if status == AccountStatus::Active {
         LoginResolution::active()
     } else {
-        LoginResolution::failure(status, message)
+        // trace(CDP 실패 백트레이스)는 있으면 보존해 "자세히 보기"에 띄운다(#210).
+        LoginResolution::failure_with_trace(status, message, trace)
     }
 }
 
@@ -153,15 +175,27 @@ mod tests {
 
     #[test]
     fn resolve_non_ok_preserves_error_text_and_marks_failure() {
-        let r = resolve_non_ok(LoginOutcome::Error("타임아웃".into()));
+        let r = resolve_non_ok(LoginOutcome::Error("타임아웃".into()), None);
         assert_eq!(r.status, AccountStatus::Error);
         assert_eq!(r.message, "타임아웃");
         assert!(!r.succeeded);
+        assert_eq!(r.trace, None);
+    }
+
+    #[test]
+    fn resolve_non_ok_preserves_trace_for_detail_view() {
+        // CDP 실패에서 넘어온 백트레이스는 "자세히 보기"용으로 보존된다(#210).
+        let r = resolve_non_ok(
+            LoginOutcome::Error("연결 실패".into()),
+            Some("at file.rs:1:1\n\nframe0".to_owned()),
+        );
+        assert_eq!(r.status, AccountStatus::Error);
+        assert_eq!(r.trace.as_deref(), Some("at file.rs:1:1\n\nframe0"));
     }
 
     #[test]
     fn resolve_non_ok_blocked_uses_guide() {
-        let r = resolve_non_ok(LoginOutcome::Blocked);
+        let r = resolve_non_ok(LoginOutcome::Blocked, None);
         assert_eq!(r.status, AccountStatus::Blocked);
         assert!(r.message.contains("차단"));
         assert!(!r.succeeded);
@@ -169,9 +203,12 @@ mod tests {
 
     #[test]
     fn resolve_non_ok_challenge_names_the_kind() {
-        let r = resolve_non_ok(LoginOutcome::ChallengeRequired {
-            kind: ChallengeKind::Otp,
-        });
+        let r = resolve_non_ok(
+            LoginOutcome::ChallengeRequired {
+                kind: ChallengeKind::Otp,
+            },
+            None,
+        );
         assert_eq!(r.status, AccountStatus::Challenge);
         assert!(r.message.contains("OTP"));
     }
