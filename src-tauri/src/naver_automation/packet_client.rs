@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use reqwest::blocking::Client;
 use reqwest::header::{
     HeaderMap, HeaderValue, ACCEPT, ACCEPT_LANGUAGE, CONTENT_TYPE, COOKIE, ORIGIN, REFERER,
-    USER_AGENT,
+    RETRY_AFTER, USER_AGENT,
 };
 use serde_json::{json, Value};
 use url::form_urlencoded::Serializer;
@@ -24,6 +24,13 @@ const CBOX_HOST: &str = "apis.naver.com";
 const STATIC_NID_HOST: &str = "static.nid.naver.com";
 const DEFAULT_REFERER: &str = "https://stock.naver.com/discussion";
 const DEFAULT_PROFILE_INTRODUCTION: &str = "2222";
+
+// 글쓰기 form(txId)·add 가 다종목 연속 게시 때 간헐적으로 429를 반환하므로
+// 일시적 실패(429·5xx)에 한해 70초 대기 후 재시도한다. 네이버 레이트리밋 창이
+// 종목 간 대기(60초)보다 길어, 사수 요청대로 백오프를 70초로 고정한다. 최대 4회(=3회 재시도).
+const POST_RETRY_MAX_ATTEMPTS: u32 = 4;
+const POST_RETRY_BASE: Duration = Duration::from_secs(70);
+const POST_RETRY_MAX_DELAY: Duration = Duration::from_secs(70);
 
 // Chrome에서 수거한 쿠키 한 개(도메인까지 보존). 이름만으로 합치면 서브도메인별
 // host-scoped 동일 이름 쿠키(NNB, 서비스별 세션/CSRF 등)가 last-write-wins로 뭉개져
@@ -349,17 +356,12 @@ impl NaverPacketClient {
         let target = discussion_target_from_url(page_url)?;
         let tx_id = self.issue_post_tx_id(page_url, &target)?;
         let payload = build_post_payload(title, body, &target, &tx_id);
-        let response_text = self
-            .client
-            .post(format!("{M_STOCK_ORIGIN}/front-api/discussion/add"))
-            .headers(self.json_headers(M_STOCK_HOST, page_url)?)
-            .json(&payload)
-            .send()
-            .map_err(|error| AutomationError::new(format!("글쓰기 add 패킷 전송 실패: {error}")))?
-            .error_for_status()
-            .map_err(|error| AutomationError::new(format!("글쓰기 add 패킷 HTTP 실패: {error}")))?
-            .text()
-            .map_err(|error| AutomationError::new(format!("글쓰기 add 응답 읽기 실패: {error}")))?;
+        let response_text = self.post_with_retry(
+            &format!("{M_STOCK_ORIGIN}/front-api/discussion/add"),
+            self.json_headers(M_STOCK_HOST, page_url)?,
+            Some(&payload),
+            "글쓰기 add",
+        )?;
         let value = parse_json(&response_text, "글쓰기 add")?;
 
         if !value
@@ -531,18 +533,12 @@ impl NaverPacketClient {
             "{M_STOCK_ORIGIN}/front-api/discussion/form?discussionType={}&itemCode={}",
             target.discussion_type, target.item_code
         );
-        let response_text = self
-            .client
-            .post(form_url)
-            .headers(self.json_headers(M_STOCK_HOST, page_url)?)
-            .send()
-            .map_err(|error| AutomationError::new(format!("글쓰기 form 패킷 전송 실패: {error}")))?
-            .error_for_status()
-            .map_err(|error| AutomationError::new(format!("글쓰기 form 패킷 HTTP 실패: {error}")))?
-            .text()
-            .map_err(|error| {
-                AutomationError::new(format!("글쓰기 form 응답 읽기 실패: {error}"))
-            })?;
+        let response_text = self.post_with_retry(
+            &form_url,
+            self.json_headers(M_STOCK_HOST, page_url)?,
+            None,
+            "글쓰기 form",
+        )?;
         let value = parse_json(&response_text, "글쓰기 form")?;
 
         if !value
@@ -676,6 +672,70 @@ impl NaverPacketClient {
         headers.insert("sec-fetch-dest", HeaderValue::from_static("empty"));
         Ok(headers)
     }
+
+    // 429(Too Many Requests)·5xx 같은 일시적 실패에 지수 백오프로 재시도하며 POST를 보낸다.
+    // 다종목 연속 게시 때 글쓰기 form(txId)·add 엔드포인트가 간헐 429를 반환해, 무재시도로
+    // 일부 종목만 실패하던 문제를 막는다. 성공 시 응답 본문(text)을 돌려준다.
+    fn post_with_retry(
+        &self,
+        url: &str,
+        headers: HeaderMap,
+        json_body: Option<&Value>,
+        label: &str,
+    ) -> AutomationResult<String> {
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            let mut builder = self.client.post(url).headers(headers.clone());
+            if let Some(body) = json_body {
+                builder = builder.json(body);
+            }
+            let response = builder.send().map_err(|error| {
+                AutomationError::new(format!("{label} 패킷 전송 실패: {error}"))
+            })?;
+            let status = response.status();
+            if status.is_success() {
+                return response.text().map_err(|error| {
+                    AutomationError::new(format!("{label} 응답 읽기 실패: {error}"))
+                });
+            }
+            if is_retryable_status(status.as_u16()) && attempt < POST_RETRY_MAX_ATTEMPTS {
+                let delay =
+                    parse_retry_after(response.headers()).unwrap_or_else(|| backoff_delay(attempt));
+                std::thread::sleep(delay);
+                continue;
+            }
+            return Err(AutomationError::new(format!(
+                "{label} 패킷 HTTP 실패: HTTP status {status} for url ({url})"
+            )));
+        }
+    }
+}
+
+// 429·5xx 처럼 재시도해 볼 만한(일시적) 상태코드인지 판별하는 함수입니다.
+fn is_retryable_status(status: u16) -> bool {
+    status == 429 || (500..=599).contains(&status)
+}
+
+// 재시도 대기시간을 계산하는 함수입니다. POST_RETRY_BASE=POST_RETRY_MAX_DELAY=70초이므로
+// 모든 시도에서 70초로 고정된다(사수 요청). 상수를 다시 벌리면 지수 백오프로 동작.
+fn backoff_delay(attempt: u32) -> Duration {
+    let shift = attempt.saturating_sub(1).min(5);
+    let scaled = POST_RETRY_BASE.saturating_mul(1u32 << shift);
+    scaled.min(POST_RETRY_MAX_DELAY)
+}
+
+// 응답의 Retry-After 헤더(초 단위 정수)를 대기시간으로 해석하는 함수입니다.
+// HTTP-date 형식은 다루지 않고, 상한 POST_RETRY_MAX_DELAY로 캡한다.
+fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
+    let secs: u64 = headers
+        .get(RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(Duration::from_secs(secs).min(POST_RETRY_MAX_DELAY))
 }
 
 // 현재 토론방 URL에서 네이버 discussionType과 itemCode를 계산하는 함수입니다.
@@ -1146,6 +1206,47 @@ mod tests {
             name: name.to_owned(),
             value: value.to_owned(),
         }
+    }
+
+    #[test]
+    fn is_retryable_status_covers_429_and_5xx_only() {
+        assert!(is_retryable_status(429));
+        assert!(is_retryable_status(500));
+        assert!(is_retryable_status(503));
+        // 404/401/403 같은 클라이언트 오류와 2xx는 재시도하지 않는다.
+        assert!(!is_retryable_status(200));
+        assert!(!is_retryable_status(404));
+        assert!(!is_retryable_status(401));
+    }
+
+    #[test]
+    fn backoff_delay_is_fixed_seventy_seconds() {
+        // 사수 요청: 429 백오프를 70초로 고정.
+        assert_eq!(POST_RETRY_MAX_DELAY, Duration::from_secs(70));
+        assert_eq!(backoff_delay(1), Duration::from_secs(70));
+        assert_eq!(backoff_delay(2), Duration::from_secs(70));
+        assert_eq!(backoff_delay(99), Duration::from_secs(70));
+    }
+
+    #[test]
+    fn parse_retry_after_reads_seconds_caps_and_ignores_non_integer() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("3"));
+        assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(3)));
+
+        // 상한 초과는 캡된다.
+        let mut big = HeaderMap::new();
+        big.insert(RETRY_AFTER, HeaderValue::from_static("999"));
+        assert_eq!(parse_retry_after(&big), Some(POST_RETRY_MAX_DELAY));
+
+        // 헤더가 없거나 HTTP-date 형식이면 None → 지수 백오프로 폴백.
+        assert_eq!(parse_retry_after(&HeaderMap::new()), None);
+        let mut date = HeaderMap::new();
+        date.insert(
+            RETRY_AFTER,
+            HeaderValue::from_static("Wed, 21 Oct 2026 07:28:00 GMT"),
+        );
+        assert_eq!(parse_retry_after(&date), None);
     }
 
     #[test]
