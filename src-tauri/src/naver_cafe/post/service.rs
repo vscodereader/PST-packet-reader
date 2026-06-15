@@ -140,7 +140,13 @@ fn serde_err_to_post_error(request: &PostRequest, err: serde_json::Error) -> Pos
     ErrorEnvelope {
         trace_id: String::new(),
         code: CODE_CONTENT_BUILD_FAILED.to_string(),
-        message: format!("contentJson 또는 요청 바디 직렬화에 실패했습니다: {}", err),
+        // here! 앵커 + 런타임 백트레이스(#199, client.rs와 동일) — "자세히 보기" trace로 노출.
+        message: format!(
+            "contentJson 또는 요청 바디 직렬화에 실패했습니다: {}\n\nat {}\n\n{}",
+            err,
+            crate::here!(),
+            crate::util::backtrace_string(),
+        ),
         error_data: Some(PostErrorData {
             cafe: NaverCafeCommonErrorData {
                 target: Some(CafeTarget {
@@ -246,7 +252,12 @@ pub fn execute_post(
             Err(ErrorEnvelope {
                 trace_id: String::new(),
                 code: CODE_USE_ASYNC_LIVE.to_string(),
-                message: "Live 전송은 execute_post_live 비동기 함수를 사용하세요.".to_string(),
+                // here! 앵커 + 백트레이스(#199).
+                message: format!(
+                    "Live 전송은 execute_post_live 비동기 함수를 사용하세요.\n\nat {}\n\n{}",
+                    crate::here!(),
+                    crate::util::backtrace_string(),
+                ),
                 error_data: Some(PostErrorData {
                     cafe: NaverCafeCommonErrorData {
                         target: Some(CafeTarget {
@@ -296,7 +307,13 @@ pub async fn execute_post_live(
         .map_err(|e| ErrorEnvelope {
             trace_id: String::new(),
             code: CODE_SESSION_INVALID.to_string(),
-            message: format!("계정 쿠키를 읽는 데 실패했습니다: {}", e),
+            // here! 앵커 + 백트레이스(#199).
+            message: format!(
+                "계정 쿠키를 읽는 데 실패했습니다: {}\n\nat {}\n\n{}",
+                e,
+                crate::here!(),
+                crate::util::backtrace_string(),
+            ),
             error_data: Some(PostErrorData {
                 cafe: NaverCafeCommonErrorData {
                     target: Some(CafeTarget {
@@ -319,7 +336,12 @@ pub async fn execute_post_live(
         .ok_or_else(|| ErrorEnvelope {
             trace_id: String::new(),
             code: CODE_SESSION_INVALID.to_string(),
-            message: "세션 쿠키가 없거나 만료되었습니다. 다시 로그인하세요.".to_string(),
+            // here! 앵커 + 백트레이스(#199).
+            message: format!(
+                "세션 쿠키가 없거나 만료되었습니다. 다시 로그인하세요.\n\nat {}\n\n{}",
+                crate::here!(),
+                crate::util::backtrace_string(),
+            ),
             error_data: Some(PostErrorData {
                 cafe: NaverCafeCommonErrorData {
                     target: Some(CafeTarget {

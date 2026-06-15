@@ -330,7 +330,14 @@ export const ipc = {
       comment: string;
       runPost: boolean;
       runComment: boolean;
-      items: { target: string; loginId: string; ok: boolean; msg: string }[];
+      items: {
+        target: string;
+        loginId: string;
+        ok: boolean;
+        msg: string;
+        /** 실패 행의 "자세히 보기" trace(런타임 backtrace 포함, #199). */
+        trace?: string;
+      }[];
     }) => call<void>("record_band_batch", { ...input }),
   },
   diagnostics: {

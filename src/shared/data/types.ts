@@ -122,6 +122,9 @@ export interface PublishJob {
 export interface PublishResult extends PublishJob {
   ok: boolean;
   msg: string;
+  /** 실패 시 "자세히 보기"용 개발자 trace(런타임 backtrace 포함, #199). 밴드 즉시 게시는
+   *  백엔드 command가 reason+trace를 분리해 주므로 이 필드에 trace를 싣는다. */
+  trace?: string;
 }
 
 export interface ActivityItem {
