@@ -85,7 +85,7 @@ export function NaverAccountList() {
         // IP 로테이션 스위치: true=계정마다 모바일 IP를 바꾼 뒤 로그인한다(#196). 폰 USB
         // 연결 + PATH에 adb 필요(winget Google.PlatformTools) — 없으면 로그인이 실패한다.
         // 백엔드: src-tauri/src/auth/adb.rs toggle_airplane_mode.
-        useAdb: true,
+        useAdb: false,
       });
       setQueueStatus(status);
     } catch (err) {

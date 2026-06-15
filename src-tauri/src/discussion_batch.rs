@@ -7,8 +7,9 @@ use serde_json::Value;
 use tauri::{Emitter, Runtime};
 
 use crate::naver_automation::{
-    run_naver_discussion_macro, run_naver_post_with_comment_macro, AutomationReport,
-    AutomationTarget, DiscussionStock, NaverDiscussionRequest, NaverPostWithCommentRequest,
+    run_naver_discussion_macro, run_naver_post_with_comment_macro, AutomationError,
+    AutomationReport, AutomationTarget, DiscussionStock, NaverDiscussionRequest,
+    NaverPostWithCommentRequest,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +90,10 @@ pub struct ForumPublishResult {
     pub name: String,
     pub ok: bool,
     pub message: String,
+    /// 실패 시 "자세히 보기"용 캡처된 호출 스택(개발자 trace). 성공이면 `None`.
+    /// 사용자용 `message`와 분리해, 메인 라인엔 안 나오고 자세히 보기에만 노출한다(#199).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<String>,
 }
 
 // 선택한 종목들에 글/댓글을 게시하고 종목별 성공/실패 결과를 돌려주는 함수입니다.
@@ -105,9 +110,10 @@ pub fn run_forum_publish<R: Runtime>(
 
     for (index, stock) in request.stocks.iter().enumerate() {
         let outcome = run_one_forum_stock(&request, stock, title, body, comment, &app);
-        let (ok, message) = match outcome {
-            Ok(()) => (true, "게시 완료".to_owned()),
-            Err(error) => (false, error),
+        // 실패면 사용자용 메시지(message)와 캡처된 스택(trace)을 분리해 들고 간다(#199).
+        let (ok, message, trace) = match outcome {
+            Ok(()) => (true, "게시 완료".to_owned(), None),
+            Err(error) => (false, error.message().to_owned(), Some(error.trace())),
         };
 
         // 작업 결과를 pstmacro.log에 기록(가독성·상세화). 동작 무변경, 로그 줄만 추가.
@@ -132,6 +138,7 @@ pub fn run_forum_publish<R: Runtime>(
             name: stock.name.clone(),
             ok,
             message,
+            trace,
         });
 
         // 마지막 종목이 아니면 다음 게시 전 1분 대기(타이머 이벤트 emit).
@@ -152,7 +159,9 @@ fn run_one_forum_stock<R: Runtime>(
     body: &str,
     comment: &str,
     app: &tauri::AppHandle<R>,
-) -> Result<(), String> {
+    // AutomationError를 그대로 돌려준다(메시지+캡처된 스택). 호출부가 message/backtrace로
+    // 나눠 ForumPublishResult에 싣는다(#199).
+) -> Result<(), AutomationError> {
     if request.run_post && request.run_comment {
         run_naver_post_with_comment_macro(
             NaverPostWithCommentRequest {
@@ -169,7 +178,6 @@ fn run_one_forum_stock<R: Runtime>(
             false,
         )
         .map(|_| ())
-        .map_err(|error| error.to_string())
     } else {
         let target = if request.run_comment {
             AutomationTarget::Comment
@@ -188,7 +196,6 @@ fn run_one_forum_stock<R: Runtime>(
             account_id: Some(request.account_id.clone()),
         })
         .map(|_| ())
-        .map_err(|error| error.to_string())
     }
 }
 

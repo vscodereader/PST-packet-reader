@@ -48,7 +48,7 @@ function statusColor(s: string) {
         : "gray";
 }
 
-function SubLog({ item }: { item: BatchItem }) {
+export function SubLog({ item }: { item: BatchItem }) {
   const [showTrace, setShowTrace] = useState(false);
   const ok = item.status === "success";
   const fail = item.status === "fail";
@@ -87,9 +87,26 @@ function SubLog({ item }: { item: BatchItem }) {
             · {item.loginId}
           </Text>
         </Group>
-        <Text fz={11.5} c={fail ? "red" : "dimmed"} style={{ flexShrink: 0 }}>
-          {item.msg}
-        </Text>
+        {/* 긴 실패 사유가 카페/계정 ID 영역을 밀어내지 않게 maw로 폭을 제한하고 ...으로
+            잘라낸다. 잘린 전체 문구는 hover 툴팁으로 확인한다(개발자용 trace는 아래
+            "자세히 보기"가 별도로 보여준다). */}
+        <Tooltip
+          label={item.msg}
+          multiline
+          maw={420}
+          withinPortal
+          openDelay={250}
+        >
+          <Text
+            fz={11.5}
+            c={fail ? "red" : "dimmed"}
+            truncate
+            maw="45%"
+            style={{ minWidth: 0 }}
+          >
+            {item.msg}
+          </Text>
+        </Tooltip>
         {fail && item.trace && (
           <Button
             size="compact-xs"

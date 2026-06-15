@@ -119,7 +119,15 @@ fn api_failure_error(
     ErrorEnvelope {
         trace_id: String::new(),
         code: CODE_COMMENT_HTTP_ERROR.to_string(),
-        message: "댓글 등록 요청이 실패했습니다. 상세는 errorData.cafe를 확인하세요.".to_string(),
+        // 실패 지점 앵커(here!) + 런타임 백트레이스를 message 뒤에 붙인다 — "자세히 보기"
+        // trace로 노출된다(#199). 백트레이스는 디버그 정보가 있으면(전 플랫폼) 심볼로 해석되고,
+        // 앵커는 그게 일부 <unknown>이어도 실패 지점을 항상 보장한다. 메인 사유는 failure_reason이
+        // errorCode로 따로 만든다.
+        message: format!(
+            "댓글 등록 요청이 실패했습니다. 상세는 errorData.cafe를 확인하세요.\n\nat {}\n\n{}",
+            crate::here!(),
+            crate::util::backtrace_string(),
+        ),
         error_data: Some(error_data(
             article_id,
             ref_comment_id,
@@ -156,8 +164,11 @@ fn make_non_2xx_error(
     ErrorEnvelope {
         trace_id: String::new(),
         code: CODE_COMMENT_HTTP_ERROR.to_string(),
-        message: "댓글 등록 요청이 실패했습니다. 응답 원문은 errorData.cafe.apiErrorMessage를 확인하세요."
-            .to_string(),
+        message: format!(
+            "댓글 등록 요청이 실패했습니다. 응답 원문은 errorData.cafe.apiErrorMessage를 확인하세요.\n\nat {}\n\n{}",
+            crate::here!(),
+            crate::util::backtrace_string(),
+        ),
         error_data: Some(error_data(
             article_id,
             ref_comment_id,

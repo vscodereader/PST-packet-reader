@@ -61,3 +61,14 @@ tempfile = "3"
 wiremock = "0.6"
 # Enables `tauri::test` (MockRuntime) for the IPC integration tests in `tests/`.
 tauri = { version = "2", features = ["test"] }
+
+[profile.release]
+# 릴리스 빌드에도 디버그 정보를 남긴다(#199). 게시/댓글 실패의 "자세히 보기" trace는 런타임
+# backtrace를 캡처해 보여주는데, 디버그 정보가 없으면(release 기본 debug=false) 프레임이 전부
+# `<unknown>`으로 떠서 쓸모가 없다. 전 플랫폼 적용:
+#   - Linux/macOS: DWARF가 바이너리에 들어가 in-process로 심볼이 해석된다(별도 파일 불필요).
+#   - Windows(cargo-xwin): 별도 `pstmacro.pdb`가 생성된다. dbghelp가 런타임에 읽어 심볼을
+#     해석하므로, 이 PDB를 설치된 `.exe` 옆에 함께 배포해야 한다(아래 tauri.conf.json 참조).
+debug = true
+# 심볼이 스트립되면 다시 `<unknown>`이 되므로 명시적으로 끈다(릴리스 기본은 false지만 못박는다).
+strip = false

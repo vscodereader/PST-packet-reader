@@ -30,14 +30,40 @@ type AutomationResult<T> = Result<T, AutomationError>;
 #[derive(Debug)]
 pub struct AutomationError {
     message: String,
+    // 에러를 만든 호출 지점(파일:줄)을 컴파일타임에 기록 — 백트레이스의 앵커(#199).
+    // #[track_caller]로 new()의 호출자(실제 실패 지점)를 잡으므로, 런타임 백트레이스 심볼이
+    // 일부 <unknown>이어도 실패 지점만큼은 항상 보장된다.
+    location: String,
+    // 에러 생성 시점에 캡처한 런타임 호출 스택 — "자세히 보기" trace의 본문(#199).
+    // 디버그 정보가 있으면(전 플랫폼: release debug=true) 프레임이 심볼로 해석된다.
+    backtrace: String,
 }
 
 impl AutomationError {
     // 자동화 중 발생한 오류 메시지를 생성하는 함수입니다.
+    #[track_caller]
     fn new(message: impl Into<String>) -> Self {
+        let loc = std::panic::Location::caller();
         Self {
             message: message.into(),
+            location: format!("at {}:{}:{}", loc.file(), loc.line(), loc.column()),
+            backtrace: crate::util::backtrace_string(),
         }
+    }
+
+    /// 사용자용 한 줄 오류 메시지(위치 제외).
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// "자세히 보기"용 — 실패 지점 앵커(`at 파일:줄:열`).
+    pub fn location(&self) -> &str {
+        &self.location
+    }
+
+    /// "자세히 보기"용 — 앵커(항상 보장) + 캡처된 런타임 호출 스택을 합친 개발자 trace.
+    pub fn trace(&self) -> String {
+        format!("{}\n\n{}", self.location, self.backtrace)
     }
 }
 
@@ -465,5 +491,33 @@ impl CdpClient {
         Err(AutomationError::new(
             "페이지 로드 대기 시간이 초과되었습니다.",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn automation_error_keeps_message_and_records_caller_location() {
+        // new() 호출 지점(이 줄)을 컴파일타임에 기록한다 — "자세히 보기" trace의 원천(#199).
+        let err = AutomationError::new("게시 실패");
+        assert_eq!(err.message(), "게시 실패");
+        // 호출 지점 파일이 location에 들어가야 한다(<unknown> 없이 항상).
+        assert!(err.location().starts_with("at "), "위치 형식: {}", err.location());
+        assert!(
+            err.location().contains("naver_automation.rs"),
+            "호출 파일이 들어가야 함: {}",
+            err.location()
+        );
+        // Display는 사용자용 메시지만(위치 미포함).
+        assert_eq!(format!("{err}"), "게시 실패");
+        // trace()는 앵커(이 함수) + 캡처된 런타임 스택을 합친다 — "자세히 보기" 본문(#199).
+        let trace = err.trace();
+        assert!(trace.starts_with(err.location()), "trace는 앵커로 시작: {trace}");
+        assert!(
+            trace.contains("automation_error_keeps_message_and_records_caller_location"),
+            "캡처한 스택에 호출 함수가 보여야 함(심볼 해석됨): {trace}"
+        );
     }
 }

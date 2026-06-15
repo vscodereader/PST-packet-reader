@@ -3,12 +3,12 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
-import type { LogFilter } from "@/shared/data/types";
+import type { BatchItem, LogFilter } from "@/shared/data/types";
 import { ipc } from "@/shared/ipc";
 import { resetIpc, setCommandFailures } from "@/test/ipc";
 import { pickOption } from "@/test/select";
 
-import { Notifications } from "./notifications";
+import { Notifications, SubLog } from "./notifications";
 
 vi.mock("@tauri-apps/api/core", async () => ({
   invoke: (await import("@/test/ipc")).invoke,
@@ -26,6 +26,24 @@ function renderLog(filter: LogFilter | null = null) {
     </MantineProvider>,
   );
 }
+
+function renderSubLog(item: BatchItem) {
+  render(
+    <MantineProvider>
+      <SubLog item={item} />
+    </MantineProvider>,
+  );
+}
+
+// 카페/계정 ID 영역을 침범할 만큼 긴 실패 사유를 가진 항목.
+const LONG_FAIL_ITEM: BatchItem = {
+  platform: "naver",
+  target: "개미투자 카페",
+  loginId: "stock_daily",
+  status: "fail",
+  msg: "글 게시 실패 — 해당 게시판 또는 게시물이 존재하지 않습니다. 카페 권한과 게시판 설정을 확인한 뒤 다시 시도해 주세요 (10404)",
+  trace: "REGISTER_HTTP_ERROR · HTTP 404 · 10404 · Page Not Found",
+};
 
 describe("Notifications", () => {
   beforeEach(() => {
@@ -71,6 +89,25 @@ describe("Notifications", () => {
       await screen.findByRole("button", { name: /자세히 보기/ }),
     );
     expect(screen.getByText(/NaverAuthError/)).toBeInTheDocument();
+  });
+
+  it("truncates a long main message and caps its width so it can't crowd out the cafe/account id", () => {
+    renderSubLog(LONG_FAIL_ITEM);
+    const msgEl = screen.getByText(LONG_FAIL_ITEM.msg);
+    // 폭 상한(maw) + 말줄임(truncate)이 함께 걸려야 긴 사유가 카페/계정 ID를 밀어내지 않는다.
+    expect(msgEl).toHaveAttribute("data-truncate");
+    expect(msgEl).toHaveStyle({ maxWidth: "45%" });
+  });
+
+  it("keeps the full main message reachable via tooltip on hover", async () => {
+    renderSubLog(LONG_FAIL_ITEM);
+    // 잘리기 전엔 본문이 한 곳에만 존재한다.
+    expect(screen.getAllByText(LONG_FAIL_ITEM.msg)).toHaveLength(1);
+    await userEvent.hover(screen.getByText(LONG_FAIL_ITEM.msg));
+    // hover하면 툴팁이 전체 문구를 한 번 더 띄워, 잘린 사유를 온전히 확인할 수 있다.
+    await waitFor(() =>
+      expect(screen.getAllByText(LONG_FAIL_ITEM.msg).length).toBeGreaterThan(1),
+    );
   });
 
   it("fires the export action — calls save dialog and exportActivity", async () => {

@@ -156,8 +156,14 @@ fn build_publish_batch(
             } else {
                 BatchItemStatus::Fail
             },
-            msg: r.message.clone(),
-            trace: if r.ok { None } else { Some(r.message.clone()) },
+            // 큐 경로(build_log_batch)와 동일: 메인은 일반 친절 문구, 캡처된 호출 스택은
+            // 자세히 보기(trace)로 분리한다(#199).
+            msg: if r.ok {
+                r.message.clone()
+            } else {
+                "종목토론방 게시에 실패했습니다".to_owned()
+            },
+            trace: r.trace.clone(),
         })
         .collect();
     LogBatch {
@@ -944,12 +950,14 @@ mod tests {
                 name: "삼성전자".into(),
                 ok: true,
                 message: "게시 완료".into(),
+                trace: None,
             },
             ForumPublishResult {
                 code: "000660".into(),
                 name: "SK하이닉스".into(),
                 ok: false,
                 message: "로그인 만료".into(),
+                trace: Some("stack backtrace:\n  0: forum::login_check".into()),
             },
         ];
         let b = build_publish_batch(
@@ -969,7 +977,12 @@ mod tests {
             b.items[0].status,
             ipc::log_batches::BatchItemStatus::Success
         ));
-        assert_eq!(b.items[1].trace.as_deref(), Some("로그인 만료"));
+        // 실패 항목: 메인은 일반 친절 문구, 자세히 보기엔 캡처된 호출 스택(#199).
+        assert_eq!(b.items[1].msg, "종목토론방 게시에 실패했습니다");
+        assert_eq!(
+            b.items[1].trace.as_deref(),
+            Some("stack backtrace:\n  0: forum::login_check")
+        );
     }
 
     #[test]
@@ -979,6 +992,7 @@ mod tests {
             name: "삼성전자".into(),
             ok: true,
             message: "게시 완료".into(),
+            trace: None,
         }];
         let b = build_publish_batch(
             "제목",
