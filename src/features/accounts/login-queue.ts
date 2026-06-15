@@ -42,6 +42,7 @@ export function buildLoginNowItem(
       title,
       bodyText: "",
       comments: [],
+      linkOverride: "",
       naver: [],
       forum: [],
       band: [],

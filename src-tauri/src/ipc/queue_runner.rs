@@ -129,6 +129,9 @@ pub fn pick_next_waiting(items: &[QueueNowItem]) -> Option<QueueNowItem> {
 /// plan의 네이버 카페 대상을 글 작성 작업(`PostJob`)으로 변환한다. 제목/본문은 예약
 /// 시점에 동결된 plan 값을 쓴다(이슈 #142). 글을 쓰는 모드(post/both)에서만 의미가 있다.
 pub fn plan_to_post_jobs(plan: &PublishPlan) -> Vec<PostJob> {
+    // 카페는 종목이 없어 #{링크}만 치환한다(#{종목명}/#{종목코드}는 종토 전용이라 그대로 둠).
+    // 링크값(linkOverride)이 있으면 그 값으로, 없으면 빈 문자열로.
+    let link = crate::template_tokens::resolve_link(&plan.link_override, "");
     plan.naver
         .iter()
         .map(|t| PostJob {
@@ -136,8 +139,8 @@ pub fn plan_to_post_jobs(plan: &PublishPlan) -> Vec<PostJob> {
             cafe: t.cafe.clone(),
             menu_id: t.menu_id,
             board_type: t.board_type.clone(),
-            subject: plan.title.clone(),
-            body_text: plan.body_text.clone(),
+            subject: crate::template_tokens::resolve_link_only(&plan.title, &link),
+            body_text: crate::template_tokens::resolve_link_only(&plan.body_text, &link),
             tag_list: Vec::new(),
         })
         .collect()
@@ -285,10 +288,17 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) {
     // 댓글을 달고(writer-modal "위에서 작성한 글에 바로 댓글이 달립니다"), comment 전용은
     // 대상마다 풀에서 1개씩 분배한다(#98 "계정마다 다른 댓글"). 진행률 total은 실제
     // 만들어진 작업 수로 잡아 100%에 도달하게 한다(빈 풀로 인한 영구 미완 방지).
+    // 카페 댓글도 #{링크}만 치환한다(종목 토큰은 종토 전용).
+    let cafe_link = crate::template_tokens::resolve_link(&plan.link_override, "");
+    let cafe_comments: Vec<String> = plan
+        .comments
+        .iter()
+        .map(|c| crate::template_tokens::resolve_link_only(c, &cafe_link))
+        .collect();
     let comment_jobs = if matches!(plan.kind, ModeValue::Both) {
-        build_self_comment_jobs(collected.targets, &plan.comments)
+        build_self_comment_jobs(collected.targets, &cafe_comments)
     } else {
-        build_comment_jobs(collected.targets, &plan.comments)
+        build_comment_jobs(collected.targets, &cafe_comments)
     };
 
     // 진행률 총계 확정(실제 카페 글 + 카페 댓글 작업 + 종목토론방 종목 수 + 밴드 수). 글
@@ -456,6 +466,7 @@ fn plan_to_forum_requests(plan: &PublishPlan) -> Vec<ForumPublishRequest> {
             body: plan.body_text.clone(),
             comment: comment.clone(),
             stocks,
+            link_override: plan.link_override.clone(),
         })
         .collect()
 }
@@ -548,13 +559,21 @@ async fn run_band_targets<R: Runtime>(
     plan: &PublishPlan,
     id: &str,
 ) -> Vec<BandOutcome> {
+    // 밴드는 종목이 없어 #{링크}만 치환한다(링크값 있으면 그 값, 없으면 빈 문자열).
+    let band_link = crate::template_tokens::resolve_link(&plan.link_override, "");
+    let band_title = crate::template_tokens::resolve_link_only(&plan.title, &band_link);
+    let band_body = crate::template_tokens::resolve_link_only(&plan.body_text, &band_link);
     // comment/both면 댓글 풀 전체를 넘긴다. post/both는 새 글에, comment 전용은 기존
     // 글(최신/인기)에 같은 풀을 분배해 단다. post 전용 모드면 빈 슬라이스라 댓글 없음.
-    let comments: &[String] = if runs_comment(plan) {
-        &plan.comments
+    let resolved_comments: Vec<String> = if runs_comment(plan) {
+        plan.comments
+            .iter()
+            .map(|c| crate::template_tokens::resolve_link_only(c, &band_link))
+            .collect()
     } else {
-        &[]
+        Vec::new()
     };
+    let comments: &[String] = &resolved_comments;
     // 댓글 전용 모드는 새 글을 쓰지 않는다. band_publish(create_post)는 리더 승인제
     // 밴드에서 result_code=1003("리더 승인 후 등록")을 부르므로, 기존 글에 댓글을 다는
     // band_comment로 간다(즉시게시 runNow의 댓글 전용 경로와 동일).
@@ -583,15 +602,9 @@ async fn run_band_targets<R: Runtime>(
                 .await
                 .map(BandJobResult::Commented)
         } else {
-            band_publish(
-                &t.account_id,
-                &t.link,
-                &plan.title,
-                &plan.body_text,
-                comments,
-            )
-            .await
-            .map(BandJobResult::Published)
+            band_publish(&t.account_id, &t.link, &band_title, &band_body, comments)
+                .await
+                .map(BandJobResult::Published)
         };
         outcomes.push(BandOutcome {
             account_id: t.account_id.clone(),
@@ -1289,6 +1302,7 @@ mod tests {
             title: "T".into(),
             body_text: "B".into(),
             comments: vec!["c1".into()],
+            link_override: String::new(),
             naver,
             forum: vec![],
             band: vec![],

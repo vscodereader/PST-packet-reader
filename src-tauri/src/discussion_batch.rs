@@ -80,6 +80,10 @@ pub struct ForumPublishRequest {
     pub body: String,
     pub comment: String,
     pub stocks: Vec<DiscussionStock>,
+    /// `#{링크}` 토큰 치환에 쓸 사용자 지정 링크값. 비우면 종목별 시세 링크를 쓴다.
+    /// 과거 요청과 호환되도록 기본값(빈 문자열)을 허용한다.
+    #[serde(default)]
+    pub link_override: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +166,13 @@ fn run_one_forum_stock<R: Runtime>(
     // AutomationError를 그대로 돌려준다(메시지+캡처된 스택). 호출부가 message/backtrace로
     // 나눠 ForumPublishResult에 싣는다(#199).
 ) -> Result<(), AutomationError> {
+    // 종목별로 변수 토큰을 치환한다(미리보기 resolveTemplate와 동일 결과).
+    // #{종목명}/#{종목코드}는 이 종목 값으로, #{링크}는 링크값(있으면) 또는 종목 시세 링크로.
+    let link = crate::template_tokens::resolve_link(&request.link_override, &stock.code);
+    let title = crate::template_tokens::resolve_forum(title, &stock.name, &stock.code, &link);
+    let body = crate::template_tokens::resolve_forum(body, &stock.name, &stock.code, &link);
+    let comment = crate::template_tokens::resolve_forum(comment, &stock.name, &stock.code, &link);
+    let (title, body, comment) = (title.as_str(), body.as_str(), comment.as_str());
     if request.run_post && request.run_comment {
         run_naver_post_with_comment_macro(
             NaverPostWithCommentRequest {

@@ -132,6 +132,10 @@ pub struct PublishPlan {
     pub body_text: String,
     #[serde(default)]
     pub comments: Vec<String>,
+    /// `#{링크}` 토큰 치환에 쓸 사용자 지정 링크값(선택). 비우면 종목별 시세 링크를 쓴다.
+    /// 기존 plan과 호환되도록 기본값(빈 문자열)을 허용한다.
+    #[serde(default)]
+    pub link_override: String,
     #[serde(default)]
     pub naver: Vec<NaverTarget>,
     #[serde(default)]
@@ -642,6 +646,7 @@ mod tests {
             title: "제목".into(),
             body_text: "본문".into(),
             comments: vec!["댓글1".into()],
+            link_override: String::new(),
             naver: vec![NaverTarget {
                 account_id: "user01".into(),
                 cafe: "12345".into(),
