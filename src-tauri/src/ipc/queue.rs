@@ -212,6 +212,16 @@ pub fn apply_reorder_now(items: Vec<QueueNowItem>, ordered_ids: &[String]) -> Ve
     running
 }
 
+/// 즉시 처리 대기열(now 큐)에 새로 적재되는 아이템을 정규화한다 — 워커가 실행 상태를
+/// 채우므로 항상 대기 상태로 시작하고 실행 메타(batch_id/progress)는 비운다. 프론트가
+/// 보낸 값에 대한 방어(add_queue_scheduled가 missed를 강제 해제하는 것과 같은 취지).
+pub fn as_fresh_now_item(mut item: QueueNowItem) -> QueueNowItem {
+    item.state = QueueState::Waiting;
+    item.batch_id = None;
+    item.progress = None;
+    item
+}
+
 /// Convert a scheduled item into a waiting immediate-queue item (for "즉시 처리").
 /// 실행 페이로드(plan)도 그대로 옮겨, 승격된 아이템을 워커가 게시할 수 있게 한다.
 pub fn to_now_item(s: QueueScheduledItem) -> QueueNowItem {
@@ -262,6 +272,33 @@ pub fn cancel_queue_now(
     let next = store.mutate(|items| apply_cancel_now(items, &id));
     record(activity.inner(), ActivityType::Info, "진행 작업 취소됨");
     next
+}
+
+/// 즉시 게시("지금 바로")를 게시 큐(now 큐)에 적재한다(이슈 #198). 예약
+/// (`add_queue_scheduled`)이 scheduled 큐에 넣는 것과 달리, 곧바로 워커가 집어가도록 now
+/// 큐에 대기 상태로 push하고 워커를 기동한다(`start_if_idle`). 워커(`execute_item`)가
+/// 카페 글·댓글·종목토론방·밴드 게시와 완료 로그를 모두 처리하므로, 즉시 게시와 예약
+/// 게시가 동일 실행 경로로 수렴한다.
+#[tauri::command]
+pub fn add_queue_now<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    now: tauri::State<'_, JsonStore<QueueNowItem>>,
+    activity: tauri::State<'_, JsonStore<crate::ipc::activity::ActivityItem>>,
+    runner: tauri::State<'_, super::queue_runner::NowQueueRunner>,
+    item: QueueNowItem,
+) -> Vec<QueueNowItem> {
+    let title = item.title.clone();
+    let after = now.mutate(|mut items| {
+        items.push(as_fresh_now_item(item));
+        items
+    });
+    super::queue_runner::start_if_idle(runner.inner(), app);
+    record(
+        activity.inner(),
+        ActivityType::Info,
+        format!("즉시 처리 대기열에 추가됨 — {title}"),
+    );
+    after
 }
 
 /// 대기열 순서를 `ordered_ids`대로 영속화한다(드래그/우선순위 변경). 빈번한 조작이라
@@ -637,6 +674,22 @@ mod tests {
         assert_eq!(now.locs.len(), locs_len);
         // 실행 페이로드(plan)는 승격 시 보존돼야 워커가 게시할 수 있다(이슈 #142).
         assert_eq!(now.plan, Some(sample_plan()));
+    }
+
+    #[test]
+    fn as_fresh_now_item_forces_waiting_and_clears_exec_meta() {
+        // 즉시 처리 대기열 적재(add_queue_now)는 프론트가 보낸 상태와 무관하게 대기 상태로
+        // 시작하고, 워커가 채울 실행 메타(batch_id/progress)는 비운다.
+        let mut item = sample_now_item("q1", QueueState::Running);
+        item.batch_id = Some("b1".into());
+        item.progress = Some((2, 5));
+        let title = item.title.clone();
+        let fresh = as_fresh_now_item(item);
+        assert_eq!(fresh.state, QueueState::Waiting);
+        assert_eq!(fresh.batch_id, None);
+        assert_eq!(fresh.progress, None);
+        // 표시·실행에 필요한 나머지 필드(title 등)는 그대로 보존한다.
+        assert_eq!(fresh.title, title);
     }
 
     #[test]

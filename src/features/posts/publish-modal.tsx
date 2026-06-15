@@ -19,13 +19,11 @@ import { notifications } from "@mantine/notifications";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { BandTarget } from "@/shared/bindings/BandTarget";
-import type { CafePublishNowResult } from "@/shared/bindings/CafePublishNowResult";
 import type { CommentTargetSpec } from "@/shared/bindings/CommentTargetSpec";
 import type { ForumTarget } from "@/shared/bindings/ForumTarget";
 import type { JoinedCafe } from "@/shared/bindings/JoinedCafe";
 import type { NaverTarget } from "@/shared/bindings/NaverTarget";
 import type { PostJob } from "@/shared/bindings/PostJob";
-import type { PublishOutcome } from "@/shared/bindings/PublishOutcome";
 import { isPostable, KIND, STATUS_ACCOUNT } from "@/shared/data/config";
 import {
   acctPlatforms,
@@ -42,6 +40,7 @@ import type {
   PublishPlan,
   PublishResult,
   QueueLocation,
+  QueueNowItem,
   QueueScheduledItem,
   Stock,
 } from "@/shared/data/types";
@@ -51,12 +50,7 @@ import { DateTimePicker } from "@/shared/ui/date-time-picker";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo, PlatformPill } from "@/shared/ui/platform-logo";
 
-import {
-  commentSummary,
-  commentsAllOk,
-  parseCafeArticleUrl,
-  topNArticles,
-} from "./comment-jobs";
+import { parseCafeArticleUrl } from "./comment-jobs";
 import { PreviewModal } from "./preview-modal";
 import { htmlToText, unreadyNaverAccountIds } from "./publish-helpers";
 import { StockCrawlModal } from "./stock-crawl-modal";
@@ -593,10 +587,12 @@ function PublishFlow({
                 size="sm"
                 onClick={() => {
                   onClose();
-                  go(when === "schedule" ? "queue" : "log");
+                  // 즉시 게시도 게시 큐(즉시 처리 대기열)에 적재되므로(#198), 예약과 마찬가지로
+                  // 큐로 보내 진행률을 보게 한다(예전엔 즉시 게시가 곧장 알림 로그로 갔다).
+                  go("queue");
                 }}
               >
-                {when === "schedule" ? "큐 보기" : "알림 보기"}
+                {when === "schedule" ? "큐 보기" : "게시큐 보기"}
               </Button>
             </Group>
           </>
@@ -611,7 +607,11 @@ function newScheduledId(): string {
   return "qs" + Date.now();
 }
 
-/** Map a backend per-job outcome onto the UI's PublishResult. */
+/** Fresh id for an item appended to the immediate-processing queue (now 큐). */
+function newNowId(): string {
+  return "qn" + Date.now();
+}
+
 // 백엔드가 거부하는 값은 ErrorEnvelope(`{ code, message? }`)이거나 Error다. 사용자에게
 // 보일 짧은 사유 문자열로 환원한다(쿠키 만료/없음 등 침묵 실패를 드러내기 위함).
 function errText(err: unknown): string {
@@ -622,31 +622,6 @@ function errText(err: unknown): string {
     if (typeof e.code === "string" && e.code) return e.code;
   }
   return String(err);
-}
-
-function outcomeToResult(
-  job: PublishJob,
-  outcome: PublishOutcome | undefined,
-  action: string,
-): PublishResult {
-  const ok = outcome?.success ?? false;
-  return {
-    ...job,
-    ok,
-    msg: ok
-      ? `${action} 게시 완료`
-      : (outcome?.errorMessage ?? "게시 실패 — 잠시 후 재시도"),
-  };
-}
-
-/**
- * Fallback Chrome DevTools endpoint, used ONLY when the backend command isn't
- * available (browser preview / Vitest). The authoritative endpoint comes from
- * the backend (`ipc.forum.endpoint()` → `forum_endpoint`), so the port is not a
- * hardcoded frontend constant in the real app.
- */
-function fallbackEndpoint(): { host: string; port: number } {
-  return { host: "127.0.0.1", port: 9222 };
 }
 
 function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
@@ -726,18 +701,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [linkOverride, setLinkOverride] = useState("");
   const [showPreview, setShowPreview] = useState(false);
   const [flow, setFlow] = useState<null | "running" | PublishResult[]>(null);
-  // 게시 엔드포인트는 백엔드가 단일 출처. 받아오기 전/실패 시엔 폴백을 쓴다(브라우저·테스트).
-  const [endpoint, setEndpoint] = useState<{ host: string; port: number }>(
-    fallbackEndpoint,
-  );
 
   useEffect(() => {
-    void ipc.forum
-      .endpoint()
-      .then(setEndpoint)
-      .catch(() => {
-        /* 비-Tauri 환경: 폴백 유지 */
-      });
     void ipc.accounts.list().then((a) => {
       setAccounts(a);
       // 게시 가능한 계정만 선택 대상이다. 기존 선택에서 로그인 실패 계열을 걸러내고
@@ -1087,289 +1052,6 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     };
   };
 
-  // 카페 즉시 게시("지금 바로")용 plan을 만든다. 예약 경로와 같은 buildPlan을 재사용하되,
-  // comment 모드의 최신글/인기글 대상만 프론트가 지금 조회해(조회 실패는 즉시 토스트) 각 글을
-  // url 대상으로 박제한다 — 나머지(글/글+댓글/url 댓글)는 백엔드가 plan을 보고 처리한다.
-  // (글+댓글 self-comment 대상은 백엔드가 방금 쓴 글에서 잡으므로 여기서 다루지 않는다.)
-  const buildCafeNowPlan = async (): Promise<PublishPlan> => {
-    const plan = buildPlan();
-    if (mode !== "comment" || !isListTarget) return plan;
-    const sortBy = commentTargetMode === "popular" ? "popular" : "latest";
-    // 계정별로 cafe의 상위 N개 글을 조회해 각 글을 url 대상으로 펼친다. 조회 실패/빈 목록은
-    // 그 계정 대상이 0개가 된다(완료 로그/요약에서 "댓글 없음"으로 읽힌다).
-    const expanded = await Promise.all(
-      plan.naver.map(async (t) => {
-        const cafeId = t.commentTarget?.cafeId;
-        if (cafeId == null) return [];
-        const list = await ipc.cafes
-          .listArticles(cafeId, sortBy, t.accountId)
-          .catch((err) => {
-            notifications.show({
-              message: `${t.accountId} ${
-                sortBy === "popular" ? "인기글" : "최신글"
-              } 목록을 불러오지 못했어요: ${errText(err)}`,
-              color: "red",
-            });
-            return null;
-          });
-        if (!list) return [];
-        return topNArticles(list.articles, commentCount).map(
-          (a): NaverTarget => ({
-            ...t,
-            commentTarget: { mode: "url", cafeId, articleId: a.articleId },
-          }),
-        );
-      }),
-    );
-    return { ...plan, naver: expanded.flat() };
-  };
-
-  // 백엔드 통합 커맨드 결과(글/댓글 슬림 outcome)를 잡별 행으로 매핑한다. 인라인 결과패널이
-  // 기존(runPostJobs/runCommentJobs 직접 호출)과 동일하게 보이도록 같은 헬퍼를 재사용한다.
-  const mapCafeResult = (
-    naverJobs: PublishJob[],
-    result: CafePublishNowResult,
-  ): PublishResult[] => {
-    if (mode === "comment") {
-      return naverJobs.map((j) => ({
-        ...j,
-        // 한 계정의 댓글이 여러 건이면 모두 성공해야 성공으로 본다(일부 성공을 초록 배지로
-        // 묻지 않는다). 자세한 건수는 msg에.
-        ok: commentsAllOk(result.comments, j.loginId),
-        msg: commentSummary(result.comments, j.loginId),
-      }));
-    }
-    const postResults = naverJobs.map((j, i) =>
-      outcomeToResult(j, result.posts[i], action),
-    );
-    // 댓글이 없으면(both이지만 댓글 풀이 빔) 글 결과를 그대로 둔다 — 백엔드도 댓글을 달지
-    // 않으므로, 성공한 글을 "댓글 없음"으로 접어 실패처럼 보이게 하지 않는다.
-    if (mode !== "both" || comments.length === 0) return postResults;
-    // 글이 올라간 행이라도 그 계정 댓글이 전부 성공해야 "성공"으로 둔다(기존 정책 유지).
-    return postResults.map((r) =>
-      r.ok
-        ? {
-            ...r,
-            ok: commentsAllOk(result.comments, r.loginId),
-            msg: `${r.msg} · ${commentSummary(result.comments, r.loginId)}`,
-          }
-        : r,
-    );
-  };
-
-  // 네이버 카페 즉시 게시 진입점: plan을 구성해 백엔드 통합 커맨드(run_cafe_publish_now)를
-  // 호출한다. 글/댓글 게시와 알림 로그(LogBatch) 기록을 백엔드가 한 번에 수행하므로(#194),
-  // 밴드처럼 프론트가 recordBatch를 따로 호출하지 않는다 — 실패 사유 문구도 예약 게시와 일관.
-  const runNaverCafe = async (
-    naverJobs: PublishJob[],
-  ): Promise<PublishResult[]> => {
-    if (!naverJobs.length) return [];
-    if (
-      mode === "comment" &&
-      (comments.length === 0 || (!isListTarget && !urlTarget))
-    ) {
-      return naverJobs.map((j) => ({
-        ...j,
-        ok: false,
-        msg: "댓글 대상 또는 댓글 내용이 없어요",
-      }));
-    }
-    const plan = await buildCafeNowPlan();
-    const result = await ipc.cafes.publishNow(plan).catch((): null => null);
-    if (!result) {
-      return naverJobs.map((j) => ({
-        ...j,
-        ok: false,
-        msg: "게시 실패 — 잠시 후 재시도",
-      }));
-    }
-    return mapCafeResult(naverJobs, result);
-  };
-
-  // Publish now: naver cafe(글/댓글)·종목토론방(forum)·밴드(band)는 실제 백엔드를
-  // 호출하고, 그 외 플랫폼(현재 없음)은 엔진이 없어 시뮬레이션으로 표시한다.
-  const runNow = () => {
-    setFlow("running");
-    // 플랫폼별로 갈래를 나눈다: 네이버 카페·종목토론방·밴드는 실제 백엔드,
-    // 그 외 나머지는 엔진 미구현이라 시뮬레이션(후속 작업).
-    const naverJobs = jobs.filter((j) => j.platform === "naver");
-    const forumJobs = jobs.filter((j) => j.platform === "forum");
-    const bandJobs = jobs.filter((j) => j.platform === "band");
-    const otherJobs = jobs.filter(
-      (j) =>
-        j.platform !== "naver" &&
-        j.platform !== "forum" &&
-        j.platform !== "band",
-    );
-
-    // 네이버 카페: 백엔드 통합 커맨드가 글/댓글 게시 + 알림 로그 기록을 함께 수행한다(#194).
-    const naverWork: Promise<PublishResult[]> = runNaverCafe(naverJobs);
-
-    // 종목토론방(forum): 패킷 게시 엔진을 계정별로 호출한다.
-    const ep = endpoint;
-    const firstComment = (doc.comments ?? []).find((c) => c.trim()) ?? "";
-    const byAccount = new Map<string, typeof forumJobs>();
-    forumJobs.forEach((j) => {
-      const list = byAccount.get(j.loginId) ?? [];
-      list.push(j);
-      byAccount.set(j.loginId, list);
-    });
-    const forumWork: Promise<PublishResult[]> = Promise.all(
-      [...byAccount.entries()].map(([loginId, accJobs]) =>
-        ipc.forum
-          .publishNow({
-            host: ep.host,
-            port: ep.port,
-            // 계정 loginId로 저장된 로그인 쿠키를 사용한다.
-            accountId: loginId,
-            runPost: mode === "post" || mode === "both",
-            runComment: mode === "comment" || mode === "both",
-            title: doc.title,
-            body: doc.body ?? "",
-            comment: firstComment,
-            stocks: accJobs.map((j) => ({
-              name: j.targetName,
-              code: j.code ?? "",
-              link: "",
-            })),
-          })
-          .then((results) => {
-            // 엔진이 결과를 비워(빈 배열·누락) 돌려줄 수 있으므로 방어적으로 다룬다.
-            const list = Array.isArray(results) ? results : [];
-            // 결과는 code가 아니라 보낸 순서(인덱스)로 매칭한다. 백엔드(run_forum_publish)는
-            // 보낸 stocks 순서대로 결과를 돌려주므로, 같은 code가 두 번 들어가도 두 행이 첫
-            // 결과에 묶여 두 번째 종목의 실제 결과(성공 중복/실패 은폐)가 가려지지 않는다.
-            return accJobs.map((j, i) => {
-              const r = list[i];
-              return {
-                ...j,
-                ok: r?.ok ?? false,
-                msg: r?.message ?? "결과 없음",
-              };
-            });
-          })
-          .catch((err: unknown) =>
-            accJobs.map((j) => ({
-              ...j,
-              ok: false,
-              msg: err instanceof Error ? err.message : String(err),
-            })),
-          ),
-      ),
-    ).then((forumArr) => forumArr.flat());
-
-    // 밴드(band.us): comment 모드는 기존 글(최신글/인기글) 상위 N개에 댓글(band_comment),
-    // 그 외(post/both)는 가입 후 글(+댓글) 게시(band_publish) — 모두 순수 HTTP 백엔드 호출.
-    // both/comment면 비어있지 않은 댓글을 모두 같은 글에 단다(카페 both와 동일, #192).
-    const bandComments = mode === "both" || mode === "comment" ? comments : [];
-    const bandMode: "latest" | "popular" =
-      commentTargetMode === "popular" ? "popular" : "latest";
-    const bandWork: Promise<PublishResult[]> = Promise.all(
-      bandJobs.map((j) => {
-        // 잡 생성 시 동결한 가입 링크를 쓴다(밴드명 재조회 없이 정확한 밴드).
-        const link = j.bandLink ?? "";
-        if (mode === "comment") {
-          // 밴드는 url(특정 글) 댓글을 지원하지 않는다. latest로 조용히 떨어뜨리면 엉뚱한
-          // 최신글에 댓글이 달리므로, 오라우팅 대신 실패로 표기한다.
-          if (commentTargetMode === "url") {
-            return Promise.resolve({
-              ...j,
-              ok: false,
-              msg: "밴드는 특정 글(URL) 댓글을 지원하지 않아요",
-            });
-          }
-          // 댓글 전용: 기존 글(최신/인기) 상위 count개에 댓글 풀을 1개씩 분배해 단다.
-          return ipc.band
-            .comment({
-              accountId: j.loginId,
-              bandLink: link,
-              mode: bandMode,
-              count: commentCount,
-              comments: bandComments,
-            })
-            .then((out) => ({
-              ...j,
-              targetName: out.bandName ?? j.targetName,
-              ok: out.commentedCount > 0,
-              msg:
-                out.commentedCount > 0
-                  ? `${out.targetCount}글 중 댓글 ${out.commentedCount}개 게시 완료`
-                  : "댓글 대상 글을 찾지 못했어요",
-            }))
-            .catch((err: unknown) => ({ ...j, ok: false, msg: errText(err) }));
-        }
-        return ipc.band
-          .publish({
-            // 백엔드는 loginId(쿠키 파일 키)로 band 로그인 쿠키를 찾는다.
-            accountId: j.loginId,
-            bandLink: link,
-            title: doc.title,
-            content: htmlToText(doc.body ?? ""),
-            comments: bandComments,
-          })
-          .then((out) => ({
-            ...j,
-            // 결과 라벨을 게시 응답의 실제 밴드명으로(없으면 잡의 밴드명 유지).
-            targetName: out.bandName ?? j.targetName,
-            // 댓글을 의도했으면 전부 성공해야 ok(카페 commentsAllOk와 동일 정책).
-            // 부분/전량 실패는 초록 배지로 묻지 않는다.
-            ok:
-              out.commentTotal === 0 || out.commentedCount === out.commentTotal,
-            msg:
-              out.commentTotal === 0
-                ? "글 게시 완료"
-                : `글·댓글 ${out.commentedCount}/${out.commentTotal}개 게시 완료`,
-          }))
-          .catch((err: unknown) => ({ ...j, ok: false, msg: errText(err) }));
-      }),
-    );
-
-    // 그 외 플랫폼(현재 없음): 진행 UI가 보이도록 지연 후 시뮬레이션 결과를 낸다.
-    const mockOthers = new Promise<PublishResult[]>((resolve) => {
-      window.setTimeout(
-        () =>
-          resolve(
-            otherJobs.map((j) => {
-              const ok = Math.random() > 0.1;
-              return {
-                ...j,
-                ok,
-                msg: ok ? `${action} 게시 완료` : "게시 실패 — 잠시 후 재시도",
-              };
-            }),
-          ),
-        otherJobs.length ? 1200 : 0,
-      );
-    });
-
-    void Promise.all([naverWork, forumWork, bandWork, mockOthers]).then(
-      ([nr, fr, br, or]) => {
-        setFlow([...nr, ...fr, ...br, ...or]);
-        // 밴드 게시 결과를 알림(게시 배치)에 기록한다 — 종토방(forum)이 백엔드에서
-        // 배치를 남기는 것과 동일하게, 밴드는 프론트가 결과를 모아 한 번 기록한다.
-        // (실패해도 게시 흐름엔 영향 없도록 best-effort.)
-        if (br.length > 0) {
-          void ipc.band
-            .recordBatch({
-              title: doc.title,
-              body: htmlToText(doc.body ?? ""),
-              // 로그 스냅샷은 대표로 첫 댓글만 남긴다(실제 게시는 위에서 전체 전달).
-              comment: bandComments[0] ?? "",
-              runPost: mode === "post" || mode === "both",
-              runComment: mode === "comment" || mode === "both",
-              items: br.map((r) => ({
-                target: r.targetName,
-                loginId: r.loginId,
-                ok: r.ok,
-                msg: r.msg,
-              })),
-            })
-            .catch(() => {});
-        }
-      },
-    );
-  };
-
   // 예약 시점에 동결할 댓글 대상 스펙. comment/both 모드일 때만 만든다. url이면
   // 파싱된 cafeId/articleId를, latest/popular면 계정이 고른 cafeId + 상위 N(count)을
   // 박제한다(실제 글 목록 해석은 워커가 게시 시점에 수행). post 전용이면 undefined.
@@ -1397,10 +1079,10 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     return { mode: m, count: commentCount };
   };
 
-  // 예약 plan(동결 실행 페이로드): 본문은 모달이 이미 평문화한 값을 박제하고,
-  // 엔진이 있는 naver/forum/band 대상을 모두 싣는다. naver의 cafe/menuId/
-  // boardType은 toPostJob과 동일하게 naverPicks에서 구하고, band 링크는
-  // 즉시 게시(runNow)와 동일하게 resolvedBands에서 밴드명으로 찾는다.
+  // 게시 plan(동결 실행 페이로드): 즉시·예약 게시가 공유한다. 본문은 모달이 이미
+  // 평문화한 값을 박제하고, 엔진이 있는 naver/forum/band 대상을 모두 싣는다. naver의
+  // cafe/menuId/boardType은 toPostJob과 동일하게 naverPicks에서 구하고, band 링크는
+  // resolvedBands에서 밴드명으로 찾는다.
   const buildPlan = (): PublishPlan => {
     const naver: NaverTarget[] = jobs
       .filter((j) => j.platform === "naver")
@@ -1425,9 +1107,9 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         code: j.code ?? "",
       }));
     const bandSpec = bandCommentSpecFor();
-    // 밴드는 url(특정 글) 댓글을 지원하지 않는다 — runNow는 실패로 표기한다(위 1303행).
-    // 예약 plan은 url 모드일 때 밴드 대상을 싣지 않는다(안 그러면 bandCommentSpecFor가
-    // latest로 접혀 엉뚱한 최신글에 댓글이 달린다). 카페 url 대상은 그대로 실린다.
+    // 밴드는 url(특정 글) 댓글을 지원하지 않으므로, url 모드일 때 plan에 밴드 대상을
+    // 싣지 않는다(안 그러면 bandCommentSpecFor가 latest로 접혀 엉뚱한 최신글에 댓글이
+    // 달린다 — 워커도 이 대상을 받지 못하니 시도조차 안 한다). 카페 url 대상은 그대로 실린다.
     const bandUrlUnsupported =
       mode === "comment" && commentTargetMode === "url";
     const band: BandTarget[] = bandUrlUnsupported
@@ -1456,11 +1138,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   };
 
   const doPublish = () => {
-    if (when !== "schedule") {
-      runNow();
-      return;
-    }
-    // Add the post to the scheduled queue so it shows up under 예약 대기.
+    // 게시 위치(표시용 locs)는 즉시·예약 공통이다. 같은 플랫폼·대상·코드는 한 번만 싣는다.
     const seen = new Set<string>();
     const locs: QueueLocation[] = [];
     jobs.forEach((j) => {
@@ -1473,6 +1151,44 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         ...(j.code ? { code: j.code } : {}),
       });
     });
+
+    if (when !== "schedule") {
+      // 즉시 게시("지금 바로")도 게시 큐의 즉시 처리 대기열(now 큐)에 적재한다(#198).
+      // 워커가 곧바로 집어 카페/종목토론방/밴드 게시와 완료 로그를 예약 게시와 동일
+      // 경로로 처리한다 — 진행률·취소·완료 로그가 예약 게시와 일관된다.
+      const item: QueueNowItem = {
+        id: newNowId(),
+        title: doc.title,
+        kind: doc.kind,
+        state: "waiting",
+        locs,
+        plan: buildPlan(),
+      };
+      setFlow("running");
+      void ipc.queue
+        .addNow(item)
+        .then(() =>
+          setFlow(
+            jobs.map((j) => ({
+              ...j,
+              ok: true,
+              msg: `${action} 즉시 처리 대기열에 추가됨`,
+            })),
+          ),
+        )
+        .catch(() =>
+          setFlow(
+            jobs.map((j) => ({
+              ...j,
+              ok: false,
+              msg: "대기열 추가 실패 — 잠시 후 다시 시도하세요",
+            })),
+          ),
+        );
+      return;
+    }
+
+    // 예약: scheduled 큐에 추가해 "예약 대기"에 뜨게 한다.
     const moment = scheduleMoment(date, time);
     const item: QueueScheduledItem = {
       id: newScheduledId(),

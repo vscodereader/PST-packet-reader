@@ -4,11 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
 import type { LibraryPost, PublishPlan } from "@/shared/data/types";
-import {
-  invoke as ipcBackend,
-  resetIpc,
-  setArticleListFailures,
-} from "@/test/ipc";
+import { invoke as ipcBackend, resetIpc } from "@/test/ipc";
 import { pickOption } from "@/test/select";
 
 import { PublishModal } from "./publish-modal";
@@ -43,6 +39,18 @@ function renderPublish(over: Partial<Parameters<typeof PublishModal>[0]> = {}) {
     </MantineProvider>,
   );
   return { go };
+}
+
+/**
+ * 즉시 게시("지금 바로")는 백엔드 게시를 직접 호출하지 않고, 게시 큐의 즉시 처리
+ * 대기열에 아이템 하나를 적재한다(add_queue_now, #198). 그 아이템에 동결된 plan을
+ * 꺼내 단언에 쓴다 — 실제 게시(글/댓글/밴드/종토방)와 그 결과 매핑은 워커가 맡으므로
+ * queue_runner의 백엔드 테스트가 검증한다.
+ */
+function enqueuedPlan(): PublishPlan {
+  const call = ipcBackend.mock.calls.find((c) => c[0] === "add_queue_now");
+  expect(call).toBeDefined();
+  return (call![1] as { item: { plan: PublishPlan } }).item.plan;
 }
 
 describe("PublishModal", () => {
@@ -97,42 +105,60 @@ describe("PublishModal", () => {
     ).toBeInTheDocument();
   });
 
-  it("starts the publish flow and shows progress", async () => {
+  it("enqueues the publish and shows the queued confirmation", async () => {
     renderPublish();
     await userEvent.click(
       await screen.findByRole("button", { name: /^게시 \(\d+\)/ }),
     );
-    expect(await screen.findByText(/게시하는 중/)).toBeInTheDocument();
+    // 즉시 게시는 큐에 적재하고(add_queue_now) 결과 패널에 "대기열에 추가됨"을 보여준다.
+    // 실제 진행률은 모달이 아니라 게시 큐에서 보인다(#198).
+    expect(
+      await screen.findByText(/대기열에 추가됨/, undefined, { timeout: 3000 }),
+    ).toBeInTheDocument();
+    expect(ipcBackend).toHaveBeenCalledWith("add_queue_now", expect.anything());
   });
 
-  it("completes the publish flow and routes to a follow-up view", async () => {
-    vi.spyOn(Math, "random").mockReturnValue(1); // force every job to succeed
+  it("routes to the publish queue after an immediate publish", async () => {
     const { go } = renderPublish();
     await userEvent.click(
       await screen.findByRole("button", { name: /^게시 \(\d+\)/ }),
     );
-    // results render after the simulated upload (~2s)
+    // 큐에 적재되면 결과 패널이 뜬다.
     expect(
       await screen.findByText("계속 작성", undefined, { timeout: 3000 }),
     ).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "알림 보기" }));
-    expect(go).toHaveBeenCalledWith("log");
-    vi.restoreAllMocks();
+    // 즉시 게시도 큐를 타므로 후속 버튼은 "게시큐 보기" → 큐 화면으로 이동한다(#198).
+    await userEvent.click(screen.getByRole("button", { name: "게시큐 보기" }));
+    expect(go).toHaveBeenCalledWith("queue");
   });
 
-  it("offers a retry control when a job fails", async () => {
-    vi.spyOn(Math, "random").mockReturnValue(0); // force every job to fail
-    renderPublish();
-    await userEvent.click(
-      await screen.findByRole("button", { name: /^게시 \(\d+\)/ }),
+  it("offers a retry control when enqueuing fails", async () => {
+    // 큐 적재(add_queue_now)가 거부되면 결과 행을 실패로 두고 재시도 버튼을 보여준다.
+    const real = ipcBackend.getMockImplementation()!;
+    ipcBackend.mockImplementation(
+      (cmd: string, args?: Record<string, unknown>) =>
+        cmd === "add_queue_now"
+          ? Promise.reject(new Error("큐 적재 실패"))
+          : real(cmd, args),
     );
-    expect(
-      await screen.findByRole("button", { name: "재시도" }, { timeout: 3000 }),
-    ).toBeInTheDocument();
-    vi.restoreAllMocks();
+    try {
+      renderPublish();
+      await userEvent.click(
+        await screen.findByRole("button", { name: /^게시 \(\d+\)/ }),
+      );
+      expect(
+        await screen.findByRole(
+          "button",
+          { name: "재시도" },
+          { timeout: 3000 },
+        ),
+      ).toBeInTheDocument();
+    } finally {
+      ipcBackend.mockImplementation(real);
+    }
   });
 
-  it("publishes naver jobs through the cafe immediate-publish command", async () => {
+  it("enqueues naver jobs to the immediate-processing queue", async () => {
     renderPublish();
     // Swap the preselected forum account for a naver one. Selecting it loads
     // that account's joined cafes; picking a cafe resolves its boards (first
@@ -152,23 +178,26 @@ describe("PublishModal", () => {
     );
     // The result row renders "{loginId} · {msg}" in one node, so match loosely.
     expect(
-      await screen.findByText(/글 게시 완료/, undefined, { timeout: 3000 }),
+      await screen.findByText(/대기열에 추가됨/, undefined, { timeout: 3000 }),
     ).toBeInTheDocument();
-    // 즉시 게시는 백엔드 통합 커맨드(run_cafe_publish_now)로 plan을 보낸다 — 글/댓글 게시와
-    // 알림 로그 기록을 한 번에 수행한다(#194). plan.naver에 동결된 글 정보가 실린다.
+    // 즉시 게시는 백엔드 게시를 직접 부르지 않고 즉시 처리 대기열에 적재한다(add_queue_now,
+    // #198). 적재 아이템의 plan.naver에 동결된 글 정보가 실린다 — 실제 게시는 워커가 한다.
     expect(ipcBackend).toHaveBeenCalledWith(
-      "run_cafe_publish_now",
+      "add_queue_now",
       expect.objectContaining({
-        plan: expect.objectContaining({
-          naver: [
-            expect.objectContaining({
-              // 백엔드는 쿠키 파일 키(loginId)로 계정을 찾는다 — UI 고유 id("a5")가 아니다.
-              accountId: "money_lab",
-              cafe: "11111111",
-              menuId: 1,
-              boardType: "L",
-            }),
-          ],
+        item: expect.objectContaining({
+          state: "waiting",
+          plan: expect.objectContaining({
+            naver: [
+              expect.objectContaining({
+                // 백엔드는 쿠키 파일 키(loginId)로 계정을 찾는다 — UI 고유 id("a5")가 아니다.
+                accountId: "money_lab",
+                cafe: "11111111",
+                menuId: 1,
+                boardType: "L",
+              }),
+            ],
+          }),
         }),
       }),
     );
@@ -564,7 +593,7 @@ describe("PublishModal", () => {
     ).toBeDisabled();
   });
 
-  it("comments every template comment on the just-posted article in 'both' mode", async () => {
+  it("enqueues a 'both' job with the full comment pool frozen", async () => {
     const bothDoc: LibraryPost = {
       id: "lb",
       title: "실적 점검 + 댓글",
@@ -588,28 +617,24 @@ describe("PublishModal", () => {
         { timeout: 3000 },
       ),
     );
-    // 즉시 게시는 통합 커맨드 하나로 글+댓글을 보낸다(both): plan.kind=both, 댓글 풀 전체를
-    // 싣고, 방금 쓴 글에 self-comment를 다는 일은 백엔드가 맡는다(#194).
-    const call = ipcBackend.mock.calls.find(
-      (c) => c[0] === "run_cafe_publish_now",
-    );
-    expect(call).toBeDefined();
-    const plan = (call?.[1] as { plan: PublishPlan }).plan;
+    // 즉시 게시는 동결된 plan을 큐에 적재한다(both): plan.kind=both, 댓글 풀 전체를 싣고,
+    // 방금 쓴 글에 self-comment를 다는 일은 워커가 맡는다(#198).
+    const plan = enqueuedPlan();
     expect(plan.kind).toBe("both");
     expect(plan.naver).toHaveLength(1);
     expect(plan.naver[0]).toEqual(
       expect.objectContaining({ accountId: "money_lab", cafe: "11111111" }),
     );
     expect(plan.comments).toEqual(["좋네요", "굿"]);
-    // 글 1개 × 댓글 2개가 모두 성공 → 행에 "댓글 2/2건"이 보인다.
+    // 큐에 적재되면 결과 행은 "추가됨"으로 뜬다(실제 댓글 게시·집계는 워커가 한다).
     expect(
-      await screen.findByText(/댓글 2\/2건/, undefined, { timeout: 3000 }),
+      await screen.findByText(/대기열에 추가됨/, undefined, { timeout: 3000 }),
     ).toBeInTheDocument();
   });
 
-  it("keeps a posted article successful in 'both' mode with no comment text", async () => {
-    // both 문서이지만 댓글 풀이 비면 백엔드는 글만 게시한다. 성공한 글을 "댓글 없음"으로
-    // 접어 실패처럼 보이게 하면 안 된다(commentsAllOk([])가 false라 회귀하기 쉬운 지점).
+  it("enqueues a 'both' job with an empty comment pool", async () => {
+    // both 문서이지만 댓글 풀이 비면 plan.comments는 빈 배열로 적재된다(워커가 글만 게시).
+    // 결과 행은 "추가됨"으로 떠야 한다 — 빈 댓글 때문에 실패처럼 접히면 안 된다.
     const bothNoComments: LibraryPost = {
       id: "lbnc",
       title: "글만 있는 글+댓글",
@@ -633,9 +658,12 @@ describe("PublishModal", () => {
         { timeout: 3000 },
       ),
     );
-    // 글은 성공으로 떠야 하고, "댓글 없음"으로 접혀 실패가 되면 안 된다.
+    // 빈 댓글 풀로 적재되고, 결과는 "추가됨"으로 떠야 한다(실패처럼 접히면 안 된다).
+    const plan = enqueuedPlan();
+    expect(plan.kind).toBe("both");
+    expect(plan.comments).toEqual([]);
     expect(
-      await screen.findByText(/글\+댓글 게시 완료/, undefined, {
+      await screen.findByText(/대기열에 추가됨/, undefined, {
         timeout: 3000,
       }),
     ).toBeInTheDocument();
@@ -666,13 +694,9 @@ describe("PublishModal", () => {
         { timeout: 3000 },
       ),
     );
-    // url 댓글 대상은 plan.naver의 commentTarget(url)에 박제돼 통합 커맨드로 전달된다.
-    // 댓글 분배(어느 계정이 어떤 댓글)는 백엔드가 RNG로 정하므로 여기선 단언하지 않는다(#98).
-    const call = ipcBackend.mock.calls.find(
-      (c) => c[0] === "run_cafe_publish_now",
-    );
-    expect(call).toBeDefined();
-    const plan = (call?.[1] as { plan: PublishPlan }).plan;
+    // url 댓글 대상은 plan.naver의 commentTarget(url)에 박제돼 큐에 적재된다. 댓글 분배
+    // (어느 계정이 어떤 댓글)는 워커가 RNG로 정하므로 여기선 단언하지 않는다(#98).
+    const plan = enqueuedPlan();
     expect(plan.naver).toHaveLength(1);
     expect(plan.naver[0]?.accountId).toBe("money_lab");
     expect(plan.naver[0]?.commentTarget).toEqual(
@@ -681,7 +705,7 @@ describe("PublishModal", () => {
     expect(plan.comments).toEqual(["댓글1", "댓글2"]);
   });
 
-  it("comments on the top-N latest articles in 'comment' + 'latest' mode", async () => {
+  it("freezes a 'latest' commentTarget spec (worker expands at run time)", async () => {
     const latestDoc: LibraryPost = {
       id: "ll",
       title: "최신글 댓글 세트",
@@ -708,28 +732,18 @@ describe("PublishModal", () => {
         { timeout: 3000 },
       ),
     );
-    // 최신글 상위 3개를 프론트가 조회해 각각 url 대상으로 박제한다(articleId 8000..8002,
-    // mock). 통합 커맨드 plan.naver의 commentTarget에 실려 백엔드가 댓글을 분배한다(#98).
-    const call = ipcBackend.mock.calls.find(
-      (c) => c[0] === "run_cafe_publish_now",
+    // 최신글 대상은 프론트가 펼치지 않고 동결 스펙(mode:latest, count, cafeId)으로 적재한다.
+    // 실행 시점에 상위 N개를 조회·분배하는 일은 워커가 맡는다(예약 게시와 동일 경로, #98/#198).
+    const plan = enqueuedPlan();
+    expect(plan.naver).toHaveLength(1);
+    expect(plan.naver[0]?.accountId).toBe("money_lab");
+    expect(plan.naver[0]?.commentTarget).toEqual(
+      expect.objectContaining({ mode: "latest", count: 3, cafeId: 11111111 }),
     );
-    expect(call).toBeDefined();
-    const targets = (call?.[1] as { plan: PublishPlan }).plan.naver;
-    expect(targets).toHaveLength(3);
-    expect(targets.every((t) => t.commentTarget?.cafeId === 11111111)).toBe(
-      true,
-    );
-    expect(targets.every((t) => t.accountId === "money_lab")).toBe(true);
-    expect(
-      [...new Set(targets.map((t) => t.commentTarget?.articleId))].sort(),
-    ).toEqual([8000, 8001, 8002]);
-    expect((call?.[1] as { plan: PublishPlan }).plan.comments).toEqual([
-      "댓글1",
-      "댓글2",
-    ]);
+    expect(plan.comments).toEqual(["댓글1", "댓글2"]);
   });
 
-  it("queries the popular list when commentTarget is 'popular'", async () => {
+  it("freezes a 'popular' commentTarget spec instead of querying upfront", async () => {
     const popularDoc: LibraryPost = {
       id: "lp",
       title: "인기글 댓글 세트",
@@ -754,68 +768,26 @@ describe("PublishModal", () => {
         { timeout: 3000 },
       ),
     );
-    // The article-list query uses the 'popular' sort.
-    expect(ipcBackend).toHaveBeenCalledWith("list_cafe_articles", {
-      cafeId: "11111111",
-      sortBy: "popular",
-      accountId: "money_lab",
-    });
-    // …and the popular ORDER must propagate into the targets: the mock reverses
-    // for popular, so top-1 is 8009 (not latest's 8000). This fails if a
-    // regression takes the latest slice / ignores the returned order.
-    const call = ipcBackend.mock.calls.find(
-      (c) => c[0] === "run_cafe_publish_now",
+    // popular 대상도 프론트가 펼치지 않고 동결 스펙(mode:popular)으로 적재한다 — 인기글
+    // 조회·정렬은 워커가 실행 시점에 한다. 프론트는 더 이상 list_cafe_articles를 부르지 않는다.
+    expect(ipcBackend).not.toHaveBeenCalledWith(
+      "list_cafe_articles",
+      expect.anything(),
     );
-    expect(call).toBeDefined();
-    const targets = (call?.[1] as { plan: PublishPlan }).plan.naver;
-    expect(targets.map((t) => t.commentTarget?.articleId)).toEqual([8009]);
+    const plan = enqueuedPlan();
+    expect(plan.naver).toHaveLength(1);
+    expect(plan.naver[0]?.commentTarget).toEqual(
+      expect.objectContaining({ mode: "popular", count: 1, cafeId: 11111111 }),
+    );
   });
 
-  it("falls back to the available articles when the list has fewer than N", async () => {
+  it("freezes a per-account latest spec for each selected naver account", async () => {
+    // 다계정 댓글 전용: 각 계정이 고른 카페가 동결 스펙(mode:latest, count, cafeId)으로
+    // plan.naver에 실린다. 프론트는 더 이상 글목록을 미리 조회하지 않으므로(상위 N개 펼침은
+    // 워커가 실행 시점에) list_cafe_articles는 불리지 않는다.
     const latestDoc: LibraryPost = {
-      id: "lf",
-      title: "최신글 폴백",
-      kind: "comment",
-      updated: "방금 전",
-      words: 30,
-      status: "ready",
-      excerpt: "요약",
-      commentTarget: "latest",
-      commentCount: 5,
-      comments: ["댓글"],
-    };
-    renderPublish({ doc: latestDoc });
-    await userEvent.click(await screen.findByText("invest_king7"));
-    await userEvent.click(screen.getByText("money_lab"));
-    await screen.findByPlaceholderText("가입 카페 선택");
-    // 개미투자 카페 (cafeId 22222222) only has 2 articles in the mock, fewer
-    // than the requested N=5 — only those two should become targets.
-    await pickOption(0, "개미투자 카페");
-    await userEvent.click(
-      await screen.findByRole(
-        "button",
-        { name: /^게시 \(1\)/ },
-        { timeout: 3000 },
-      ),
-    );
-    const call = ipcBackend.mock.calls.find(
-      (c) => c[0] === "run_cafe_publish_now",
-    );
-    expect(call).toBeDefined();
-    const targets = (call?.[1] as { plan: PublishPlan }).plan.naver;
-    // 2 available articles → 2 targets (not 5).
-    expect(targets).toHaveLength(2);
-    expect(
-      [...new Set(targets.map((t) => t.commentTarget?.articleId))].sort(),
-    ).toEqual([7000, 7001]);
-  });
-
-  it("surfaces a red toast and drops only the failed account when a list fetch rejects", async () => {
-    // money_lab → cafe 11111111 (succeeds), insight_note → cafe 33333333 (rejects).
-    setArticleListFailures(["33333333"]);
-    const latestDoc: LibraryPost = {
-      id: "lerr",
-      title: "최신글 댓글 — 목록 실패",
+      id: "lmulti",
+      title: "최신글 댓글 — 다계정",
       kind: "comment",
       updated: "방금 전",
       words: 30,
@@ -841,29 +813,35 @@ describe("PublishModal", () => {
         { timeout: 3000 },
       ),
     );
-    // The failing cafe surfaces a red toast…
-    await vi.waitFor(() =>
-      expect(notifShow).toHaveBeenCalledWith(
-        expect.objectContaining({ color: "red" }),
-      ),
+    expect(ipcBackend).not.toHaveBeenCalledWith(
+      "list_cafe_articles",
+      expect.anything(),
     );
-    // …and only the good account's article becomes a comment target — the failed
-    // account contributes none (other accounts are unaffected).
-    const call = ipcBackend.mock.calls.find(
-      (c) => c[0] === "run_cafe_publish_now",
+    const plan = enqueuedPlan();
+    expect(plan.naver).toHaveLength(2);
+    expect(plan.naver).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          accountId: "money_lab",
+          commentTarget: expect.objectContaining({
+            mode: "latest",
+            count: 1,
+            cafeId: 11111111,
+          }),
+        }),
+        expect.objectContaining({
+          accountId: "insight_note",
+          commentTarget: expect.objectContaining({
+            mode: "latest",
+            count: 1,
+            cafeId: 33333333,
+          }),
+        }),
+      ]),
     );
-    expect(call).toBeDefined();
-    const targets = (call?.[1] as { plan: PublishPlan }).plan.naver;
-    expect(targets).toEqual([
-      expect.objectContaining({
-        accountId: "money_lab",
-        commentTarget: expect.objectContaining({ cafeId: 11111111 }),
-      }),
-    ]);
-    expect(targets.some((t) => t.accountId === "insight_note")).toBe(false);
   });
 
-  it("uses the template's commentCount (5) for the number of comment targets", async () => {
+  it("freezes the template's commentCount (5) into the commentTarget spec", async () => {
     // 개수는 댓글 템플릿(doc.commentCount)에서 동결된 값을 쓴다 — 게시 모달엔
     // 더 이상 개수 선택 UI가 없다(중복 제거).
     const latestDoc: LibraryPost = {
@@ -891,16 +869,12 @@ describe("PublishModal", () => {
         { timeout: 3000 },
       ),
     );
-    const call = ipcBackend.mock.calls.find(
-      (c) => c[0] === "run_cafe_publish_now",
+    const plan = enqueuedPlan();
+    // 개수(5)는 commentTarget.count로 동결돼 적재된다 — 상위 5개 펼침은 워커가 실행 시점에.
+    expect(plan.naver).toHaveLength(1);
+    expect(plan.naver[0]?.commentTarget).toEqual(
+      expect.objectContaining({ mode: "latest", count: 5, cafeId: 11111111 }),
     );
-    expect(call).toBeDefined();
-    const targets = (call?.[1] as { plan: PublishPlan }).plan.naver;
-    // Top-5 latest → articleId 8000..8004.
-    expect(targets).toHaveLength(5);
-    expect(
-      [...new Set(targets.map((t) => t.commentTarget?.articleId))].sort(),
-    ).toEqual([8000, 8001, 8002, 8003, 8004]);
   });
 
   it("blocks publish while a selected naver account hasn't picked a cafe", async () => {
@@ -969,7 +943,7 @@ describe("PublishModal", () => {
     ).toBeDisabled();
   });
 
-  it("accumulates bands from links, multi-selects, and publishes to each", async () => {
+  it("accumulates bands from links, multi-selects, and freezes each into the plan", async () => {
     renderPublish();
     await userEvent.click(await screen.findByText("value_invest")); // band a7
 
@@ -992,35 +966,25 @@ describe("PublishModal", () => {
     await addBand("https://band.us/band/999", "밴드 999");
     expect(await screen.findByLabelText("밴드 999 제거")).toBeInTheDocument(); // 칩
 
-    // 게시 → 선택한 각 밴드 링크로 band_publish가 호출되어야 한다.
+    // 게시 → 선택한 각 밴드가 동결돼 plan.band에 적재된다(워커가 band_publish로 게시하고
+    // 결과를 알림에 기록한다 — 즉시 게시도 큐를 타므로 프론트는 직접 호출하지 않는다, #198).
     const publishBtn = await screen.findByRole("button", {
       name: /^게시 \(\d+\)/,
     });
     await waitFor(() => expect(publishBtn).toBeEnabled());
     await userEvent.click(publishBtn);
-    await waitFor(() => {
-      const links = ipcBackend.mock.calls
-        .filter((c) => c[0] === "band_publish")
-        .map((c) => (c[1] as { bandLink: string }).bandLink);
-      expect(links).toContain("https://band.us/band/103043410");
-      expect(links).toContain("https://band.us/band/999");
-    });
-    // 밴드 게시 결과가 알림(게시 배치)에 기록되도록 record_band_batch가 호출된다
-    // (종토방처럼 알림에 떠야 함). 선택한 두 밴드가 items로 들어간다.
-    await waitFor(() => {
-      const rec = ipcBackend.mock.calls.find(
-        (c) => c[0] === "record_band_batch",
-      );
-      expect(rec).toBeTruthy();
-      const arg = rec![1] as { items: { target: string }[] };
-      const targets = arg.items.map((i) => i.target);
-      expect(targets).toContain("데일밴드");
-      expect(targets).toContain("밴드 999");
-    });
+    const plan = enqueuedPlan();
+    expect(plan.band.map((b) => ({ name: b.name, link: b.link }))).toEqual(
+      expect.arrayContaining([
+        { name: "데일밴드", link: "https://band.us/band/103043410" },
+        { name: "밴드 999", link: "https://band.us/band/999" },
+      ]),
+    );
   });
 
-  it("밴드 댓글 전용 모드는 기존 글(최신글)에 band_comment로 댓글을 단다", async () => {
-    // 밴드만 선택한 댓글 전용 — 새 글(band_publish)이 아니라 기존 글 조회+댓글(band_comment).
+  it("freezes a 'latest' band comment spec in 'comment' mode", async () => {
+    // 밴드만 선택한 댓글 전용 — plan.band에 최신글 spec이 동결돼, 워커가 기존 글 조회+댓글
+    // (band_comment, 새 글 band_publish 아님)로 게시한다.
     const commentDoc: LibraryPost = {
       ...postDoc,
       id: "l-band-comment",
@@ -1048,26 +1012,17 @@ describe("PublishModal", () => {
     await waitFor(() => expect(publishBtn).toBeEnabled());
     await userEvent.click(publishBtn);
 
-    // band_comment(기존 글에 댓글)가 최신글/개수/댓글 풀과 함께 호출된다.
-    await waitFor(() => {
-      const call = ipcBackend.mock.calls.find((c) => c[0] === "band_comment");
-      expect(call).toBeDefined();
-      const arg = call![1] as {
-        mode: string;
-        count: number;
-        comments: string[];
-      };
-      expect(arg.mode).toBe("latest");
-      expect(arg.count).toBe(3);
-      expect(arg.comments).toEqual(["좋아요", "멋지네요"]);
-    });
-    // 댓글 전용은 새 글을 만들지 않는다 — band_publish 미호출.
-    expect(
-      ipcBackend.mock.calls.find((c) => c[0] === "band_publish"),
-    ).toBeUndefined();
+    // 밴드 대상에 최신글 spec(mode:latest, count:3)이 동결되고, 댓글 풀 전체가 실린다.
+    const plan = enqueuedPlan();
+    expect(plan.kind).toBe("comment");
+    expect(plan.band).toHaveLength(1);
+    expect(plan.band[0]?.commentTarget).toEqual(
+      expect.objectContaining({ mode: "latest", count: 3 }),
+    );
+    expect(plan.comments).toEqual(["좋아요", "멋지네요"]);
   });
 
-  it("밴드 댓글 전용 인기글 대상은 band_comment에 mode=popular로 전달한다", async () => {
+  it("밴드 댓글 전용 인기글 대상은 plan.band에 mode=popular로 동결한다", async () => {
     const commentDoc: LibraryPost = {
       ...postDoc,
       id: "l-band-comment-popular",
@@ -1095,16 +1050,13 @@ describe("PublishModal", () => {
     await waitFor(() => expect(publishBtn).toBeEnabled());
     await userEvent.click(publishBtn);
 
-    await waitFor(() => {
-      const call = ipcBackend.mock.calls.find((c) => c[0] === "band_comment");
-      expect(call).toBeDefined();
-      const arg = call![1] as { mode: string; count: number };
-      expect(arg.mode).toBe("popular");
-      expect(arg.count).toBe(5);
-    });
+    const plan = enqueuedPlan();
+    expect(plan.band[0]?.commentTarget).toEqual(
+      expect.objectContaining({ mode: "popular", count: 5 }),
+    );
   });
 
-  it("밴드는 url 댓글 대상을 지원하지 않아 latest로 오라우팅하지 않고 실패로 표기한다", async () => {
+  it("밴드는 url 댓글 미지원이라 plan.band에서 제외한다(네이버 url 대상은 유지)", async () => {
     // 네이버+밴드 혼합 댓글 전용 — 네이버는 url 글에 댓글이 가능하지만 밴드는 불가.
     const commentDoc: LibraryPost = {
       ...postDoc,
@@ -1134,16 +1086,14 @@ describe("PublishModal", () => {
     await waitFor(() => expect(publishBtn).toBeEnabled());
     await userEvent.click(publishBtn);
 
-    // 밴드에 url 댓글을 시도하지 않고(=band_comment 미호출) 실패 사유를 보여준다.
-    // 결과 행은 "{loginId} · {msg}" 한 줄이라 부분 일치로 찾는다.
-    expect(
-      await screen.findByText((t) =>
-        t.includes("밴드는 특정 글(URL) 댓글을 지원하지 않아요"),
-      ),
-    ).toBeInTheDocument();
-    expect(
-      ipcBackend.mock.calls.find((c) => c[0] === "band_comment"),
-    ).toBeUndefined();
+    // 밴드는 url 댓글 미지원이라 plan.band에서 제외된다(엉뚱한 최신글 오라우팅 방지).
+    // 네이버 url 대상은 그대로 실린다 — 워커가 밴드를 빼고 네이버만 게시한다.
+    const plan = enqueuedPlan();
+    expect(plan.band).toEqual([]);
+    expect(plan.naver).toHaveLength(1);
+    expect(plan.naver[0]?.commentTarget).toEqual(
+      expect.objectContaining({ mode: "url", cafeId: 31732304, articleId: 9 }),
+    );
   });
 
   it("이름이 같은 밴드(다른 band_no) 둘을 등록해도 드롭다운이 깨지지 않고 각각 선택된다", async () => {
@@ -1189,23 +1139,21 @@ describe("PublishModal", () => {
     await pickNth(1);
     expect(await screen.findAllByLabelText("데일밴드 제거")).toHaveLength(2);
 
-    // 게시 → 서로 다른 두 밴드 링크(동결)로 band_publish가 각각 호출된다.
+    // 게시 → 서로 다른 두 밴드 링크(동결)가 각각 plan.band에 실린다(동명이라도 별개 밴드).
     const publishBtn = await screen.findByRole("button", {
       name: /^게시 \(\d+\)/,
     });
     await waitFor(() => expect(publishBtn).toBeEnabled());
     await userEvent.click(publishBtn);
-    await waitFor(() => {
-      const links = ipcBackend.mock.calls
-        .filter((c) => c[0] === "band_publish")
-        .map((c) => (c[1] as { bandLink: string }).bandLink);
-      expect(links).toContain("https://band.us/band/103043410");
-      expect(links).toContain("https://www.band.us/band/103084867");
-    });
+    const plan = enqueuedPlan();
+    const links = plan.band.map((b) => b.link);
+    expect(links).toContain("https://band.us/band/103043410");
+    expect(links).toContain("https://www.band.us/band/103084867");
   });
 
-  it("밴드 즉시게시(글+댓글)는 댓글을 모두 같은 글에 보낸다", async () => {
-    // 회귀: 댓글을 2개 이상 써도 1개만 게시되던 문제 — comments 풀 전체를 백엔드에 전달.
+  it("밴드 글+댓글은 댓글 풀 전체를 plan.comments에 동결한다", async () => {
+    // 회귀: 댓글을 2개 이상 써도 1개만 게시되던 문제 — comments 풀 전체를 plan에 실어야 한다
+    // (워커가 같은 글에 전부 단다). 프론트는 더 이상 band_publish를 직접 부르지 않는다.
     const bothDoc: LibraryPost = {
       ...postDoc,
       id: "l-band-multi",
@@ -1232,113 +1180,16 @@ describe("PublishModal", () => {
     await waitFor(() => expect(publishBtn).toBeEnabled());
     await userEvent.click(publishBtn);
 
-    // band_publish에 댓글 풀 전체가 같은 글로 전달된다(1개만 X).
-    await waitFor(() => {
-      const call = ipcBackend.mock.calls.find((c) => c[0] === "band_publish");
-      expect(call).toBeDefined();
-      expect((call![1] as { comments: string[] }).comments).toEqual([
-        "첫 번째 댓글",
-        "두 번째 댓글",
-      ]);
-    });
+    // plan.comments에 댓글 풀 전체가 실린다(1개만 X). 밴드 대상도 함께 적재된다.
+    const plan = enqueuedPlan();
+    expect(plan.kind).toBe("both");
+    expect(plan.band).toHaveLength(1);
+    expect(plan.comments).toEqual(["첫 번째 댓글", "두 번째 댓글"]);
   });
 
-  it("밴드 즉시게시에서 댓글이 일부 실패하면 실패로 표기한다", async () => {
-    // 회귀: 댓글을 의도했는데 일부/전량 실패면 초록 배지로 묻지 않고 "N/M개"로 드러내고
-    // 행을 실패(재시도 버튼)로 둔다 — 카페 commentsAllOk와 동일 정책.
-    const real = ipcBackend.getMockImplementation()!;
-    ipcBackend.mockImplementation(
-      (cmd: string, args?: Record<string, unknown>) =>
-        cmd === "band_publish"
-          ? Promise.resolve({
-              joined: true,
-              postNo: 1,
-              webUrl: "https://band.us/band/103043410/post/1",
-              commentedCount: 1, // 2개 시도 중 1개만 성공
-              commentTotal: 2,
-              bandName: "데일밴드",
-            })
-          : real(cmd, args),
-    );
-    try {
-      const bothDoc: LibraryPost = {
-        ...postDoc,
-        id: "l-band-partial",
-        kind: "both",
-        body: "<p>본문</p>",
-        comments: ["첫 번째 댓글", "두 번째 댓글"],
-      };
-      renderPublish({ doc: bothDoc });
-      await userEvent.click(await screen.findByText("value_invest"));
-
-      const linkInput = screen.getByLabelText("밴드 링크");
-      const saveBtn = screen.getByRole("button", { name: "저장" });
-      await userEvent.type(linkInput, "https://band.us/band/103043410");
-      await waitFor(() => expect(saveBtn).toBeEnabled());
-      await userEvent.click(saveBtn);
-      await waitFor(() => expect(linkInput).toHaveValue(""));
-      await screen.findByPlaceholderText("게시할 밴드 선택");
-      await pickOption(0, "데일밴드");
-      await screen.findByLabelText("데일밴드 제거");
-
-      const publishBtn = await screen.findByRole("button", {
-        name: /^게시 \(\d+\)/,
-      });
-      await waitFor(() => expect(publishBtn).toBeEnabled());
-      await userEvent.click(publishBtn);
-
-      // msg는 "글·댓글 1/2개", 행은 ok:false라 "재시도" 버튼이 뜬다.
-      // 그 행(Text→Box→Group)으로 범위를 좁혀 해당 행이 실패 표기인지 본다.
-      const msgEl = await screen.findByText(/글·댓글 1\/2개 게시 완료/);
-      const row = msgEl.parentElement!.parentElement!;
-      expect(
-        within(row).getByRole("button", { name: "재시도" }),
-      ).toBeInTheDocument();
-    } finally {
-      ipcBackend.mockImplementation(real);
-    }
-  });
-
-  it("밴드 즉시게시에서 글 게시가 실패(reject)하면 실패로 표기한다", async () => {
-    // 회귀: 가입/글 게시 단계가 통째로 실패(reject)하면 초록으로 묻지 않고
-    // 에러 사유 + 재시도로 드러낸다(부분실패와 별개로 publish 자체 거부 경로).
-    const real = ipcBackend.getMockImplementation()!;
-    ipcBackend.mockImplementation(
-      (cmd: string, args?: Record<string, unknown>) =>
-        cmd === "band_publish"
-          ? Promise.reject(new Error("밴드 가입에 실패했습니다"))
-          : real(cmd, args),
-    );
-    try {
-      renderPublish();
-      await userEvent.click(await screen.findByText("value_invest"));
-
-      const linkInput = screen.getByLabelText("밴드 링크");
-      const saveBtn = screen.getByRole("button", { name: "저장" });
-      await userEvent.type(linkInput, "https://band.us/band/103043410");
-      await waitFor(() => expect(saveBtn).toBeEnabled());
-      await userEvent.click(saveBtn);
-      await waitFor(() => expect(linkInput).toHaveValue(""));
-      await screen.findByPlaceholderText("게시할 밴드 선택");
-      await pickOption(0, "데일밴드");
-      await screen.findByLabelText("데일밴드 제거");
-
-      const publishBtn = await screen.findByRole("button", {
-        name: /^게시 \(\d+\)/,
-      });
-      await waitFor(() => expect(publishBtn).toBeEnabled());
-      await userEvent.click(publishBtn);
-
-      // reject → ok:false라 에러 사유가 그대로 뜨고 행은 재시도로 남는다.
-      const msgEl = await screen.findByText(/밴드 가입에 실패했습니다/);
-      const row = msgEl.parentElement!.parentElement!;
-      expect(
-        within(row).getByRole("button", { name: "재시도" }),
-      ).toBeInTheDocument();
-    } finally {
-      ipcBackend.mockImplementation(real);
-    }
-  });
+  // 밴드 부분 실패(댓글 N/M)·게시 reject의 "실패로 표기" 회귀는 이제 워커가 담당한다
+  // (즉시 게시도 큐를 타므로, #198). build_log_batch가 밴드 성공/실패를 BatchItemStatus로
+  // 매핑하는지는 queue_runner의 백엔드 테스트(build_log_batch_maps_band_*)가 검증한다.
 
   it("밴드 링크 저장 시 밴드명 조회가 실패하면 링크를 이름으로 폴백한다", async () => {
     // 회귀: band_resolve_name 실패 시 빈 이름이 아니라 원문 링크를 표시명으로 쓴다.

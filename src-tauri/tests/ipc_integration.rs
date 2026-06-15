@@ -211,6 +211,29 @@ fn queue_now_cancel_removes_the_targeted_item() {
     assert!(array(&after).is_empty());
 }
 
+// 즉시 게시("지금 바로")는 게시 큐에 직접 적재된다(add_queue_now, #198). 예약→promote와
+// 달리 scheduled 큐를 거치지 않고, 프론트가 보낸 상태와 무관하게 대기 상태로 now 큐에
+// 들어가는지 확인한다. 반환 스냅샷은 (plan 없는 아이템을) 워커가 드레인하기 전에 잡히므로
+// 막 적재한 항목을 결정적으로 담는다(promote와 동일, 이슈 #181).
+#[test]
+fn add_queue_now_appends_a_waiting_item_directly() {
+    let (app, _dir) = mock_app();
+    let wv = main_webview(&app);
+
+    let item = json!({
+        "id": "qn-direct",
+        "title": "즉시 게시 통합 테스트",
+        "kind": "post",
+        // running을 보내도 적재 시 대기로 정규화돼야 한다(워커가 실행 상태를 채운다).
+        "state": "running",
+        "locs": [],
+    });
+    let now = invoke_ok(&wv, "add_queue_now", json!({ "item": item }));
+    assert_eq!(array(&now).len(), 1);
+    assert_eq!(array(&now)[0]["id"], "qn-direct");
+    assert_eq!(array(&now)[0]["state"], "waiting");
+}
+
 #[test]
 fn scheduled_add_promote_and_cancel_flow() {
     let (app, _dir) = mock_app();
