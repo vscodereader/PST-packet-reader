@@ -1,6 +1,7 @@
 mod ipc;
 mod logging;
 mod store;
+mod template_tokens;
 mod util;
 
 use std::path::{Path, PathBuf};

@@ -1131,6 +1131,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       title: doc.title,
       bodyText: htmlToText(doc.body ?? ""),
       comments: doc.comments ?? [],
+      // 백엔드가 대상별로 #{링크}를 치환할 때 쓴다. 비우면 종목별 시세 링크.
+      linkOverride: linkOverride.trim(),
       naver,
       forum,
       band,

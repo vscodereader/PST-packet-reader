@@ -12,7 +12,11 @@ export type PublishPlan = {
 /**
  * 출처 글(LibraryPost) id — 추적/표시용. 본문은 아래 필드에 동결되어 있다.
  */
-postId: string, kind: ModeValue, title: string, bodyText: string, comments: Array<string>, naver: Array<NaverTarget>, forum: Array<ForumTarget>, band: Array<BandTarget>,
+postId: string, kind: ModeValue, title: string, bodyText: string, comments: Array<string>,
+/**
+ * `#{링크}` 토큰 치환에 쓸 사용자 지정 링크값(선택). 비우면 종목별 시세 링크를 쓴다.
+ */
+linkOverride: string, naver: Array<NaverTarget>, forum: Array<ForumTarget>, band: Array<BandTarget>,
 /**
  * 로그인 전용 아이템의 계정 목록. 게시 아이템에는 없다(직렬화 생략 → 기존 plan과 호환).
  * 워커(`execute_item`)는 이 필드가 채워진 아이템을 게시 대신 계정별 로그인으로 처리한다
