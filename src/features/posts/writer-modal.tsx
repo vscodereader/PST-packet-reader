@@ -25,6 +25,8 @@ import type {
 import { ipc } from "@/shared/ipc";
 import { Icon } from "@/shared/ui/icons";
 
+import { crawlToText } from "./publish-helpers";
+
 export interface WriterModalProps {
   open: boolean;
   doc: LibraryPost | null;
@@ -52,26 +54,6 @@ function exec(cmd: string, body: HTMLElement | null) {
     /* jsdom / unsupported — no-op */
   }
   body?.focus();
-}
-
-// URL → plain text (mock crawl). Stock board links become a price line.
-function crawlToText(u: string, stocks: Stock[]): string {
-  const m = u.match(/code=(\d{6})/) ?? u.match(/(\d{6})/);
-  const s = m?.[1] ? stocks.find((x) => x.code === m[1]) : undefined;
-  if (s) {
-    const arrow = s.chg > 0 ? "▲" : s.chg < 0 ? "▼" : "·";
-    return `${s.name}(${s.code}) · ${s.market} 현재가 ${s.price} (${arrow}${Math.abs(s.chg)}%)`;
-  }
-  let host = u;
-  try {
-    host = new URL(u.startsWith("http") ? u : "https://" + u).hostname.replace(
-      /^www\./,
-      "",
-    );
-  } catch {
-    /* ignore */
-  }
-  return `[${host}에서 가져온 내용]`;
 }
 
 const COUNT_OPTS = [1, 3, 5, 10];

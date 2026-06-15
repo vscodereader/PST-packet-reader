@@ -1,6 +1,21 @@
 /** Pure helpers for the publish modal — extracted so the job/validation logic is
  * unit-testable without rendering the whole component. */
 
+import type { Stock } from "@/shared/data/types";
+
+/** 붙여넣은 URL 처리. 종목 시세 링크(6자리 코드)는 시세 줄로 바꾸고, 그 외 링크/내용은
+ * 붙여넣은 원문 그대로 둔다 — URL이 본문에 남아야 게시 글에서 링크가 보인다. 예전엔
+ * 일반 링크를 "[host에서 가져온 내용]" 가짜 문구로 바꿔 URL이 통째로 유실됐다. */
+export function crawlToText(u: string, stocks: Stock[]): string {
+  const m = u.match(/code=(\d{6})/) ?? u.match(/(\d{6})/);
+  const s = m?.[1] ? stocks.find((x) => x.code === m[1]) : undefined;
+  if (s) {
+    const arrow = s.chg > 0 ? "▲" : s.chg < 0 ? "▼" : "·";
+    return `${s.name}(${s.code}) · ${s.market} 현재가 ${s.price} (${arrow}${Math.abs(s.chg)}%)`;
+  }
+  return u;
+}
+
 /** Turn an `<img>` tag into a readable placeholder so it survives the plain-text
  * flattening. Prefers `alt`, falls back to `src`, else a bare marker. */
 function imgPlaceholder(tag: string): string {
