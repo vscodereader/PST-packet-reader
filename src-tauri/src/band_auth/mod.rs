@@ -9,7 +9,6 @@ mod login;
 mod login_flow;
 mod outcome;
 mod paths;
-mod queue;
 mod util;
 
 use tauri::{AppHandle, Runtime};
@@ -19,8 +18,6 @@ use crate::auth::{
     app_data_root, assert_adb_device, config, paths_for_root, toggle_airplane_mode, Account,
     OrchestratorError,
 };
-
-pub use queue::{enqueue_band_accounts, get_band_queue_status, BandQueueState};
 
 use cookies::{account_band_cookie_status, BandCookieStatus};
 use paths::{band_cookies_dir_for_app_data, ensure_band_cookies_dir};

@@ -614,31 +614,24 @@ fn resolve_login_status(
     }
 }
 
-/// 로그인 결과 1건을 알림 로그(`LogBatch`)용 메인 라인 문구로 만든다. 게시 실패의
-/// "글 게시 실패 — {사유}" 패턴을 미러한다 — 성공은 "로그인 성공", 실패는 "로그인 실패 — {사유}".
-fn login_batch_msg(status: &AccountStatus, reason: &str) -> String {
-    if *status == AccountStatus::Active {
-        "로그인 성공".to_owned()
-    } else {
-        format!("로그인 실패 — {reason}")
-    }
-}
-
 /// 로그인 전용 아이템을 처리한다(#210): 계정을 순서대로 로그인하고, 1건마다 진행률과
 /// 계정 상태(`apply_status_by_login_id`)·활동 피드를 갱신한다. 성공/실패와 무관하게 항상
 /// 다음 계정으로 진행해(한 계정 실패가 큐를 멈추지 않게) 모든 계정을 성공 또는 실패로
 /// 확정한다. `platform`이 Band면 band.us 로그인, 그 외(naver/forum 등)는 네이버 로그인으로
 /// 보낸다(프론트 runLogin 분기 미러). 각 계정 시작 전 협조적 취소(item_present)를 확인한다.
-/// 처리 결과는 게시와 동일하게 알림 로그(`LogBatch`)에도 남겨, 실패 시 "자세히 보기"에
-/// 백트레이스(trace)가 뜨도록 한다.
+///
+/// 결과 표시: 계정별 활동 피드(알림 화면) + 계정 상태 배지 + 완료 시 OS 토스트로 충분하므로,
+/// 알림 로그(LogBatch)에는 **남기지 않는다**(중복 제거). 실패 사유·백트레이스(trace)는 디버깅용
+/// 으로 `pstmacro.log`에만 기록한다(전용 로그인 큐 제거로 사라졌던 `[LOGIN]` 로그도 복원).
 async fn run_login_targets<R: Runtime>(app: &AppHandle<R>, id: &str, targets: &[LoginTarget]) {
+    use crate::auth::mask_id;
     use crate::auth::outcome::{activity_message, status_activity_type};
     use crate::ipc::accounts::{apply_status_by_login_id, Account};
 
     let total = targets.len() as u32;
     update_progress(app, id, 0, total);
     let mut done = 0u32;
-    let mut batch_items = Vec::new();
+    let mut ok = 0u32;
     for t in targets {
         // 로그인은 비싸고(브라우저 기동) 비가역적이라 시작 전마다 취소를 확인한다.
         if !item_present(app, id) {
@@ -657,6 +650,11 @@ async fn run_login_targets<R: Runtime>(app: &AppHandle<R>, id: &str, targets: &[
             crate::auth::process_account(app, &t.account_id, t.headless, t.use_adb, t.force).await
         };
         let (status, msg, trace) = resolve_login_status(&result);
+        // 성공 여부는 resolution의 succeeded(쿠키 저장 완료)로 판정한다(기존 전용 로그인 큐와 동일).
+        let succeeded = matches!(&result, Ok(res) if res.succeeded);
+        if succeeded {
+            ok += 1;
+        }
 
         // 계정 세밀 상태/사유를 accounts 스토어에 반영한다(loginId가 같은 모든 행). 프론트
         // accounts 화면이 이 값을 폴링해 상태 배지/tooltip을 갱신한다.
@@ -669,38 +667,29 @@ async fn run_login_targets<R: Runtime>(app: &AppHandle<R>, id: &str, targets: &[
             status_activity_type(&status),
             activity_message(&t.account_id, &status, &msg),
         );
-
-        // 게시 실패처럼 알림 로그에도 남겨, 실패 시 "자세히 보기"에 trace(백트레이스)를 노출한다.
-        batch_items.push(BatchItem {
-            platform: t.platform.clone(),
-            target: t.account_id.clone(),
-            code: None,
-            board: None,
-            login_id: t.account_id.clone(),
-            status: status_of(status == AccountStatus::Active),
-            msg: login_batch_msg(&status, &msg),
-            trace,
-        });
+        // pstmacro.log에 성공/실패를 남긴다(알림 로그 UI는 중복이라 안 남김). 실패는 사유와
+        // 백트레이스(trace)를 함께 기록해 디버깅에 쓴다(#210). PW는 어떤 로그에도 넣지 않는다.
+        if succeeded {
+            tracing::info!("[LOGIN] {} 로그인 성공 ✅", mask_id(&t.account_id));
+        } else if let Some(tr) = &trace {
+            tracing::warn!(
+                "[LOGIN] {} 로그인 실패 ❌ — {msg}\n{tr}",
+                mask_id(&t.account_id)
+            );
+        } else {
+            tracing::warn!("[LOGIN] {} 로그인 실패 ❌ — {msg}", mask_id(&t.account_id));
+        }
 
         done += 1;
         update_progress(app, id, done, total);
     }
 
-    // 처리한 계정이 있으면 알림 로그 배치 한 건으로 남긴다(자세히 보기 trace 노출). 게시
-    // 완료 배치와 같은 store에 넣되, 활동 피드는 위에서 계정별로 이미 남겼으므로 여기선
-    // 로그 배치만 저장한다(게시용 record_completion의 "예약 게시" 요약/토스트는 쓰지 않는다).
-    if !batch_items.is_empty() {
-        let batch = LogBatch {
-            id: format!("lb-q-{}-{}", now_ms(), LB_SEQ.fetch_add(1, Ordering::Relaxed)),
-            title: format!("계정 로그인 {}건", batch_items.len()),
-            body: None,
-            comment: None,
-            kind: ModeValue::Post,
-            at: now_ms(),
-            state: None,
-            items: batch_items,
-        };
-        store_log_batch(app, batch);
+    // 완료 시 OS 토스트로 결과를 통지한다(게시 완료 토스트와 동일 UX, #163/#210). 트레이
+    // 상주로 창을 닫아둔 경우에도 인지할 수 있게 한다. 알림 로그(LogBatch)는 만들지 않는다.
+    if total > 0 {
+        let (toast_title, toast_body) =
+            super::notify::login_completion_message(total as usize, ok as usize);
+        super::notify::notify_desktop(app, &toast_title, &toast_body);
     }
 }
 
@@ -1351,15 +1340,6 @@ mod tests {
         let (status, _msg, trace) = resolve_login_status(&with_trace);
         assert_eq!(status, AccountStatus::Error);
         assert_eq!(trace.as_deref(), Some("at x.rs:1:1\n\nframe0"));
-    }
-
-    #[test]
-    fn login_batch_msg_mirrors_publish_wording() {
-        assert_eq!(login_batch_msg(&AccountStatus::Active, "ignored"), "로그인 성공");
-        assert_eq!(
-            login_batch_msg(&AccountStatus::BadCredentials, "비번 오류"),
-            "로그인 실패 — 비번 오류"
-        );
     }
 
     #[test]

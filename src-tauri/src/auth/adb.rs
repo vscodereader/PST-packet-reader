@@ -69,7 +69,13 @@ pub async fn probe_adb_connection() -> Result<(), OrchestratorError> {
 pub async fn toggle_airplane_mode() -> Result<(), OrchestratorError> {
     let before = fetch_external_ip().await;
     tracing::info!("[ADB] ✈ 비행기모드 ON");
-    run_adb_timed(airplane_mode_args(true).iter().map(|s| s.to_string()).collect()).await?;
+    run_adb_timed(
+        airplane_mode_args(true)
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    )
+    .await?;
     sleep(Duration::from_secs(config::ADB_AIRPLANE_ENABLE_SECS)).await;
     tracing::info!("[ADB] ✈ 비행기모드 OFF — 인터넷 복구 대기");
     run_adb_timed(
@@ -175,7 +181,12 @@ async fn wait_for_internet_connection() -> Result<(), OrchestratorError> {
     let deadline = Instant::now() + timeout;
 
     loop {
-        if has_internet_connection().await? {
+        // 비행기모드 해제 직후엔 단말 라디오가 순환 중이라 `adb shell`(ping 프로브)이 일시적으로
+        // 실패(device offline)하거나 ping이 fail로 나올 수 있다. 이를 하드 에러로 올리면 로그인
+        // 전체가 'command failed: adb shell ... ping'으로 죽으므로(#210 E2E 간헐 실패), 일시
+        // 실패는 "아직 연결 안 됨"으로 보고 데드라인까지 재시도한다. 끝내 안 되면 아래에서
+        // 명확한 "복구 시간 초과" 에러로 마무리한다.
+        if has_internet_connection().await.unwrap_or(false) {
             return Ok(());
         }
 

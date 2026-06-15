@@ -8,7 +8,6 @@ mod login_flow;
 // band_auth가 로그인 결과 매핑(`LoginResolution`)을 재사용하도록 크레이트 내부에 공개한다.
 pub(crate) mod outcome;
 mod paths;
-mod queue;
 mod types;
 mod util;
 
@@ -20,8 +19,7 @@ pub use adb::probe_adb_connection;
 pub(crate) use chrome::launch as launch_debug_chrome;
 pub use error::OrchestratorError;
 pub use paths::{app_data_root, paths_for_root};
-pub use queue::{enqueue_accounts, get_queue_status, QueueState};
-pub use types::{Account, QueueJob, QueueJobStatus, QueueStatus, RuntimePaths};
+pub use types::{Account, RuntimePaths};
 // 로그용 ID 마스킹 헬퍼를 다른 모듈(예: discussion_batch)에서도 쓸 수 있게 재노출.
 pub(crate) use util::mask_id;
 

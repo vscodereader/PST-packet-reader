@@ -96,13 +96,6 @@ pub(crate) fn has_valid_account_cookies(
     Ok(account_cookie_status(paths, account_id)? == CookieStatus::Valid)
 }
 
-pub(crate) fn account_cookie_status_for_app_data(
-    account_id: &str,
-) -> Result<CookieStatus, OrchestratorError> {
-    let paths = paths_for_root(app_data_root()?);
-    account_cookie_status(&paths, account_id)
-}
-
 pub(crate) fn account_cookie_status(
     paths: &RuntimePaths,
     account_id: &str,
