@@ -6,7 +6,6 @@ import type { Article } from "@/shared/bindings/Article";
 import type { ArticleListResponse } from "@/shared/bindings/ArticleListResponse";
 import type { Band } from "@/shared/bindings/Band";
 import type { Cafe } from "@/shared/bindings/Cafe";
-import type { CafePublishNowResult } from "@/shared/bindings/CafePublishNowResult";
 import type { CommentDistributionRequest } from "@/shared/bindings/CommentDistributionRequest";
 import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutcome";
 import type { DashStat } from "@/shared/bindings/DashStat";
@@ -19,12 +18,12 @@ import type { LibraryPost } from "@/shared/bindings/LibraryPost";
 import type { LogBatch } from "@/shared/bindings/LogBatch";
 import type { PostJob } from "@/shared/bindings/PostJob";
 import type { PublishOutcome } from "@/shared/bindings/PublishOutcome";
-import type { PublishPlan } from "@/shared/bindings/PublishPlan";
 import type { QueueNowItem } from "@/shared/bindings/QueueNowItem";
 import type { QueueScheduledItem } from "@/shared/bindings/QueueScheduledItem";
 import type { SortBy } from "@/shared/bindings/SortBy";
 import type { Stock } from "@/shared/bindings/Stock";
 import type { StockExchange } from "@/shared/bindings/StockExchange";
+import type { StockMarket } from "@/shared/bindings/StockMarket";
 import type { StockCandidate } from "@/shared/data/types";
 
 export type {
@@ -184,6 +183,13 @@ export const ipc = {
     cancelScheduled: (id: string) =>
       call<QueueScheduledItem[]>("cancel_queue_scheduled", { id }),
     /**
+     * Append an item to the immediate-processing queue ("즉시 처리 대기열") and
+     * kick the worker; returns the new now-list. This is the path "지금 바로
+     * 게시" takes — the worker publishes it just like a promoted schedule (#198).
+     */
+    addNow: (item: QueueNowItem) =>
+      call<QueueNowItem[]>("add_queue_now", { item }),
+    /**
      * Append a scheduled item at local epoch-ms `atMs`; returns the list.
      * Rejects if the backend deems the time already past.
      */
@@ -218,13 +224,22 @@ export const ipc = {
   },
   // 종목토론방 종목 선택 화면 — 네이버 모바일(m.stock.naver.com) 종목 데이터.
   forumStocks: {
-    /** 카테고리(토론/거래대금/인기/상승/하락/거래량) × 거래소(krx/nxt) 한 페이지. */
+    /**
+     * 카테고리(토론/거래대금/인기/상승/하락/거래량) × 거래소(krx/nxt)
+     * × 시장(all/kospi/kosdaq) 한 페이지. 토론은 시장 구분이 무시된다.
+     */
     list: (
       category: ForumStockCategory,
       exchange: StockExchange,
+      market: StockMarket,
       page: number,
     ) =>
-      call<ForumStockPage>("list_forum_stocks", { category, exchange, page }),
+      call<ForumStockPage>("list_forum_stocks", {
+        category,
+        exchange,
+        market,
+        page,
+      }),
     /** 검색어 포함 국내 종목 한 페이지(80개 상한 없음). */
     search: (query: string, page: number) =>
       call<ForumStockPage>("search_forum_stocks", { query, page }),
@@ -259,14 +274,6 @@ export const ipc = {
      */
     runCommentJobs: (req: CommentDistributionRequest) =>
       call<CommentPublishOutcome[]>("run_comment_jobs", { req }),
-    /**
-     * 카페 즉시 게시("지금 바로"): 글/댓글 게시와 알림 로그(LogBatch) 기록을 백엔드가
-     * 일괄 수행하고(예약 게시와 같은 build_log_batch 재사용 → 실패 사유 문구 일관) UI용
-     * 슬림 결과(글/댓글 outcome)를 돌려준다. plan의 forum/band 대상은 무시한다 — 종목
-     * 토론방·밴드 즉시 게시는 각자 별도 경로가 기록한다.
-     */
-    publishNow: (plan: PublishPlan) =>
-      call<CafePublishNowResult>("run_cafe_publish_now", { plan }),
     /**
      * List every cafe `accountId` has joined (crawled across all pages),
      * using its session cookie. Rejects with the backend's error envelope
