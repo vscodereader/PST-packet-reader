@@ -89,7 +89,15 @@ fn transport_error(e: reqwest::Error) -> PostError {
     ErrorEnvelope {
         trace_id: String::new(),
         code: CODE_HTTP_TRANSPORT_ERROR.to_string(),
-        message: format!("HTTP 전송 오류가 발생했습니다: {}", e),
+        // 실패 지점 앵커(here!) + 런타임 백트레이스를 message 뒤에 붙인다 — "자세히 보기"
+        // trace로 노출된다(#199, 카페 댓글 api_failure_error와 동일 처리). 메인 사유는
+        // failure_reason이 따로 만든다.
+        message: format!(
+            "HTTP 전송 오류가 발생했습니다: {}\n\nat {}\n\n{}",
+            e,
+            crate::here!(),
+            crate::util::backtrace_string(),
+        ),
         error_data: Some(PostErrorData {
             cafe: NaverCafeCommonErrorData {
                 target: None,
@@ -124,7 +132,13 @@ fn api_error_from_body(
     ErrorEnvelope {
         trace_id,
         code: code.to_string(),
-        message,
+        // here! 앵커 + 런타임 백트레이스(#199, 카페 댓글과 동일). 메인 사유는 failure_reason이
+        // 따로 만들고, 이 message는 "자세히 보기" trace로 노출된다.
+        message: format!(
+            "{message}\n\nat {}\n\n{}",
+            crate::here!(),
+            crate::util::backtrace_string(),
+        ),
         error_data: Some(PostErrorData {
             cafe: NaverCafeCommonErrorData {
                 target: None,
@@ -165,7 +179,12 @@ fn make_non_2xx_error(
     ErrorEnvelope {
         trace_id: String::new(),
         code: code.to_string(),
-        message,
+        // here! 앵커 + 백트레이스(#199, 카페 댓글과 동일).
+        message: format!(
+            "{message}\n\nat {}\n\n{}",
+            crate::here!(),
+            crate::util::backtrace_string(),
+        ),
         error_data: Some(PostErrorData {
             cafe: NaverCafeCommonErrorData {
                 target: None,
@@ -191,7 +210,12 @@ fn make_parse_error(code: &str, message: String, status: u16, raw_body: String) 
     ErrorEnvelope {
         trace_id: String::new(),
         code: code.to_string(),
-        message,
+        // here! 앵커 + 백트레이스(#199, 카페 댓글과 동일).
+        message: format!(
+            "{message}\n\nat {}\n\n{}",
+            crate::here!(),
+            crate::util::backtrace_string(),
+        ),
         error_data: Some(PostErrorData {
             cafe: NaverCafeCommonErrorData {
                 target: None,

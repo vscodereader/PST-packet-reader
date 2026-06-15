@@ -504,7 +504,11 @@ mod tests {
         let err = AutomationError::new("게시 실패");
         assert_eq!(err.message(), "게시 실패");
         // 호출 지점 파일이 location에 들어가야 한다(<unknown> 없이 항상).
-        assert!(err.location().starts_with("at "), "위치 형식: {}", err.location());
+        assert!(
+            err.location().starts_with("at "),
+            "위치 형식: {}",
+            err.location()
+        );
         assert!(
             err.location().contains("naver_automation.rs"),
             "호출 파일이 들어가야 함: {}",
@@ -514,7 +518,10 @@ mod tests {
         assert_eq!(format!("{err}"), "게시 실패");
         // trace()는 앵커(이 함수) + 캡처된 런타임 스택을 합친다 — "자세히 보기" 본문(#199).
         let trace = err.trace();
-        assert!(trace.starts_with(err.location()), "trace는 앵커로 시작: {trace}");
+        assert!(
+            trace.starts_with(err.location()),
+            "trace는 앵커로 시작: {trace}"
+        );
         assert!(
             trace.contains("automation_error_keeps_message_and_records_caller_location"),
             "캡처한 스택에 호출 함수가 보여야 함(심볼 해석됨): {trace}"

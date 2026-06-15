@@ -147,11 +147,11 @@ async fn band_publish_inner(
     comments: &[String],
 ) -> Result<BandPublishOutcome, BandPostError> {
     let band_no = band_no_from_link(band_link)
-        .ok_or_else(|| BandPostError::InvalidLink(band_link.to_string()))?;
+        .ok_or_else(|| BandPostError::invalid_link(band_link.to_string()))?;
 
     let cookie_header = load_band_cookie_header(account_id)
-        .map_err(|e| BandPostError::Transport(e.to_string()))?
-        .ok_or(BandPostError::NoSession)?;
+        .map_err(|e| BandPostError::transport(e.to_string()))?
+        .ok_or_else(BandPostError::no_session)?;
 
     let client = BandHttpClient::new();
     tracing::info!("[BAND] 게시 시작 — 계정 {account_id}, band_no {band_no}");
@@ -280,11 +280,11 @@ async fn band_comment_inner(
     comments: &[String],
 ) -> Result<BandCommentOutcome, BandPostError> {
     let band_no = band_no_from_link(band_link)
-        .ok_or_else(|| BandPostError::InvalidLink(band_link.to_string()))?;
+        .ok_or_else(|| BandPostError::invalid_link(band_link.to_string()))?;
 
     let cookie_header = load_band_cookie_header(account_id)
-        .map_err(|e| BandPostError::Transport(e.to_string()))?
-        .ok_or(BandPostError::NoSession)?;
+        .map_err(|e| BandPostError::transport(e.to_string()))?
+        .ok_or_else(BandPostError::no_session)?;
 
     let client = BandHttpClient::new();
     tracing::info!("[BAND] 댓글 전용 시작 — 계정 {account_id}, band_no {band_no}, sort {sort:?}");
@@ -354,11 +354,11 @@ async fn band_comment_inner(
 /// `band_no`를 그대로 돌려준다(프론트가 항상 무언가 표시하도록).
 pub async fn resolve_band_name(account_id: &str, band_link: &str) -> Result<String, BandPostError> {
     let band_no = band_no_from_link(band_link)
-        .ok_or_else(|| BandPostError::InvalidLink(band_link.to_string()))?;
+        .ok_or_else(|| BandPostError::invalid_link(band_link.to_string()))?;
 
     let cookie_header = load_band_cookie_header(account_id)
-        .map_err(|e| BandPostError::Transport(e.to_string()))?
-        .ok_or(BandPostError::NoSession)?;
+        .map_err(|e| BandPostError::transport(e.to_string()))?
+        .ok_or_else(BandPostError::no_session)?;
 
     let client = BandHttpClient::new();
     let key = client.fetch_secret_key(&cookie_header).await?;

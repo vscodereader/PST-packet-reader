@@ -443,6 +443,26 @@ fn get_band_queue_status(
     band_auth::get_band_queue_status(&state).map_err(|e| e.to_string())
 }
 
+/// 밴드 게시 실패를 프론트로 보낼 때, 카페·종토방과 동일하게 사용자 사유(`reason`)와
+/// "자세히 보기" 개발자 trace(`trace`, 런타임 backtrace 포함)를 분리해 전달한다(#199).
+/// 프론트는 이 둘을 알림 항목의 메인 라인 / 자세히 보기로 나눠 기록한다(record_band_batch).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BandPublishError {
+    reason: String,
+    trace: String,
+}
+
+/// `BandPostError`를 사유 + trace로 나눠 프론트용 에러로 만든다. trace는 큐(예약) 경로와
+/// 동일한 `band_failure_trace`(backtrace 동반)를 재사용해, 즉시 게시도 카페·종토방처럼
+/// "자세히 보기"에 호출 스택이 나온다(#199).
+fn band_publish_error(error: band_post::error::BandPostError) -> BandPublishError {
+    BandPublishError {
+        reason: ipc::queue_runner::band_failure_reason(&error),
+        trace: ipc::queue_runner::band_failure_trace(&error),
+    }
+}
+
 /// 밴드 링크로 가입한 뒤 글(+선택 댓글)을 순수 HTTP로 게시한다.
 ///
 /// `account_id`는 band 로그인 쿠키 파일 키(loginId)다. `band_link`로 가입 →
@@ -454,10 +474,10 @@ async fn band_publish(
     title: String,
     content: String,
     comments: Vec<String>,
-) -> Result<band_post::BandPublishOutcome, String> {
+) -> Result<band_post::BandPublishOutcome, BandPublishError> {
     band_post::band_publish(&account_id, &band_link, &title, &content, &comments)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(band_publish_error)
 }
 
 /// 밴드 댓글 전용: 기존 글(최신글/인기글) 상위 `count`개를 조회해 댓글을 단다.
@@ -469,14 +489,14 @@ async fn band_comment(
     mode: String,
     count: u32,
     comments: Vec<String>,
-) -> Result<band_post::BandCommentOutcome, String> {
+) -> Result<band_post::BandCommentOutcome, BandPublishError> {
     let sort = match mode.as_str() {
         "popular" => band_post::BandFeedSort::Popular,
         _ => band_post::BandFeedSort::Latest,
     };
     band_post::band_comment(&account_id, &band_link, sort, count, &comments)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(band_publish_error)
 }
 
 /// 링크(band_no)로 밴드 이름을 조회한다(게시 모달에서 링크 저장 시 실제 밴드명 표시용).
@@ -495,6 +515,10 @@ struct BandBatchItemInput {
     login_id: String,
     ok: bool,
     msg: String,
+    /// "자세히 보기" 개발자 trace(런타임 backtrace 포함, #199). 프론트가 밴드 command 실패의
+    /// `trace`를 실어 보낸다. URL 댓글 미지원 등 프론트 자체 합성 실패는 없을 수 있어 옵션.
+    #[serde(default)]
+    trace: Option<String>,
 }
 
 /// `run_post`/`run_comment` 플래그를 배치 kind로 변환한다(순수 함수, 테스트 가능).
@@ -548,8 +572,12 @@ fn record_band_batch<R: Runtime>(
             } else {
                 BatchItemStatus::Fail
             },
-            // 실패 행은 trace에도 메시지를 실어 "자세히 보기"에서 원인을 본다.
-            trace: if i.ok { None } else { Some(i.msg.clone()) },
+            // 실패 행은 trace(backtrace 동반)를 그대로 싣고, 없으면 메시지로 폴백한다(#199).
+            trace: if i.ok {
+                None
+            } else {
+                i.trace.clone().or_else(|| Some(i.msg.clone()))
+            },
             msg: i.msg,
         })
         .collect();
@@ -940,6 +968,21 @@ mod tests {
         assert_eq!(band_batch_kind(true, false), ModeValue::Post);
         assert_eq!(band_batch_kind(false, true), ModeValue::Comment);
         assert_eq!(band_batch_kind(true, true), ModeValue::Both);
+    }
+
+    #[test]
+    fn band_publish_error_splits_reason_and_trace() {
+        use band_post::error::BandPostError;
+        // 즉시 게시 경로도 사유(메인)와 backtrace 동반 trace(자세히 보기)를 분리해야 한다(#199).
+        let e = band_publish_error(BandPostError::no_session());
+        assert_eq!(
+            e.reason,
+            "밴드 로그인 세션이 없습니다. 먼저 밴드 로그인을 해주세요"
+        );
+        // trace는 코드 상세로 시작하고 뒤에 런타임 backtrace가 붙는다(reason과 다르다).
+        assert!(e.trace.starts_with("code: BAND_NO_SESSION"));
+        assert!(e.trace.contains("\n\n"));
+        assert_ne!(e.reason, e.trace);
     }
 
     #[test]

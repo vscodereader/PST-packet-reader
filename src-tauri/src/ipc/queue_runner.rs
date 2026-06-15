@@ -19,7 +19,7 @@ use super::cafes::{comment_outcome_from_report, outcome_from_report, CafePublish
 use super::log_batches::{BatchItem, BatchItemStatus, LogBatch, MAX_LOG_BATCHES};
 use super::posts::{CommentTarget, ModeValue};
 use super::queue::{apply_cancel_now, PublishPlan, QueueNowItem, QueueState};
-use crate::band_post::error::BandPostError;
+use crate::band_post::error::{BandPostError, BandPostErrorKind};
 use crate::band_post::{
     band_comment, band_publish, BandCommentOutcome, BandFeedSort, BandPublishOutcome,
 };
@@ -756,18 +756,18 @@ fn failure_trace(code: &str, message: &str, cafe: Option<&NaverCafeCommonErrorDa
 
 /// 밴드 게시 실패의 사용자용 메인 라인 사유(#199). 기술 상세(원문/HTTP 바디)는 빼고 무엇이
 /// 잘못됐는지만 짧게 — 카페 `failure_reason`과 같은 철학. 디버그 원문은 `band_failure_trace`로.
-fn band_failure_reason(err: &BandPostError) -> String {
-    match err {
-        BandPostError::InvalidLink(_) => "밴드 링크가 올바르지 않습니다".to_owned(),
-        BandPostError::NoSession => {
+pub(crate) fn band_failure_reason(err: &BandPostError) -> String {
+    match &err.kind {
+        BandPostErrorKind::InvalidLink(_) => "밴드 링크가 올바르지 않습니다".to_owned(),
+        BandPostErrorKind::NoSession => {
             "밴드 로그인 세션이 없습니다. 먼저 밴드 로그인을 해주세요".to_owned()
         }
-        BandPostError::NoSecretKey(_) => "밴드 서명 키 발급에 실패했습니다".to_owned(),
-        BandPostError::Transport(_) => "네트워크 연결에 문제가 있습니다".to_owned(),
-        BandPostError::Http { status, .. } => band_http_reason(*status).to_owned(),
+        BandPostErrorKind::NoSecretKey(_) => "밴드 서명 키 발급에 실패했습니다".to_owned(),
+        BandPostErrorKind::Transport(_) => "네트워크 연결에 문제가 있습니다".to_owned(),
+        BandPostErrorKind::Http { status, .. } => band_http_reason(*status).to_owned(),
         // band가 준 사유가 한국어면 그대로(이미 사람이 읽을 설명), 아니면 일반 문구.
-        BandPostError::Api(api) if contains_hangul(&api.message) => api.message.clone(),
-        BandPostError::Api(_) => "밴드에서 게시를 거부했습니다".to_owned(),
+        BandPostErrorKind::Api(api) if contains_hangul(&api.message) => api.message.clone(),
+        BandPostErrorKind::Api(_) => "밴드에서 게시를 거부했습니다".to_owned(),
     }
 }
 
@@ -783,27 +783,30 @@ fn band_http_reason(status: u16) -> &'static str {
 
 /// "자세히 보기"용 밴드 개발자 trace(#199). 변형·status·원문 등 기술 상세를 한 줄로 남겨
 /// 사용자 사유(`band_failure_reason`)와 별개로 실제 오류를 확인할 수 있게 한다.
-fn band_failure_trace(err: &BandPostError) -> String {
-    match err {
-        BandPostError::InvalidLink(link) => format!("code: BAND_INVALID_LINK\nlink: {link}"),
-        BandPostError::NoSession => "code: BAND_NO_SESSION".to_owned(),
-        BandPostError::NoSecretKey(detail) => {
+pub(crate) fn band_failure_trace(err: &BandPostError) -> String {
+    let detail = match &err.kind {
+        BandPostErrorKind::InvalidLink(link) => format!("code: BAND_INVALID_LINK\nlink: {link}"),
+        BandPostErrorKind::NoSession => "code: BAND_NO_SESSION".to_owned(),
+        BandPostErrorKind::NoSecretKey(detail) => {
             format!("code: BAND_NO_SECRET_KEY\ndetail: {detail}")
         }
-        BandPostError::Transport(msg) => format!("code: BAND_TRANSPORT\ndetail: {msg}"),
-        BandPostError::Http { status, body } => {
+        BandPostErrorKind::Transport(msg) => format!("code: BAND_TRANSPORT\ndetail: {msg}"),
+        BandPostErrorKind::Http { status, body } => {
             format!(
                 "code: BAND_HTTP\nHTTP status: {status}\nbody: {}",
                 trace_snippet(body)
             )
         }
-        BandPostError::Api(api) => format!(
+        BandPostErrorKind::Api(api) => format!(
             "code: BAND_API\nresult_code: {}\nmessage: {}",
             api.result_code
                 .map_or_else(|| "-".to_owned(), |c| c.to_string()),
             api.message
         ),
-    }
+    };
+    // 기술 상세 + 에러 생성 지점에서 캡처한 런타임 호출 스택(#199, 카페/종토방과 동일). 실패
+    // 지점 호출 경로는 backtrace 상위 프레임(BandPostError::new 직후)에 나온다.
+    format!("{detail}\n\n{}", err.backtrace)
 }
 
 /// trace에 넣을 본문 스니펫 — 너무 길지 않게 문자 경계로 자른다(바이트 슬라이스 패닉 방지).
@@ -1381,7 +1384,7 @@ mod tests {
         BandOutcome {
             account_id: account.into(),
             band_name: name.into(),
-            result: Err(BandPostError::NoSession),
+            result: Err(BandPostError::no_session()),
         }
     }
 
@@ -1645,10 +1648,7 @@ mod tests {
             "글 게시 실패 — 로그인 정보가 없습니다. 먼저 로그인해 주세요 (NO_COOKIES)"
         );
         // 디버그 원문은 자세히 보기(trace)에 헤더+원본으로 보존.
-        assert_eq!(
-            b.items[1].trace.as_deref(),
-            Some("NO_COOKIES\n쿠키 없음")
-        );
+        assert_eq!(b.items[1].trace.as_deref(), Some("NO_COOKIES\n쿠키 없음"));
     }
 
     /// `api_error_message`/`http_status`를 담은 게시 실패 리포트(REGISTER_HTTP_ERROR 형태).
@@ -1889,61 +1889,49 @@ mod tests {
     fn band_failure_reason_and_trace_split_user_and_debug() {
         // NoSession: 친절 메인 + 짧은 코드 trace.
         assert_eq!(
-            band_failure_reason(&BandPostError::NoSession),
+            band_failure_reason(&BandPostError::no_session()),
             "밴드 로그인 세션이 없습니다. 먼저 밴드 로그인을 해주세요"
         );
-        assert_eq!(
-            band_failure_trace(&BandPostError::NoSession),
-            "code: BAND_NO_SESSION"
+        // trace는 코드 상세 뒤에 런타임 backtrace가 붙으므로(#199) 접두만 확인한다.
+        assert!(
+            band_failure_trace(&BandPostError::no_session()).starts_with("code: BAND_NO_SESSION")
         );
 
         // HTTP 403: status 기반 한국어 메인 + status·바디 여러 줄 trace.
-        let http = BandPostError::Http {
-            status: 403,
-            body: "<html>forbidden</html>".into(),
-        };
+        let http = BandPostError::http(403, "<html>forbidden</html>");
         assert_eq!(
             band_failure_reason(&http),
             "밴드 로그인이 만료되었거나 권한이 없습니다"
         );
-        assert_eq!(
-            band_failure_trace(&http),
-            "code: BAND_HTTP\nHTTP status: 403\nbody: <html>forbidden</html>"
-        );
+        assert!(band_failure_trace(&http)
+            .starts_with("code: BAND_HTTP\nHTTP status: 403\nbody: <html>forbidden</html>"));
 
         // InvalidLink: 링크는 메인엔 숨기고 trace에만 남긴다.
-        let bad = BandPostError::InvalidLink("not-a-band".into());
+        let bad = BandPostError::invalid_link("not-a-band");
         assert_eq!(band_failure_reason(&bad), "밴드 링크가 올바르지 않습니다");
-        assert_eq!(
-            band_failure_trace(&bad),
-            "code: BAND_INVALID_LINK\nlink: not-a-band"
-        );
+        assert!(band_failure_trace(&bad).starts_with("code: BAND_INVALID_LINK\nlink: not-a-band"));
     }
 
     #[test]
     fn band_failure_reason_passes_through_korean_api_message() {
         use crate::band_post::response::BandApiError;
         // band가 한국어 사유를 주면 메인에 그대로(이미 사람이 읽을 설명), trace엔 코드 동반.
-        let api = BandPostError::Api(BandApiError {
+        let api = BandPostError::from(BandApiError {
             result_code: Some(1003),
             message: "리더 승인 후 등록됩니다".into(),
         });
         assert_eq!(band_failure_reason(&api), "리더 승인 후 등록됩니다");
-        assert_eq!(
-            band_failure_trace(&api),
-            "code: BAND_API\nresult_code: 1003\nmessage: 리더 승인 후 등록됩니다"
-        );
+        assert!(band_failure_trace(&api)
+            .starts_with("code: BAND_API\nresult_code: 1003\nmessage: 리더 승인 후 등록됩니다"));
 
         // 영어/기술 원문이면 메인은 일반 문구로 가리고, 원문은 trace로.
-        let en = BandPostError::Api(BandApiError {
+        let en = BandPostError::from(BandApiError {
             result_code: None,
             message: "forbidden".into(),
         });
         assert_eq!(band_failure_reason(&en), "밴드에서 게시를 거부했습니다");
-        assert_eq!(
-            band_failure_trace(&en),
-            "code: BAND_API\nresult_code: -\nmessage: forbidden"
-        );
+        assert!(band_failure_trace(&en)
+            .starts_with("code: BAND_API\nresult_code: -\nmessage: forbidden"));
     }
 
     #[test]
@@ -1988,7 +1976,11 @@ mod tests {
             b.items[3].msg,
             "밴드 로그인 세션이 없습니다. 먼저 밴드 로그인을 해주세요"
         );
-        assert_eq!(b.items[3].trace.as_deref(), Some("code: BAND_NO_SESSION"));
+        // trace는 코드 상세 뒤에 런타임 backtrace가 붙으므로(#199) 접두만 확인한다.
+        assert!(b.items[3]
+            .trace
+            .as_deref()
+            .is_some_and(|t| t.starts_with("code: BAND_NO_SESSION")));
     }
 
     #[test]

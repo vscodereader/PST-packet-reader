@@ -2,9 +2,9 @@
 
 use super::response::BandApiError;
 
-/// band 가입·글쓰기·댓글 수행 중 발생하는 오류.
+/// band 가입·글쓰기·댓글 수행 중 발생하는 오류의 종류.
 #[derive(Debug)]
-pub enum BandPostError {
+pub enum BandPostErrorKind {
     /// 입력 링크에서 band_no를 추출하지 못함.
     InvalidLink(String),
     /// 저장된 band 쿠키가 없거나 만료됨(재로그인 필요).
@@ -19,26 +19,71 @@ pub enum BandPostError {
     Api(BandApiError),
 }
 
+/// band 오류 = 종류([`BandPostErrorKind`]) + 생성 지점에서 캡처한 런타임 호출 스택(#199).
+///
+/// 카페·종토방과 동일하게 메인 사유(`band_failure_reason`)와 "자세히 보기" trace를 나누되,
+/// trace에 이 `backtrace`를 실어 실패 지점의 호출 스택을 보여준다. 밴드 실패는 panic이 아니라
+/// 에러 값으로 흐르므로, [`BandPostError::new`]를 **실제 실패 지점**에서 호출해 스택을 잡는다
+/// (에러가 `?`로 전파된 뒤에 잡으면 그 지점 스택이 사라진다).
+#[derive(Debug)]
+pub struct BandPostError {
+    pub kind: BandPostErrorKind,
+    pub backtrace: String,
+}
+
+impl BandPostError {
+    /// 종류로부터 오류를 만들며 호출 스택을 캡처한다.
+    pub fn new(kind: BandPostErrorKind) -> Self {
+        Self {
+            backtrace: crate::util::backtrace_string(),
+            kind,
+        }
+    }
+
+    pub fn invalid_link(link: impl Into<String>) -> Self {
+        Self::new(BandPostErrorKind::InvalidLink(link.into()))
+    }
+
+    pub fn no_session() -> Self {
+        Self::new(BandPostErrorKind::NoSession)
+    }
+
+    pub fn no_secret_key(detail: impl Into<String>) -> Self {
+        Self::new(BandPostErrorKind::NoSecretKey(detail.into()))
+    }
+
+    pub fn transport(detail: impl Into<String>) -> Self {
+        Self::new(BandPostErrorKind::Transport(detail.into()))
+    }
+
+    pub fn http(status: u16, body: impl Into<String>) -> Self {
+        Self::new(BandPostErrorKind::Http {
+            status,
+            body: body.into(),
+        })
+    }
+}
+
 impl std::fmt::Display for BandPostError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BandPostError::InvalidLink(link) => {
+        match &self.kind {
+            BandPostErrorKind::InvalidLink(link) => {
                 write!(f, "밴드 링크에서 밴드 번호를 찾지 못했습니다: {link}")
             }
-            BandPostError::NoSession => {
+            BandPostErrorKind::NoSession => {
                 write!(
                     f,
                     "밴드 로그인 세션이 없습니다. 먼저 밴드 로그인을 해주세요."
                 )
             }
-            BandPostError::NoSecretKey(detail) => {
+            BandPostErrorKind::NoSecretKey(detail) => {
                 write!(f, "밴드 서명 키 발급에 실패했습니다(getKey). {detail}")
             }
-            BandPostError::Transport(msg) => write!(f, "HTTP 전송 오류: {msg}"),
-            BandPostError::Http { status, body } => {
+            BandPostErrorKind::Transport(msg) => write!(f, "HTTP 전송 오류: {msg}"),
+            BandPostErrorKind::Http { status, body } => {
                 write!(f, "HTTP {status} 응답: {}", truncate(body, 300))
             }
-            BandPostError::Api(err) => write!(f, "{err}"),
+            BandPostErrorKind::Api(err) => write!(f, "{err}"),
         }
     }
 }
@@ -47,7 +92,7 @@ impl std::error::Error for BandPostError {}
 
 impl From<BandApiError> for BandPostError {
     fn from(err: BandApiError) -> Self {
-        BandPostError::Api(err)
+        Self::new(BandPostErrorKind::Api(err))
     }
 }
 

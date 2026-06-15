@@ -624,6 +624,22 @@ function errText(err: unknown): string {
   return String(err);
 }
 
+/**
+ * 밴드 command 실패를 메인 사유(msg) / "자세히 보기" trace로 나눈다(#199).
+ *
+ * 백엔드 `band_publish`/`band_comment`는 실패 시 `{ reason, trace }`(trace는 런타임
+ * backtrace 동반)를 reject한다. 그 형태면 둘로 분리하고, 그 외(문자열 등)는 errText로 폴백한다.
+ */
+function bandErr(err: unknown): { msg: string; trace?: string } {
+  if (err && typeof err === "object" && "reason" in err && "trace" in err) {
+    const e = err as { reason: unknown; trace: unknown };
+    if (typeof e.reason === "string" && typeof e.trace === "string") {
+      return { msg: e.reason, trace: e.trace };
+    }
+  }
+  return { msg: errText(err) };
+}
+
 function outcomeToResult(
   job: PublishJob,
   outcome: PublishOutcome | undefined,
@@ -1296,7 +1312,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
                   ? `${out.targetCount}글 중 댓글 ${out.commentedCount}개 게시 완료`
                   : "댓글 대상 글을 찾지 못했어요",
             }))
-            .catch((err: unknown) => ({ ...j, ok: false, msg: errText(err) }));
+            .catch((err: unknown) => ({ ...j, ok: false, ...bandErr(err) }));
         }
         return ipc.band
           .publish({
@@ -1320,7 +1336,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
                 ? "글 게시 완료"
                 : `글·댓글 ${out.commentedCount}/${out.commentTotal}개 게시 완료`,
           }))
-          .catch((err: unknown) => ({ ...j, ok: false, msg: errText(err) }));
+          .catch((err: unknown) => ({ ...j, ok: false, ...bandErr(err) }));
       }),
     );
 
@@ -1362,6 +1378,9 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
                 loginId: r.loginId,
                 ok: r.ok,
                 msg: r.msg,
+                // 실패면 backtrace 동반 trace를 함께 보낸다(#199). exactOptionalPropertyTypes라
+                // 값이 있을 때만 키를 넣는다(undefined 대입 금지).
+                ...(r.trace !== undefined ? { trace: r.trace } : {}),
               })),
             })
             .catch(() => {});

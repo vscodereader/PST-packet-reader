@@ -91,7 +91,11 @@ impl BandHttpClient {
                 status.as_u16(),
                 snippet
             );
-            BandPostError::NoSecretKey(format!("status={} 응답앞부분={}", status.as_u16(), snippet))
+            BandPostError::no_secret_key(format!(
+                "status={} 응답앞부분={}",
+                status.as_u16(),
+                snippet
+            ))
         })
     }
 
@@ -130,10 +134,7 @@ impl BandHttpClient {
         let text = resp.text().await.map_err(transport)?;
         tracing::info!("[BAND] POST {} → status={}", base_path, status.as_u16());
         if !status.is_success() {
-            return Err(BandPostError::Http {
-                status: status.as_u16(),
-                body: text,
-            });
+            return Err(BandPostError::http(status.as_u16(), text));
         }
         Ok(parse_band_result(&text)?)
     }
@@ -176,7 +177,7 @@ impl BandHttpClient {
             )
             .await?;
         let post_no = post_no_from_result(&data).ok_or_else(|| {
-            BandPostError::Api(super::response::BandApiError {
+            BandPostError::from(super::response::BandApiError {
                 result_code: Some(1),
                 message: "글 게시는 성공했으나 post_no를 찾지 못했습니다.".to_string(),
             })
@@ -243,10 +244,7 @@ impl BandHttpClient {
         let status = resp.status();
         let text = resp.text().await.map_err(transport)?;
         if !status.is_success() {
-            return Err(BandPostError::Http {
-                status: status.as_u16(),
-                body: text,
-            });
+            return Err(BandPostError::http(status.as_u16(), text));
         }
         let data = parse_band_result(&text)?;
         let name = super::response::name_from_band_info(&data);
@@ -299,10 +297,7 @@ impl BandHttpClient {
         let endpoint = path.split('?').next().unwrap_or(path);
         tracing::info!("[BAND] GET {} → status={}", endpoint, status.as_u16());
         if !status.is_success() {
-            return Err(BandPostError::Http {
-                status: status.as_u16(),
-                body: text,
-            });
+            return Err(BandPostError::http(status.as_u16(), text));
         }
         Ok(parse_band_result(&text)?)
     }
@@ -380,7 +375,7 @@ impl Default for BandHttpClient {
 }
 
 fn transport(e: reqwest::Error) -> BandPostError {
-    BandPostError::Transport(e.to_string())
+    BandPostError::transport(e.to_string())
 }
 
 /// 진단용: 응답에서 secretKey 값을 가리고 앞부분(최대 250자)만 남긴다.
@@ -416,6 +411,7 @@ fn redact_secret_key(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::error::BandPostErrorKind;
     use super::*;
     use wiremock::{
         matchers::{header, header_exists, method, path_regex},
@@ -618,8 +614,8 @@ mod tests {
             .join_band("103043410", &test_key(), FAKE_COOKIE)
             .await
             .expect_err("실패여야 함");
-        match err {
-            BandPostError::Api(api_err) => {
+        match err.kind {
+            BandPostErrorKind::Api(api_err) => {
                 assert_eq!(api_err.result_code, Some(1004));
                 assert_eq!(api_err.message, "가입할 수 없는 밴드입니다.");
             }
@@ -641,6 +637,9 @@ mod tests {
             .create_post("1", "x", &test_key(), FAKE_COOKIE)
             .await
             .expect_err("500은 실패");
-        assert!(matches!(err, BandPostError::Http { status: 500, .. }));
+        assert!(matches!(
+            err.kind,
+            BandPostErrorKind::Http { status: 500, .. }
+        ));
     }
 }
