@@ -522,14 +522,14 @@ function PublishFlow({
               {allOk
                 ? when === "schedule"
                   ? "예약 완료!"
-                  : "게시 완료!"
+                  : "등록 완료!"
                 : `${results.length}곳 중 ${okCount}곳 성공`}
             </Text>
             <Text fz={14} c="dimmed" mb={20} ta="center">
               {when === "schedule"
                 ? `${date} ${time}에 자동 ${actionWord} 게시됩니다`
                 : allOk
-                  ? `모든 위치에 정상 ${actionWord} 게시되었어요`
+                  ? "게시큐에 정상적으로 등록되었어요!"
                   : "일부 위치는 다시 시도해 주세요"}
             </Text>
             <Stack
