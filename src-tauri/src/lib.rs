@@ -369,80 +369,6 @@ fn save_accounts(accounts: Vec<auth::Account>) -> Result<Vec<auth::Account>, Str
     auth::save_accounts_file(&accounts).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-fn enqueue_cookie_refresh<R: Runtime>(
-    app: tauri::AppHandle<R>,
-    state: tauri::State<'_, auth::QueueState>,
-    activity: tauri::State<'_, JsonStore<ipc::activity::ActivityItem>>,
-    account_ids: Vec<String>,
-    headless: Option<bool>,
-    use_adb: Option<bool>,
-    force: Option<bool>,
-) -> Result<auth::QueueStatus, String> {
-    let n = account_ids.len();
-    let result = auth::enqueue_accounts(
-        &state,
-        app,
-        account_ids,
-        headless.unwrap_or(false),
-        use_adb.unwrap_or(false),
-        force.unwrap_or(false),
-    )
-    .map_err(|e| e.to_string())?;
-    if n > 0 {
-        ipc::activity::record(
-            activity.inner(),
-            ipc::activity::ActivityType::Info,
-            format!("계정 {n}건 로그인 시작"),
-        );
-    }
-    Ok(result)
-}
-
-#[tauri::command]
-fn get_queue_status(
-    state: tauri::State<'_, auth::QueueState>,
-) -> Result<auth::QueueStatus, String> {
-    auth::get_queue_status(&state).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn enqueue_band_login<R: Runtime>(
-    app: tauri::AppHandle<R>,
-    state: tauri::State<'_, band_auth::BandQueueState>,
-    activity: tauri::State<'_, JsonStore<ipc::activity::ActivityItem>>,
-    account_ids: Vec<String>,
-    headless: Option<bool>,
-    use_adb: Option<bool>,
-    force: Option<bool>,
-) -> Result<auth::QueueStatus, String> {
-    let n = account_ids.len();
-    let result = band_auth::enqueue_band_accounts(
-        &state,
-        app,
-        account_ids,
-        headless.unwrap_or(false),
-        use_adb.unwrap_or(false),
-        force.unwrap_or(false),
-    )
-    .map_err(|e| e.to_string())?;
-    if n > 0 {
-        ipc::activity::record(
-            activity.inner(),
-            ipc::activity::ActivityType::Info,
-            format!("밴드 계정 {n}건 로그인 시작"),
-        );
-    }
-    Ok(result)
-}
-
-#[tauri::command]
-fn get_band_queue_status(
-    state: tauri::State<'_, band_auth::BandQueueState>,
-) -> Result<auth::QueueStatus, String> {
-    band_auth::get_band_queue_status(&state).map_err(|e| e.to_string())
-}
-
 /// 밴드 게시 실패를 프론트로 보낼 때, 카페·종토방과 동일하게 사용자 사유(`reason`)와
 /// "자세히 보기" 개발자 trace(`trace`, 런타임 backtrace 포함)를 분리해 전달한다(#199).
 /// 프론트는 이 둘을 알림 항목의 메인 라인 / 자세히 보기로 나눠 기록한다(record_band_batch).
@@ -731,10 +657,6 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         diagnostics::open_chrome_download,
         bootstrap_runtime,
         save_accounts,
-        enqueue_cookie_refresh,
-        get_queue_status,
-        enqueue_band_login,
-        get_band_queue_status,
         band_publish,
         band_comment,
         band_resolve_name,
@@ -802,9 +724,6 @@ pub fn manage_stores<R: Runtime>(app: &AppHandle<R>, dir: &Path) -> std::io::Res
         dir.join("bands.json"),
         bands::seed(),
     ));
-    // Naver-login cookie-refresh queue state (empty until enqueued).
-    app.manage(auth::QueueState::default());
-    app.manage(band_auth::BandQueueState::default());
     // 게시 큐 실행 워커 상태(promote 시 기동, 이슈 #144).
     app.manage(ipc::queue_runner::NowQueueRunner::default());
     Ok(())

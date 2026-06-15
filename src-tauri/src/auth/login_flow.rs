@@ -153,10 +153,15 @@ pub(crate) fn run(
     id: &str,
     pw: &str,
     wait_for_human: bool,
-) -> LoginOutcome {
+) -> (LoginOutcome, Option<String>) {
     match run_inner(client, id, pw, wait_for_human) {
-        Ok(outcome) => outcome,
-        Err(error) => LoginOutcome::Error(error.to_string()),
+        Ok(outcome) => (outcome, None),
+        // CDP/자동화 실패 — 메시지는 사용자용, trace(위치 앵커+백트레이스)는 "자세히 보기"용
+        // 으로 분리해 함께 돌려준다(#210). 메시지에는 백트레이스를 섞지 않는다.
+        Err(error) => (
+            LoginOutcome::Error(error.message().to_owned()),
+            Some(error.trace()),
+        ),
     }
 }
 

@@ -8,7 +8,6 @@ mod login_flow;
 // band_auth가 로그인 결과 매핑(`LoginResolution`)을 재사용하도록 크레이트 내부에 공개한다.
 pub(crate) mod outcome;
 mod paths;
-mod queue;
 mod types;
 mod util;
 
@@ -20,8 +19,7 @@ pub use adb::probe_adb_connection;
 pub(crate) use chrome::launch as launch_debug_chrome;
 pub use error::OrchestratorError;
 pub use paths::{app_data_root, paths_for_root};
-pub use queue::{enqueue_accounts, get_queue_status, QueueState};
-pub use types::{Account, QueueJob, QueueJobStatus, QueueStatus, RuntimePaths};
+pub use types::{Account, RuntimePaths};
 // 로그용 ID 마스킹 헬퍼를 다른 모듈(예: discussion_batch)에서도 쓸 수 있게 재노출.
 pub(crate) use util::mask_id;
 
@@ -41,7 +39,7 @@ pub async fn bootstrap_runtime() -> Result<RuntimePaths, OrchestratorError> {
 // `_app`은 sidecar 시절 shell 실행에 쓰였으나, CDP 로그인으로 전환하며 더는 쓰이지 않는다.
 // 큐 워커가 `AppHandle<R>`를 넘기므로(IPC 테스트의 MockRuntime 포함) 제네릭 시그니처는
 // 유지하되, 본문은 CDP 로그인을 직접 호출하므로 핸들은 사용하지 않는다.
-async fn process_account<R: Runtime>(
+pub(crate) async fn process_account<R: Runtime>(
     _app: &AppHandle<R>,
     account_id: &str,
     headless: bool,

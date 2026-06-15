@@ -24,35 +24,53 @@ pub(crate) fn login(
     account: &Account,
     headless: bool,
 ) -> Result<LoginResolution, OrchestratorError> {
-    let outcome = attempt(&account.id, &account.password, headless)?;
+    let (outcome, trace) = attempt(&account.id, &account.password, headless)?;
 
     // headless에서 챌린지가 나오면 headed로 승격해 사용자가 직접 해결하도록 재실행.
-    let outcome = match outcome {
+    let (outcome, trace) = match outcome {
         LoginOutcome::ChallengeRequired { .. } if headless => {
             attempt(&account.id, &account.password, false)?
         }
-        other => other,
+        other => (other, trace),
     };
 
-    finalize(paths, account, outcome)
+    finalize(paths, account, outcome, trace)
 }
 
-// Chrome을 띄워 attach하고 로그인 시퀀스를 1회 수행한다.
-fn attempt(id: &str, pw: &str, headless: bool) -> Result<LoginOutcome, OrchestratorError> {
+// Chrome을 띄워 attach하고 로그인 시퀀스를 1회 수행한다. 실패 시 사용자 메시지와 함께
+// "자세히 보기"용 trace(위치+백트레이스)도 돌려준다(#210).
+fn attempt(
+    id: &str,
+    pw: &str,
+    headless: bool,
+) -> Result<(LoginOutcome, Option<String>), OrchestratorError> {
     let handle = chrome::launch(headless)?;
-    let mut client = CdpClient::connect_to_existing_chrome("127.0.0.1", handle.port)
-        .map_err(|error| OrchestratorError::CommandFailed(error.to_string()))?;
+    // CDP 연결/Page 활성화 실패는 AutomationError(백트레이스 보유)다. 인프라 Err로 뭉개
+    // 백트레이스를 잃지 않도록, 메시지를 사용자 사유로·trace를 "자세히 보기"로 보존해
+    // 로그인 실패(Error)로 흘린다(#199 게시 trace와 동일 철학).
+    let mut client = match CdpClient::connect_to_existing_chrome("127.0.0.1", handle.port) {
+        Ok(client) => client,
+        Err(error) => {
+            return Ok((
+                LoginOutcome::Error(error.message().to_owned()),
+                Some(error.trace()),
+            ))
+        }
+    };
     // 로그인은 Runtime.enable 을 켜지 않는다(CDP 탐지 누출 방지). Page 도메인만 활성화.
-    client
-        .enable_page_only()
-        .map_err(|error| OrchestratorError::CommandFailed(error.to_string()))?;
+    if let Err(error) = client.enable_page_only() {
+        return Ok((
+            LoginOutcome::Error(error.message().to_owned()),
+            Some(error.trace()),
+        ));
+    }
 
     // headed(=!headless)면 사용자가 캡차/2차 인증을 직접 풀 동안 기다린다.
-    let outcome = login_flow::run(&mut client, id, pw, !headless);
+    let (outcome, trace) = login_flow::run(&mut client, id, pw, !headless);
 
     drop(client);
     drop(handle); // ChromeHandle Drop이 프로세스/임시 프로필을 정리한다.
-    Ok(outcome)
+    Ok((outcome, trace))
 }
 
 // 결과를 해석한다: 성공이면 쿠키를 저장하고, 그 외(인증필요/비번오류/차단/오류)는
@@ -62,6 +80,7 @@ fn finalize(
     paths: &RuntimePaths,
     account: &Account,
     outcome: LoginOutcome,
+    trace: Option<String>,
 ) -> Result<LoginResolution, OrchestratorError> {
     match outcome {
         LoginOutcome::Ok { cookies } => {
@@ -84,6 +103,6 @@ fn finalize(
                 ))
             }
         }
-        other => Ok(resolve_non_ok(other)),
+        other => Ok(resolve_non_ok(other, trace)),
     }
 }

@@ -10,7 +10,10 @@ use super::login_flow::BandLoginOutcome;
 /// 실패 계열 밴드 결과를 세분 상태(badCredentials/blocked/error)로 해석한다. 성공(`Ok`)은
 /// 쿠키 저장 IO 결과까지 봐야 하므로 호출부(`login::finalize`)가 `active`/`failure`로 직접
 /// 만든다 — 여기 `Ok` 가지는 방어적 기본값(active)이다.
-pub(crate) fn resolve_band_failure(outcome: &BandLoginOutcome) -> LoginResolution {
+pub(crate) fn resolve_band_failure(
+    outcome: &BandLoginOutcome,
+    trace: Option<String>,
+) -> LoginResolution {
     match outcome {
         BandLoginOutcome::BadCredentials => LoginResolution::failure(
             AccountStatus::BadCredentials,
@@ -20,8 +23,9 @@ pub(crate) fn resolve_band_failure(outcome: &BandLoginOutcome) -> LoginResolutio
             AccountStatus::Blocked,
             "로그인 접근이 차단되었습니다(계정 상태 확인 필요).",
         ),
+        // CDP 실패에서 온 trace는 "자세히 보기"에 띄우려고 보존한다(#210).
         BandLoginOutcome::Error(message) => {
-            LoginResolution::failure(AccountStatus::Error, message.clone())
+            LoginResolution::failure_with_trace(AccountStatus::Error, message.clone(), trace)
         }
         BandLoginOutcome::Ok { .. } => LoginResolution::active(),
     }
@@ -33,7 +37,7 @@ mod tests {
 
     #[test]
     fn bad_credentials_maps_to_bad_credentials_failure() {
-        let r = resolve_band_failure(&BandLoginOutcome::BadCredentials);
+        let r = resolve_band_failure(&BandLoginOutcome::BadCredentials, None);
         assert_eq!(r.status, AccountStatus::BadCredentials);
         assert!(!r.succeeded);
         assert!(!r.message.is_empty());
@@ -41,7 +45,7 @@ mod tests {
 
     #[test]
     fn blocked_maps_to_blocked_failure() {
-        let r = resolve_band_failure(&BandLoginOutcome::Blocked);
+        let r = resolve_band_failure(&BandLoginOutcome::Blocked, None);
         assert_eq!(r.status, AccountStatus::Blocked);
         assert!(!r.succeeded);
         assert!(!r.message.is_empty());
@@ -49,15 +53,25 @@ mod tests {
 
     #[test]
     fn error_carries_original_message() {
-        let r = resolve_band_failure(&BandLoginOutcome::Error("연결 시간 초과".into()));
+        let r = resolve_band_failure(&BandLoginOutcome::Error("연결 시간 초과".into()), None);
         assert_eq!(r.status, AccountStatus::Error);
         assert!(!r.succeeded);
         assert_eq!(r.message, "연결 시간 초과");
     }
 
     #[test]
+    fn error_preserves_trace_for_detail_view() {
+        // CDP 실패 백트레이스는 "자세히 보기"용으로 보존된다(#210).
+        let r = resolve_band_failure(
+            &BandLoginOutcome::Error("연결 실패".into()),
+            Some("at band.rs:1:1\n\nframe0".to_owned()),
+        );
+        assert_eq!(r.trace.as_deref(), Some("at band.rs:1:1\n\nframe0"));
+    }
+
+    #[test]
     fn ok_is_defensive_active() {
-        let r = resolve_band_failure(&BandLoginOutcome::Ok { cookies: vec![] });
+        let r = resolve_band_failure(&BandLoginOutcome::Ok { cookies: vec![] }, None);
         assert_eq!(r.status, AccountStatus::Active);
         assert!(r.succeeded);
     }

@@ -21,6 +21,22 @@ pub fn completion_message(title: &str, total: usize, ok: usize) -> (String, Stri
     )
 }
 
+/// 계정 로그인 완료 토스트 문구(제목, 본문, #210). 성공/실패 비율로 제목을 달리한다.
+/// 게시 완료 토스트(`completion_message`)와 같은 UX로, 트레이 상주 중에도 결과를 통지한다.
+pub fn login_completion_message(total: usize, ok: usize) -> (String, String) {
+    let head = if ok == total {
+        "로그인 완료"
+    } else if ok == 0 {
+        "로그인 실패"
+    } else {
+        "로그인 일부 실패"
+    };
+    (
+        head.to_string(),
+        format!("계정 {total}개 중 {ok}개 로그인 성공"),
+    )
+}
+
 /// 놓친 예약(앱 종료 중 시각 경과) 토스트 문구(제목, 본문)를 만든다.
 pub fn missed_message(newly: usize) -> (String, String) {
     (
@@ -58,6 +74,14 @@ mod tests {
     fn completion_title_reflects_total_failure() {
         let (head, _) = completion_message("x", 3, 0);
         assert_eq!(head, "게시 실패");
+    }
+
+    #[test]
+    fn login_completion_title_reflects_ratio() {
+        assert_eq!(login_completion_message(3, 3).0, "로그인 완료");
+        assert_eq!(login_completion_message(3, 1).0, "로그인 일부 실패");
+        assert_eq!(login_completion_message(3, 0).0, "로그인 실패");
+        assert!(login_completion_message(3, 2).1.contains("3개 중 2개"));
     }
 
     #[test]

@@ -9,7 +9,6 @@ mod login;
 mod login_flow;
 mod outcome;
 mod paths;
-mod queue;
 mod util;
 
 use tauri::{AppHandle, Runtime};
@@ -19,8 +18,6 @@ use crate::auth::{
     app_data_root, assert_adb_device, config, paths_for_root, toggle_airplane_mode, Account,
     OrchestratorError,
 };
-
-pub use queue::{enqueue_band_accounts, get_band_queue_status, BandQueueState};
 
 use cookies::{account_band_cookie_status, BandCookieStatus};
 use paths::{band_cookies_dir_for_app_data, ensure_band_cookies_dir};
@@ -39,7 +36,7 @@ fn load_accounts() -> Result<Vec<Account>, OrchestratorError> {
 /// 한 band 계정을 처리한다(네이버 `process_account` 미러).
 ///
 /// `_app`은 큐 워커가 넘기는 핸들로, CDP 로그인은 직접 호출하므로 본문에서는 쓰지 않는다.
-async fn process_band_account<R: Runtime>(
+pub(crate) async fn process_band_account<R: Runtime>(
     _app: &AppHandle<R>,
     account_id: &str,
     headless: bool,

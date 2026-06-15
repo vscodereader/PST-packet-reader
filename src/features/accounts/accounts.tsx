@@ -36,6 +36,8 @@ import { ipc } from "@/shared/ipc";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo } from "@/shared/ui/platform-logo";
 
+import { buildLoginNowItem } from "./login-queue";
+
 const PER_PAGE = 10;
 const PLATFORM_OPTIONS = [
   { value: "forum", label: "종목토론방" },
@@ -339,8 +341,9 @@ export function Accounts({ go }: { go: GoFn }) {
     setSel([]);
   };
 
-  // 선택한 계정으로 네이버 로그인 자동화를 실행한다(쿠키 키 = loginId).
-  // 성공/실패는 각 계정의 status(active/error)로 표시한다.
+  // 선택한 계정을 즉시 처리 대기열(now 큐)에 로그인 작업으로 적재한다(#210). 로그인도
+  // 게시와 같은 큐에서 처리되며, 성공/실패는 각 계정 status 배지와 알림 로그(자세히 보기의
+  // 백트레이스 포함)에 반영된다. 네이버/밴드 분기는 buildLoginNowItem이 plan.login에 담는다.
   const runLogin = async () => {
     const targets = rows.filter(
       (r) => sel.includes(r.id) && r.loginId.trim() && r.pw,
@@ -351,13 +354,7 @@ export function Accounts({ go }: { go: GoFn }) {
     }
     setLoggingIn(true);
     try {
-      // 플랫폼이 밴드인 계정은 네이버가 아니라 band.us로 로그인한다. 종목토론방·
-      // 네이버카페는 기존대로 네이버 로그인 큐를 쓴다(기존 동작 무수정).
-      const bandTargets = targets.filter((t) => t.platform === "band");
-      const naverTargets = targets.filter((t) => t.platform !== "band");
-
-      // 계정 자격증명은 양쪽 큐가 같은 accounts.json(id=loginId)을 읽으므로 한 번만 저장한다.
-      // save_accounts는 id 기준 병합이라 두 그룹이 서로를 덮어쓰지 않는다.
+      // 자격증명을 accounts.json(id=loginId)에 저장한다(네이버·밴드 공용, id 기준 병합).
       await ipc.auth.bootstrap();
       await ipc.auth.saveAccounts(
         targets.map((t) => ({
@@ -366,28 +363,14 @@ export function Accounts({ go }: { go: GoFn }) {
           label: t.loginId,
         })),
       );
-
-      if (naverTargets.length > 0) {
-        // 명시적 선택 계정 로그인 → force=true: 서버측에서 죽었지만 로컬 검증만 통과하는
-        // 쿠키도 실제 재로그인으로 새로 덮어쓴다(이슈 #132).
-        await ipc.auth.enqueueLogin(
-          naverTargets.map((t) => t.loginId),
-          false,
-          true,
-        );
-      }
-      if (bandTargets.length > 0) {
-        // 밴드 선택로그인: band.us(CDP)로 로그인. 랜선만 꽂으면 되며 ADB 불필요.
-        // force=true: 명시적 재로그인이므로 유효 쿠키여도 실제 로그인해 새 비밀번호를
-        // 검증한다(틀린 비번으로 바꾼 뒤 재로그인이 그대로 성공하던 문제 방지, 네이버 #132).
-        await ipc.band.login(
-          bandTargets.map((t) => t.loginId),
-          false,
-          false,
-          true,
-        );
-      }
-      pollLogin(targets);
+      // 로그인 배치 1개 = now 큐 아이템 1개. 워커가 계정별로 네이버/밴드 로그인을 처리한다.
+      const item = buildLoginNowItem(targets, crypto.randomUUID());
+      await ipc.queue.addNow(item);
+      toast(
+        `${targets.length}개 계정 로그인을 큐에 추가했어요 — 진행 상황은 큐에서 확인하세요`,
+        "green",
+      );
+      pollLoginCompletion(item.id);
     } catch (err) {
       setLoggingIn(false);
       toast(err instanceof Error ? err.message : String(err), "red");
@@ -401,60 +384,28 @@ export function Accounts({ go }: { go: GoFn }) {
     }
   };
 
-  // get_queue_status를 2초마다 확인해 각 계정의 로그인 결과를 반영한다.
-  const pollLogin = (targets: Account[]) => {
+  // now 큐를 폴링해 로그인 배치(itemId)가 큐에서 사라질 때까지 계정 리스트를 갱신한다.
+  // 워커가 1계정 처리할 때마다 accounts store에 상태를 기록하므로 배지가 실시간으로 갱신되고,
+  // 아이템이 큐에서 제거되면(완료) 폴링을 멈춘다. 큐 진행률은 큐 화면이 별도로 보여준다.
+  const pollLoginCompletion = (itemId: string) => {
     if (loginPollRef.current !== null)
       window.clearInterval(loginPollRef.current);
-    // 행 추적은 고유키 id로 한다(loginId는 유니크가 보장되지 않아 같은 loginId의 두 행이
-    // 하나로 합쳐지면 한쪽만 반영된다).
-    const remaining = new Set(targets.map((t) => t.id));
-    // 밴드 계정은 별도 band 큐(get_band_queue_status)에서 결과를 읽고, 나머지는 기존
-    // 네이버 큐(get_queue_status)에서 읽는다. 선택에 포함된 큐만 조회한다.
-    const needNaver = targets.some((t) => t.platform !== "band");
-    const needBand = targets.some((t) => t.platform === "band");
-
     loginPollRef.current = window.setInterval(() => {
-      void Promise.all([
-        needNaver ? ipc.auth.queueStatus() : Promise.resolve(null),
-        needBand ? ipc.band.queueStatus() : Promise.resolve(null),
-      ])
-        .then(([naverStatus, bandStatus]) => {
-          let resolvedThisTick = false;
-          targets.forEach((t) => {
-            if (!remaining.has(t.id)) return;
-            // 계정 플랫폼에 맞는 큐 상태에서 잡을 찾는다.
-            const status = t.platform === "band" ? bandStatus : naverStatus;
-            if (!status) return;
-            // 백엔드 잡은 loginId(=쿠키 키)로 식별된다. 같은 loginId를 쓰는 행들은
-            // 같은 잡 결과를 각자(id별로) 반영한다.
-            const job = [...status.jobs]
-              .reverse()
-              .find((j) => j.accountId === t.loginId);
-            if (!job || job.status === "pending" || job.status === "running")
-              return;
-
-            remaining.delete(t.id);
-            resolvedThisTick = true;
-            const ok = job.status === "success" || job.status === "expired";
-            toast(
-              `${t.loginId}: ${ok ? "로그인 성공" : "로그인 실패 — " + job.message}`,
-              ok ? "green" : "red",
-            );
-          });
-
-          // 이번 틱에 하나라도 완료됐으면 권위 계정 리스트를 한 번만 재조회해 배지·tooltip에
-          // 세밀 상태(active/blocked/challenge/badCredentials)와 사유를 반영한다. 백엔드
-          // worker_loop가 큐 상태를 finished로 바꾸기 전에 계정 store를 먼저 기록하므로,
-          // 여기서 읽으면 최신 상태가 보인다(틱당 1회 — 행별 중복 list 호출 방지).
-          if (resolvedThisTick) void ipc.accounts.list().then(setRows);
-
-          if (remaining.size === 0) {
-            if (loginPollRef.current !== null) {
-              window.clearInterval(loginPollRef.current);
-              loginPollRef.current = null;
-            }
-            setLoggingIn(false);
+      void Promise.all([ipc.queue.listNow(), ipc.accounts.list()])
+        .then(([queue, accounts]) => {
+          // 워커가 계정별로 기록한 최신 상태를 배지·tooltip에 반영한다.
+          setRows(accounts);
+          if (queue.some((q) => q.id === itemId)) return;
+          // 로그인 아이템이 큐에서 사라짐 = 배치 완료.
+          if (loginPollRef.current !== null) {
+            window.clearInterval(loginPollRef.current);
+            loginPollRef.current = null;
           }
+          setLoggingIn(false);
+          toast(
+            "계정 로그인이 끝났어요 — 상태 배지와 알림 로그에서 결과를 확인하세요",
+            "green",
+          );
         })
         .catch((err) => {
           if (loginPollRef.current !== null) {
@@ -468,7 +419,7 @@ export function Accounts({ go }: { go: GoFn }) {
             "red",
           );
         });
-    }, 2000);
+    }, 1000);
   };
 
   const allTags = useMemo(

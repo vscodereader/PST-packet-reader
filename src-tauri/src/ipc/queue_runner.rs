@@ -13,11 +13,13 @@ use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Manager, Runtime};
 
-use super::accounts::PlatformId;
+use super::accounts::{AccountStatus, PlatformId};
 use super::activity::{record, ActivityItem, ActivityType};
 use super::log_batches::{BatchItem, BatchItemStatus, LogBatch, MAX_LOG_BATCHES};
 use super::posts::{CommentTarget, ModeValue};
-use super::queue::{apply_cancel_now, PublishPlan, QueueNowItem, QueueState};
+use super::queue::{apply_cancel_now, LoginTarget, PublishPlan, QueueNowItem, QueueState};
+use crate::auth::outcome::LoginResolution;
+use crate::auth::OrchestratorError;
 use crate::band_post::error::{BandPostError, BandPostErrorKind};
 use crate::band_post::{
     band_comment, band_publish, BandCommentOutcome, BandFeedSort, BandPublishOutcome,
@@ -242,6 +244,14 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) {
         return;
     };
     let id = item.id.as_str();
+
+    // 로그인 전용 아이템(#210): 게시 경로를 타지 않고 계정별 로그인만 수행하고 종료한다.
+    // 로그인도 게시와 같은 now 큐로 일원화되며, 한 계정이 실패해도 다음 계정으로 진행한다.
+    if let Some(login) = plan.login.as_ref().filter(|l| !l.is_empty()) {
+        run_login_targets(app, id, login).await;
+        return;
+    }
+
     // 글/댓글 1건마다 진행률을 0/N→1/N→…로 올릴 때 쓸 추정 분모. 실제 작업 수(total)가
     // 확정되기 전 단계(글 작성 중)에는 이 상한 추정치를 분모로 쓰고, 확정 후 보정한다.
     let est = estimate_total(plan);
@@ -590,6 +600,97 @@ async fn run_band_targets<R: Runtime>(
         });
     }
     outcomes
+}
+
+/// 로그인 1건의 결과를 (계정 상태, 사용자 사유, 자세히보기 trace)로 해석한다(순수). Ok면
+/// resolution의 세밀 상태/메시지/trace를 그대로, Err(인프라 오류)면 Error + 오류 문자열(trace
+/// 없음)로 본다. trace는 CDP 실패(AutomationError)에서만 채워져 "자세히 보기"에 노출된다(#210).
+fn resolve_login_status(
+    result: &Result<LoginResolution, OrchestratorError>,
+) -> (AccountStatus, String, Option<String>) {
+    match result {
+        Ok(res) => (res.status.clone(), res.message.clone(), res.trace.clone()),
+        Err(err) => (AccountStatus::Error, err.to_string(), None),
+    }
+}
+
+/// 로그인 전용 아이템을 처리한다(#210): 계정을 순서대로 로그인하고, 1건마다 진행률과
+/// 계정 상태(`apply_status_by_login_id`)·활동 피드를 갱신한다. 성공/실패와 무관하게 항상
+/// 다음 계정으로 진행해(한 계정 실패가 큐를 멈추지 않게) 모든 계정을 성공 또는 실패로
+/// 확정한다. `platform`이 Band면 band.us 로그인, 그 외(naver/forum 등)는 네이버 로그인으로
+/// 보낸다(프론트 runLogin 분기 미러). 각 계정 시작 전 협조적 취소(item_present)를 확인한다.
+///
+/// 결과 표시: 계정별 활동 피드(알림 화면) + 계정 상태 배지 + 완료 시 OS 토스트로 충분하므로,
+/// 알림 로그(LogBatch)에는 **남기지 않는다**(중복 제거). 실패 사유·백트레이스(trace)는 디버깅용
+/// 으로 `pstmacro.log`에만 기록한다(전용 로그인 큐 제거로 사라졌던 `[LOGIN]` 로그도 복원).
+async fn run_login_targets<R: Runtime>(app: &AppHandle<R>, id: &str, targets: &[LoginTarget]) {
+    use crate::auth::mask_id;
+    use crate::auth::outcome::{activity_message, status_activity_type};
+    use crate::ipc::accounts::{apply_status_by_login_id, Account};
+
+    let total = targets.len() as u32;
+    update_progress(app, id, 0, total);
+    let mut done = 0u32;
+    let mut ok = 0u32;
+    for t in targets {
+        // 로그인은 비싸고(브라우저 기동) 비가역적이라 시작 전마다 취소를 확인한다.
+        if !item_present(app, id) {
+            break;
+        }
+        let result = if matches!(t.platform, PlatformId::Band) {
+            crate::band_auth::process_band_account(
+                app,
+                &t.account_id,
+                t.headless,
+                t.use_adb,
+                t.force,
+            )
+            .await
+        } else {
+            crate::auth::process_account(app, &t.account_id, t.headless, t.use_adb, t.force).await
+        };
+        let (status, msg, trace) = resolve_login_status(&result);
+        // 성공 여부는 resolution의 succeeded(쿠키 저장 완료)로 판정한다(기존 전용 로그인 큐와 동일).
+        let succeeded = matches!(&result, Ok(res) if res.succeeded);
+        if succeeded {
+            ok += 1;
+        }
+
+        // 계정 세밀 상태/사유를 accounts 스토어에 반영한다(loginId가 같은 모든 행). 프론트
+        // accounts 화면이 이 값을 폴링해 상태 배지/tooltip을 갱신한다.
+        app.state::<JsonStore<Account>>().mutate(|list| {
+            apply_status_by_login_id(list, &t.account_id, status.clone(), Some(msg.clone()))
+        });
+        // 활동 피드에도 상태별 타입으로 남긴다(기존 전용 로그인 큐와 동일 UX).
+        record(
+            app.state::<JsonStore<ActivityItem>>().inner(),
+            status_activity_type(&status),
+            activity_message(&t.account_id, &status, &msg),
+        );
+        // pstmacro.log에 성공/실패를 남긴다(알림 로그 UI는 중복이라 안 남김). 실패는 사유와
+        // 백트레이스(trace)를 함께 기록해 디버깅에 쓴다(#210). PW는 어떤 로그에도 넣지 않는다.
+        if succeeded {
+            tracing::info!("[LOGIN] {} 로그인 성공 ✅", mask_id(&t.account_id));
+        } else if let Some(tr) = &trace {
+            tracing::warn!(
+                "[LOGIN] {} 로그인 실패 ❌ — {msg}\n{tr}",
+                mask_id(&t.account_id)
+            );
+        } else {
+            tracing::warn!("[LOGIN] {} 로그인 실패 ❌ — {msg}", mask_id(&t.account_id));
+        }
+
+        done += 1;
+        update_progress(app, id, done, total);
+    }
+
+    // 완료 시 OS 토스트로 결과를 통지한다(게시 완료 토스트와 동일 UX, #163/#210). 트레이
+    // 상주로 창을 닫아둔 경우에도 인지할 수 있게 한다. 알림 로그(LogBatch)는 만들지 않는다.
+    if total > 0 {
+        let (toast_title, toast_body) =
+            super::notify::login_completion_message(total as usize, ok as usize);
+        super::notify::notify_desktop(app, &toast_title, &toast_body);
+    }
 }
 
 /// 댓글 대상에 댓글 풀(comments)을 분배해 작업으로 만든다. 풀이 비면 빈 목록을 내
@@ -1098,6 +1199,10 @@ fn record_completion<R: Runtime>(app: &AppHandle<R>, batch: LogBatch) {
 /// 확정되기 전에도 "처리 중 N/N"이 빈칸("/")으로 보이지 않게 한다. 이후 execute_item이
 /// 실제 작업 수로 정밀화한다(실패·빈 풀로 실제치가 더 작아질 수 있다).
 fn estimate_total(plan: &PublishPlan) -> u32 {
+    // 로그인 전용 아이템(#210)은 진행률 분모가 계정 수로 확정돼 있다(게시 추정과 별개).
+    if let Some(login) = plan.login.as_ref().filter(|l| !l.is_empty()) {
+        return login.len() as u32;
+    }
     let posts = if runs_post(plan) { plan.naver.len() } else { 0 };
     let comments = if runs_comment(plan) {
         if matches!(plan.kind, ModeValue::Both) {
@@ -1187,7 +1292,66 @@ mod tests {
             naver,
             forum: vec![],
             band: vec![],
+            login: None,
         }
+    }
+
+    fn login_target(account: &str, platform: PlatformId) -> LoginTarget {
+        LoginTarget {
+            account_id: account.into(),
+            platform,
+            headless: false,
+            use_adb: false,
+            force: true,
+        }
+    }
+
+    #[test]
+    fn resolve_login_status_maps_ok_resolution_and_infra_error() {
+        // Ok(active) → Active, Ok(failure) → 세밀 상태+사유 보존, trace 없음.
+        let ok = Ok(LoginResolution::active());
+        assert_eq!(resolve_login_status(&ok).0, AccountStatus::Active);
+        let bad: Result<LoginResolution, OrchestratorError> = Ok(LoginResolution::failure(
+            AccountStatus::BadCredentials,
+            "비밀번호 오류",
+        ));
+        let (status, msg, trace) = resolve_login_status(&bad);
+        assert_eq!(status, AccountStatus::BadCredentials);
+        assert_eq!(msg, "비밀번호 오류");
+        assert_eq!(trace, None);
+        // Err(인프라 오류) → Error + 오류 문자열, trace 없음.
+        let err: Result<LoginResolution, OrchestratorError> =
+            Err(OrchestratorError::AccountNotFound("user01".into()));
+        let (status, msg, trace) = resolve_login_status(&err);
+        assert_eq!(status, AccountStatus::Error);
+        assert!(!msg.is_empty());
+        assert_eq!(trace, None);
+    }
+
+    #[test]
+    fn resolve_login_status_carries_trace_for_detail_view() {
+        // CDP 실패에서 온 trace는 그대로 전달돼 알림 로그 "자세히 보기"에 노출된다(#210).
+        let with_trace: Result<LoginResolution, OrchestratorError> =
+            Ok(LoginResolution::failure_with_trace(
+                AccountStatus::Error,
+                "연결 실패",
+                Some("at x.rs:1:1\n\nframe0".to_owned()),
+            ));
+        let (status, _msg, trace) = resolve_login_status(&with_trace);
+        assert_eq!(status, AccountStatus::Error);
+        assert_eq!(trace.as_deref(), Some("at x.rs:1:1\n\nframe0"));
+    }
+
+    #[test]
+    fn estimate_total_uses_login_account_count() {
+        // 로그인 전용 아이템의 진행률 분모는 계정 수다(게시 필드는 무시).
+        let mut p = plan(ModeValue::Post, vec![naver_target("a"), naver_target("b")]);
+        p.login = Some(vec![
+            login_target("a", PlatformId::Naver),
+            login_target("b", PlatformId::Band),
+            login_target("c", PlatformId::Naver),
+        ]);
+        assert_eq!(estimate_total(&p), 3);
     }
 
     fn now_item(id: &str, state: QueueState, p: Option<PublishPlan>) -> QueueNowItem {

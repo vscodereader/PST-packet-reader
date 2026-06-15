@@ -17,14 +17,6 @@ pub(crate) fn safe_file_stem(value: &str) -> String {
         .collect()
 }
 
-/// 현재 시간을 밀리초 단위로 반환한다.
-pub(crate) fn now_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-}
-
 /// 현재 시간을 초 단위 Unix timestamp로 반환한다.
 pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
@@ -44,8 +36,7 @@ mod tests {
 
     #[test]
     fn now_helpers_return_post_2020_unix_time() {
-        // 2020-09-13 이후의 합리적인 하한으로 두 헬퍼가 동작함을 확인한다.
+        // 2020-09-13 이후의 합리적인 하한으로 now_secs가 동작함을 확인한다.
         assert!(now_secs() > 1_600_000_000);
-        assert!(now_millis() > 1_600_000_000_000);
     }
 }

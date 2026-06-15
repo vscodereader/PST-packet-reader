@@ -297,7 +297,7 @@ describe("Accounts", () => {
       args?: Record<string, unknown>,
     ) => Promise<unknown>;
     vi.mocked(ipcBackend).mockImplementation((cmd, args) =>
-      cmd === "enqueue_cookie_refresh"
+      cmd === "add_queue_now"
         ? Promise.reject(new Error("sidecar missing"))
         : realImpl(cmd, args),
     );
@@ -406,40 +406,51 @@ describe("Accounts", () => {
     await userEvent.click(checkboxes[1]!);
     await userEvent.click(screen.getByRole("button", { name: /선택 로그인/ }));
 
-    // 밴드 계정은 네이버가 아니라 band 로그인 큐로 enqueue 되어야 한다. 명시적 재로그인
-    // 이므로 force=true로 보내 유효 쿠키여도 실제 로그인해 비밀번호를 검증한다(#132 미러).
-    await waitFor(() =>
-      expect(ipcBackend).toHaveBeenCalledWith("enqueue_band_login", {
-        accountIds: ["invest_king7"],
-        headless: false,
-        useAdb: false,
-        force: true,
-      }),
+    // 로그인은 게시와 같은 now 큐로 일원화됐다(#210): add_queue_now에 plan.login을 담아
+    // 적재한다. 밴드 계정은 platform=band·useAdb=false로, 명시적 재로그인이라 force=true.
+    await waitFor(() => {
+      const call = vi
+        .mocked(ipcBackend)
+        .mock.calls.find((c) => c[0] === "add_queue_now");
+      expect(call).toBeTruthy();
+      const item = (call![1] as { item: { plan?: { login?: unknown[] } } })
+        .item;
+      expect(item.plan?.login).toEqual([
+        {
+          accountId: "invest_king7",
+          platform: "band",
+          headless: false,
+          // 밴드도 네이버처럼 ADB IP 로테이션 사용(#210).
+          useAdb: true,
+          force: true,
+        },
+      ]);
+    });
+    // 구 전용 로그인 큐 커맨드는 더 이상 호출되지 않는다.
+    expect(ipcBackend).not.toHaveBeenCalledWith(
+      "enqueue_band_login",
+      expect.anything(),
     );
-    // 네이버 로그인(enqueue_cookie_refresh)은 호출되지 않아야 한다.
     expect(ipcBackend).not.toHaveBeenCalledWith(
       "enqueue_cookie_refresh",
       expect.anything(),
     );
 
-    // 2초 상태 폴링이 band 큐 결과를 받으면, 권위 계정 목록을 재조회(list_accounts)해
-    // 배지·상태를 반영한다(feat/155: 로컬 update_account 대신 재조회로 일원화).
+    // 폴링이 계정 목록을 재조회(list_accounts)해 배지·상태를 반영하고, 배치 완료 시
+    // 녹색 완료 토스트가 뜬다(개별 성공/실패는 배지·알림 로그로 표시).
     await waitFor(
-      () => {
-        const call = vi
-          .mocked(ipcBackend)
-          .mock.calls.find((c) => c[0] === "list_accounts");
-        expect(call).toBeTruthy();
-      },
+      () =>
+        expect(notifShow).toHaveBeenCalledWith(
+          expect.objectContaining({
+            color: "green",
+            message: expect.stringContaining("로그인이 끝났"),
+          }),
+        ),
       { timeout: 4000 },
     );
-    // 밴드 로그인 성공 시 녹색 토스트가 뜬다.
-    expect(notifShow).toHaveBeenCalledWith(
-      expect.objectContaining({
-        color: "green",
-        message: expect.stringContaining("로그인 성공"),
-      }),
-    );
+    expect(
+      vi.mocked(ipcBackend).mock.calls.some((c) => c[0] === "list_accounts"),
+    ).toBe(true);
   });
 
   it("runs naver login for the selected account", async () => {
@@ -451,42 +462,51 @@ describe("Accounts", () => {
     await userEvent.click(checkboxes[1]!);
     await userEvent.click(screen.getByRole("button", { name: /선택 로그인/ }));
 
-    // saves the auth account (keyed by loginId) and enqueues a cookie refresh.
-    await waitFor(() =>
-      expect(ipcBackend).toHaveBeenCalledWith("enqueue_cookie_refresh", {
-        accountIds: ["invest_king7"],
-        headless: false,
-        useAdb: true,
-        // 선택 계정 로그인은 강제 재로그인(이슈 #132).
-        force: true,
-      }),
+    // 자격증명을 저장(loginId 키)하고, 로그인을 now 큐에 적재한다(#210). forum/naver
+    // 계정은 platform=naver·useAdb=true(모바일 IP 로테이션)로, 명시적 재로그인이라 force=true.
+    await waitFor(() => {
+      const call = vi
+        .mocked(ipcBackend)
+        .mock.calls.find((c) => c[0] === "add_queue_now");
+      expect(call).toBeTruthy();
+      const item = (call![1] as { item: { plan?: { login?: unknown[] } } })
+        .item;
+      expect(item.plan?.login).toEqual([
+        {
+          accountId: "invest_king7",
+          platform: "naver",
+          headless: false,
+          useAdb: true,
+          force: true,
+        },
+      ]);
+    });
+    // 구 전용 로그인 큐 커맨드는 더 이상 호출되지 않는다.
+    expect(ipcBackend).not.toHaveBeenCalledWith(
+      "enqueue_cookie_refresh",
+      expect.anything(),
     );
 
-    // the 2s status poll fires; on completion the row is reconciled by re-fetching
-    // the authoritative account list — the backend worker writes the fine-grained
-    // status (active/blocked/challenge/badCredentials) to the store, so the frontend
-    // just re-reads it instead of computing a binary active/error locally.
+    // 완료 시 권위 계정 목록을 재조회(list_accounts)해 배지·세밀 상태를 반영하고, 녹색
+    // 완료 토스트가 뜬다(개별 결과는 상태 배지/알림 로그로 확인).
     await waitFor(
-      () => {
-        const call = vi
-          .mocked(ipcBackend)
-          .mock.calls.find((c) => c[0] === "list_accounts");
-        expect(call).toBeTruthy();
-      },
+      () =>
+        expect(notifShow).toHaveBeenCalledWith(
+          expect.objectContaining({
+            color: "green",
+            message: expect.stringContaining("로그인이 끝났"),
+          }),
+        ),
       { timeout: 4000 },
     );
-    // a green success toast fires for the account.
-    expect(notifShow).toHaveBeenCalledWith(
-      expect.objectContaining({
-        color: "green",
-        message: expect.stringContaining("로그인 성공"),
-      }),
-    );
+    expect(
+      vi.mocked(ipcBackend).mock.calls.some((c) => c[0] === "list_accounts"),
+    ).toBe(true);
   });
 
-  it("red-toasts and re-syncs the account list on a failed login", async () => {
+  it("re-syncs the account list and completes even when a login fails", async () => {
     await renderAccounts();
-    // Simulate the auth queue reporting a failure for this account.
+    // 워커가 이 계정의 로그인을 error로 보고하도록 시뮬레이션한다.
     setLoginOutcomes({
       invest_king7: {
         status: "error",
@@ -499,23 +519,22 @@ describe("Accounts", () => {
     await userEvent.click(checkboxes[1]!);
     await userEvent.click(screen.getByRole("button", { name: /선택 로그인/ }));
 
-    // failure branch: red toast carrying "로그인 실패 — ".
+    // 실패해도 배치는 완료되고(멈추지 않음) 녹색 완료 토스트가 뜬다 — 개별 실패는 토스트가
+    // 아니라 상태 배지/알림 로그(자세히 보기 백트레이스)로 표시된다(#210).
     await waitFor(
       () =>
         expect(notifShow).toHaveBeenCalledWith(
           expect.objectContaining({
-            color: "red",
-            message: expect.stringContaining("로그인 실패 — "),
+            color: "green",
+            message: expect.stringContaining("로그인이 끝났"),
           }),
         ),
       { timeout: 4000 },
     );
-    // and the row is reconciled by re-fetching the authoritative account list
-    // (the backend worker persisted the fine-grained status to the store).
-    const call = vi
-      .mocked(ipcBackend)
-      .mock.calls.find((c) => c[0] === "list_accounts");
-    expect(call).toBeTruthy();
+    // 완료 시 권위 계정 목록을 재조회해 배지에 실패(error) 상태를 반영한다.
+    expect(
+      vi.mocked(ipcBackend).mock.calls.some((c) => c[0] === "list_accounts"),
+    ).toBe(true);
   });
 
   it("stops the spinner and red-toasts when the status poll itself errors", async () => {
@@ -524,9 +543,9 @@ describe("Accounts", () => {
       cmd: string,
       args?: Record<string, unknown>,
     ) => Promise<unknown>;
-    // Make only the status poll reject; everything else keeps working.
+    // 완료 폴링(list_queue_now)만 reject시킨다; 나머지는 정상 동작.
     vi.mocked(ipcBackend).mockImplementation((cmd, args) =>
-      cmd === "get_queue_status"
+      cmd === "list_queue_now"
         ? Promise.reject(new Error("큐 상태 조회 실패"))
         : realInvoke(cmd, args),
     );
@@ -566,11 +585,9 @@ describe("Accounts", () => {
     vi.mocked(ipcBackend).mockClear();
     await userEvent.click(screen.getByRole("button", { name: /선택 로그인/ }));
 
-    // No id → nothing is enqueued.
+    // No id → nothing is enqueued to the now queue.
     expect(
-      vi
-        .mocked(ipcBackend)
-        .mock.calls.some((c) => c[0] === "enqueue_cookie_refresh"),
+      vi.mocked(ipcBackend).mock.calls.some((c) => c[0] === "add_queue_now"),
     ).toBe(false);
   });
 });

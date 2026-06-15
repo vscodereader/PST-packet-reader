@@ -131,25 +131,6 @@ export interface AuthAccount {
   label: string;
 }
 
-export type LoginJobStatus =
-  | "pending"
-  | "expired"
-  | "running"
-  | "success"
-  | "failed";
-
-export interface LoginJob {
-  accountId: string;
-  status: LoginJobStatus;
-  message: string;
-}
-
-export interface LoginQueueStatus {
-  isRunning: boolean;
-  currentAccountId: string | null;
-  jobs: LoginJob[];
-}
-
 /** Thin typed wrapper around a single Tauri command channel. */
 function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   return invoke<T>(cmd, args);
@@ -302,24 +283,6 @@ export const ipc = {
     /** 밴드 댓글 전용 — 기존 글(최신글/인기글) 상위 count개에 댓글을 단다. */
     comment: (request: BandCommentRequest) =>
       call<BandCommentOutcome>("band_comment", { ...request }),
-    /**
-     * 밴드 계정 선택로그인 — 네이버가 아니라 band.us(CDP)로 로그인한다.
-     * 네이버 로그인 큐와 분리된 band 큐를 쓴다(상태는 queueStatus로 폴링).
-     * `force=true`면 유효 쿠키여도 실제 재로그인해 새 비밀번호를 검증한다(네이버 #132 미러).
-     */
-    login: (
-      accountIds: string[],
-      headless = false,
-      useAdb = false,
-      force = false,
-    ) =>
-      call<LoginQueueStatus>("enqueue_band_login", {
-        accountIds,
-        headless,
-        useAdb,
-        force,
-      }),
-    queueStatus: () => call<LoginQueueStatus>("get_band_queue_status"),
     /** 링크(band_no)로 실제 밴드명을 조회한다(저장 시 표시용). accountId=band 쿠키 키. */
     resolveName: (accountId: string, bandLink: string) =>
       call<string>("band_resolve_name", { accountId, bandLink }),
@@ -371,26 +334,11 @@ export const ipc = {
     importPosts: (path: string) =>
       call<ImportSummary>("import_posts_xlsx", { path }),
   },
-  // 네이버 로그인 자동화(CDP). 계정 ID/PW로 로그인해 쿠키를 저장한다.
+  // 네이버 로그인 자동화(CDP). 계정 ID/PW로 로그인해 쿠키를 저장한다. 실제 로그인 실행은
+  // 즉시 처리 대기열(now 큐)에서 처리된다 — `queue.addNow`에 plan.login을 담아 적재한다(#210).
   auth: {
     bootstrap: () => call<unknown>("bootstrap_runtime"),
     saveAccounts: (accounts: AuthAccount[]) =>
       call<AuthAccount[]>("save_accounts", { accounts }),
-    // force=true: skip the local-cookie short-circuit and always perform a real
-    // re-login, overwriting the saved cookie file — for explicit per-account login
-    // so server-dead cookies that still pass local validation get refreshed
-    // (issue #132). Leave false for batch "run all" to avoid re-logging in live
-    // sessions (stealth: fewer automated logins).
-    enqueueLogin: (accountIds: string[], headless = false, force = false) =>
-      call<LoginQueueStatus>("enqueue_cookie_refresh", {
-        accountIds,
-        headless,
-        // IP 로테이션 스위치: true=계정마다 모바일 IP를 바꾼 뒤 로그인한다(#196). 폰 USB
-        // 연결 + PATH에 adb 필요(winget Google.PlatformTools) — 없으면 로그인이 실패한다.
-        // 백엔드: src-tauri/src/auth/adb.rs toggle_airplane_mode.
-        useAdb: true,
-        force,
-      }),
-    queueStatus: () => call<LoginQueueStatus>("get_queue_status"),
   },
 };

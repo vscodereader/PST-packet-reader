@@ -106,6 +106,20 @@ pub struct BandTarget {
     pub comment_target: Option<CommentTargetSpec>,
 }
 
+/// 로그인 배치의 계정 1건. `account_id`는 로그인 쿠키 키(= loginId) 규약을 따른다.
+/// `platform`이 `Band`면 band.us 로그인(`process_band_account`), 그 외(naver/forum 등)는
+/// 네이버 로그인(`process_account`)으로 처리된다(프론트 `runLogin`의 naver/band 분기 미러).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
+#[serde(rename_all = "camelCase")]
+pub struct LoginTarget {
+    pub account_id: String,
+    pub platform: PlatformId,
+    pub headless: bool,
+    pub use_adb: bool,
+    pub force: bool,
+}
+
 /// 큐 아이템을 실제로 게시하는 데 필요한 동결된 실행 페이로드.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../src/shared/bindings/")]
@@ -124,6 +138,12 @@ pub struct PublishPlan {
     pub forum: Vec<ForumTarget>,
     #[serde(default)]
     pub band: Vec<BandTarget>,
+    /// 로그인 전용 아이템의 계정 목록. 게시 아이템에는 없다(직렬화 생략 → 기존 plan과 호환).
+    /// 워커(`execute_item`)는 이 필드가 채워진 아이템을 게시 대신 계정별 로그인으로 처리한다
+    /// (배치 1개 = 아이템 1개, 진행률 분모 = 계정 수). 일원화: 로그인도 now 큐로 흐른다(#210).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub login: Option<Vec<LoginTarget>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -646,6 +666,17 @@ mod tests {
                 link: "https://band.us/band/12345678".into(),
                 comment_target: None,
             }],
+            login: None,
+        }
+    }
+
+    fn sample_login_target(account: &str, platform: PlatformId) -> LoginTarget {
+        LoginTarget {
+            account_id: account.into(),
+            platform,
+            headless: false,
+            use_adb: false,
+            force: true,
         }
     }
 
@@ -780,6 +811,43 @@ mod tests {
         assert!(json.contains("\"progress\":[2,3]"));
         assert!(json.contains("\"batchId\":\"b0\""));
         assert!(json.contains("\"state\":\"running\""));
+    }
+
+    #[test]
+    fn login_omitted_when_none_but_present_camelcase_when_set() {
+        // 게시 plan은 login이 None이라 직렬화에서 키가 생략돼 기존 plan과 호환된다.
+        let no_login = sample_plan();
+        assert!(!serde_json::to_string(&no_login)
+            .unwrap()
+            .contains("\"login\""));
+
+        // 로그인 전용 plan은 login 배열이 camelCase 필드(accountId/useAdb)로 직렬화된다.
+        let mut login_plan = sample_plan();
+        login_plan.login = Some(vec![
+            sample_login_target("user01", PlatformId::Naver),
+            sample_login_target("band01", PlatformId::Band),
+        ]);
+        let json = serde_json::to_string(&login_plan).unwrap();
+        assert!(json.contains("\"login\""));
+        assert!(json.contains("\"accountId\":\"user01\""));
+        assert!(json.contains("\"useAdb\":false"));
+        assert!(json.contains("\"platform\":\"band\""));
+    }
+
+    #[test]
+    fn legacy_plan_without_login_deserializes_to_none() {
+        // login 필드가 없는 구버전/게시 plan JSON은 login=None으로 역직렬화된다(하위호환).
+        let json = r#"{"postId":"p1","kind":"post","title":"T","bodyText":"B"}"#;
+        let plan: PublishPlan = serde_json::from_str(json).unwrap();
+        assert_eq!(plan.login, None);
+        assert!(plan.naver.is_empty());
+
+        // 로그인 plan 라운드트립도 보존된다.
+        let mut full = sample_plan();
+        full.login = Some(vec![sample_login_target("u", PlatformId::Naver)]);
+        let back: PublishPlan =
+            serde_json::from_str(&serde_json::to_string(&full).unwrap()).unwrap();
+        assert_eq!(full, back);
     }
 
     #[test]

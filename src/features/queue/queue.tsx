@@ -283,6 +283,8 @@ export function Queue({ go }: { go: GoFn }) {
           const kd = KIND[q.kind] ?? { t: q.kind, c: "gray" };
           const KI =
             Icon[(KIND_ICON[q.kind] ?? "fileText") as keyof typeof Icon];
+          // 로그인 전용 아이템(plan.login)은 글/댓글이 아니라 "로그인"으로 표시한다(#210).
+          const isLogin = (q.plan?.login?.length ?? 0) > 0;
           const dragging = dragId === q.id;
           const order = running
             ? null
@@ -362,15 +364,21 @@ export function Queue({ go }: { go: GoFn }) {
                 size={36}
                 radius="md"
                 variant="light"
-                color={q.kind === "comment" ? "forum" : "gray"}
+                color={
+                  isLogin ? "violet" : q.kind === "comment" ? "forum" : "gray"
+                }
               >
                 <KI size={18} />
               </ThemeIcon>
 
               <Box style={{ flex: 1, minWidth: 0 }}>
                 <Group gap={8} mb={5} wrap="nowrap">
-                  <Badge size="sm" color={kd.c} variant="light">
-                    {kd.t}
+                  <Badge
+                    size="sm"
+                    color={isLogin ? "violet" : kd.c}
+                    variant="light"
+                  >
+                    {isLogin ? "로그인" : kd.t}
                   </Badge>
                   <Text fz={14} fw={700} truncate>
                     {q.title}

@@ -99,6 +99,10 @@ pub const ADB_INTERNET_PING_HOST: &str = "8.8.8.8";
 /// 진단용 USB 디바이스 스캔(autodetect)이 드라이버 문제 등으로 멈추는 것을 막는
 /// 상한. 정상이면 거의 즉시 끝나므로 넉넉히 잡는다(초과 시 "지연" 안내로 반환).
 pub const ADB_PROBE_TIMEOUT_SECS: u64 = 10;
+/// 로그인 시 개별 adb CLI 명령(devices/airplane/ping)의 응답 상한(초, #210). adb 서버가
+/// 행이면 `cmd.output()`이 무한 블록돼 로그인 큐가 멈추므로, 명령 1건마다 이 시간으로
+/// 끊어 실패로 처리하고 다음 계정으로 진행한다. 정상 명령은 거의 즉시 끝난다.
+pub const ADB_STEP_TIMEOUT_SECS: u64 = 15;
 
 // 쿠키 저장 확인
 pub const COOKIE_WRITE_POLL_INTERVAL_MS: u64 = 200;

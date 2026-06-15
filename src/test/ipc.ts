@@ -1224,13 +1224,37 @@ export const invoke = vi.fn(
           (q) => q.id !== (args!.id as string),
         );
         return clone(state.queueScheduled);
-      case "add_queue_now":
-        // 즉시 처리 대기열 적재(#198): 백엔드처럼 항상 대기 상태로 now 큐에 push한다.
-        state.queueNow = [
-          ...state.queueNow,
-          { ...(args!.item as QueueNowItem), state: "waiting" },
-        ];
+      case "add_queue_now": {
+        const item = args!.item as QueueNowItem;
+        const login = item.plan?.login;
+        if (login && login.length > 0) {
+          // 로그인 전용 아이템(#210): 백엔드 워커처럼 계정별 로그인 결과를 계정 상태에
+          // 반영하고, 완료된 아이템은 큐에 남기지 않는다(폴링이 "큐에서 사라짐"으로 완료를
+          // 감지). loginOutcomes 오버라이드로 성공/실패를 시뮬레이션한다(미지정=success).
+          for (const t of login) {
+            const outcome = loginOutcomes[t.accountId];
+            const ok =
+              !outcome ||
+              outcome.status === "success" ||
+              outcome.status === "expired";
+            state.accounts = state.accounts.map((a) =>
+              a.loginId === t.accountId
+                ? {
+                    ...a,
+                    status: (ok
+                      ? "active"
+                      : outcome.status) as Account["status"],
+                    statusMsg: ok ? "" : outcome.message,
+                  }
+                : a,
+            );
+          }
+          return clone(state.queueNow);
+        }
+        // 일반 게시 아이템: 백엔드처럼 항상 대기 상태로 now 큐에 push한다(#198).
+        state.queueNow = [...state.queueNow, { ...item, state: "waiting" }];
         return clone(state.queueNow);
+      }
       case "add_queue_scheduled":
         state.queueScheduled = [
           ...state.queueScheduled,
