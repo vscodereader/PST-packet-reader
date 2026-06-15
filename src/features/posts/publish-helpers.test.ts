@@ -25,6 +25,21 @@ describe("htmlToText", () => {
     );
   });
 
+  it("preserves <a> links as '텍스트 (URL)' instead of dropping the href", () => {
+    // The regression: 평문 변환이 <a>를 통째로 지워 링크 URL이 사라졌다.
+    expect(htmlToText('<a href="https://naver.com">네이버</a>')).toBe(
+      "네이버 (https://naver.com)",
+    );
+    // 표시 텍스트가 URL과 같으면 중복 없이 URL 하나만.
+    expect(
+      htmlToText('<a href="https://naver.com">https://naver.com</a>'),
+    ).toBe("https://naver.com");
+    // 본문 안에 섞여 있어도 주변 텍스트와 함께 보존.
+    expect(
+      htmlToText('<p>참고: <a href="https://x.com/a">여기</a> 클릭</p>'),
+    ).toBe("참고: 여기 (https://x.com/a) 클릭");
+  });
+
   it("collapses 3+ blank lines and trims", () => {
     expect(htmlToText("<p>a</p><p></p><p></p><p>b</p>")).toBe("a\n\nb");
   });

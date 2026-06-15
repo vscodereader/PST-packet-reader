@@ -14,18 +14,34 @@ function imgPlaceholder(tag: string): string {
   return label ? `[이미지: ${label}]` : "[이미지]";
 }
 
+/** Turn an `<a href="URL">텍스트</a>` into plain text that keeps the URL, so the
+ * link survives flattening. `텍스트 (URL)`, or just the URL when the visible text
+ * already equals it. Without this the tag-strip below drops the href entirely and
+ * the posted 평문 글 loses the link. */
+function anchorToText(_tag: string, href: string, inner: string): string {
+  const url = href.trim();
+  const text = inner.replace(/<[^>]*>/g, "").trim();
+  if (!url) return text;
+  return text && text !== url ? `${text} (${url})` : url;
+}
+
 /**
  * Flatten the document's HTML body into plain text for the article body.
  *
  * `<img>` is converted to a `[이미지: …]` placeholder (alt, else src) rather than
  * stripped — otherwise a chart/image-only 글 posts to 네이버 as empty text while
  * the forum path keeps the original HTML, silently losing the images.
+ * `<a href>` is likewise kept as `텍스트 (URL)` so links aren't lost.
  */
 export function htmlToText(html: string): string {
   return html
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/(p|div|li|h[1-6])>/gi, "\n")
     .replace(/<img\b[^>]*>/gi, imgPlaceholder)
+    .replace(
+      /<a\b[^>]*\bhref\s*=\s*["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi,
+      anchorToText,
+    )
     .replace(/<[^>]*>/g, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
