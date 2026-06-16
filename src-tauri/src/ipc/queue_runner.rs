@@ -15,7 +15,7 @@ use tauri::{AppHandle, Manager, Runtime};
 
 use super::accounts::{AccountStatus, PlatformId};
 use super::activity::{record, ActivityItem, ActivityType};
-use super::log_batches::{BatchItem, BatchItemStatus, LogBatch, MAX_LOG_BATCHES};
+use super::log_batches::{BatchItem, BatchItemStatus, LogBatch, PostedContent, MAX_LOG_BATCHES};
 use super::posts::{CommentTarget, ModeValue};
 use super::queue::{apply_cancel_now, LoginTarget, PublishPlan, QueueNowItem, QueueState};
 use crate::auth::outcome::LoginResolution;
@@ -1081,11 +1081,20 @@ fn build_log_batch(
         });
     }
 
+    // 밴드 게시 내용(제목/본문/댓글)도 #{링크} 치환 후 값으로 보존한다(종토방과 동일).
+    let band_link = crate::template_tokens::resolve_link(&plan.link_override, "");
+    let band_title = crate::template_tokens::resolve_link_only(&plan.title, &band_link);
+    let band_body = crate::template_tokens::resolve_link_only(&plan.body_text, &band_link);
+    let band_comment = plan
+        .comments
+        .iter()
+        .find(|c| !c.trim().is_empty())
+        .map(|c| crate::template_tokens::resolve_link_only(c, &band_link));
     for o in band_outcomes {
         // post/both는 새 글(+댓글), comment 전용은 기존 글 댓글. 둘 다 부분 실패를 드러낸다
         // (성공분이 모자라면 성공으로 묻지 않는다). 메인=친절 문구, 자세히=기술 trace로 나눈다
         // (실패만 trace; 부분 실패도 성공/시도 수를 trace로 남긴다)(#199).
-        let (status, msg, trace) = match &o.result {
+        let (status, msg, trace, posted) = match &o.result {
             Ok(BandJobResult::Published(out)) => {
                 let ok = out.comment_total == 0 || out.commented_count >= out.comment_total;
                 let msg = if out.comment_total > 0 {
@@ -1102,7 +1111,18 @@ fn build_log_batch(
                         out.commented_count, out.comment_total
                     )
                 });
-                (status_of(ok), msg, trace)
+                // 새 글 게시(post/both)는 작성 내용 + 실제 글 URL(web_url)을 보존한다.
+                let posted = Some(PostedContent {
+                    title: band_title.clone(),
+                    body: band_body.clone(),
+                    comment: if out.comment_total > 0 {
+                        band_comment.clone()
+                    } else {
+                        None
+                    },
+                    url: Some(out.web_url.clone()),
+                });
+                (status_of(ok), msg, trace, posted)
             }
             Ok(BandJobResult::Commented(out)) => {
                 // 한 건도 못 달면(대상 글 없음/전부 실패) 실패로 둔다(즉시게시 판정과 동일).
@@ -1125,12 +1145,13 @@ fn build_log_batch(
                 } else {
                     Some("BAND_NO_TARGET · 댓글 대상 글을 찾지 못함".to_owned())
                 };
-                (status_of(ok), msg, trace)
+                (status_of(ok), msg, trace, None)
             }
             Err(e) => (
                 BatchItemStatus::Fail,
                 band_failure_reason(e),
                 Some(band_failure_trace(e)),
+                None,
             ),
         };
         items.push(BatchItem {
@@ -1142,7 +1163,7 @@ fn build_log_batch(
             status,
             msg,
             trace,
-            posted: None,
+            posted,
         });
     }
 
