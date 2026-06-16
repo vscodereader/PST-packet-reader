@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::accounts::PlatformId;
+use super::log_batches::BatchItem;
 use super::posts::{CommentTarget, ModeValue};
 use crate::ipc::activity::{record, ActivityType};
 use crate::store::JsonStore;
@@ -169,6 +170,11 @@ pub struct QueueNowItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub plan: Option<PublishPlan>,
+    /// 워커가 phase별로 갱신하는 대상별 실시간 상태(진행 전/중/완료/실패). 알림 로그와
+    /// 같은 `BatchItem` 모델을 재사용해 프론트가 SubLog를 그대로 쓴다. 대기/표시 전용
+    /// 아이템은 빈 Vec(레거시 JSON엔 키가 없어 기본값 빈 Vec로 역직렬화).
+    #[serde(default)]
+    pub items: Vec<BatchItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -243,6 +249,7 @@ pub fn as_fresh_now_item(mut item: QueueNowItem) -> QueueNowItem {
     item.state = QueueState::Waiting;
     item.batch_id = None;
     item.progress = None;
+    item.items = Vec::new();
     item
 }
 
@@ -258,6 +265,7 @@ pub fn to_now_item(s: QueueScheduledItem) -> QueueNowItem {
         progress: None,
         locs: s.locs,
         plan: s.plan,
+        items: Vec::new(),
     }
 }
 
@@ -622,6 +630,7 @@ mod tests {
             progress: None,
             locs: vec![loc(PlatformId::Naver, "테스트 카페", None)],
             plan: None,
+            items: Vec::new(),
         }
     }
 

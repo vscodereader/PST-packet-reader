@@ -15,7 +15,7 @@ use tauri::{AppHandle, Manager, Runtime};
 
 use super::accounts::{AccountStatus, PlatformId};
 use super::activity::{record, ActivityItem, ActivityType};
-use super::log_batches::{BatchItem, BatchItemStatus, LogBatch, MAX_LOG_BATCHES};
+use super::log_batches::{BatchItem, BatchItemStatus, LogBatch, PostedContent, MAX_LOG_BATCHES};
 use super::posts::{CommentTarget, ModeValue};
 use super::queue::{apply_cancel_now, LoginTarget, PublishPlan, QueueNowItem, QueueState};
 use crate::auth::outcome::LoginResolution;
@@ -260,16 +260,20 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) {
     let est = estimate_total(plan);
 
     // 1. 카페 글(post/both). 글 1건이 끝날 때마다 진행률을 올려, 폴링이 배치 완료만 보고
-    // 0/N에서 곧장 사라지지 않게 한다(이슈 #198 즉시 게시는 이 진행률을 직접 본다).
+    // 0/N에서 곧장 사라지지 않게 한다(이슈 #198 즉시 게시는 이 진행률을 직접 본다). 대상별
+    // 라이브 상태(#219): 시작 시 "처리 중"으로 표시하고, 결과가 나오면 성공/실패로 교체한다.
     let post_reports = if runs_post(plan) && item_present(app, id) {
         let jobs = plan_to_post_jobs(plan);
         if jobs.is_empty() {
             Vec::new()
         } else {
-            run_post_jobs_with_progress(&jobs, |done| {
+            set_queue_items(app, id, running_post_items(plan));
+            let reports = run_post_jobs_with_progress(&jobs, |done| {
                 update_progress(app, id, done as u32, est);
             })
-            .await
+            .await;
+            set_queue_items(app, id, build_items(plan, &reports, &[], &[], &[], &[]));
+            reports
         }
     } else {
         Vec::new()
@@ -311,33 +315,102 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) {
 
     // 댓글도 1건이 끝날 때마다 진행률을 올린다(글 완료분 위에 누적). 안티스팸 간격은 보존된다.
     let comment_reports = if comment_jobs.is_empty() {
+        // 댓글 작업이 없어도 글목록 조회 실패 항목은 표시한다(조용한 누락 방지).
+        if !comment_fetch_failures.is_empty() {
+            set_queue_items(
+                app,
+                id,
+                build_items(plan, &post_reports, &[], &comment_fetch_failures, &[], &[]),
+            );
+        }
         Vec::new()
     } else {
+        // 글 확정분 + 댓글 "처리 중" 표시.
+        let mut pre = build_items(plan, &post_reports, &[], &comment_fetch_failures, &[], &[]);
+        pre.extend(running_comment_items(plan, &comment_jobs));
+        set_queue_items(app, id, pre);
         let reports = run_comment_jobs_with_progress(&comment_jobs, |c| {
             update_progress(app, id, posts_done + c as u32, total);
         })
         .await;
         done += reports.len() as u32;
-        update_progress(app, id, done, total);
+        set_progress_and_items(
+            app,
+            id,
+            done,
+            total,
+            build_items(
+                plan,
+                &post_reports,
+                &reports,
+                &comment_fetch_failures,
+                &[],
+                &[],
+            ),
+        );
         reports
     };
 
-    // 4. 종목토론방 게시(계정별 Chrome, 본문은 평문 = plan.body_text). 진행 중 단계는
-    // 끝까지 두되, 진입 전 협조적 취소를 확인한다.
+    // 4. 종목토론방 게시(계정별 Chrome, 본문은 평문 = plan.body_text). 종목 1건이 끝날
+    // 때마다(60초 대기를 사이에 둔다) 진행률·라이브 상태를 갱신해, 0/N에 한참 멈춰 보이지
+    // 않게 한다(#219). 진행 중 단계는 끝까지 두되, 진입 전 협조적 취소를 확인한다.
     let forum_outcomes = if !plan.forum.is_empty() && item_present(app, id) {
-        let outcomes = run_forum_targets(app, plan, id).await;
+        let base = build_items(
+            plan,
+            &post_reports,
+            &comment_reports,
+            &comment_fetch_failures,
+            &[],
+            &[],
+        );
+        let outcomes = run_forum_targets(app, plan, id, base, done, total).await;
         done += outcomes.len() as u32;
-        update_progress(app, id, done, total);
+        set_progress_and_items(
+            app,
+            id,
+            done,
+            total,
+            build_items(
+                plan,
+                &post_reports,
+                &comment_reports,
+                &comment_fetch_failures,
+                &outcomes,
+                &[],
+            ),
+        );
         outcomes
     } else {
         Vec::new()
     };
 
-    // 5. 밴드 게시(band.us, 순수 HTTP). 진행 중 단계는 끝까지 두되 진입 전 협조적 취소를 확인한다.
+    // 5. 밴드 게시(band.us, 순수 HTTP). 대상 1건이 끝날 때마다 진행률·라이브 상태를 갱신한다
+    // (#219). 진행 중 단계는 끝까지 두되 진입 전 협조적 취소를 확인한다.
     let band_outcomes = if !plan.band.is_empty() && item_present(app, id) {
-        let outcomes = run_band_targets(app, plan, id).await;
+        let base = build_items(
+            plan,
+            &post_reports,
+            &comment_reports,
+            &comment_fetch_failures,
+            &forum_outcomes,
+            &[],
+        );
+        let outcomes = run_band_targets(app, plan, id, base, done, total).await;
         done += outcomes.len() as u32;
-        update_progress(app, id, done, total);
+        set_progress_and_items(
+            app,
+            id,
+            done,
+            total,
+            build_items(
+                plan,
+                &post_reports,
+                &comment_reports,
+                &comment_fetch_failures,
+                &forum_outcomes,
+                &outcomes,
+            ),
+        );
         outcomes
     } else {
         Vec::new()
@@ -481,51 +554,108 @@ async fn run_forum_targets<R: Runtime>(
     app: &AppHandle<R>,
     plan: &PublishPlan,
     id: &str,
+    base_items: Vec<BatchItem>,
+    base_done: u32,
+    total: u32,
 ) -> Vec<ForumOutcome> {
+    // 모든 종목을 "대기 중"으로 미리 깔고(스켈레톤), 종목이 시작/완료될 때마다 그 자리만
+    // 진행 중→완료/실패로 바꾼다(로그인 화면과 동일 UX, #219 — 완료된 것만 보이던 문제 해결).
+    // blocking 스레드의 콜백과 공유하므로 Arc<Mutex>로 들고 다닌다. 인덱스 순서는
+    // plan_to_forum_requests 순서(=skeleton·outcomes 순서)와 일치한다.
+    let forum_live = Arc::new(Mutex::new(forum_skeleton_items(plan)));
+    {
+        let live = lock_or_poisoned(&forum_live);
+        write_live_phase(app, id, &base_items, &live, base_done, total);
+    }
     let mut outcomes = Vec::new();
+    let mut offset = 0usize;
     for req in plan_to_forum_requests(plan) {
         // 계정별 Chrome 게시는 비싸고 비가역적이라, 시작 전마다 취소를 확인해 멈춘다.
         if !item_present(app, id) {
             break;
         }
         let account_id = req.account_id.clone();
+        let n_stocks = req.stocks.len();
         // spawn_blocking 태스크가 패닉(JoinError)하면 결과를 잃으므로, 합성 실패에 쓸
         // 종목 목록을 미리 복제해 둔다(누락 대신 명시 실패).
         let stocks_for_panic = req.stocks.clone();
         let app_for_job = app.clone();
+        // 종목 시작/완료마다(blocking 스레드) 스켈레톤의 해당 칸만 바꾸기 위한 캡처들.
+        let off = offset;
+        let app_start = app.clone();
+        let id_start = id.to_owned();
+        let base_start = base_items.clone();
+        let live_start = Arc::clone(&forum_live);
+        let app_done = app.clone();
+        let id_done = id.to_owned();
+        let base_done_items = base_items.clone();
+        let account_done = account_id.clone();
+        let live_done = Arc::clone(&forum_live);
         let results = match tauri::async_runtime::spawn_blocking(move || {
+            // 종목 게시 시작 직전: 그 종목을 "게시 중"으로(진행률은 그대로 — 완료분만 센다).
+            let on_start = move |local: usize| {
+                let mut live = lock_or_poisoned(&live_start);
+                if let Some(it) = live.get_mut(off + local) {
+                    it.status = BatchItemStatus::Running;
+                    it.msg = "게시 중…".to_owned();
+                }
+                write_live_phase(&app_start, &id_start, &base_start, &live, base_done, total);
+            };
+            // 종목 완료 직후: 그 자리만 성공/실패로 교체(60초 대기 전에 갱신).
+            let on_result = move |local: usize, result: &ForumPublishResult| {
+                let mut live = lock_or_poisoned(&live_done);
+                if let Some(slot) = live.get_mut(off + local) {
+                    *slot = forum_result_to_item(&account_done, result);
+                }
+                write_live_phase(
+                    &app_done,
+                    &id_done,
+                    &base_done_items,
+                    &live,
+                    base_done,
+                    total,
+                );
+            };
             match crate::auth::launch_debug_chrome(true) {
                 Ok(chrome) => {
                     let mut req = req;
                     // host는 plan_to_forum_requests에서 이미 127.0.0.1; 포트만 띄운 Chrome 값으로.
                     req.port = chrome.port;
-                    let results = run_forum_publish(req, app_for_job);
+                    let results = run_forum_publish(req, app_for_job, on_start, on_result);
                     drop(chrome);
                     results
                 }
-                // Chrome 기동 실패 → 이 계정 종목 전부 실패로 기록(누락 대신 명시).
-                Err(error) => req
-                    .stocks
-                    .iter()
-                    .map(|s| {
-                        // 인프라 실패(엔진 진입 전)는 backtrace가 없어 메시지를 trace로도 쓴다.
-                        let message = format!("Chrome 실행 실패: {error}");
-                        ForumPublishResult {
-                            code: s.code.clone(),
-                            name: s.name.clone(),
-                            ok: false,
-                            trace: Some(message.clone()),
-                            message,
-                            posted: None,
-                        }
-                    })
-                    .collect(),
+                // Chrome 기동 실패 → 이 계정 종목 전부 실패로 기록(누락 대신 명시). on_result로
+                // 흘려 그 자리들을 즉시 실패로 바꾼다(다음 계정까지 대기 중으로 멈춰 보이지 않게).
+                Err(error) => {
+                    // 인프라 실패(엔진 진입 전)는 backtrace가 없어 메시지를 trace로도 쓴다.
+                    let synth: Vec<ForumPublishResult> = req
+                        .stocks
+                        .iter()
+                        .map(|s| {
+                            let message = format!("Chrome 실행 실패: {error}");
+                            ForumPublishResult {
+                                code: s.code.clone(),
+                                name: s.name.clone(),
+                                ok: false,
+                                trace: Some(message.clone()),
+                                message,
+                                posted: None,
+                            }
+                        })
+                        .collect();
+                    for (i, result) in synth.iter().enumerate() {
+                        on_result(i, result);
+                    }
+                    synth
+                }
             }
         })
         .await
         {
             Ok(results) => results,
             // 블로킹 태스크 패닉 → 빈 결과로 조용히 누락하지 않고 그 계정 종목 전부 실패로 합성.
+            // (이 합성분은 라이브 스켈레톤엔 못 반영되지만, execute_item의 최종 보정이 채운다.)
             Err(join_error) => stocks_for_panic
                 .iter()
                 .map(|s| {
@@ -547,6 +677,7 @@ async fn run_forum_targets<R: Runtime>(
                 result,
             });
         }
+        offset += n_stocks;
     }
     outcomes
 }
@@ -560,6 +691,9 @@ async fn run_band_targets<R: Runtime>(
     app: &AppHandle<R>,
     plan: &PublishPlan,
     id: &str,
+    base_items: Vec<BatchItem>,
+    base_done: u32,
+    total: u32,
 ) -> Vec<BandOutcome> {
     // 밴드는 종목이 없어 #{링크}만 치환한다(링크값 있으면 그 값, 없으면 빈 문자열).
     let band_link = crate::template_tokens::resolve_link(&plan.link_override, "");
@@ -580,12 +714,22 @@ async fn run_band_targets<R: Runtime>(
     // 밴드에서 result_code=1003("리더 승인 후 등록")을 부르므로, 기존 글에 댓글을 다는
     // band_comment로 간다(즉시게시 runNow의 댓글 전용 경로와 동일).
     let comment_only = matches!(plan.kind, ModeValue::Comment);
+    // 모든 밴드를 "대기 중"으로 미리 깔고(스켈레톤), 대상이 시작/완료될 때마다 그 자리만
+    // 게시 중→완료/실패로 바꾼다(종토방·로그인과 동일 UX, #219).
+    let mut live = band_skeleton_items(plan);
+    write_live_phase(app, id, &base_items, &live, base_done, total);
     let mut outcomes = Vec::new();
-    for t in &plan.band {
+    for (i, t) in plan.band.iter().enumerate() {
         // 밴드 게시도 비가역적이라, 시작 전마다 취소를 확인해 멈춘다(forum과 동일).
         if !item_present(app, id) {
             break;
         }
+        // 게시 시작 표시(진행률은 완료분만 세므로 그대로).
+        if let Some(it) = live.get_mut(i) {
+            it.status = BatchItemStatus::Running;
+            it.msg = "게시 중…".to_owned();
+        }
+        write_live_phase(app, id, &base_items, &live, base_done, total);
         let result = if comment_only {
             // 대상 spec에서 정렬·개수를 꺼낸다. 밴드는 url 미지원이라 latest로 편다.
             // spec이 없으면(비정상) 최신글 1개 기본 — 어떤 경우에도 새 글은 쓰지 않는다.
@@ -608,11 +752,17 @@ async fn run_band_targets<R: Runtime>(
                 .await
                 .map(BandJobResult::Published)
         };
-        outcomes.push(BandOutcome {
+        let outcome = BandOutcome {
             account_id: t.account_id.clone(),
             band_name: t.name.clone(),
             result,
-        });
+        };
+        // 대상 1건 완료마다 그 자리만 성공/실패로 교체하고 진행률·라이브 상태를 갱신한다(#219).
+        if let Some(slot) = live.get_mut(i) {
+            *slot = band_outcome_to_item(&outcome);
+        }
+        write_live_phase(app, id, &base_items, &live, base_done, total);
+        outcomes.push(outcome);
     }
     outcomes
 }
@@ -626,6 +776,27 @@ fn resolve_login_status(
     match result {
         Ok(res) => (res.status.clone(), res.message.clone(), res.trace.clone()),
         Err(err) => (AccountStatus::Error, err.to_string(), None),
+    }
+}
+
+/// 로그인 계정 1건의 대상별 라이브 상태(#219). target/login_id 모두 계정 ID를 쓴다(사용자
+/// 본인 계정이라 마스킹 불필요). 완료 로그(LogBatch)는 만들지 않으므로 큐 펼침 전용이다.
+fn login_item(
+    t: &LoginTarget,
+    status: BatchItemStatus,
+    msg: String,
+    trace: Option<String>,
+) -> BatchItem {
+    BatchItem {
+        platform: t.platform.clone(),
+        target: t.account_id.clone(),
+        code: None,
+        board: None,
+        login_id: t.account_id.clone(),
+        status,
+        msg,
+        trace,
+        posted: None,
     }
 }
 
@@ -645,13 +816,22 @@ async fn run_login_targets<R: Runtime>(app: &AppHandle<R>, id: &str, targets: &[
 
     let total = targets.len() as u32;
     update_progress(app, id, 0, total);
+    // 계정별 라이브 상태(#219): 처음엔 모두 "대기 중", 처리 중인 계정은 "로그인 중…",
+    // 끝나면 성공/실패로 교체한다(펼침 시 어느 계정이 진행 중인지 보이게).
+    let mut items: Vec<BatchItem> = targets
+        .iter()
+        .map(|t| login_item(t, BatchItemStatus::Waiting, "대기 중".to_owned(), None))
+        .collect();
+    set_queue_items(app, id, items.clone());
     let mut done = 0u32;
     let mut ok = 0u32;
-    for t in targets {
+    for (i, t) in targets.iter().enumerate() {
         // 로그인은 비싸고(브라우저 기동) 비가역적이라 시작 전마다 취소를 확인한다.
         if !item_present(app, id) {
             break;
         }
+        items[i] = login_item(t, BatchItemStatus::Running, "로그인 중…".to_owned(), None);
+        set_queue_items(app, id, items.clone());
         let result = if matches!(t.platform, PlatformId::Band) {
             crate::band_auth::process_band_account(
                 app,
@@ -696,7 +876,8 @@ async fn run_login_targets<R: Runtime>(app: &AppHandle<R>, id: &str, targets: &[
         }
 
         done += 1;
-        update_progress(app, id, done, total);
+        items[i] = login_item(t, status_of(succeeded), msg.clone(), trace.clone());
+        set_progress_and_items(app, id, done, total, items.clone());
     }
 
     // 완료 시 OS 토스트로 결과를 통지한다(게시 완료 토스트와 동일 UX, #163/#210). 트레이
@@ -783,6 +964,11 @@ fn naver_code_reason(api_code: &str) -> Option<&'static str> {
         "9999" => Some("네이버에서 요청을 거부했습니다"),
         // 0001: 네이버가 "알 수 없는 오류"로만 답하는 일반 코드 — 잘못된 댓글 대상에서 관측됨.
         "0001" => Some("댓글 대상을 찾을 수 없거나 잘못된 요청입니다"),
+        // 10004: "IP check failure" — 로그인한 IP와 게시 요청 IP가 달라 네이버가 거부.
+        // 원문("NaverUser 인증 실패 - loginStat…")이 혼란스러워 행동 가능한 문구로 덮어쓴다.
+        "10004" => Some(
+            "로그인한 IP와 게시 IP가 달라 인증에 실패했습니다. 해당 계정을 다시 로그인해 주세요",
+        ),
         _ => None,
     }
 }
@@ -954,11 +1140,386 @@ fn trace_snippet(s: &str) -> String {
     }
 }
 
+/// 카페 ID(문자열) → 표시 이름. plan에 동결된 이름을 써서 로그/큐 표시에 ID 대신 카페 명을
+/// 보여준다. 이름이 비었거나 매칭이 없으면 ID로 폴백한다.
+fn cafe_label(plan: &PublishPlan, cafe: &str) -> String {
+    plan.naver
+        .iter()
+        .find(|t| t.cafe == cafe && !t.cafe_name.is_empty())
+        .map_or_else(|| cafe.to_owned(), |t| t.cafe_name.clone())
+}
+
+/// 카페 글 게시 결과 1건 → BatchItem.
+/// 카페 글/댓글의 읽기 URL을 cafe_id+article_id로 조립한다(글쓰기 엔드포인트와 동일
+/// 계열의 `ca-fe/cafes/{cafeId}/articles/{articleId}`). 완료 로그·게시 큐의
+/// "올라간 글 열기"가 이 URL을 외부 브라우저로 연다.
+fn cafe_article_url(cafe_id: u64, article_id: u64) -> String {
+    format!("https://cafe.naver.com/ca-fe/cafes/{cafe_id}/articles/{article_id}")
+}
+
+fn post_report_to_item(plan: &PublishPlan, r: &JobReport) -> BatchItem {
+    BatchItem {
+        platform: PlatformId::Naver,
+        target: cafe_label(plan, &r.cafe),
+        code: None,
+        board: Some(r.menu_id.to_string()),
+        login_id: r.account_id.clone(),
+        status: status_of(r.success),
+        // msg/status를 같은 기준(success)으로 묶는다 — 실패인데 오류가 비면(불변식
+        // 위반 시) "완료"로 오인되지 않게.
+        msg: if r.success {
+            "글 게시 완료".to_owned()
+        } else {
+            match r.error.as_ref() {
+                Some(e) => format!(
+                    "글 게시 실패 — {}",
+                    failure_reason(&e.code, e.error_data.as_ref().map(|d| &d.cafe))
+                ),
+                None => "글 게시 실패".to_owned(),
+            }
+        },
+        trace: r
+            .error
+            .as_ref()
+            .map(|e| failure_trace(&e.code, &e.message, e.error_data.as_ref().map(|d| &d.cafe))),
+        // 성공 시 등록 결과(cafe_id/article_id)로 글 URL을 채워 "올라간 글 열기"를 띄운다.
+        // 카페 엔진은 제목/본문을 결과로 돌려주지 않아 url만 보존한다(#219).
+        posted: r.result.as_ref().map(|res| PostedContent {
+            url: Some(cafe_article_url(res.cafe_id, res.article_id)),
+            ..Default::default()
+        }),
+    }
+}
+
+/// 카페 댓글 게시 결과 1건 → BatchItem.
+fn comment_report_to_item(plan: &PublishPlan, r: &CommentJobReport) -> BatchItem {
+    BatchItem {
+        platform: PlatformId::Naver,
+        target: cafe_label(plan, &r.cafe_id.to_string()),
+        code: None,
+        board: None,
+        login_id: r.account_id.clone(),
+        status: status_of(r.success),
+        msg: if r.success {
+            "댓글 게시 완료".to_owned()
+        } else {
+            match r.error.as_ref() {
+                Some(e) => format!(
+                    "댓글 게시 실패 — {}",
+                    failure_reason(&e.code, e.error_data.as_ref().map(|d| &d.cafe))
+                ),
+                None => "댓글 게시 실패".to_owned(),
+            }
+        },
+        trace: r
+            .error
+            .as_ref()
+            .map(|e| failure_trace(&e.code, &e.message, e.error_data.as_ref().map(|d| &d.cafe))),
+        // 성공 시 댓글을 단 대상 글로 이동할 수 있게 그 글 URL을 채운다(#219).
+        posted: r.success.then(|| PostedContent {
+            url: Some(cafe_article_url(r.cafe_id, r.article_id)),
+            ..Default::default()
+        }),
+    }
+}
+
+/// 글목록 조회 실패로 댓글을 시도조차 못 한 대상 1건 → 실패 BatchItem.
+fn fetch_failure_to_item(plan: &PublishPlan, f: &CommentFetchFailure) -> BatchItem {
+    BatchItem {
+        platform: PlatformId::Naver,
+        target: cafe_label(plan, &f.cafe_id.to_string()),
+        code: None,
+        board: None,
+        login_id: f.account_id.clone(),
+        status: BatchItemStatus::Fail,
+        // 카페 글/댓글과 동일: 메인=친절 사유, 자세히=개발자 trace(#199).
+        msg: format!(
+            "댓글 대상 글 조회 실패 — {}",
+            failure_reason(&f.code, f.cafe.as_ref())
+        ),
+        trace: Some(failure_trace(&f.code, &f.message, f.cafe.as_ref())),
+        posted: None,
+    }
+}
+
+/// 종목토론방 게시 결과 1건(계정+종목별) → BatchItem. 라이브 갱신과 최종 로그가 공유한다.
+fn forum_result_to_item(account_id: &str, result: &ForumPublishResult) -> BatchItem {
+    BatchItem {
+        platform: PlatformId::Forum,
+        target: result.name.clone(),
+        code: Some(result.code.clone()),
+        board: None,
+        login_id: account_id.to_owned(),
+        status: status_of(result.ok),
+        // 성공은 엔진 문구("게시 완료"), 실패는 일반 친절 문구. 캡처된 호출 스택은
+        // ForumPublishResult.trace(자세히 보기)로 분리해 메인 라인엔 안 싣는다(#199).
+        msg: if result.ok {
+            result.message.clone()
+        } else {
+            "종목토론방 게시에 실패했습니다".to_owned()
+        },
+        trace: result.trace.clone(),
+        // master #218: 종목별 게시 내용(제목/본문/댓글/URL)을 완료 로그·라이브 표시에 보존한다.
+        posted: result.posted.clone(),
+    }
+}
+
+fn forum_outcome_to_item(o: &ForumOutcome) -> BatchItem {
+    forum_result_to_item(&o.account_id, &o.result)
+}
+
+/// 종목토론방 전체 종목을 "대기 중" BatchItem으로(라이브 스켈레톤). 순서는
+/// `plan_to_forum_requests`(계정 그룹) × 종목 순서 = `outcomes`/콜백 인덱스 순서와 일치한다.
+fn forum_skeleton_items(plan: &PublishPlan) -> Vec<BatchItem> {
+    let mut out = Vec::new();
+    for req in plan_to_forum_requests(plan) {
+        for s in &req.stocks {
+            out.push(BatchItem {
+                platform: PlatformId::Forum,
+                target: s.name.clone(),
+                code: Some(s.code.clone()),
+                board: None,
+                login_id: req.account_id.clone(),
+                status: BatchItemStatus::Waiting,
+                msg: "대기 중".to_owned(),
+                trace: None,
+                posted: None,
+            });
+        }
+    }
+    out
+}
+
+/// 밴드 게시 결과 1건 → BatchItem.
+fn band_outcome_to_item(o: &BandOutcome) -> BatchItem {
+    // post/both는 새 글(+댓글), comment 전용은 기존 글 댓글. 둘 다 부분 실패를 드러낸다
+    // (성공분이 모자라면 성공으로 묻지 않는다). 메인=친절 문구, 자세히=기술 trace로 나눈다
+    // (실패만 trace; 부분 실패도 성공/시도 수를 trace로 남긴다)(#199).
+    let (status, msg, trace, posted) = match &o.result {
+        Ok(BandJobResult::Published(out)) => {
+            let ok = out.comment_total == 0 || out.commented_count >= out.comment_total;
+            let msg = if out.comment_total > 0 {
+                format!(
+                    "글·댓글 {}/{}개 게시 완료",
+                    out.commented_count, out.comment_total
+                )
+            } else {
+                "글 게시 완료".to_owned()
+            };
+            let trace = (!ok).then(|| {
+                format!(
+                    "BAND_PARTIAL · 댓글 {}/{}건 게시",
+                    out.commented_count, out.comment_total
+                )
+            });
+            // 글은 올라갔으므로(댓글 부분 실패여도) 밴드가 준 글 URL을 채워 "올라간 글 열기"를
+            // 띄운다. 댓글 전용 모드(Commented)는 여러 글 대상이라 단일 URL이 없어 비운다(#219).
+            let posted = Some(PostedContent {
+                url: Some(out.web_url.clone()),
+                ..Default::default()
+            });
+            (status_of(ok), msg, trace, posted)
+        }
+        Ok(BandJobResult::Commented(out)) => {
+            // 한 건도 못 달면(대상 글 없음/전부 실패) 실패로 둔다(즉시게시 판정과 동일).
+            let ok = out.commented_count > 0;
+            let msg = if out.target_count > 0 {
+                format!(
+                    "댓글 {}/{}개 게시 완료",
+                    out.commented_count, out.target_count
+                )
+            } else {
+                "댓글 대상 글 없음".to_owned()
+            };
+            let trace = if ok {
+                None
+            } else if out.target_count > 0 {
+                Some(format!(
+                    "BAND_COMMENT_FAIL · 대상 {}건 중 0건 게시",
+                    out.target_count
+                ))
+            } else {
+                Some("BAND_NO_TARGET · 댓글 대상 글을 찾지 못함".to_owned())
+            };
+            (status_of(ok), msg, trace, None)
+        }
+        Err(e) => (
+            BatchItemStatus::Fail,
+            band_failure_reason(e),
+            Some(band_failure_trace(e)),
+            None,
+        ),
+    };
+    BatchItem {
+        platform: PlatformId::Band,
+        target: o.band_name.clone(),
+        code: None,
+        board: None,
+        login_id: o.account_id.clone(),
+        status,
+        msg,
+        trace,
+        posted,
+    }
+}
+
+/// 밴드 전체 대상을 "대기 중" BatchItem으로(라이브 스켈레톤). 순서는 `plan.band` =
+/// `run_band_targets` 루프 순서와 일치해, 인덱스로 그 자리만 갱신할 수 있다.
+fn band_skeleton_items(plan: &PublishPlan) -> Vec<BatchItem> {
+    plan.band
+        .iter()
+        .map(|t| BatchItem {
+            platform: PlatformId::Band,
+            target: t.name.clone(),
+            code: None,
+            board: None,
+            login_id: t.account_id.clone(),
+            status: BatchItemStatus::Waiting,
+            msg: "대기 중".to_owned(),
+            trace: None,
+            posted: None,
+        })
+        .collect()
+}
+
+/// 누적된 플랫폼별 결과를 대상별 BatchItem 목록으로 합친다(라이브 큐 상태·최종 알림 로그
+/// 공용). 순서는 글→댓글→조회 실패→종토방→밴드로 고정한다.
+fn build_items(
+    plan: &PublishPlan,
+    post_reports: &[JobReport],
+    comment_reports: &[CommentJobReport],
+    comment_fetch_failures: &[CommentFetchFailure],
+    forum_outcomes: &[ForumOutcome],
+    band_outcomes: &[BandOutcome],
+) -> Vec<BatchItem> {
+    let mut items = Vec::new();
+    items.extend(post_reports.iter().map(|r| post_report_to_item(plan, r)));
+    items.extend(
+        comment_reports
+            .iter()
+            .map(|r| comment_report_to_item(plan, r)),
+    );
+    items.extend(
+        comment_fetch_failures
+            .iter()
+            .map(|f| fetch_failure_to_item(plan, f)),
+    );
+    items.extend(forum_outcomes.iter().map(forum_outcome_to_item));
+    items.extend(band_outcomes.iter().map(band_outcome_to_item));
+    items
+}
+
+/// 카페 글 게시 대상을 "처리 중" 상태의 BatchItem으로(펼침 시 진행 중 표시). 실제 결과가
+/// 나오면 `post_report_to_item` 결과로 교체된다.
+fn running_post_items(plan: &PublishPlan) -> Vec<BatchItem> {
+    plan.naver
+        .iter()
+        .map(|t| BatchItem {
+            platform: PlatformId::Naver,
+            target: if t.cafe_name.is_empty() {
+                t.cafe.clone()
+            } else {
+                t.cafe_name.clone()
+            },
+            code: None,
+            board: Some(t.menu_id.to_string()),
+            login_id: t.account_id.clone(),
+            status: BatchItemStatus::Running,
+            msg: "글 게시 중…".to_owned(),
+            trace: None,
+            posted: None,
+        })
+        .collect()
+}
+
+/// 카페 댓글 작업을 "처리 중" 상태의 BatchItem으로. 실제 결과가 나오면 교체된다.
+fn running_comment_items(plan: &PublishPlan, jobs: &[CommentJob]) -> Vec<BatchItem> {
+    jobs.iter()
+        .map(|j| BatchItem {
+            platform: PlatformId::Naver,
+            target: cafe_label(plan, &j.cafe_id.to_string()),
+            code: None,
+            board: None,
+            login_id: j.account_id.clone(),
+            status: BatchItemStatus::Running,
+            msg: "댓글 게시 중…".to_owned(),
+            trace: None,
+            posted: None,
+        })
+        .collect()
+}
+
+/// 큐 아이템의 대상별 라이브 상태(items)만 교체한다(진행률은 유지).
+fn set_queue_items<R: Runtime>(app: &AppHandle<R>, id: &str, items: Vec<BatchItem>) {
+    app.state::<JsonStore<QueueNowItem>>()
+        .mutate(|list| apply_queue_items(list, id, items));
+}
+
+fn apply_queue_items(
+    mut list: Vec<QueueNowItem>,
+    id: &str,
+    items: Vec<BatchItem>,
+) -> Vec<QueueNowItem> {
+    if let Some(it) = list.iter_mut().find(|i| i.id == id) {
+        it.items = items;
+    }
+    list
+}
+
+/// 진행률 카운트와 대상별 라이브 상태를 한 번에 갱신한다(대상 1건 완료 지점에서 사용).
+fn set_progress_and_items<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    done: u32,
+    total: u32,
+    items: Vec<BatchItem>,
+) {
+    app.state::<JsonStore<QueueNowItem>>()
+        .mutate(|list| apply_progress_and_items(list, id, done, total, items));
+}
+
+fn apply_progress_and_items(
+    mut list: Vec<QueueNowItem>,
+    id: &str,
+    done: u32,
+    total: u32,
+    items: Vec<BatchItem>,
+) -> Vec<QueueNowItem> {
+    if let Some(it) = list.iter_mut().find(|i| i.id == id) {
+        it.progress = Some((done, total));
+        it.items = items;
+    }
+    list
+}
+
+/// 뮤텍스가 poison돼도(다른 스레드 패닉) 라이브 상태 갱신은 계속한다 — 진행률·표시 데이터일
+/// 뿐이라 오염된 값을 그대로 이어 써도 안전하다.
+fn lock_or_poisoned<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// 종토방/밴드 라이브 스켈레톤(`live`)을 base 항목 뒤에 이어 붙여 큐 아이템에 반영한다.
+/// 진행률 done은 base_done + (성공/실패로 확정된 칸 수)로 잡아, "진행 중"은 카운트하지 않는다.
+fn write_live_phase<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    base_items: &[BatchItem],
+    live: &[BatchItem],
+    base_done: u32,
+    total: u32,
+) {
+    let resolved = live
+        .iter()
+        .filter(|i| matches!(i.status, BatchItemStatus::Success | BatchItemStatus::Fail))
+        .count() as u32;
+    let mut items = base_items.to_vec();
+    items.extend(live.iter().cloned());
+    set_progress_and_items(app, id, base_done + resolved, total, items);
+}
+
 /// 카페 글·댓글·종목토론방·밴드 실행 결과를 알림 배치(`LogBatch`) 한 건으로 묶는다.
+/// 대상별 항목(`items`)은 `build_items`로 만들어 라이브 큐 상태와 동일 매핑을 공유한다.
 /// 본문/댓글 스냅샷은 실제 그 작업을 돌린 모드일 때만 남긴다(즉시게시 forum 경로와 동일).
-// 플랫폼별 결과 슬라이스(글/댓글/forum/band)와 조회 실패·시각·seq를 그대로 받는다.
-// 플랫폼이 늘며 인자가 7개를 넘지만, 한 곳에서 LogBatch로 합치는 평탄한 빌더라 묶음
-// 구조체로 감싸기보다 인자로 두는 편이 읽기 쉽다.
 #[allow(clippy::too_many_arguments)]
 fn build_log_batch(
     plan: &PublishPlan,
@@ -970,181 +1531,14 @@ fn build_log_batch(
     at: i64,
     seq: u64,
 ) -> LogBatch {
-    use std::collections::HashMap;
-
-    // 카페 ID(문자열) → 표시 이름. plan에 동결된 이름을 써서 로그에 ID 대신 카페 명을
-    // 보여준다. 이름이 비었거나 매칭이 없으면 ID로 폴백한다.
-    let cafe_names: HashMap<&str, &str> = plan
-        .naver
-        .iter()
-        .filter(|t| !t.cafe_name.is_empty())
-        .map(|t| (t.cafe.as_str(), t.cafe_name.as_str()))
-        .collect();
-    let cafe_label = |id: &str| -> String {
-        cafe_names
-            .get(id)
-            .map_or_else(|| id.to_owned(), |n| n.to_string())
-    };
-
-    let mut items = Vec::new();
-
-    for r in post_reports {
-        items.push(BatchItem {
-            platform: PlatformId::Naver,
-            target: cafe_label(&r.cafe),
-            code: None,
-            board: Some(r.menu_id.to_string()),
-            login_id: r.account_id.clone(),
-            status: status_of(r.success),
-            // msg/status를 같은 기준(success)으로 묶는다 — 실패인데 오류가 비면(불변식
-            // 위반 시) "완료"로 오인되지 않게.
-            msg: if r.success {
-                "글 게시 완료".to_owned()
-            } else {
-                match r.error.as_ref() {
-                    Some(e) => format!(
-                        "글 게시 실패 — {}",
-                        failure_reason(&e.code, e.error_data.as_ref().map(|d| &d.cafe))
-                    ),
-                    None => "글 게시 실패".to_owned(),
-                }
-            },
-            trace: r.error.as_ref().map(|e| {
-                failure_trace(&e.code, &e.message, e.error_data.as_ref().map(|d| &d.cafe))
-            }),
-            posted: None,
-        });
-    }
-
-    for r in comment_reports {
-        items.push(BatchItem {
-            platform: PlatformId::Naver,
-            target: cafe_label(&r.cafe_id.to_string()),
-            code: None,
-            board: None,
-            login_id: r.account_id.clone(),
-            status: status_of(r.success),
-            msg: if r.success {
-                "댓글 게시 완료".to_owned()
-            } else {
-                match r.error.as_ref() {
-                    Some(e) => format!(
-                        "댓글 게시 실패 — {}",
-                        failure_reason(&e.code, e.error_data.as_ref().map(|d| &d.cafe))
-                    ),
-                    None => "댓글 게시 실패".to_owned(),
-                }
-            },
-            trace: r.error.as_ref().map(|e| {
-                failure_trace(&e.code, &e.message, e.error_data.as_ref().map(|d| &d.cafe))
-            }),
-            posted: None,
-        });
-    }
-
-    // 글목록 조회 실패로 댓글을 시도조차 못 한 대상 — 조용히 빼지 않고 실패로 남긴다.
-    for f in comment_fetch_failures {
-        items.push(BatchItem {
-            platform: PlatformId::Naver,
-            target: cafe_label(&f.cafe_id.to_string()),
-            code: None,
-            board: None,
-            login_id: f.account_id.clone(),
-            status: BatchItemStatus::Fail,
-            // 카페 글/댓글과 동일: 메인=친절 사유, 자세히=개발자 trace(#199).
-            msg: format!(
-                "댓글 대상 글 조회 실패 — {}",
-                failure_reason(&f.code, f.cafe.as_ref())
-            ),
-            trace: Some(failure_trace(&f.code, &f.message, f.cafe.as_ref())),
-            posted: None,
-        });
-    }
-
-    for o in forum_outcomes {
-        items.push(BatchItem {
-            platform: PlatformId::Forum,
-            target: o.result.name.clone(),
-            code: Some(o.result.code.clone()),
-            board: None,
-            login_id: o.account_id.clone(),
-            status: status_of(o.result.ok),
-            // 성공은 엔진 문구("게시 완료"), 실패는 일반 친절 문구. 캡처된 호출 스택은
-            // ForumPublishResult.trace(자세히 보기)로 분리해 메인 라인엔 안 싣는다(#199).
-            msg: if o.result.ok {
-                o.result.message.clone()
-            } else {
-                "종목토론방 게시에 실패했습니다".to_owned()
-            },
-            trace: o.result.trace.clone(),
-            posted: o.result.posted.clone(),
-        });
-    }
-
-    for o in band_outcomes {
-        // post/both는 새 글(+댓글), comment 전용은 기존 글 댓글. 둘 다 부분 실패를 드러낸다
-        // (성공분이 모자라면 성공으로 묻지 않는다). 메인=친절 문구, 자세히=기술 trace로 나눈다
-        // (실패만 trace; 부분 실패도 성공/시도 수를 trace로 남긴다)(#199).
-        let (status, msg, trace) = match &o.result {
-            Ok(BandJobResult::Published(out)) => {
-                let ok = out.comment_total == 0 || out.commented_count >= out.comment_total;
-                let msg = if out.comment_total > 0 {
-                    format!(
-                        "글·댓글 {}/{}개 게시 완료",
-                        out.commented_count, out.comment_total
-                    )
-                } else {
-                    "글 게시 완료".to_owned()
-                };
-                let trace = (!ok).then(|| {
-                    format!(
-                        "BAND_PARTIAL · 댓글 {}/{}건 게시",
-                        out.commented_count, out.comment_total
-                    )
-                });
-                (status_of(ok), msg, trace)
-            }
-            Ok(BandJobResult::Commented(out)) => {
-                // 한 건도 못 달면(대상 글 없음/전부 실패) 실패로 둔다(즉시게시 판정과 동일).
-                let ok = out.commented_count > 0;
-                let msg = if out.target_count > 0 {
-                    format!(
-                        "댓글 {}/{}개 게시 완료",
-                        out.commented_count, out.target_count
-                    )
-                } else {
-                    "댓글 대상 글 없음".to_owned()
-                };
-                let trace = if ok {
-                    None
-                } else if out.target_count > 0 {
-                    Some(format!(
-                        "BAND_COMMENT_FAIL · 대상 {}건 중 0건 게시",
-                        out.target_count
-                    ))
-                } else {
-                    Some("BAND_NO_TARGET · 댓글 대상 글을 찾지 못함".to_owned())
-                };
-                (status_of(ok), msg, trace)
-            }
-            Err(e) => (
-                BatchItemStatus::Fail,
-                band_failure_reason(e),
-                Some(band_failure_trace(e)),
-            ),
-        };
-        items.push(BatchItem {
-            platform: PlatformId::Band,
-            target: o.band_name.clone(),
-            code: None,
-            board: None,
-            login_id: o.account_id.clone(),
-            status,
-            msg,
-            trace,
-            posted: None,
-        });
-    }
+    let items = build_items(
+        plan,
+        post_reports,
+        comment_reports,
+        comment_fetch_failures,
+        forum_outcomes,
+        band_outcomes,
+    );
 
     LogBatch {
         // 큐 경로 전용 prefix(`lb-q-`): lib.rs forum 즉시게시의 `lb-` 시퀀스와 별도
@@ -1385,6 +1779,7 @@ mod tests {
             progress: None,
             locs: vec![],
             plan: p,
+            items: Vec::new(),
         }
     }
 
@@ -1598,6 +1993,137 @@ mod tests {
     fn set_progress_value_writes_done_and_total() {
         let next = set_progress_value(vec![now_item("a", QueueState::Running, None)], "a", 2, 3);
         assert_eq!(next[0].progress, Some((2, 3)));
+    }
+
+    fn batch_item(target: &str, status: BatchItemStatus) -> BatchItem {
+        BatchItem {
+            platform: PlatformId::Naver,
+            target: target.into(),
+            code: None,
+            board: None,
+            login_id: "u0".into(),
+            status,
+            msg: "m".into(),
+            trace: None,
+            posted: None,
+        }
+    }
+
+    #[test]
+    fn apply_queue_items_sets_items_on_matching_id_only() {
+        let items = vec![
+            now_item("a", QueueState::Running, None),
+            now_item("b", QueueState::Waiting, None),
+        ];
+        let next = apply_queue_items(
+            items,
+            "a",
+            vec![batch_item("카페", BatchItemStatus::Running)],
+        );
+        assert_eq!(next[0].items.len(), 1);
+        assert_eq!(next[0].items[0].status, BatchItemStatus::Running);
+        assert!(next[1].items.is_empty(), "다른 아이템은 건드리지 않는다");
+    }
+
+    #[test]
+    fn apply_progress_and_items_sets_progress_and_items_together() {
+        let items = vec![now_item("a", QueueState::Running, None)];
+        let next = apply_progress_and_items(
+            items,
+            "a",
+            1,
+            2,
+            vec![batch_item("삼성전자", BatchItemStatus::Success)],
+        );
+        assert_eq!(next[0].progress, Some((1, 2)));
+        assert_eq!(next[0].items.len(), 1);
+        assert_eq!(next[0].items[0].target, "삼성전자");
+    }
+
+    #[test]
+    fn running_post_items_marks_each_naver_target_running() {
+        let p = plan(
+            ModeValue::Post,
+            vec![naver_target("u0"), naver_target("u1")],
+        );
+        let items = running_post_items(&p);
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|i| i.status == BatchItemStatus::Running));
+        // cafe_name(동결 표시 이름)을 대상명으로 쓰고, board=menu_id.
+        assert_eq!(items[0].target, "테스트카페");
+        assert_eq!(items[0].board.as_deref(), Some("7"));
+        assert_eq!(items[0].login_id, "u0");
+    }
+
+    #[test]
+    fn build_items_maps_post_report_with_cafe_name_label() {
+        let p = plan(ModeValue::Post, vec![naver_target("u0")]);
+        let items = build_items(&p, &[post_report("u0", 123, 456)], &[], &[], &[], &[]);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].status, BatchItemStatus::Success);
+        assert_eq!(items[0].target, "테스트카페");
+        assert_eq!(items[0].msg, "글 게시 완료");
+    }
+
+    #[test]
+    fn login_item_maps_platform_account_and_status() {
+        let t = LoginTarget {
+            account_id: "user01".into(),
+            platform: PlatformId::Band,
+            headless: false,
+            use_adb: true,
+            force: true,
+        };
+        let it = login_item(
+            &t,
+            BatchItemStatus::Success,
+            "로그인 성공".into(),
+            Some("tr".into()),
+        );
+        assert_eq!(it.platform, PlatformId::Band);
+        assert_eq!(it.target, "user01");
+        assert_eq!(it.login_id, "user01");
+        assert_eq!(it.status, BatchItemStatus::Success);
+        assert_eq!(it.trace.as_deref(), Some("tr"));
+    }
+
+    #[test]
+    fn forum_skeleton_items_lists_every_stock_as_waiting() {
+        use crate::ipc::queue::ForumTarget;
+        let mut p = plan(ModeValue::Post, vec![]);
+        p.forum = vec![
+            ForumTarget {
+                account_id: "u0".into(),
+                name: "삼성전자".into(),
+                code: "005930".into(),
+            },
+            ForumTarget {
+                account_id: "u0".into(),
+                name: "카카오".into(),
+                code: "035720".into(),
+            },
+        ];
+        let items = forum_skeleton_items(&p);
+        // 완료된 것만이 아니라 모든 종목이 "대기 중"으로 깔린다(#219).
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|i| i.status == BatchItemStatus::Waiting));
+        assert_eq!(items[0].target, "삼성전자");
+        assert_eq!(items[0].code.as_deref(), Some("005930"));
+        assert_eq!(items[0].login_id, "u0");
+    }
+
+    #[test]
+    fn band_skeleton_items_lists_every_band_as_waiting() {
+        let mut p = plan(ModeValue::Post, vec![]);
+        p.band = vec![
+            band_target("u0", "투자밴드", "https://band.us/band/1"),
+            band_target("u1", "정보밴드", "https://band.us/band/2"),
+        ];
+        let items = band_skeleton_items(&p);
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|i| i.status == BatchItemStatus::Waiting));
+        assert_eq!(items[0].target, "투자밴드");
+        assert_eq!(items[1].login_id, "u1");
     }
 
     #[tokio::test]
@@ -1816,6 +2342,23 @@ mod tests {
         );
         assert!(!reason.contains("Page Not Found"));
         assert!(!reason.contains("HTTP"));
+    }
+
+    #[test]
+    fn failure_reason_maps_ip_check_failure_10004_to_relogin_hint() {
+        // 10004(IP check failure): 원문이 한국어를 포함해도(인증 실패) 혼란스러우므로 재로그인
+        // 안내로 덮어쓴다. 원문 loginStat 문자열은 메인 라인에 노출하지 않는다.
+        let cafe = cafe_error(
+            Some(500),
+            Some("10004"),
+            Some("NaverUser 인증 실패 - loginStat : 'Failure-[401:IP check failure]'"),
+        );
+        let reason = failure_reason("REGISTER_HTTP_ERROR", Some(&cafe));
+        assert_eq!(
+            reason,
+            "로그인한 IP와 게시 IP가 달라 인증에 실패했습니다. 해당 계정을 다시 로그인해 주세요 (10004)"
+        );
+        assert!(!reason.contains("loginStat"));
     }
 
     #[test]
@@ -2173,5 +2716,99 @@ mod tests {
             b.items[0].trace.as_deref(),
             Some("ARTICLE_LIST_HTTP_ERROR · HTTP 500 · errorCode -\nlist fetch failed")
         );
+    }
+
+    // #219: 게시 큐/완료 로그의 "올라간 글 열기"가 동작하려면 변환 단계에서 posted.url을
+    // 채워야 한다. 카페 글/댓글·밴드 글이 각각 올바른 URL을 채우는지 검증한다.
+    #[test]
+    fn cafe_post_success_fills_article_url() {
+        let p = plan(ModeValue::Post, vec![naver_target("u1")]);
+        let report = JobReport {
+            account_id: "u1".into(),
+            cafe: "123".into(),
+            menu_id: 7,
+            success: true,
+            result: Some(ArticleRegisterResult {
+                cafe_id: 999,
+                article_id: 42,
+                menu_id: 7,
+            }),
+            error: None,
+        };
+        let item = post_report_to_item(&p, &report);
+        assert_eq!(
+            item.posted.and_then(|c| c.url).as_deref(),
+            Some("https://cafe.naver.com/ca-fe/cafes/999/articles/42")
+        );
+    }
+
+    #[test]
+    fn cafe_post_failure_has_no_url() {
+        let p = plan(ModeValue::Post, vec![naver_target("u1")]);
+        let report = JobReport {
+            account_id: "u1".into(),
+            cafe: "123".into(),
+            menu_id: 7,
+            success: false,
+            result: None,
+            error: None,
+        };
+        let item = post_report_to_item(&p, &report);
+        assert!(item.posted.is_none());
+    }
+
+    #[test]
+    fn cafe_comment_success_fills_target_article_url() {
+        let p = plan(ModeValue::Comment, vec![naver_target("u1")]);
+        let report = CommentJobReport {
+            account_id: "u1".into(),
+            cafe_id: 123,
+            article_id: 55,
+            success: true,
+            result: None,
+            error: None,
+        };
+        let item = comment_report_to_item(&p, &report);
+        assert_eq!(
+            item.posted.and_then(|c| c.url).as_deref(),
+            Some("https://cafe.naver.com/ca-fe/cafes/123/articles/55")
+        );
+    }
+
+    #[test]
+    fn band_published_fills_web_url() {
+        let outcome = BandOutcome {
+            account_id: "u1".into(),
+            band_name: "테스트밴드".into(),
+            result: Ok(BandJobResult::Published(BandPublishOutcome {
+                joined: true,
+                post_no: 7,
+                web_url: "https://band.us/band/100/post/7".into(),
+                commented_count: 0,
+                comment_total: 0,
+                band_name: None,
+            })),
+        };
+        let item = band_outcome_to_item(&outcome);
+        assert_eq!(
+            item.posted.and_then(|c| c.url).as_deref(),
+            Some("https://band.us/band/100/post/7")
+        );
+    }
+
+    #[test]
+    fn band_comment_only_has_no_url() {
+        // 댓글 전용은 여러 글 대상이라 단일 URL이 없어 posted를 비운다.
+        let outcome = BandOutcome {
+            account_id: "u1".into(),
+            band_name: "테스트밴드".into(),
+            result: Ok(BandJobResult::Commented(BandCommentOutcome {
+                target_count: 3,
+                commented_count: 3,
+                band_name: None,
+            })),
+        };
+        let item = band_outcome_to_item(&outcome);
+        assert!(item.posted.is_none());
     }
 }

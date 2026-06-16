@@ -1164,6 +1164,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         kind: doc.kind,
         state: "waiting",
         locs,
+        // 대상별 라이브 상태는 워커가 채운다(적재 시점엔 빈 배열).
+        items: [],
         plan: buildPlan(),
       };
       setFlow("running");

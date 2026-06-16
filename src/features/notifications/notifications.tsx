@@ -54,6 +54,7 @@ export function SubLog({ item }: { item: BatchItem }) {
   const [showPosted, setShowPosted] = useState(false);
   const ok = item.status === "success";
   const fail = item.status === "fail";
+  const waiting = item.status === "waiting";
   const color = statusColor(item.status);
   return (
     <Box
@@ -71,6 +72,8 @@ export function SubLog({ item }: { item: BatchItem }) {
             <Icon.check size={13} />
           ) : fail ? (
             <Icon.x size={13} />
+          ) : waiting ? (
+            <Icon.clock size={13} />
           ) : (
             <Loader size={13} color={color} />
           )}

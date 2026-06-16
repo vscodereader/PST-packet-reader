@@ -36,6 +36,8 @@ export function buildLoginNowItem(
     kind: "post",
     state: "waiting",
     locs: targets.map((t) => ({ p: t.platform, name: t.loginId })),
+    // 대상별 라이브 상태는 워커가 채운다(적재 시점엔 빈 배열). 백엔드도 적재 시 비운다.
+    items: [],
     plan: {
       postId: "",
       kind: "post",
