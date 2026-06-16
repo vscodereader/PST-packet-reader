@@ -175,6 +175,10 @@ pub fn run_naver_discussion_macro(
 
     let (register_button_highlighted, submitted) = match request.target {
         AutomationTarget::Post => {
+            // 글쓰기 전에 종목토론방 프로필(닉네임+소개 2222)을 보장한다. 프로필이 없으면
+            // 글쓰기 토큰 발급(discussion/form)이 404가 난다. 멱등이라 이미 있으면 즉시 통과.
+            let room_url = chrome.current_url()?;
+            packet_client.ensure_profile_intro_setup(&room_url)?;
             if request.submit_after_fill {
                 chrome.submit_post_and_refresh(&packet_client, title, body)?;
                 (false, true)
@@ -243,6 +247,11 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
         request.account_id.as_deref(),
         request.stock.as_ref(),
     )?;
+
+    // 글쓰기 전에 종목토론방 프로필(닉네임+소개 2222)을 보장한다(없으면 글쓰기 form 404).
+    // 멱등이라 이미 있으면 즉시 통과. 글 등록 후 댓글 직전의 셋업 호출은 그대로 둔다.
+    let room_url = chrome.current_url()?;
+    packet_client.ensure_profile_intro_setup(&room_url)?;
 
     let post_url = chrome.submit_post_and_refresh(&packet_client, title, body)?;
     let post_report = AutomationReport {
