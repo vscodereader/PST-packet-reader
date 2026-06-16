@@ -3,6 +3,63 @@
 
 import type { Stock } from "@/shared/data/types";
 
+/** A cafe publish target parsed from a board link — the cafe plus the board
+ * (menu) to post into. `boardType` is resolved later (게시 시점, 쿠키 필요). */
+export interface CafeBoardTarget {
+  cafeId: number;
+  menuId: number;
+}
+
+/**
+ * Parse a naver cafe **board** URL into numeric `cafeId`/`menuId`.
+ *
+ * 카페는 밴드와 달리 게시판(menuId)이 필요하고, 게시판 목록 API는 쿠키 필수라
+ * 시드 로그인 없이는 못 받는다(401). 그래서 사용자가 올릴 게시판의 URL을 붙여넣으면
+ * 거기서 `cafeId`+`menuId`를 **쿠키 없이** 뽑는다. 구조는 [`parseCafeArticleUrl`]과
+ * 동일: `clubid`/`menuid`가 `iframe_url_utf8`에 (이중)인코딩될 수 있어 점진적으로
+ * `decodeURIComponent`하며 각 단계를 매칭하고, SPA 형(`cafes/{id}/menus/{id}`)을
+ * 폴백으로 둔다. menuId 없는 링크(카페 홈 등)는 `null` — 호출부가 추가를 거부한다.
+ */
+export function parseCafeBoardLink(
+  url: string | undefined,
+): CafeBoardTarget | null {
+  if (!url) return null;
+
+  const candidates: string[] = [url];
+  let cur = url;
+  for (let i = 0; i < 3; i++) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(cur);
+    } catch {
+      break;
+    }
+    if (decoded === cur) break;
+    candidates.push(decoded);
+    cur = decoded;
+  }
+
+  for (const c of candidates) {
+    // 쿼리 형: clubid|cafeid + menuid. `\b`로 subclubid 등 부분일치 차단.
+    const club = c.match(/\b(?:clubid|cafeid)=(\d+)/i);
+    const menu = c.match(/\bmenuid=(\d+)/i);
+    if (club && menu) {
+      const cafeId = Number(club[1]);
+      const menuId = Number(menu[1]);
+      if (cafeId > 0 && menuId > 0) return { cafeId, menuId };
+    }
+    // SPA 형(폴백): cafes/{id}/menus/{id}.
+    const spa = c.match(/cafes\/(\d+)\/menus\/(\d+)/);
+    if (spa) {
+      const cafeId = Number(spa[1]);
+      const menuId = Number(spa[2]);
+      if (cafeId > 0 && menuId > 0) return { cafeId, menuId };
+    }
+  }
+
+  return null;
+}
+
 /** 붙여넣은 URL 처리. 종목 시세 링크(6자리 코드)는 시세 줄로 바꾸고, 그 외 링크/내용은
  * 붙여넣은 원문 그대로 둔다 — URL이 본문에 남아야 게시 글에서 링크가 보인다. 예전엔
  * 일반 링크를 "[host에서 가져온 내용]" 가짜 문구로 바꿔 URL이 통째로 유실됐다. */

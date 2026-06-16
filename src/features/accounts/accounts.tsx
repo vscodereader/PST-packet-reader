@@ -19,7 +19,7 @@ import {
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   STATUS_ACCOUNT,
@@ -35,8 +35,6 @@ import type {
 import { ipc } from "@/shared/ipc";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo } from "@/shared/ui/platform-logo";
-
-import { buildLoginNowItem } from "./login-queue";
 
 const PER_PAGE = 10;
 const PLATFORM_OPTIONS = [
@@ -296,16 +294,6 @@ export function Accounts({ go }: { go: GoFn }) {
   const [q, setQ] = useState("");
   const [sel, setSel] = useState<string[]>([]);
   const [page, setPage] = useState(1);
-  const [loggingIn, setLoggingIn] = useState(false);
-  const loginPollRef = useRef<number | null>(null);
-
-  // 화면을 떠날 때 로그인 상태 폴링 타이머를 정리한다.
-  useEffect(() => {
-    return () => {
-      if (loginPollRef.current !== null)
-        window.clearInterval(loginPollRef.current);
-    };
-  }, []);
 
   // Optimistically patch the row for snappy editing, then persist over IPC and
   // reconcile with the authoritative list the backend returns.
@@ -339,87 +327,6 @@ export function Accounts({ go }: { go: GoFn }) {
     void ipc.accounts.remove(sel).then(setRows);
     toast(`${sel.length}개 계정을 삭제했어요`);
     setSel([]);
-  };
-
-  // 선택한 계정을 즉시 처리 대기열(now 큐)에 로그인 작업으로 적재한다(#210). 로그인도
-  // 게시와 같은 큐에서 처리되며, 성공/실패는 각 계정 status 배지와 알림 로그(자세히 보기의
-  // 백트레이스 포함)에 반영된다. 네이버/밴드 분기는 buildLoginNowItem이 plan.login에 담는다.
-  const runLogin = async () => {
-    const targets = rows.filter(
-      (r) => sel.includes(r.id) && r.loginId.trim() && r.pw,
-    );
-    if (targets.length === 0) {
-      toast("로그인할 계정을 선택하고 아이디·비밀번호를 채워주세요", "red");
-      return;
-    }
-    setLoggingIn(true);
-    try {
-      // 자격증명을 accounts.json(id=loginId)에 저장한다(네이버·밴드 공용, id 기준 병합).
-      await ipc.auth.bootstrap();
-      await ipc.auth.saveAccounts(
-        targets.map((t) => ({
-          id: t.loginId,
-          password: t.pw,
-          label: t.loginId,
-        })),
-      );
-      // 로그인 배치 1개 = now 큐 아이템 1개. 워커가 계정별로 네이버/밴드 로그인을 처리한다.
-      const item = buildLoginNowItem(targets, crypto.randomUUID());
-      await ipc.queue.addNow(item);
-      toast(
-        `${targets.length}개 계정 로그인을 큐에 추가했어요 — 진행 상황은 큐에서 확인하세요`,
-        "green",
-      );
-      pollLoginCompletion(item.id);
-    } catch (err) {
-      setLoggingIn(false);
-      toast(err instanceof Error ? err.message : String(err), "red");
-      ipc.activity
-        .append(
-          "error",
-          "로그인 시작 실패 — " +
-            (err instanceof Error ? err.message : String(err)),
-        )
-        .catch(() => {});
-    }
-  };
-
-  // now 큐를 폴링해 로그인 배치(itemId)가 큐에서 사라질 때까지 계정 리스트를 갱신한다.
-  // 워커가 1계정 처리할 때마다 accounts store에 상태를 기록하므로 배지가 실시간으로 갱신되고,
-  // 아이템이 큐에서 제거되면(완료) 폴링을 멈춘다. 큐 진행률은 큐 화면이 별도로 보여준다.
-  const pollLoginCompletion = (itemId: string) => {
-    if (loginPollRef.current !== null)
-      window.clearInterval(loginPollRef.current);
-    loginPollRef.current = window.setInterval(() => {
-      void Promise.all([ipc.queue.listNow(), ipc.accounts.list()])
-        .then(([queue, accounts]) => {
-          // 워커가 계정별로 기록한 최신 상태를 배지·tooltip에 반영한다.
-          setRows(accounts);
-          if (queue.some((q) => q.id === itemId)) return;
-          // 로그인 아이템이 큐에서 사라짐 = 배치 완료.
-          if (loginPollRef.current !== null) {
-            window.clearInterval(loginPollRef.current);
-            loginPollRef.current = null;
-          }
-          setLoggingIn(false);
-          toast(
-            "계정 로그인이 끝났어요 — 상태 배지와 알림 로그에서 결과를 확인하세요",
-            "green",
-          );
-        })
-        .catch((err) => {
-          if (loginPollRef.current !== null) {
-            window.clearInterval(loginPollRef.current);
-            loginPollRef.current = null;
-          }
-          setLoggingIn(false);
-          toast(
-            "로그인 상태 확인 중 오류가 발생했어요 — " +
-              (err instanceof Error ? err.message : String(err)),
-            "red",
-          );
-        });
-    }, 1000);
   };
 
   const allTags = useMemo(
@@ -474,17 +381,6 @@ export function Accounts({ go }: { go: GoFn }) {
           </Text>
         </Box>
         <Group gap="xs">
-          <Button
-            size="sm"
-            variant="light"
-            color="green"
-            loading={loggingIn}
-            disabled={sel.length === 0}
-            leftSection={<Icon.bolt size={16} />}
-            onClick={() => void runLogin()}
-          >
-            선택 로그인 ({sel.length})
-          </Button>
           <Button
             size="sm"
             variant="default"

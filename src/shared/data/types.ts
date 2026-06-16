@@ -115,6 +115,11 @@ export interface PublishJob {
   /** band 플랫폼 전용: 가입·게시 링크. 잡 생성 시점에 동결해, 이후 밴드명이 같은
    *  다른 밴드와 헷갈려 링크를 잘못 재조회하는 일을 막는다(이름 lookup 제거). */
   bandLink?: string;
+  /** naver(cafe) 전용: 게시판 링크에서 파싱한 카페·게시판 식별자(잡 생성 시 동결).
+   *  게시판 목록은 쿠키 필수라 시드 로그인 없이 못 받으므로, 사용자가 붙여넣은
+   *  게시판 URL에서 직접 뽑는다. boardType은 게시 시점 백엔드가 해결한다. */
+  cafeId?: number;
+  menuId?: number;
   board: string;
   status: AccountStatus;
 }

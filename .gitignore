@@ -54,3 +54,6 @@ TODO.local.md
 # OMC local state
 .omc/
 src-tauri/.omc/
+
+# Claude Code 병렬 작업용 임시 worktree (커밋·린트 대상 아님)
+.claude/worktrees/

@@ -287,8 +287,14 @@ export function Queue({ go }: { go: GoFn }) {
           const kd = KIND[q.kind] ?? { t: q.kind, c: "gray" };
           const KI =
             Icon[(KIND_ICON[q.kind] ?? "fileText") as keyof typeof Icon];
-          // 로그인 전용 아이템(plan.login)은 글/댓글이 아니라 "로그인"으로 표시한다(#210).
-          const isLogin = (q.plan?.login?.length ?? 0) > 0;
+          // 로그인 "전용" 아이템(plan.login만 있고 게시 타깃 전무)만 "로그인"으로 표시한다.
+          // 게시 아이템도 이제 plan.login을 동봉하므로(#225, 게시 직전 계정별 로그인),
+          // 게시 타깃이 있으면 글/댓글로 표시한다 — 백엔드 execute_item의 login-only 판정과 동일.
+          const isLogin =
+            (q.plan?.login?.length ?? 0) > 0 &&
+            (q.plan?.naver?.length ?? 0) === 0 &&
+            (q.plan?.forum?.length ?? 0) === 0 &&
+            (q.plan?.band?.length ?? 0) === 0;
           const dragging = dragId === q.id;
           const order = running
             ? null

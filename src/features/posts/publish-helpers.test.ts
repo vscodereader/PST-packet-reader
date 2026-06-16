@@ -3,6 +3,7 @@ import { describe, it, expect } from "vitest";
 import {
   crawlToText,
   htmlToText,
+  parseCafeBoardLink,
   unreadyNaverAccountIds,
 } from "./publish-helpers";
 
@@ -77,6 +78,56 @@ describe("crawlToText", () => {
         stocks,
       ),
     ).toBe("삼성전자(005930) · 코스피 현재가 70,000 (▲1.2%)");
+  });
+});
+
+describe("parseCafeBoardLink", () => {
+  it("parses the SPA board URL (cafes/{id}/menus/{id})", () => {
+    expect(
+      parseCafeBoardLink("https://cafe.naver.com/f-e/cafes/31732304/menus/1"),
+    ).toEqual({ cafeId: 31732304, menuId: 1 });
+    // 글쓰기 URL 형태도 같은 패턴으로 잡힌다.
+    expect(
+      parseCafeBoardLink(
+        "https://cafe.naver.com/ca-fe/cafes/31732304/menus/5/articles/write",
+      ),
+    ).toEqual({ cafeId: 31732304, menuId: 5 });
+  });
+
+  it("parses the query form (clubid/cafeId + menuId), case-insensitive", () => {
+    expect(
+      parseCafeBoardLink(
+        "https://cafe.naver.com/ArticleList.nhn?search.clubid=31732304&search.menuid=7",
+      ),
+    ).toEqual({ cafeId: 31732304, menuId: 7 });
+    expect(
+      parseCafeBoardLink("https://cafe.naver.com/x?cafeId=999&menuId=3"),
+    ).toEqual({ cafeId: 999, menuId: 3 });
+  });
+
+  it("decodes URL-encoded (even doubly) iframe_url_utf8 forms", () => {
+    const url =
+      "https://cafe.naver.com/myclub?iframe_url_utf8=%252FArticleList.nhn%253Fclubid%253D31732304%2526menuid%253D2";
+    expect(parseCafeBoardLink(url)).toEqual({ cafeId: 31732304, menuId: 2 });
+  });
+
+  it("returns null when the menu (board) is missing — cafe-home link", () => {
+    expect(parseCafeBoardLink("https://cafe.naver.com/myclub")).toBeNull();
+    expect(
+      parseCafeBoardLink("https://cafe.naver.com/f-e/cafes/31732304"),
+    ).toBeNull();
+  });
+
+  it("returns null for empty/undefined input", () => {
+    expect(parseCafeBoardLink(undefined)).toBeNull();
+    expect(parseCafeBoardLink("")).toBeNull();
+  });
+
+  it("does not mis-match subclubid as the cafe id", () => {
+    // `\b` 앵커가 subclubid의 뒷부분(clubid)을 cafeId로 오인하지 않게 한다.
+    expect(
+      parseCafeBoardLink("https://cafe.naver.com/x?subclubid=88&menuid=1"),
+    ).toBeNull();
   });
 });
 

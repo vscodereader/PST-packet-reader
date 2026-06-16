@@ -16,12 +16,12 @@ import {
   ThemeIcon,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import type { BandTarget } from "@/shared/bindings/BandTarget";
 import type { CommentTargetSpec } from "@/shared/bindings/CommentTargetSpec";
 import type { ForumTarget } from "@/shared/bindings/ForumTarget";
-import type { JoinedCafe } from "@/shared/bindings/JoinedCafe";
+import type { LoginTarget } from "@/shared/bindings/LoginTarget";
 import type { NaverTarget } from "@/shared/bindings/NaverTarget";
 import type { PostJob } from "@/shared/bindings/PostJob";
 import { isPostable, KIND, STATUS_ACCOUNT } from "@/shared/data/config";
@@ -32,7 +32,6 @@ import {
 } from "@/shared/data/helpers";
 import type {
   Account,
-  Board,
   GoFn,
   LibraryPost,
   PlatformId,
@@ -52,7 +51,7 @@ import { PlatformLogo, PlatformPill } from "@/shared/ui/platform-logo";
 
 import { parseCafeArticleUrl } from "./comment-jobs";
 import { PreviewModal } from "./preview-modal";
-import { htmlToText, unreadyNaverAccountIds } from "./publish-helpers";
+import { htmlToText, parseCafeBoardLink } from "./publish-helpers";
 import { StockCrawlModal } from "./stock-crawl-modal";
 
 export interface PublishModalProps {
@@ -62,18 +61,17 @@ export interface PublishModalProps {
   go: GoFn;
 }
 
-/**
- * A single naver account's chosen cafe + board, resolved into the ids the
- * backend needs (`cafeId`/`menuId`/`boardType`). Built from the account's
- * joined-cafe list and the cafe's writable boards.
- */
-interface NaverPick {
+/** 붙여넣은 게시판 링크 하나 → 파싱된 카페·게시판 식별자. 게시 대상 목록(밴드 미러)을
+ *  이룬다. boardType은 쿠키 없이 못 받으므로 게시 시점 백엔드가 해결한다. */
+interface ResolvedCafe {
   cafeId: number;
-  cafeName: string;
-  cafeUrl: string;
-  boardName: string;
   menuId: number;
-  boardType: string;
+  link: string;
+}
+
+/** 게시 대상 목록에서 카페 항목의 고유 키(cafeId+menuId). */
+function cafeKey(cafeId: number, menuId: number): string {
+  return `${cafeId}-${menuId}`;
 }
 
 /** 저장된 밴드 링크 하나 → 조회된 실제 밴드명. 게시 대상 목록(드롭다운)을 이룬다. */
@@ -166,15 +164,13 @@ function DestinationPicker({
   onSelectBand,
   onRemoveBand,
   stocks,
-  naverAccounts,
-  joinedByAccount,
-  joinedLoading,
-  boardsByCafe,
-  boardsLoading,
-  naverPicks,
-  onPickCafe,
-  onPickBoard,
-  onRefreshJoined,
+  cafeLink,
+  setCafeLink,
+  resolvedCafes,
+  selectedCafes,
+  onSaveCafeLink,
+  onSelectCafe,
+  onRemoveCafe,
 }: {
   selPlatforms: PlatformId[];
   stockCodes: string[];
@@ -190,15 +186,13 @@ function DestinationPicker({
   onSelectBand: (bandNo: string) => void;
   onRemoveBand: (bandNo: string) => void;
   stocks: Stock[];
-  naverAccounts: Account[];
-  joinedByAccount: Record<string, JoinedCafe[]>;
-  joinedLoading: Record<string, boolean>;
-  boardsByCafe: Record<string, Board[]>;
-  boardsLoading: Record<string, boolean>;
-  naverPicks: Record<string, NaverPick | undefined>;
-  onPickCafe: (accountId: string, cafeId: number) => void;
-  onPickBoard: (accountId: string, boardName: string) => void;
-  onRefreshJoined: (accountId: string) => void;
+  cafeLink: string;
+  setCafeLink: (v: string) => void;
+  resolvedCafes: ResolvedCafe[];
+  selectedCafes: string[];
+  onSaveCafeLink: () => void;
+  onSelectCafe: (key: string) => void;
+  onRemoveCafe: (key: string) => void;
 }) {
   const card = {
     border: "1px solid var(--mantine-color-gray-2)",
@@ -272,82 +266,85 @@ function DestinationPicker({
       )}
       {selPlatforms.includes("naver") && (
         <Box style={card}>
-          <Group gap={9} px={11} py={9} wrap="nowrap" style={head}>
+          <Group gap={9} px={11} py={9} style={head}>
             <PlatformLogo id="naver" size={22} />
-            <Text fz={13} fw={700} style={{ flex: 1 }}>
+            <Text fz={13} fw={700}>
               네이버 카페
-            </Text>
-            <Text fz={11.5} c="gray.5">
-              계정별 가입 카페에서 선택
             </Text>
           </Group>
           <Stack gap={8} p={10}>
-            {naverAccounts.map((a) => {
-              const joined = joinedByAccount[a.id];
-              const loading = joinedLoading[a.id];
-              const pick = naverPicks[a.id];
-              const cafeKey = pick ? String(pick.cafeId) : "";
-              const boards = pick ? boardsByCafe[cafeKey] : undefined;
-              const bLoading = pick ? boardsLoading[cafeKey] : false;
-              return (
-                <Group key={a.id} gap={8} wrap="nowrap" align="center">
-                  <Text
-                    fz={12}
-                    fw={700}
-                    ff="monospace"
-                    c="dimmed"
-                    truncate
-                    style={{ width: 92, flexShrink: 0 }}
-                  >
-                    {a.loginId}
-                  </Text>
-                  {loading && !joined ? (
-                    <Group gap={6} style={{ flex: 1 }}>
-                      <Loader size="xs" />
-                      <Text fz={12} c="dimmed">
-                        가입 카페 불러오는 중…
-                      </Text>
-                    </Group>
-                  ) : joined && joined.length === 0 ? (
-                    <Text fz={12} c="gray.5" style={{ flex: 1 }}>
-                      가입한 카페가 없어요
-                    </Text>
-                  ) : (
-                    <>
-                      <Select
-                        placeholder="가입 카페 선택"
-                        value={pick ? String(pick.cafeId) : null}
-                        data={(joined ?? []).map((c) => ({
-                          value: String(c.cafeId),
-                          label: c.cafeName,
-                        }))}
-                        onChange={(v) => v && onPickCafe(a.id, Number(v))}
-                        searchable
-                        style={{ flex: 1 }}
-                      />
-                      <Select
-                        placeholder={bLoading ? "불러오는 중…" : "게시판"}
-                        value={pick?.boardName || null}
-                        data={(boards ?? []).map((b) => b.name)}
-                        onChange={(v) => v && onPickBoard(a.id, v)}
-                        disabled={
-                          !pick || bLoading || (boards?.length ?? 0) === 0
-                        }
-                        style={{ width: 132, flexShrink: 0 }}
-                      />
-                    </>
-                  )}
-                  <ActionIcon
-                    variant="subtle"
-                    color="gray"
-                    aria-label="가입 카페 새로고침"
-                    onClick={() => onRefreshJoined(a.id)}
-                  >
-                    <Icon.refresh size={15} />
-                  </ActionIcon>
-                </Group>
-              );
-            })}
+            {/* 게시판 목록은 쿠키 필수라 시드 로그인 없이 못 받는다(401). 그래서 올릴
+                게시판의 URL을 붙여넣으면 cafeId+menuId를 파싱해 대상으로 추가한다(밴드
+                링크 흐름과 동일). boardType은 게시 시점 백엔드가 해결한다. */}
+            <Group gap={8} align="flex-end" wrap="nowrap">
+              <TextInput
+                style={{ flex: 1 }}
+                label="게시판 링크"
+                placeholder="https://cafe.naver.com/f-e/cafes/31732304/menus/1"
+                value={cafeLink}
+                onChange={(e) => setCafeLink(e.currentTarget.value)}
+                leftSection={<Icon.link size={14} />}
+                aria-label="카페 게시판 링크"
+              />
+              <Button
+                variant="light"
+                color="naver"
+                onClick={onSaveCafeLink}
+                disabled={!cafeLink.trim()}
+              >
+                추가
+              </Button>
+            </Group>
+            <Select
+              placeholder={
+                resolvedCafes.length
+                  ? "게시할 게시판 선택"
+                  : "게시판 링크를 추가하면 여기 표시됩니다"
+              }
+              data={resolvedCafes.map((c) => ({
+                value: cafeKey(c.cafeId, c.menuId),
+                label: `카페 ${c.cafeId} · 게시판 ${c.menuId}`,
+              }))}
+              value={null}
+              disabled={resolvedCafes.length === 0}
+              onChange={(k) => {
+                if (k) onSelectCafe(k);
+              }}
+            />
+            {selectedCafes.length > 0 ? (
+              <Group gap={6}>
+                {selectedCafes.map((k) => {
+                  const c = resolvedCafes.find(
+                    (x) => cafeKey(x.cafeId, x.menuId) === k,
+                  );
+                  const label = c ? `카페 ${c.cafeId} · 게시판 ${c.menuId}` : k;
+                  return (
+                    <Badge
+                      key={k}
+                      color="naver"
+                      variant="light"
+                      rightSection={
+                        <ActionIcon
+                          size={14}
+                          variant="transparent"
+                          color="naver"
+                          aria-label={`${label} 제거`}
+                          onClick={() => onRemoveCafe(k)}
+                        >
+                          <Icon.x size={10} />
+                        </ActionIcon>
+                      }
+                    >
+                      {label}
+                    </Badge>
+                  );
+                })}
+              </Group>
+            ) : (
+              <Text fz={12} c="orange.7">
+                게시할 게시판을 선택하세요.
+              </Text>
+            )}
           </Stack>
         </Box>
       )}
@@ -612,18 +609,6 @@ function newNowId(): string {
   return "qn" + Date.now();
 }
 
-// 백엔드가 거부하는 값은 ErrorEnvelope(`{ code, message? }`)이거나 Error다. 사용자에게
-// 보일 짧은 사유 문자열로 환원한다(쿠키 만료/없음 등 침묵 실패를 드러내기 위함).
-function errText(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  if (err && typeof err === "object") {
-    const e = err as { message?: unknown; code?: unknown };
-    if (typeof e.message === "string" && e.message) return e.message;
-    if (typeof e.code === "string" && e.code) return e.code;
-  }
-  return String(err);
-}
-
 function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [stocks, setStocks] = useState<Stock[]>([]);
@@ -670,24 +655,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     setSelectedBands((s) => (s.includes(no) ? s : [...s, no]));
   const removeBand = (no: string) =>
     setSelectedBands((s) => s.filter((x) => x !== no));
-  // Account-driven naver state: joined cafes per account, boards per cafe, and
-  // each account's chosen cafe/board. Loaded live on selection and cached for
-  // the modal session (the refresh control re-fetches).
-  const [joinedByAccount, setJoinedByAccount] = useState<
-    Record<string, JoinedCafe[]>
-  >({});
-  const [joinedLoading, setJoinedLoading] = useState<Record<string, boolean>>(
-    {},
-  );
-  const [boardsByCafe, setBoardsByCafe] = useState<Record<string, Board[]>>({});
-  const [boardsLoading, setBoardsLoading] = useState<Record<string, boolean>>(
-    {},
-  );
-  const [naverPicks, setNaverPicks] = useState<
-    Record<string, NaverPick | undefined>
-  >({});
-  const joinedReqRef = useRef<Set<string>>(new Set());
-  const boardPromiseRef = useRef<Map<string, Promise<Board[]>>>(new Map());
+  // 카페: 게시판 링크를 추가하면 cafeId+menuId를 파싱해 resolvedCafes에 누적하고,
+  // selectedCafes(키 cafeId-menuId)에서 게시할 게시판을 다중 선택한다(밴드 미러).
+  // 게시판 목록은 쿠키 필수라 시드 로그인 없이 못 받으므로 링크로만 받는다.
+  const [resolvedCafes, setResolvedCafes] = useState<ResolvedCafe[]>([]);
+  const [selectedCafes, setSelectedCafes] = useState<string[]>([]);
+  const [cafeLink, setCafeLink] = useState("");
   const [when, setWhen] = useState<"now" | "schedule">("now");
   const [date, setDate] = useState(() => nowParts().date);
   const [time, setTime] = useState(() => nowParts().time);
@@ -719,73 +692,31 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     void ipc.stocks.list().then(setStocks);
   }, []);
 
-  // Fetch an account's joined cafes once (cached in `joinedReqRef`); the refresh
-  // control clears the guard to force a re-fetch. State is keyed by the UI's
-  // unique account id, but the backend looks cafes up by the account's `loginId`
-  // (its cookie-file key) — passing the UI id finds no cookie and returns nothing.
-  const fetchJoined = useCallback(
-    (accountId: string) => {
-      if (joinedReqRef.current.has(accountId)) return;
-      const loginId = accounts.find((a) => a.id === accountId)?.loginId;
-      if (!loginId) return;
-      joinedReqRef.current.add(accountId);
-      setJoinedLoading((m) => ({ ...m, [accountId]: true }));
-      ipc.cafes
-        .listJoined(loginId)
-        .then((cs) => setJoinedByAccount((m) => ({ ...m, [accountId]: cs })))
-        .catch((err) => {
-          notifications.show({
-            message: `${loginId} 가입 카페를 불러오지 못했어요: ${errText(err)}`,
-            color: "red",
-          });
-          setJoinedByAccount((m) => ({ ...m, [accountId]: [] }));
-        })
-        .finally(() => setJoinedLoading((m) => ({ ...m, [accountId]: false })));
-    },
-    [accounts],
-  );
-
-  // Lazily discover a cafe's writable boards (reuses resolve_cafe, which returns
-  // boards for a numeric cafeId). De-dupes concurrent/repeat calls via an
-  // in-flight promise cache and resolves to the boards for the caller.
-  const resolveBoards = useCallback(
-    (cafeId: number, accountId: string): Promise<Board[]> => {
-      const key = String(cafeId);
-      const existing = boardPromiseRef.current.get(key);
-      if (existing) return existing;
-      // resolve_cafe reads the account's cookie too — pass the `loginId`, not the
-      // UI account id (same cookie-file-key mismatch as fetchJoined).
-      const loginId = accounts.find((a) => a.id === accountId)?.loginId;
-      if (!loginId) return Promise.resolve([]);
-      setBoardsLoading((m) => ({ ...m, [key]: true }));
-      const p = ipc.cafes
-        .resolve(key, loginId)
-        .then((c) => {
-          setBoardsByCafe((m) => ({ ...m, [key]: c.boards }));
-          return c.boards;
-        })
-        .catch((err): Board[] => {
-          notifications.show({
-            message: `${loginId} 게시판을 불러오지 못했어요: ${errText(err)}`,
-            color: "red",
-          });
-          setBoardsByCafe((m) => ({ ...m, [key]: [] }));
-          return [];
-        })
-        .finally(() => setBoardsLoading((m) => ({ ...m, [key]: false })));
-      boardPromiseRef.current.set(key, p);
-      return p;
-    },
-    [accounts],
-  );
-
-  // Auto-load joined cafes for every selected naver account.
-  useEffect(() => {
-    selected.forEach((aid) => {
-      const a = accounts.find((x) => x.id === aid);
-      if (a?.platform === "naver") fetchJoined(aid);
-    });
-  }, [selected, accounts, fetchJoined]);
+  // 게시판 링크 저장: 링크에서 cafeId+menuId를 파싱해 resolvedCafes에 추가한다
+  // (같은 cafeId+menuId는 중복 제거). 파싱 실패(카페 홈 링크 등)면 추가하지 않고 안내한다.
+  const saveCafeLink = () => {
+    const link = cafeLink.trim();
+    if (!link) return;
+    const parsed = parseCafeBoardLink(link);
+    if (!parsed) {
+      notifications.show({
+        message:
+          "게시판 URL을 인식하지 못했어요. 올릴 게시판으로 들어가 그 주소를 붙여넣어 주세요.",
+        color: "red",
+      });
+      return;
+    }
+    setCafeLink("");
+    setResolvedCafes((prev) =>
+      prev.some((c) => c.cafeId === parsed.cafeId && c.menuId === parsed.menuId)
+        ? prev
+        : [...prev, { cafeId: parsed.cafeId, menuId: parsed.menuId, link }],
+    );
+  };
+  const selectCafe = (key: string) =>
+    setSelectedCafes((s) => (s.includes(key) ? s : [...s, key]));
+  const removeCafe = (key: string) =>
+    setSelectedCafes((s) => s.filter((x) => x !== key));
 
   if (!doc) {
     return <Modal opened={false} onClose={onClose} />;
@@ -820,78 +751,6 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const selectedNaver = usableSelected
     .map((id) => accounts.find((a) => a.id === id))
     .filter((a): a is Account => !!a && a.platform === "naver");
-
-  // Choose a cafe for an account: seed the pick, then discover the cafe's boards
-  // and default to the first one (unless the user has since changed cafe/board).
-  const pickCafe = (accountId: string, cafeId: number) => {
-    const jc = (joinedByAccount[accountId] ?? []).find(
-      (c) => c.cafeId === cafeId,
-    );
-    if (!jc) return;
-    setNaverPicks((m) => ({
-      ...m,
-      [accountId]: {
-        cafeId: jc.cafeId,
-        cafeName: jc.cafeName,
-        cafeUrl: jc.cafeUrl,
-        boardName: "",
-        menuId: 0,
-        boardType: "L",
-      },
-    }));
-    void resolveBoards(jc.cafeId, accountId).then((boards) => {
-      const first = boards[0];
-      if (!first) return;
-      setNaverPicks((m) => {
-        const p = m[accountId];
-        // Skip if the account moved to another cafe or already picked a board.
-        if (!p || p.cafeId !== jc.cafeId || p.boardName) return m;
-        return {
-          ...m,
-          [accountId]: {
-            ...p,
-            boardName: first.name,
-            menuId: first.menuId,
-            boardType: first.boardType,
-          },
-        };
-      });
-    });
-  };
-
-  const pickBoard = (accountId: string, boardName: string) => {
-    const pick = naverPicks[accountId];
-    if (!pick) return;
-    const b = (boardsByCafe[String(pick.cafeId)] ?? []).find(
-      (x) => x.name === boardName,
-    );
-    if (!b) return;
-    setNaverPicks((m) => ({
-      ...m,
-      [accountId]: {
-        ...pick,
-        boardName: b.name,
-        menuId: b.menuId,
-        boardType: b.boardType,
-      },
-    }));
-  };
-
-  // Refresh: drop the cached joined list + pick for this account and re-fetch.
-  const refreshJoined = (accountId: string) => {
-    joinedReqRef.current.delete(accountId);
-    setJoinedByAccount((m) => {
-      const n = { ...m };
-      delete n[accountId];
-      return n;
-    });
-    setNaverPicks((m) => {
-      const n = { ...m };
-      delete n[accountId];
-      return n;
-    });
-    fetchJoined(accountId);
-  };
 
   const acctFilters = [
     { value: "all", label: "전체" },
@@ -934,39 +793,42 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         }),
       );
     } else if (a.platform === "naver") {
-      if (mode === "comment") {
-        // Comment-only: the target is the URL / latest / popular, not a board
-        // pick. One job per selected account. latest/popular still need the
-        // account's picked cafe (the list is fetched from it), so skip accounts
-        // that haven't chosen a cafe yet — same silent-partial guard as posts.
-        if (isListTarget && !naverPicks[aid]) return;
-        const targetName =
-          commentTargetMode === "url"
-            ? urlTarget
-              ? `게시글 #${urlTarget.articleId}`
-              : "URL 미설정"
-            : commentTargetMode === "popular"
-              ? `인기글 ${commentCount}건`
-              : `최신글 ${commentCount}건`;
+      if (mode === "comment" && commentTargetMode === "url") {
+        // url 댓글 대상은 카페 게시판이 필요 없다(특정 글이 곧 대상) — 계정마다 잡 1개.
         jobs.push({
           key: aid,
           platform: "naver",
           loginId: a.loginId,
-          targetName,
+          targetName: urlTarget
+            ? `게시글 #${urlTarget.articleId}`
+            : "URL 미설정",
           board: "댓글",
           status: a.status,
         });
       } else {
-        const pick = naverPicks[aid];
-        // Skip accounts whose cafe/board isn't fully chosen yet.
-        if (!pick || !pick.boardName) return;
-        jobs.push({
-          key: aid,
-          platform: "naver",
-          loginId: a.loginId,
-          targetName: pick.cafeName,
-          board: pick.boardName,
-          status: a.status,
+        // 글/글+댓글, 그리고 댓글(최신/인기)은 선택한 게시판마다(계정×게시판) 잡을
+        // 만든다(밴드 미러). 댓글(최신/인기)은 그 카페의 글 목록을 읽을 대상이 된다.
+        const isComment = mode === "comment";
+        const targetName = isComment
+          ? commentTargetMode === "popular"
+            ? `인기글 ${commentCount}건`
+            : `최신글 ${commentCount}건`
+          : undefined;
+        selectedCafes.forEach((k) => {
+          const c = resolvedCafes.find(
+            (x) => cafeKey(x.cafeId, x.menuId) === k,
+          );
+          if (!c) return;
+          jobs.push({
+            key: `${aid}-${k}`,
+            platform: "naver",
+            loginId: a.loginId,
+            targetName: targetName ?? `카페 ${c.cafeId}`,
+            cafeId: c.cafeId,
+            menuId: c.menuId,
+            board: isComment ? "댓글" : `게시판 ${c.menuId}`,
+            status: a.status,
+          });
         });
       }
     } else if (a.platform === "band") {
@@ -995,12 +857,10 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     }
   });
   const targetsOk = !selPlatforms.includes("forum") || stockCodes.length > 0;
-  // Comment-only mode needs comments and a resolved target. `url` resolves to a
-  // single article; latest/popular resolve to a cafe whose list is fetched at
-  // publish time, so they're ready once every selected naver account has picked
-  // a cafe (the list source) — top-N extraction handles short lists gracefully.
-  const listTargetReady =
-    selectedNaver.length > 0 && selectedNaver.every((a) => !!naverPicks[a.id]);
+  // Comment-only mode needs comments and a resolved target. `url`은 특정 글 하나로
+  // 풀리고, latest/popular는 그 목록을 읽을 카페(게시판)가 필요하므로 선택한 게시판이
+  // 1개 이상이면 준비된 것으로 본다(게시 시점 워커가 상위 N을 추출).
+  const listTargetReady = selectedNaver.length > 0 && selectedCafes.length > 0;
   // 밴드만 선택된 댓글 전용(네이버 list 대상이 없음)은 밴드 대상(최신/인기)으로 충분하다.
   // 밴드는 url 미지원이라 latest/popular(isListTarget)일 때만 준비된 것으로 본다.
   const bandOnlyCommentReady =
@@ -1013,14 +873,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     (comments.length > 0 &&
       ((isListTarget ? listTargetReady : urlTarget !== null) ||
         bandOnlyCommentReady));
-  // 게시판이 아직 안 정해진 네이버 계정은 job 생성에서 빠진다. 이들이 있으면 게시를
-  // 막아 "일부만 올라가고 나머지는 결과에도 안 뜨는" 조용한 부분 게시를 방지한다.
-  const naverNotReady = unreadyNaverAccountIds(
-    usableSelected,
-    accounts,
-    naverPicks,
-    mode,
-  );
+  // 네이버 카페가 선택됐으면 게시할 게시판을 1개 이상 골라야 한다(밴드와 동일). url 댓글
+  // 대상은 게시판이 필요 없어 면제한다. 게시판 미선택이면 게시를 막아 조용한 누락을 막는다.
+  const naverReady =
+    !selPlatforms.includes("naver") ||
+    (mode === "comment" && commentTargetMode === "url") ||
+    selectedCafes.length > 0;
   // 밴드가 선택됐으면 게시할 밴드를 1개 이상 골라야 게시 가능(사수 요구 흐름).
   // 예약(schedule)도 이제 밴드를 plan에 싣으므로 면제하지 않는다 — 즉시·예약 공통으로
   // 밴드 플랫폼이 선택됐다면 최소 1개의 밴드를 골라야 게시할 수 있다.
@@ -1029,23 +887,23 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     usableSelected.length > 0 &&
     targetsOk &&
     commentReady &&
-    naverNotReady.length === 0 &&
+    naverReady &&
     bandReady &&
     jobs.length > 0;
 
   const action =
     mode === "comment" ? "댓글" : mode === "both" ? "글+댓글" : "글";
 
-  // Build the backend PostJob for a naver UI job — the cafeId/menuId/boardType
-  // come straight from the account's pick (joined-cafe + resolved board).
+  // Build the backend PostJob for a naver UI job — cafeId/menuId는 잡에 동결된
+  // (게시판 링크 파싱) 값이다. boardType은 게시 시점 백엔드가 menuId로 해결하므로
+  // 빈 문자열로 둔다(쿠키 없이 게시판 목록을 못 받기 때문).
   const toPostJob = (j: PublishJob): PostJob => {
-    const pick = naverPicks[j.key];
     return {
-      // 백엔드는 loginId(쿠키 파일 키)로 계정을 찾는다. UI 키(j.key)는 picks 조회용일 뿐.
+      // 백엔드는 loginId(쿠키 파일 키)로 계정을 찾는다.
       accountId: j.loginId,
-      cafe: pick ? String(pick.cafeId) : j.targetName,
-      menuId: pick?.menuId ?? 0,
-      boardType: pick?.boardType ?? "L",
+      cafe: j.cafeId != null ? String(j.cafeId) : j.targetName,
+      menuId: j.menuId ?? 0,
+      boardType: "",
       subject: doc.title,
       bodyText: htmlToText(doc.body ?? ""),
       tagList: [],
@@ -1065,7 +923,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         articleId: urlTarget.articleId,
       };
     }
-    const cafeId = naverPicks[j.key]?.cafeId;
+    const cafeId = j.cafeId;
     if (cafeId == null) return undefined;
     return { mode: commentTargetMode, count: commentCount, cafeId };
   };
@@ -1081,8 +939,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
 
   // 게시 plan(동결 실행 페이로드): 즉시·예약 게시가 공유한다. 본문은 모달이 이미
   // 평문화한 값을 박제하고, 엔진이 있는 naver/forum/band 대상을 모두 싣는다. naver의
-  // cafe/menuId/boardType은 toPostJob과 동일하게 naverPicks에서 구하고, band 링크는
-  // resolvedBands에서 밴드명으로 찾는다.
+  // cafe/menuId는 잡에 동결된(게시판 링크 파싱) 값이고, band 링크는 잡에서 가져온다.
   const buildPlan = (): PublishPlan => {
     const naver: NaverTarget[] = jobs
       .filter((j) => j.platform === "naver")
@@ -1092,8 +949,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         return {
           accountId: pj.accountId,
           cafe: pj.cafe,
-          // 완료 로그에 카페 ID 대신 보여줄 표시 이름(동결). pick이 없으면 대상명으로.
-          cafeName: naverPicks[j.key]?.cafeName ?? j.targetName,
+          // 완료 로그에 보여줄 표시 이름(동결). 카페명은 쿠키 없이 못 받아 대상명을 쓴다.
+          cafeName: j.targetName,
           menuId: pj.menuId,
           boardType: pj.boardType,
           ...(spec ? { commentTarget: spec } : {}),
@@ -1125,6 +982,22 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
             // band_publish로 가 리더 승인제 밴드에서 1003이 난다).
             ...(bandSpec ? { commentTarget: bandSpec } : {}),
           }));
+    // 게시 대상 계정마다 로그인 스펙을 동봉한다(#225). 워커가 게시 직전에 계정 단위로
+    // [IP 회전 → 로그인 → 게시]를 원자 실행해 "로그인 IP == 게시 IP"를 맞춘다 — 그래야
+    // 네이버 카페 10004(IP check failure)를 피한다. force/useAdb는 기존 선택 로그인과 동일.
+    const loginByAccount = new Map<string, LoginTarget>();
+    jobs.forEach((j) => {
+      const platform = j.platform === "band" ? "band" : "naver";
+      const key = `${j.loginId} ${platform}`;
+      if (loginByAccount.has(key)) return;
+      loginByAccount.set(key, {
+        accountId: j.loginId,
+        platform,
+        headless: false,
+        useAdb: true,
+        force: true,
+      });
+    });
     return {
       postId: doc.id,
       kind: doc.kind,
@@ -1136,7 +1009,25 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       naver,
       forum,
       band,
+      login: [...loginByAccount.values()],
     };
+  };
+
+  // 게시 대상 계정의 자격증명(id/pw)을 accounts.json에 저장한다(#225). 선택 로그인을
+  // 없앴으므로, 백엔드가 게시 직전 로그인하려면 자격증명이 미리 저장돼 있어야 한다(기존
+  // runLogin이 로그인 전에 하던 일을 게시 흐름으로 옮긴 것). pw 없는 계정은 건너뛴다.
+  const persistCredentials = async () => {
+    const seen = new Set<string>();
+    const creds = jobs
+      .map((j) => accounts.find((a) => a.loginId === j.loginId))
+      .filter((a): a is Account => !!a && !!a.loginId.trim() && !!a.pw)
+      .filter((a) =>
+        seen.has(a.loginId) ? false : (seen.add(a.loginId), true),
+      )
+      .map((a) => ({ id: a.loginId, password: a.pw, label: a.loginId }));
+    if (creds.length === 0) return;
+    await ipc.auth.bootstrap();
+    await ipc.auth.saveAccounts(creds);
   };
 
   const doPublish = () => {
@@ -1169,8 +1060,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         plan: buildPlan(),
       };
       setFlow("running");
-      void ipc.queue
-        .addNow(item)
+      void persistCredentials()
+        .then(() => ipc.queue.addNow(item))
         .then(() =>
           setFlow(
             jobs.map((j) => ({
@@ -1206,9 +1097,9 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       plan: buildPlan(),
     };
     // Defense-in-depth: the backend rejects a past time even though the picker
-    // already prevents it.
-    ipc.queue
-      .addScheduled(item, toEpochMs(date, time))
+    // already prevents it. 예약도 게시 시점에 백엔드가 로그인하므로 자격증명을 먼저 저장한다.
+    void persistCredentials()
+      .then(() => ipc.queue.addScheduled(item, toEpochMs(date, time)))
       .then(() =>
         setFlow(
           jobs.map((j) => ({ ...j, ok: true, msg: `${action} 예약 완료` })),
@@ -1390,15 +1281,13 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
               onSelectBand={selectBand}
               onRemoveBand={removeBand}
               stocks={stocks}
-              naverAccounts={selectedNaver}
-              joinedByAccount={joinedByAccount}
-              joinedLoading={joinedLoading}
-              boardsByCafe={boardsByCafe}
-              boardsLoading={boardsLoading}
-              naverPicks={naverPicks}
-              onPickCafe={pickCafe}
-              onPickBoard={pickBoard}
-              onRefreshJoined={refreshJoined}
+              cafeLink={cafeLink}
+              setCafeLink={setCafeLink}
+              resolvedCafes={resolvedCafes}
+              selectedCafes={selectedCafes}
+              onSaveCafeLink={saveCafeLink}
+              onSelectCafe={selectCafe}
+              onRemoveCafe={removeCafe}
             />
           </>
         )}
@@ -1544,10 +1433,9 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
           {jobs.length}곳
         </Text>
         <PlatformPill ids={selPlatforms} size={16} />
-        {naverNotReady.length > 0 && (
+        {!naverReady && (
           <Text fz={12} c="orange.7">
-            게시판 미설정 계정 {naverNotReady.length}개 — 게시판을 선택해야
-            게시할 수 있어요
+            게시판 링크를 추가하고 게시할 게시판을 선택해야 게시할 수 있어요
           </Text>
         )}
         <Box style={{ flex: 1 }} />

@@ -80,6 +80,71 @@ describe("Queue", () => {
     expect(screen.getByText("예약 대기")).toBeInTheDocument();
   });
 
+  it("labels only a login-only item '로그인'; a publish item carrying plan.login shows its kind (#225)", async () => {
+    // 게시 아이템도 이제 plan.login을 동봉(게시 직전 계정별 로그인)하므로, plan.login 유무만으로
+    // "로그인"을 붙이면 게시 아이템이 오표시된다. 게시 타깃이 있으면 종류(글)로 표시해야 한다.
+    const login = {
+      accountId: "user01",
+      platform: "naver" as const,
+      headless: false,
+      useAdb: true,
+      force: true,
+    };
+    const base = {
+      postId: "",
+      kind: "post" as const,
+      title: "",
+      bodyText: "",
+      comments: [],
+      linkOverride: "",
+      naver: [],
+      forum: [],
+      band: [],
+    };
+    const items: QueueNowItem[] = [
+      {
+        id: "qlogin",
+        title: "계정 로그인 작업",
+        kind: "post",
+        state: "waiting",
+        locs: [{ p: "naver", name: "user01" }],
+        items: [],
+        plan: { ...base, title: "계정 로그인 작업", login: [login] },
+      },
+      {
+        id: "qpub",
+        title: "카페 글 게시 작업",
+        kind: "post",
+        state: "waiting",
+        locs: [{ p: "naver", name: "카페" }],
+        items: [],
+        plan: {
+          ...base,
+          title: "카페 글 게시 작업",
+          naver: [
+            {
+              accountId: "user01",
+              cafe: "111",
+              cafeName: "카페",
+              menuId: 1,
+              boardType: "",
+            },
+          ],
+          login: [login],
+        },
+      },
+    ];
+    setQueueNow(items);
+    render(
+      <MantineProvider>
+        <Queue go={vi.fn()} />
+      </MantineProvider>,
+    );
+    await screen.findByText("카페 글 게시 작업");
+    // "로그인" 배지는 로그인 전용 아이템 1건에만 — 수정 전엔 게시 아이템에도 붙어 2건이었다.
+    expect(screen.getAllByText("로그인")).toHaveLength(1);
+  });
+
   it("navigates to posts via '새 작업 추가'", async () => {
     const go = await renderQueue();
     await userEvent.click(screen.getByRole("button", { name: /새 작업 추가/ }));
