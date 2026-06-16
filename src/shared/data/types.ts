@@ -150,6 +150,11 @@ export interface QueueNowItem {
   locs: QueueLocation[];
   /** 워커가 실제 게시에 쓰는 실행 페이로드. 표시 전용 아이템은 없음. */
   plan?: PublishPlan;
+  /**
+   * 워커가 phase별로 갱신하는 대상별 실시간 상태(진행 전/중/완료/실패). 알림 로그와
+   * 같은 BatchItem 모델을 재사용해 진행 중 큐를 펼치면 SubLog로 보여준다. 대기 아이템은 빈 배열.
+   */
+  items: BatchItem[];
 }
 
 export interface QueueScheduledItem {

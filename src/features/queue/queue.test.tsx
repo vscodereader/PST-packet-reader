@@ -3,13 +3,56 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
-import { resetIpc, setCommandFailures } from "@/test/ipc";
+import type { QueueNowItem } from "@/shared/data/types";
+import { resetIpc, setCommandFailures, setQueueNow } from "@/test/ipc";
 
 import { Queue } from "./queue";
 
 vi.mock("@tauri-apps/api/core", async () => ({
   invoke: (await import("@/test/ipc")).invoke,
 }));
+
+// 진행 중 아이템 1건 — 대상별 라이브 상태(성공/실패/진행중/대기 4종)를 함께 담는다.
+const RUNNING_ITEM: QueueNowItem = {
+  id: "qr1",
+  title: "진행 중 게시 작업",
+  kind: "post",
+  state: "running",
+  progress: [2, 4],
+  locs: [{ p: "naver", name: "개미투자 카페" }],
+  items: [
+    {
+      platform: "naver",
+      target: "ZZ카페하나",
+      loginId: "user01",
+      status: "success",
+      msg: "글 게시 완료",
+    },
+    {
+      platform: "forum",
+      target: "ZZ종목둘",
+      code: "086520",
+      loginId: "user02",
+      status: "fail",
+      msg: "종목토론방 게시에 실패했습니다",
+      trace: "FORUM_ERR\nstack",
+    },
+    {
+      platform: "band",
+      target: "ZZ밴드셋",
+      loginId: "user03",
+      status: "running",
+      msg: "게시 중…",
+    },
+    {
+      platform: "naver",
+      target: "ZZ카페넷",
+      loginId: "user04",
+      status: "waiting",
+      msg: "대기 중",
+    },
+  ],
+};
 
 async function renderQueue(go = vi.fn()) {
   render(
@@ -146,6 +189,51 @@ describe("Queue", () => {
     );
     // 실패 시 setSched를 부르지 않으므로 missed(놓침)가 그대로 남는다.
     expect(screen.getByText("놓침")).toBeInTheDocument();
+  });
+
+  it("진행 중 아이템을 클릭하면 대상별 상태가 인라인으로 펼쳐진다", async () => {
+    setQueueNow([RUNNING_ITEM]);
+    const go = vi.fn();
+    render(
+      <MantineProvider>
+        <Queue go={go} />
+      </MantineProvider>,
+    );
+    const title = await screen.findByText("진행 중 게시 작업");
+    // 펼치기 전엔 대상 목록(ZZ종목둘은 items에만 있음)이 보이지 않는다.
+    expect(screen.queryByText("ZZ종목둘")).not.toBeInTheDocument();
+
+    await userEvent.click(title);
+
+    // 4개 대상의 상태가 SubLog로 펼쳐진다.
+    expect(await screen.findByText("ZZ종목둘")).toBeInTheDocument();
+    expect(screen.getByText("ZZ밴드셋")).toBeInTheDocument();
+    expect(screen.getByText("ZZ카페넷")).toBeInTheDocument();
+    expect(
+      screen.getByText("종목토론방 게시에 실패했습니다"),
+    ).toBeInTheDocument();
+    // 알림 화면으로 이동하지 않고 인라인으로 펼친다(#219 — 기존 네비게이션 대체).
+    expect(go).not.toHaveBeenCalledWith("log", expect.anything());
+
+    // 다시 클릭하면 접힌다.
+    await userEvent.click(title);
+    await waitFor(() =>
+      expect(screen.queryByText("ZZ종목둘")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("항목이 아직 없는 진행 중 아이템은 펼치면 준비 안내를 보여준다", async () => {
+    setQueueNow([{ ...RUNNING_ITEM, items: [] }]);
+    render(
+      <MantineProvider>
+        <Queue go={vi.fn()} />
+      </MantineProvider>,
+    );
+    const title = await screen.findByText("진행 중 게시 작업");
+    await userEvent.click(title);
+    expect(
+      await screen.findByText("진행 상태를 준비하고 있어요…"),
+    ).toBeInTheDocument();
   });
 
   it("persists the new order so it survives a reload", async () => {

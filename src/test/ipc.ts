@@ -445,6 +445,7 @@ const SEED_QUEUE_NOW: QueueNowItem[] = [
       { p: "forum", name: "SK하이닉스", code: "000660" },
       { p: "forum", name: "한미반도체", code: "042700" },
     ],
+    items: [],
   },
   {
     id: "q3",
@@ -455,6 +456,7 @@ const SEED_QUEUE_NOW: QueueNowItem[] = [
       { p: "naver", name: "개미투자 카페" },
       { p: "band", name: "가치투자모임 BAND" },
     ],
+    items: [],
   },
   {
     id: "q4",
@@ -462,6 +464,7 @@ const SEED_QUEUE_NOW: QueueNowItem[] = [
     kind: "comment",
     state: "waiting",
     locs: [{ p: "forum", name: "POSCO홀딩스", code: "005490" }],
+    items: [],
   },
   {
     id: "q5",
@@ -469,6 +472,7 @@ const SEED_QUEUE_NOW: QueueNowItem[] = [
     kind: "post",
     state: "waiting",
     locs: [{ p: "forum", name: "카카오", code: "035720" }],
+    items: [],
   },
 ];
 
@@ -910,6 +914,15 @@ export function setCommandFailures(cmds: string[]): void {
   failCommands = new Set(cmds);
 }
 
+/**
+ * Override the immediate (now) queue — e.g. to inject a running item carrying live
+ * per-target `items` so a component test can exercise the inline-expand view.
+ * Cleared by {@link resetIpc}.
+ */
+export function setQueueNow(items: QueueNowItem[]): void {
+  state.queueNow = clone(items);
+}
+
 /** Re-seed the in-memory backend to the pristine dataset. Call in `beforeEach`. */
 export function resetIpc(): void {
   state = {
@@ -1274,6 +1287,7 @@ export const invoke = vi.fn(
               kind: item.kind,
               state: "waiting",
               locs: item.locs,
+              items: [],
             },
           ];
         }

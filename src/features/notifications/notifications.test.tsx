@@ -110,6 +110,22 @@ describe("Notifications", () => {
     );
   });
 
+  it("renders a waiting sub-log (진행 전) without a trace button", () => {
+    renderSubLog({
+      platform: "naver",
+      target: "주식 카페",
+      loginId: "user04",
+      status: "waiting",
+      msg: "대기 중",
+    });
+    // 진행 전(waiting) 항목도 대상/사유가 렌더되고, 실패 전용 '자세히 보기'는 없다.
+    expect(screen.getByText("주식 카페")).toBeInTheDocument();
+    expect(screen.getByText("대기 중")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /자세히 보기/ }),
+    ).not.toBeInTheDocument();
+  });
+
   it("fires the export action — calls save dialog and exportActivity", async () => {
     const { invoke } = await import("@/test/ipc");
     const { save } = await import("@tauri-apps/plugin-dialog");

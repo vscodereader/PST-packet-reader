@@ -102,10 +102,19 @@ pub struct ForumPublishResult {
 
 // 선택한 종목들에 글/댓글을 게시하고 종목별 성공/실패 결과를 돌려주는 함수입니다.
 // 한 종목이 실패해도 다음 종목을 계속 진행합니다. 종목 사이에는 1분 대기합니다.
-pub fn run_forum_publish<R: Runtime>(
+pub fn run_forum_publish<R, FS, FR>(
     request: ForumPublishRequest,
     app: tauri::AppHandle<R>,
-) -> Vec<ForumPublishResult> {
+    mut on_start: FS,
+    mut on_result: FR,
+) -> Vec<ForumPublishResult>
+where
+    R: Runtime,
+    // 종목 게시 시작 직전(인덱스)과 완료 직후(인덱스, 결과)에 호출한다(#219). 큐 워커가
+    // 이걸 받아 "진행 전 → 진행 중 → 완료/실패"를 실시간으로 보여준다.
+    FS: FnMut(usize),
+    FR: FnMut(usize, &ForumPublishResult),
+{
     let title = request.title.trim();
     let body = request.body.trim();
     let comment = request.comment.trim();
@@ -113,6 +122,7 @@ pub fn run_forum_publish<R: Runtime>(
     let mut results = Vec::with_capacity(total);
 
     for (index, stock) in request.stocks.iter().enumerate() {
+        on_start(index);
         let outcome = run_one_forum_stock(&request, stock, title, body, comment, &app);
         // 실패면 사용자용 메시지(message)와 캡처된 스택(trace)을 분리해 들고 간다(#199).
         let (ok, message, trace) = match outcome {
@@ -144,6 +154,11 @@ pub fn run_forum_publish<R: Runtime>(
             message,
             trace,
         });
+        // 종목 1건 완료를 호출부에 통지한다(#219). 큐 워커는 여기서 진행률·라이브 상태를
+        // 60초 대기 전에 갱신해, 종토방 작업이 0/N에 멈춰 보이지 않게 한다.
+        if let Some(last) = results.last() {
+            on_result(index, last);
+        }
 
         // 마지막 종목이 아니면 다음 게시 전 1분 대기(타이머 이벤트 emit).
         if index + 1 < total {

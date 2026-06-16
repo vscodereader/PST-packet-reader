@@ -16,6 +16,7 @@ import {
 import { notifications } from "@mantine/notifications";
 import { useEffect, useRef, useState } from "react";
 
+import { SubLog } from "@/features/notifications/notifications";
 import { KIND, KIND_ICON } from "@/shared/data/config";
 import type {
   GoFn,
@@ -104,6 +105,9 @@ export function Queue({ go }: { go: GoFn }) {
   const [now, setNow] = useState<QueueNowItem[]>([]);
   const [sched, setSched] = useState<QueueScheduledItem[]>([]);
   const [dragId, setDragId] = useState<string | null>(null);
+  // 진행 중 아이템을 클릭하면 그 자리에서 대상별 상태(items)를 펼친다(#219). 보통 실행
+  // 중 아이템은 1개라 단일 id로 충분하다.
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   // 폴링/이벤트 콜백에서 최신 값을 읽기 위한 ref (stale closure 회피).
   const nowRef = useRef<QueueNowItem[]>(now);
@@ -289,155 +293,180 @@ export function Queue({ go }: { go: GoFn }) {
           const order = running
             ? null
             : waiting.findIndex((w) => w.id === q.id) + 1;
+          const expanded = running && expandedId === q.id;
           return (
-            <Paper
-              key={q.id}
-              withBorder
-              radius="md"
-              draggable={!running}
-              onClick={
-                running && q.batchId
-                  ? () => go("log", { logFilter: { batchId: q.batchId! } })
-                  : undefined
-              }
-              onDragStart={(e) => {
-                setDragId(q.id);
-                // 폴링 가드(dragIdRef.current !== null)가 즉시 막도록 ref도 동기 세팅.
-                // setDragId 반영용 effect는 이번 tick 이후라 그 사이 폴링이 순서를
-                // 덮어쓰는 것을 막는다.
-                dragIdRef.current = q.id;
-                e.dataTransfer.effectAllowed = "move";
-              }}
-              onDragOver={(e) => {
-                e.preventDefault();
-                if (dragId && dragId !== q.id) reorder(dragId, q.id);
-              }}
-              onDragEnd={() => {
-                const dragged = dragId !== null;
-                setDragId(null);
-                dragIdRef.current = null;
-                // 드래그로 바뀐 최종 순서를 백엔드에 영속화한다.
-                if (dragged) persistOrder(nowRef.current.map((x) => x.id));
-              }}
-              title={running ? "클릭하면 알림에서 세부 로그 보기" : undefined}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 14,
-                padding: "13px 14px 13px 10px",
-                borderColor: running
-                  ? "var(--mantine-color-blue-filled)"
-                  : undefined,
-                background: running
-                  ? "var(--mantine-color-blue-light)"
-                  : undefined,
-                opacity: dragging ? 0.5 : 1,
-                cursor: running ? "pointer" : "grab",
-              }}
-            >
-              <Box
-                w={30}
+            <Box key={q.id}>
+              <Paper
+                withBorder
+                radius="md"
+                draggable={!running}
+                onClick={
+                  running
+                    ? () =>
+                        setExpandedId((prev) => (prev === q.id ? null : q.id))
+                    : undefined
+                }
+                onDragStart={(e) => {
+                  setDragId(q.id);
+                  // 폴링 가드(dragIdRef.current !== null)가 즉시 막도록 ref도 동기 세팅.
+                  // setDragId 반영용 effect는 이번 tick 이후라 그 사이 폴링이 순서를
+                  // 덮어쓰는 것을 막는다.
+                  dragIdRef.current = q.id;
+                  e.dataTransfer.effectAllowed = "move";
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  if (dragId && dragId !== q.id) reorder(dragId, q.id);
+                }}
+                onDragEnd={() => {
+                  const dragged = dragId !== null;
+                  setDragId(null);
+                  dragIdRef.current = null;
+                  // 드래그로 바뀐 최종 순서를 백엔드에 영속화한다.
+                  if (dragged) persistOrder(nowRef.current.map((x) => x.id));
+                }}
+                title={running ? "클릭하면 대상별 진행 상태 펼치기" : undefined}
                 style={{
-                  flexShrink: 0,
                   display: "flex",
-                  flexDirection: "column",
                   alignItems: "center",
-                  gap: 2,
+                  gap: 14,
+                  padding: "13px 14px 13px 10px",
+                  borderColor: running
+                    ? "var(--mantine-color-blue-filled)"
+                    : undefined,
+                  background: running
+                    ? "var(--mantine-color-blue-light)"
+                    : undefined,
+                  opacity: dragging ? 0.5 : 1,
+                  cursor: running ? "pointer" : "grab",
                 }}
               >
-                {running ? (
-                  <Loader size={18} />
-                ) : (
-                  <>
-                    <Icon.gripper
-                      size={18}
-                      color="var(--mantine-color-gray-5)"
-                    />
-                    <Text fz={11} fw={800} c="dimmed" ff="monospace">
-                      {order}
+                <Box
+                  w={30}
+                  style={{
+                    flexShrink: 0,
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    gap: 2,
+                  }}
+                >
+                  {running ? (
+                    <Loader size={18} />
+                  ) : (
+                    <>
+                      <Icon.gripper
+                        size={18}
+                        color="var(--mantine-color-gray-5)"
+                      />
+                      <Text fz={11} fw={800} c="dimmed" ff="monospace">
+                        {order}
+                      </Text>
+                    </>
+                  )}
+                </Box>
+
+                <ThemeIcon
+                  size={36}
+                  radius="md"
+                  variant="light"
+                  color={
+                    isLogin ? "violet" : q.kind === "comment" ? "forum" : "gray"
+                  }
+                >
+                  <KI size={18} />
+                </ThemeIcon>
+
+                <Box style={{ flex: 1, minWidth: 0 }}>
+                  <Group gap={8} mb={5} wrap="nowrap">
+                    <Badge
+                      size="sm"
+                      color={isLogin ? "violet" : kd.c}
+                      variant="light"
+                    >
+                      {isLogin ? "로그인" : kd.t}
+                    </Badge>
+                    <Text fz={14} fw={700} truncate>
+                      {q.title}
                     </Text>
-                  </>
+                  </Group>
+                  <LocSummary locs={q.locs} />
+                </Box>
+
+                {running ? (
+                  <Group gap={8} wrap="nowrap">
+                    <Badge size="sm" color="blue" variant="light">
+                      {(() => {
+                        // progress가 아직 없으면 "처리중 /"로 깨지지 않도록 0/0 폴백.
+                        const [d, t] = q.progress ?? [0, 0];
+                        return `처리중 ${d}/${t}`;
+                      })()}
+                    </Badge>
+                    <Icon.chevronDown
+                      size={17}
+                      color="var(--mantine-color-blue-filled)"
+                      style={{
+                        transform: expanded ? "rotate(180deg)" : "none",
+                        transition: "transform .18s",
+                      }}
+                    />
+                  </Group>
+                ) : (
+                  <Group gap={8} wrap="nowrap">
+                    <Text fz={11.5} c="dimmed">
+                      {q.locs.length}곳 대기
+                    </Text>
+                    <Stack gap={1}>
+                      <ActionIcon
+                        size="sm"
+                        variant="subtle"
+                        color="gray"
+                        title="우선순위 올리기"
+                        onClick={() => move(q.id, -1)}
+                      >
+                        <Icon.chevronUp size={15} />
+                      </ActionIcon>
+                      <ActionIcon
+                        size="sm"
+                        variant="subtle"
+                        color="gray"
+                        title="우선순위 내리기"
+                        onClick={() => move(q.id, 1)}
+                      >
+                        <Icon.chevronDown size={15} />
+                      </ActionIcon>
+                    </Stack>
+                    <ActionIcon
+                      size="md"
+                      variant="subtle"
+                      color="gray"
+                      title="취소"
+                      onClick={() => cancel(q.id)}
+                    >
+                      <Icon.x size={17} />
+                    </ActionIcon>
+                  </Group>
                 )}
-              </Box>
-
-              <ThemeIcon
-                size={36}
-                radius="md"
-                variant="light"
-                color={
-                  isLogin ? "violet" : q.kind === "comment" ? "forum" : "gray"
-                }
-              >
-                <KI size={18} />
-              </ThemeIcon>
-
-              <Box style={{ flex: 1, minWidth: 0 }}>
-                <Group gap={8} mb={5} wrap="nowrap">
-                  <Badge
-                    size="sm"
-                    color={isLogin ? "violet" : kd.c}
-                    variant="light"
-                  >
-                    {isLogin ? "로그인" : kd.t}
-                  </Badge>
-                  <Text fz={14} fw={700} truncate>
-                    {q.title}
-                  </Text>
-                </Group>
-                <LocSummary locs={q.locs} />
-              </Box>
-
-              {running ? (
-                <Group gap={8} wrap="nowrap">
-                  <Badge size="sm" color="blue" variant="light">
-                    {(() => {
-                      // progress가 아직 없으면 "처리중 /"로 깨지지 않도록 0/0 폴백.
-                      const [d, t] = q.progress ?? [0, 0];
-                      return `처리중 ${d}/${t}`;
-                    })()}
-                  </Badge>
-                  <Icon.chevronRight
-                    size={17}
-                    color="var(--mantine-color-blue-filled)"
-                  />
-                </Group>
-              ) : (
-                <Group gap={8} wrap="nowrap">
-                  <Text fz={11.5} c="dimmed">
-                    {q.locs.length}곳 대기
-                  </Text>
-                  <Stack gap={1}>
-                    <ActionIcon
-                      size="sm"
-                      variant="subtle"
-                      color="gray"
-                      title="우선순위 올리기"
-                      onClick={() => move(q.id, -1)}
-                    >
-                      <Icon.chevronUp size={15} />
-                    </ActionIcon>
-                    <ActionIcon
-                      size="sm"
-                      variant="subtle"
-                      color="gray"
-                      title="우선순위 내리기"
-                      onClick={() => move(q.id, 1)}
-                    >
-                      <Icon.chevronDown size={15} />
-                    </ActionIcon>
-                  </Stack>
-                  <ActionIcon
-                    size="md"
-                    variant="subtle"
-                    color="gray"
-                    title="취소"
-                    onClick={() => cancel(q.id)}
-                  >
-                    <Icon.x size={17} />
-                  </ActionIcon>
-                </Group>
+              </Paper>
+              {/* 진행 중 아이템을 펼치면 대상별 상태(진행 전/중/완료/실패)를 알림 로그처럼
+                SubLog로 보여준다(#219). 아직 항목이 없으면(막 시작) 안내 문구를 둔다. */}
+              {expanded && (
+                <Paper
+                  withBorder
+                  radius="md"
+                  mt={4}
+                  style={{ overflow: "hidden" }}
+                >
+                  {q.items.length > 0 ? (
+                    q.items.map((it, i) => <SubLog key={i} item={it} />)
+                  ) : (
+                    <Text fz={12} c="dimmed" ta="center" py={14}>
+                      진행 상태를 준비하고 있어요…
+                    </Text>
+                  )}
+                </Paper>
               )}
-            </Paper>
+            </Box>
           );
         })}
         {now.length === 0 && (
