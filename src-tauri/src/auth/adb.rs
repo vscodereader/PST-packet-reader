@@ -159,7 +159,9 @@ fn run_adb(args: &[&str]) -> Result<String, OrchestratorError> {
 
 /// PC의 현재 외부 IP를 조회한다(USB 테더링이면 = 폰 모바일 IP). best-effort.
 /// blocking reqwest를 async 런타임에서 직접 호출하면 패닉하므로 spawn_blocking으로 감싼다.
-async fn fetch_external_ip() -> String {
+/// 실패 시 `(확인 실패)`로 시작하는 문자열을 돌려준다 — 호출부의 IP 비교는 이를 fail-open
+/// 으로 본다(`ip_matches`).
+pub(crate) async fn fetch_external_ip() -> String {
     tokio::task::spawn_blocking(|| {
         reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(5))
