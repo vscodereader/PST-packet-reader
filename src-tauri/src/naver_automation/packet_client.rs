@@ -24,6 +24,9 @@ const CBOX_HOST: &str = "apis.naver.com";
 const STATIC_NID_HOST: &str = "static.nid.naver.com";
 const DEFAULT_REFERER: &str = "https://stock.naver.com/discussion";
 const DEFAULT_PROFILE_INTRODUCTION: &str = "2222";
+// 신규 계정 프로필 생성 시 기본 아바타(성공 캡처에서 브라우저가 보낸 값).
+const DEFAULT_PROFILE_AVATAR: &str =
+    "https://ssl.pstatic.net/imgstock/fn/real/_front/image/profile/avatar-12.png";
 
 // 글쓰기 form(txId)·add 가 다종목 연속 게시 때 간헐적으로 429를 반환하므로
 // 일시적 실패(429·5xx)에 한해 70초 대기 후 재시도한다. 네이버 레이트리밋 창이
@@ -285,46 +288,71 @@ impl NaverPacketClient {
             return Ok(false);
         }
 
-        let profile_id = status
-            .get("profileId")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| {
-                AutomationError::new("프로필 상태 응답에서 profileId를 찾지 못했습니다.")
-            })?;
-        let form =
-            self.get_stock_json("/api/community/profile/users/form", referer, "프로필 form")?;
-        let nickname = form
-            .get("nickname")
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .map(ToOwned::to_owned)
-            .map(Ok)
-            .unwrap_or_else(|| self.recommend_profile_nickname(referer))?;
+        // 신규 계정은 status="nonExistent", profileId=null 이다(성공 캡처 확인). 이때 브라우저는
+        // POST /users 로 프로필을 새로 만든다(만들 id가 없으니 PUT /{id} 가 아니다). profileId가
+        // 이미 있는(부분 생성된) 계정은 기존 PUT 경로를 그대로 유지한다.
+        let profile_id = status.get("profileId").and_then(Value::as_str);
+        let response_text = match profile_id {
+            // 신규 계정 — 프로필 생성(POST). form이 아직 없으므로 추천 닉네임과 기본 아바타를 쓴다.
+            None => {
+                let nickname = self.recommend_profile_nickname(referer)?;
+                self.validate_profile_introduction(referer)?;
+                let payload = json!({
+                    "nickname": nickname,
+                    "introduction": DEFAULT_PROFILE_INTRODUCTION,
+                    "imageUrl": DEFAULT_PROFILE_AVATAR,
+                    "danglingImages": [],
+                });
+                self.client
+                    .post(format!("{STOCK_ORIGIN}/api/community/profile/users"))
+                    .headers(self.stock_json_headers(STOCK_HOST, referer)?)
+                    .json(&payload)
+                    .send()
+                    .map_err(|error| {
+                        AutomationError::new(format!("프로필 생성 POST 패킷 전송 실패: {error}"))
+                    })
+                    .and_then(|response| response_text(response, "프로필 생성 POST"))?
+            }
+            // 기존(부분 생성) 프로필 — 기존 PUT 경로 그대로(닉네임/이미지는 form 값을 쓴다).
+            Some(profile_id) => {
+                let profile_id = profile_id.to_owned();
+                let form = self.get_stock_json(
+                    "/api/community/profile/users/form",
+                    referer,
+                    "프로필 form",
+                )?;
+                let nickname = form
+                    .get("nickname")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(ToOwned::to_owned)
+                    .map(Ok)
+                    .unwrap_or_else(|| self.recommend_profile_nickname(referer))?;
 
-        self.validate_profile_introduction(referer)?;
+                self.validate_profile_introduction(referer)?;
 
-        let payload = json!({
-            "nickname": nickname,
-            "introduction": DEFAULT_PROFILE_INTRODUCTION,
-            "imageUrl": form.get("imageUrl").cloned().unwrap_or(Value::Null),
-            "danglingImages": [],
-        });
-        let response_text = self
-            .client
-            .put(format!(
-                "{STOCK_ORIGIN}/api/community/profile/users/{profile_id}"
-            ))
-            .headers(self.stock_json_headers(STOCK_HOST, referer)?)
-            .json(&payload)
-            .send()
-            .map_err(|error| {
-                AutomationError::new(format!("프로필 저장 PUT 패킷 전송 실패: {error}"))
-            })
-            .and_then(|response| response_text(response, "프로필 저장 PUT"))?;
+                let payload = json!({
+                    "nickname": nickname,
+                    "introduction": DEFAULT_PROFILE_INTRODUCTION,
+                    "imageUrl": form.get("imageUrl").cloned().unwrap_or(Value::Null),
+                    "danglingImages": [],
+                });
+                self.client
+                    .put(format!(
+                        "{STOCK_ORIGIN}/api/community/profile/users/{profile_id}"
+                    ))
+                    .headers(self.stock_json_headers(STOCK_HOST, referer)?)
+                    .json(&payload)
+                    .send()
+                    .map_err(|error| {
+                        AutomationError::new(format!("프로필 저장 PUT 패킷 전송 실패: {error}"))
+                    })
+                    .and_then(|response| response_text(response, "프로필 저장 PUT"))?
+            }
+        };
 
         if !response_text.trim().is_empty() {
-            let _ = parse_json(&response_text, "프로필 저장 PUT");
+            let _ = parse_json(&response_text, "프로필 저장");
         }
 
         let updated = self.get_stock_json(
