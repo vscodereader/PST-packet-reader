@@ -15,7 +15,7 @@ use tauri::{AppHandle, Manager, Runtime};
 
 use super::accounts::{AccountStatus, PlatformId};
 use super::activity::{record, ActivityItem, ActivityType};
-use super::log_batches::{BatchItem, BatchItemStatus, LogBatch, MAX_LOG_BATCHES};
+use super::log_batches::{BatchItem, BatchItemStatus, LogBatch, PostedContent, MAX_LOG_BATCHES};
 use super::posts::{CommentTarget, ModeValue};
 use super::queue::{apply_cancel_now, LoginTarget, PublishPlan, QueueNowItem, QueueState};
 use crate::auth::outcome::LoginResolution;
@@ -1150,6 +1150,13 @@ fn cafe_label(plan: &PublishPlan, cafe: &str) -> String {
 }
 
 /// 카페 글 게시 결과 1건 → BatchItem.
+/// 카페 글/댓글의 읽기 URL을 cafe_id+article_id로 조립한다(글쓰기 엔드포인트와 동일
+/// 계열의 `ca-fe/cafes/{cafeId}/articles/{articleId}`). 완료 로그·게시 큐의
+/// "올라간 글 열기"가 이 URL을 외부 브라우저로 연다.
+fn cafe_article_url(cafe_id: u64, article_id: u64) -> String {
+    format!("https://cafe.naver.com/ca-fe/cafes/{cafe_id}/articles/{article_id}")
+}
+
 fn post_report_to_item(plan: &PublishPlan, r: &JobReport) -> BatchItem {
     BatchItem {
         platform: PlatformId::Naver,
@@ -1175,7 +1182,12 @@ fn post_report_to_item(plan: &PublishPlan, r: &JobReport) -> BatchItem {
             .error
             .as_ref()
             .map(|e| failure_trace(&e.code, &e.message, e.error_data.as_ref().map(|d| &d.cafe))),
-        posted: None,
+        // 성공 시 등록 결과(cafe_id/article_id)로 글 URL을 채워 "올라간 글 열기"를 띄운다.
+        // 카페 엔진은 제목/본문을 결과로 돌려주지 않아 url만 보존한다(#219).
+        posted: r.result.as_ref().map(|res| PostedContent {
+            url: Some(cafe_article_url(res.cafe_id, res.article_id)),
+            ..Default::default()
+        }),
     }
 }
 
@@ -1203,7 +1215,11 @@ fn comment_report_to_item(plan: &PublishPlan, r: &CommentJobReport) -> BatchItem
             .error
             .as_ref()
             .map(|e| failure_trace(&e.code, &e.message, e.error_data.as_ref().map(|d| &d.cafe))),
-        posted: None,
+        // 성공 시 댓글을 단 대상 글로 이동할 수 있게 그 글 URL을 채운다(#219).
+        posted: r.success.then(|| PostedContent {
+            url: Some(cafe_article_url(r.cafe_id, r.article_id)),
+            ..Default::default()
+        }),
     }
 }
 
@@ -1279,7 +1295,7 @@ fn band_outcome_to_item(o: &BandOutcome) -> BatchItem {
     // post/both는 새 글(+댓글), comment 전용은 기존 글 댓글. 둘 다 부분 실패를 드러낸다
     // (성공분이 모자라면 성공으로 묻지 않는다). 메인=친절 문구, 자세히=기술 trace로 나눈다
     // (실패만 trace; 부분 실패도 성공/시도 수를 trace로 남긴다)(#199).
-    let (status, msg, trace) = match &o.result {
+    let (status, msg, trace, posted) = match &o.result {
         Ok(BandJobResult::Published(out)) => {
             let ok = out.comment_total == 0 || out.commented_count >= out.comment_total;
             let msg = if out.comment_total > 0 {
@@ -1296,7 +1312,13 @@ fn band_outcome_to_item(o: &BandOutcome) -> BatchItem {
                     out.commented_count, out.comment_total
                 )
             });
-            (status_of(ok), msg, trace)
+            // 글은 올라갔으므로(댓글 부분 실패여도) 밴드가 준 글 URL을 채워 "올라간 글 열기"를
+            // 띄운다. 댓글 전용 모드(Commented)는 여러 글 대상이라 단일 URL이 없어 비운다(#219).
+            let posted = Some(PostedContent {
+                url: Some(out.web_url.clone()),
+                ..Default::default()
+            });
+            (status_of(ok), msg, trace, posted)
         }
         Ok(BandJobResult::Commented(out)) => {
             // 한 건도 못 달면(대상 글 없음/전부 실패) 실패로 둔다(즉시게시 판정과 동일).
@@ -1319,12 +1341,13 @@ fn band_outcome_to_item(o: &BandOutcome) -> BatchItem {
             } else {
                 Some("BAND_NO_TARGET · 댓글 대상 글을 찾지 못함".to_owned())
             };
-            (status_of(ok), msg, trace)
+            (status_of(ok), msg, trace, None)
         }
         Err(e) => (
             BatchItemStatus::Fail,
             band_failure_reason(e),
             Some(band_failure_trace(e)),
+            None,
         ),
     };
     BatchItem {
@@ -1336,7 +1359,7 @@ fn band_outcome_to_item(o: &BandOutcome) -> BatchItem {
         status,
         msg,
         trace,
-        posted: None,
+        posted,
     }
 }
 
@@ -2693,5 +2716,99 @@ mod tests {
             b.items[0].trace.as_deref(),
             Some("ARTICLE_LIST_HTTP_ERROR · HTTP 500 · errorCode -\nlist fetch failed")
         );
+    }
+
+    // #219: 게시 큐/완료 로그의 "올라간 글 열기"가 동작하려면 변환 단계에서 posted.url을
+    // 채워야 한다. 카페 글/댓글·밴드 글이 각각 올바른 URL을 채우는지 검증한다.
+    #[test]
+    fn cafe_post_success_fills_article_url() {
+        let p = plan(ModeValue::Post, vec![naver_target("u1")]);
+        let report = JobReport {
+            account_id: "u1".into(),
+            cafe: "123".into(),
+            menu_id: 7,
+            success: true,
+            result: Some(ArticleRegisterResult {
+                cafe_id: 999,
+                article_id: 42,
+                menu_id: 7,
+            }),
+            error: None,
+        };
+        let item = post_report_to_item(&p, &report);
+        assert_eq!(
+            item.posted.and_then(|c| c.url).as_deref(),
+            Some("https://cafe.naver.com/ca-fe/cafes/999/articles/42")
+        );
+    }
+
+    #[test]
+    fn cafe_post_failure_has_no_url() {
+        let p = plan(ModeValue::Post, vec![naver_target("u1")]);
+        let report = JobReport {
+            account_id: "u1".into(),
+            cafe: "123".into(),
+            menu_id: 7,
+            success: false,
+            result: None,
+            error: None,
+        };
+        let item = post_report_to_item(&p, &report);
+        assert!(item.posted.is_none());
+    }
+
+    #[test]
+    fn cafe_comment_success_fills_target_article_url() {
+        let p = plan(ModeValue::Comment, vec![naver_target("u1")]);
+        let report = CommentJobReport {
+            account_id: "u1".into(),
+            cafe_id: 123,
+            article_id: 55,
+            success: true,
+            result: None,
+            error: None,
+        };
+        let item = comment_report_to_item(&p, &report);
+        assert_eq!(
+            item.posted.and_then(|c| c.url).as_deref(),
+            Some("https://cafe.naver.com/ca-fe/cafes/123/articles/55")
+        );
+    }
+
+    #[test]
+    fn band_published_fills_web_url() {
+        let outcome = BandOutcome {
+            account_id: "u1".into(),
+            band_name: "테스트밴드".into(),
+            result: Ok(BandJobResult::Published(BandPublishOutcome {
+                joined: true,
+                post_no: 7,
+                web_url: "https://band.us/band/100/post/7".into(),
+                commented_count: 0,
+                comment_total: 0,
+                band_name: None,
+            })),
+        };
+        let item = band_outcome_to_item(&outcome);
+        assert_eq!(
+            item.posted.and_then(|c| c.url).as_deref(),
+            Some("https://band.us/band/100/post/7")
+        );
+    }
+
+    #[test]
+    fn band_comment_only_has_no_url() {
+        // 댓글 전용은 여러 글 대상이라 단일 URL이 없어 posted를 비운다.
+        let outcome = BandOutcome {
+            account_id: "u1".into(),
+            band_name: "테스트밴드".into(),
+            result: Ok(BandJobResult::Commented(BandCommentOutcome {
+                target_count: 3,
+                commented_count: 3,
+                band_name: None,
+            })),
+        };
+        let item = band_outcome_to_item(&outcome);
+        assert!(item.posted.is_none());
     }
 }
