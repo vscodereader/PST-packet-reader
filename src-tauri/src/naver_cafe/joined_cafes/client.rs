@@ -26,6 +26,13 @@ pub const JOINED_CAFES_HOST: &str = "apis.naver.com";
 /// 페이지 순회 안전 상한(무한 루프 방지).
 const MAX_PAGES: u32 = 50;
 
+/// 한 페이지 조회의 최대 시도 횟수(최초 1회 + 재시도). 간헐적 네트워크 흔들림(타임아웃/
+/// 연결 실패)·일시적 서버 오류(5xx)에 한 번에 실패로 떨어지지 않게 한다.
+const PAGE_FETCH_MAX_ATTEMPTS: u32 = 3;
+
+/// 재시도 사이 대기. 짧게 둬 사용자가 체감하는 지연을 최소화한다.
+const PAGE_FETCH_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
 // ---------------------------------------------------------------------------
 // 경로 헬퍼
 // ---------------------------------------------------------------------------
@@ -91,7 +98,7 @@ impl JoinedCafesClient {
         let mut all = Vec::new();
         let mut page = 1u32;
         loop {
-            let (mut cafes, last_page) = self.fetch_page(page, cookie_header).await?;
+            let (mut cafes, last_page) = self.fetch_page_with_retry(page, cookie_header).await?;
             tracing::debug!(
                 page,
                 fetched = cafes.len(),
@@ -113,6 +120,44 @@ impl JoinedCafesClient {
         }
         tracing::info!(count = all.len(), "가입 카페 목록 조회 완료");
         Ok(all)
+    }
+
+    /// `fetch_page`를 감싸 일시적(transport 타임아웃/연결, HTTP 5xx) 오류면 짧게 쉬고 몇
+    /// 차례 재시도한다(`retryable` 플래그 기준). 인증·파싱·4xx 오류는 재시도해도 같으므로
+    /// retryable=false라 즉시 보고한다. 마지막 시도의 오류를 그대로 돌려준다.
+    async fn fetch_page_with_retry(
+        &self,
+        page: u32,
+        cookie_header: Option<&str>,
+    ) -> Result<(Vec<JoinedCafe>, bool), JoinedCafesError> {
+        let mut attempt = 1u32;
+        loop {
+            match self.fetch_page(page, cookie_header).await {
+                Ok(ok) => return Ok(ok),
+                Err(err) => {
+                    // 일시 오류(타임아웃/연결/5xx)는 retryable 플래그로, rate limit(429)은
+                    // http_status로 판정한다. 429는 공유 http_error_envelope이 5xx만 retryable로
+                    // 잡아 빠지므로(다른 호출부 영향 없이) 여기서만 추가로 재시도한다.
+                    let retryable = err
+                        .error_data
+                        .as_ref()
+                        .map(|d| d.retryable || d.http_status == Some(429))
+                        .unwrap_or(false);
+                    if retryable && attempt < PAGE_FETCH_MAX_ATTEMPTS {
+                        tracing::warn!(
+                            page,
+                            attempt,
+                            code = %err.code,
+                            "가입 카페 페이지 조회 일시 오류 — 재시도"
+                        );
+                        tokio::time::sleep(PAGE_FETCH_RETRY_DELAY).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        }
     }
 
     /// 단일 페이지를 조회해 `(카페 목록, 마지막 페이지 여부)`를 반환한다.
@@ -339,6 +384,92 @@ mod tests {
         let cafes = client.fetch_joined_cafes(None).await.expect("성공해야 함");
         // page1(3건) + page2(0건) = 3건
         assert_eq!(cafes.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn fetch_joined_cafes_retries_transient_5xx_then_succeeds() {
+        let server = MockServer::start().await;
+        // 폴백(나중 요청)은 200 성공. 먼저 mount해 우선순위를 낮춘다.
+        Mock::given(method("GET"))
+            .and(path(
+                "/cafe-home-web/cafe-home/v1/config/join-cafes/groups/",
+            ))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(REAL_FIXTURE))
+            .mount(&server)
+            .await;
+        // 첫 요청은 503(일시 서버 오류, retryable)을 1회만 응답한다(가장 최근 mount → 우선).
+        Mock::given(method("GET"))
+            .and(path(
+                "/cafe-home-web/cafe-home/v1/config/join-cafes/groups/",
+            ))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        let client = JoinedCafesClient::with_base_url(server.uri());
+        // 503 1회 → 재시도 → 200 성공.
+        let cafes = client
+            .fetch_joined_cafes(None)
+            .await
+            .expect("일시 5xx는 재시도로 성공해야 함");
+        assert_eq!(cafes.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn fetch_joined_cafes_retries_rate_limit_429_then_succeeds() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/cafe-home-web/cafe-home/v1/config/join-cafes/groups/",
+            ))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(REAL_FIXTURE))
+            .mount(&server)
+            .await;
+        // 429(요청 과다)는 5xx가 아니라 retryable 플래그엔 안 잡히지만, 가입 카페 조회는
+        // http_status==429도 재시도한다.
+        Mock::given(method("GET"))
+            .and(path(
+                "/cafe-home-web/cafe-home/v1/config/join-cafes/groups/",
+            ))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(429))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        let client = JoinedCafesClient::with_base_url(server.uri());
+        let cafes = client
+            .fetch_joined_cafes(None)
+            .await
+            .expect("429는 재시도로 성공해야 함");
+        assert_eq!(cafes.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn fetch_joined_cafes_does_not_retry_non_retryable_404() {
+        let server = MockServer::start().await;
+        // 404는 retryable=false라 재시도하지 않는다 — 정확히 1번만 호출돼야 한다.
+        Mock::given(method("GET"))
+            .and(path(
+                "/cafe-home-web/cafe-home/v1/config/join-cafes/groups/",
+            ))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = JoinedCafesClient::with_base_url(server.uri());
+        let err = client
+            .fetch_joined_cafes(None)
+            .await
+            .expect_err("404는 즉시 실패해야 함");
+        assert_eq!(err.code, "JOINED_CAFES_HTTP_ERROR");
+        // server drop 시 expect(1) 검증: 404는 재시도 없이 1회만 호출.
     }
 
     #[tokio::test]
