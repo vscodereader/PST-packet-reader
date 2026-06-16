@@ -308,6 +308,7 @@ export const ipc = {
     getStatus: () => call<EnvironmentStatus>("get_environment_status"),
     /** Chrome 미설치 안내 카드의 "설치 페이지 열기" — 공식 다운로드 페이지를 기본 브라우저로 연다. */
     openChromeDownload: () => call<void>("open_chrome_download"),
+    openUrl: (url: string) => call<void>("open_url", { url }),
   },
   app: {
     /** 부팅 자동 시작(OS 로그인 시 자동 실행) 등록 여부. */

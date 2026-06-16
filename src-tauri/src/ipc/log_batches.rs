@@ -33,6 +33,22 @@ pub enum BatchState {
     Running,
 }
 
+/// 한 대상에 실제로 게시된 내용(종목별 토큰 치환 후). 글이 빛삭돼도 무엇을 보냈는지
+/// 완료 로그에서 확인할 수 있게 종목별로 보존한다. 댓글/URL은 있을 때만.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
+#[serde(rename_all = "camelCase")]
+pub struct PostedContent {
+    pub title: String,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub url: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../src/shared/bindings/")]
 #[serde(rename_all = "camelCase")]
@@ -51,6 +67,10 @@ pub struct BatchItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub trace: Option<String>,
+    /// 종목별 실제 게시 내용(제목/본문/댓글/URL). 게시 성공 시에만 채운다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub posted: Option<PostedContent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

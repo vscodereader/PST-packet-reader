@@ -640,6 +640,7 @@ async fn run_forum_targets<R: Runtime>(
                                 ok: false,
                                 trace: Some(message.clone()),
                                 message,
+                                posted: None,
                             }
                         })
                         .collect();
@@ -665,6 +666,7 @@ async fn run_forum_targets<R: Runtime>(
                         ok: false,
                         trace: Some(message.clone()),
                         message,
+                        posted: None,
                     }
                 })
                 .collect(),
@@ -794,6 +796,7 @@ fn login_item(
         status,
         msg,
         trace,
+        posted: None,
     }
 }
 
@@ -1172,6 +1175,7 @@ fn post_report_to_item(plan: &PublishPlan, r: &JobReport) -> BatchItem {
             .error
             .as_ref()
             .map(|e| failure_trace(&e.code, &e.message, e.error_data.as_ref().map(|d| &d.cafe))),
+        posted: None,
     }
 }
 
@@ -1199,6 +1203,7 @@ fn comment_report_to_item(plan: &PublishPlan, r: &CommentJobReport) -> BatchItem
             .error
             .as_ref()
             .map(|e| failure_trace(&e.code, &e.message, e.error_data.as_ref().map(|d| &d.cafe))),
+        posted: None,
     }
 }
 
@@ -1217,6 +1222,7 @@ fn fetch_failure_to_item(plan: &PublishPlan, f: &CommentFetchFailure) -> BatchIt
             failure_reason(&f.code, f.cafe.as_ref())
         ),
         trace: Some(failure_trace(&f.code, &f.message, f.cafe.as_ref())),
+        posted: None,
     }
 }
 
@@ -1237,6 +1243,8 @@ fn forum_result_to_item(account_id: &str, result: &ForumPublishResult) -> BatchI
             "종목토론방 게시에 실패했습니다".to_owned()
         },
         trace: result.trace.clone(),
+        // master #218: 종목별 게시 내용(제목/본문/댓글/URL)을 완료 로그·라이브 표시에 보존한다.
+        posted: result.posted.clone(),
     }
 }
 
@@ -1259,6 +1267,7 @@ fn forum_skeleton_items(plan: &PublishPlan) -> Vec<BatchItem> {
                 status: BatchItemStatus::Waiting,
                 msg: "대기 중".to_owned(),
                 trace: None,
+                posted: None,
             });
         }
     }
@@ -1327,6 +1336,7 @@ fn band_outcome_to_item(o: &BandOutcome) -> BatchItem {
         status,
         msg,
         trace,
+        posted: None,
     }
 }
 
@@ -1344,6 +1354,7 @@ fn band_skeleton_items(plan: &PublishPlan) -> Vec<BatchItem> {
             status: BatchItemStatus::Waiting,
             msg: "대기 중".to_owned(),
             trace: None,
+            posted: None,
         })
         .collect()
 }
@@ -1393,6 +1404,7 @@ fn running_post_items(plan: &PublishPlan) -> Vec<BatchItem> {
             status: BatchItemStatus::Running,
             msg: "글 게시 중…".to_owned(),
             trace: None,
+            posted: None,
         })
         .collect()
 }
@@ -1409,6 +1421,7 @@ fn running_comment_items(plan: &PublishPlan, jobs: &[CommentJob]) -> Vec<BatchIt
             status: BatchItemStatus::Running,
             msg: "댓글 게시 중…".to_owned(),
             trace: None,
+            posted: None,
         })
         .collect()
 }
@@ -1788,6 +1801,7 @@ mod tests {
                 ok: true,
                 message: "게시 완료".into(),
                 trace: None,
+                posted: None,
             },
         }
     }
@@ -1801,6 +1815,7 @@ mod tests {
                 ok: false,
                 message: "엔진 오류".into(),
                 trace: Some(trace.into()),
+                posted: None,
             },
         }
     }
@@ -1967,6 +1982,7 @@ mod tests {
             status,
             msg: "m".into(),
             trace: None,
+            posted: None,
         }
     }
 
