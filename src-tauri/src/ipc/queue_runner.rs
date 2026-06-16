@@ -759,7 +759,15 @@ async fn run_band_targets<R: Runtime>(
         };
         // 대상 1건 완료마다 그 자리만 성공/실패로 교체하고 진행률·라이브 상태를 갱신한다(#219).
         if let Some(slot) = live.get_mut(i) {
-            *slot = band_outcome_to_item(&outcome);
+            *slot = band_outcome_to_item(
+                &outcome,
+                &band_title,
+                &band_body,
+                resolved_comments
+                    .iter()
+                    .find(|c| !c.trim().is_empty())
+                    .map(String::as_str),
+            );
         }
         write_live_phase(app, id, &base_items, &live, base_done, total);
         outcomes.push(outcome);
@@ -1291,7 +1299,12 @@ fn forum_skeleton_items(plan: &PublishPlan) -> Vec<BatchItem> {
 }
 
 /// 밴드 게시 결과 1건 → BatchItem.
-fn band_outcome_to_item(o: &BandOutcome) -> BatchItem {
+fn band_outcome_to_item(
+    o: &BandOutcome,
+    title: &str,
+    body: &str,
+    comment: Option<&str>,
+) -> BatchItem {
     // post/both는 새 글(+댓글), comment 전용은 기존 글 댓글. 둘 다 부분 실패를 드러낸다
     // (성공분이 모자라면 성공으로 묻지 않는다). 메인=친절 문구, 자세히=기술 trace로 나눈다
     // (실패만 trace; 부분 실패도 성공/시도 수를 trace로 남긴다)(#199).
@@ -1314,9 +1327,17 @@ fn band_outcome_to_item(o: &BandOutcome) -> BatchItem {
             });
             // 글은 올라갔으므로(댓글 부분 실패여도) 밴드가 준 글 URL을 채워 "올라간 글 열기"를
             // 띄운다. 댓글 전용 모드(Commented)는 여러 글 대상이라 단일 URL이 없어 비운다(#219).
+            // 글은 올라갔으므로 작성 내용(제목/본문)과 밴드가 준 글 URL을 채워, 빛삭돼도
+            // 무엇을 보냈는지 + "올라간 글 열기"가 되게 한다. 댓글은 글+댓글일 때만.
             let posted = Some(PostedContent {
+                title: title.to_owned(),
+                body: body.to_owned(),
+                comment: if out.comment_total > 0 {
+                    comment.map(str::to_owned)
+                } else {
+                    None
+                },
                 url: Some(out.web_url.clone()),
-                ..Default::default()
             });
             (status_of(ok), msg, trace, posted)
         }
@@ -1405,7 +1426,20 @@ fn build_items(
             .map(|f| fetch_failure_to_item(plan, f)),
     );
     items.extend(forum_outcomes.iter().map(forum_outcome_to_item));
-    items.extend(band_outcomes.iter().map(band_outcome_to_item));
+    // 밴드 완료 로그에 작성 내용(#{링크} 치환 후)을 싣는다(URL은 엔진 web_url 사용).
+    let band_link = crate::template_tokens::resolve_link(&plan.link_override, "");
+    let band_title = crate::template_tokens::resolve_link_only(&plan.title, &band_link);
+    let band_body = crate::template_tokens::resolve_link_only(&plan.body_text, &band_link);
+    let band_comment = plan
+        .comments
+        .iter()
+        .find(|c| !c.trim().is_empty())
+        .map(|c| crate::template_tokens::resolve_link_only(c, &band_link));
+    items.extend(
+        band_outcomes
+            .iter()
+            .map(|o| band_outcome_to_item(o, &band_title, &band_body, band_comment.as_deref())),
+    );
     items
 }
 
@@ -2789,11 +2823,14 @@ mod tests {
                 band_name: None,
             })),
         };
-        let item = band_outcome_to_item(&outcome);
+        let item = band_outcome_to_item(&outcome, "제목", "본문", Some("댓글"));
         assert_eq!(
-            item.posted.and_then(|c| c.url).as_deref(),
+            item.posted.clone().and_then(|c| c.url).as_deref(),
             Some("https://band.us/band/100/post/7")
         );
+        // 작성 내용(제목/본문)도 함께 보존된다.
+        assert_eq!(item.posted.as_ref().map(|c| c.title.as_str()), Some("제목"));
+        assert_eq!(item.posted.as_ref().map(|c| c.body.as_str()), Some("본문"));
     }
 
     #[test]
@@ -2808,7 +2845,7 @@ mod tests {
                 band_name: None,
             })),
         };
-        let item = band_outcome_to_item(&outcome);
+        let item = band_outcome_to_item(&outcome, "제목", "본문", Some("댓글"));
         assert!(item.posted.is_none());
     }
 }
