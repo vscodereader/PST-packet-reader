@@ -115,8 +115,10 @@ pub fn run_forum_publish<R: Runtime>(
     for (index, stock) in request.stocks.iter().enumerate() {
         let outcome = run_one_forum_stock(&request, stock, title, body, comment, &app);
         // 실패면 사용자용 메시지(message)와 캡처된 스택(trace)을 분리해 들고 간다(#199).
+        // 성공 시 작성된 글 URL을 메시지에 함께 실어, 완료 로그에서 올라간 글을 확인할 수 있게 한다.
         let (ok, message, trace) = match outcome {
-            Ok(()) => (true, "게시 완료".to_owned(), None),
+            Ok(Some(url)) => (true, format!("게시 완료 · {url}"), None),
+            Ok(None) => (true, "게시 완료".to_owned(), None),
             Err(error) => (false, error.message().to_owned(), Some(error.trace())),
         };
 
@@ -129,7 +131,10 @@ pub fn run_forum_publish<R: Runtime>(
             _ => "글",
         };
         if ok {
-            tracing::info!("[POST] {who}  \"{}\" 종목토론방 {kind} 성공 ✅", stock.name);
+            tracing::info!(
+                "[POST] {who}  \"{}\" 종목토론방 {kind} 성공 ✅ — {message}",
+                stock.name
+            );
         } else {
             tracing::info!(
                 "[POST] {who}  \"{}\" 종목토론방 {kind} 실패 ❌ — {message}",
@@ -165,7 +170,7 @@ fn run_one_forum_stock<R: Runtime>(
     app: &tauri::AppHandle<R>,
     // AutomationError를 그대로 돌려준다(메시지+캡처된 스택). 호출부가 message/backtrace로
     // 나눠 ForumPublishResult에 싣는다(#199).
-) -> Result<(), AutomationError> {
+) -> Result<Option<String>, AutomationError> {
     // 종목별로 변수 토큰을 치환한다(미리보기 resolveTemplate와 동일 결과).
     // #{종목명}/#{종목코드}는 이 종목 값으로, #{링크}는 링크값(있으면) 또는 종목 시세 링크로.
     let link = crate::template_tokens::resolve_link(&request.link_override, &stock.code);
@@ -188,7 +193,7 @@ fn run_one_forum_stock<R: Runtime>(
             app,
             false,
         )
-        .map(|_| ())
+        .map(|reports| reports.into_iter().find_map(|r| r.post_url))
     } else {
         let target = if request.run_comment {
             AutomationTarget::Comment
@@ -206,7 +211,7 @@ fn run_one_forum_stock<R: Runtime>(
             stock: Some(stock.clone()),
             account_id: Some(request.account_id.clone()),
         })
-        .map(|_| ())
+        .map(|report| report.post_url)
     }
 }
 

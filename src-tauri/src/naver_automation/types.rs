@@ -61,6 +61,9 @@ pub struct DiscussionSelection {
 // 자동화 실행 결과를 CLI와 Tauri UI에 돌려주는 구조체입니다.
 pub struct AutomationReport {
     pub current_url: String,
+    /// 글쓰기 성공 시 작성된 글의 URL(add 응답 id 기반). 글이 아니면 None.
+    #[serde(default)]
+    pub post_url: Option<String>,
     pub login_profile: NaverLoginProfile,
     pub register_button_highlighted: bool,
     pub submitted: bool,

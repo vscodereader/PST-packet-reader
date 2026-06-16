@@ -173,6 +173,7 @@ pub fn run_naver_discussion_macro(
         request.stock.as_ref(),
     )?;
 
+    let mut posted_url: Option<String> = None;
     let (register_button_highlighted, submitted) = match request.target {
         AutomationTarget::Post => {
             // 글쓰기 전에 종목토론방 프로필(닉네임+소개 2222)을 보장한다. 프로필이 없으면
@@ -180,7 +181,8 @@ pub fn run_naver_discussion_macro(
             let room_url = chrome.current_url()?;
             packet_client.ensure_profile_intro_setup(&room_url)?;
             if request.submit_after_fill {
-                chrome.submit_post_and_refresh(&packet_client, title, body)?;
+                // 작성된 글 URL(add 응답 id 기반)을 보존해 완료 로그에서 확인할 수 있게 한다.
+                posted_url = Some(chrome.submit_post_and_refresh(&packet_client, title, body)?);
                 (false, true)
             } else {
                 chrome.open_write_modal()?;
@@ -204,6 +206,7 @@ pub fn run_naver_discussion_macro(
 
     Ok(AutomationReport {
         current_url: chrome.current_url()?,
+        post_url: posted_url,
         login_profile,
         register_button_highlighted,
         submitted,
@@ -256,6 +259,7 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
     let post_url = chrome.submit_post_and_refresh(&packet_client, title, body)?;
     let post_report = AutomationReport {
         current_url: chrome.current_url()?,
+        post_url: Some(post_url.clone()),
         login_profile: login_profile.clone(),
         register_button_highlighted: false,
         submitted: true,
@@ -276,6 +280,7 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
     chrome.submit_comment_and_refresh(&packet_client, comment)?;
     let comment_report = AutomationReport {
         current_url: chrome.current_url()?,
+        post_url: None,
         login_profile,
         register_button_highlighted: false,
         submitted: true,
