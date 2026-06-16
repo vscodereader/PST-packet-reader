@@ -50,3 +50,7 @@ NOTES.local.md
 TODO.local.md
 메모.md
 정리.md
+
+# OMC local state
+.omc/
+src-tauri/.omc/

@@ -165,6 +165,7 @@ fn build_publish_batch(
                 "종목토론방 게시에 실패했습니다".to_owned()
             },
             trace: r.trace.clone(),
+            posted: None,
         })
         .collect();
     LogBatch {
@@ -506,6 +507,7 @@ fn record_band_batch<R: Runtime>(
                 i.trace.clone().or_else(|| Some(i.msg.clone()))
             },
             msg: i.msg,
+            posted: None,
         })
         .collect();
 
@@ -656,6 +658,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         bands::list_bands,
         diagnostics::get_environment_status,
         diagnostics::open_chrome_download,
+        diagnostics::open_url,
         bootstrap_runtime,
         save_accounts,
         band_publish,
@@ -914,6 +917,7 @@ mod tests {
                 ok: true,
                 message: "게시 완료".into(),
                 trace: None,
+                posted: None,
             },
             ForumPublishResult {
                 code: "000660".into(),
@@ -921,6 +925,7 @@ mod tests {
                 ok: false,
                 message: "로그인 만료".into(),
                 trace: Some("stack backtrace:\n  0: forum::login_check".into()),
+                posted: None,
             },
         ];
         let b = build_publish_batch(
@@ -956,6 +961,7 @@ mod tests {
             ok: true,
             message: "게시 완료".into(),
             trace: None,
+            posted: None,
         }];
         let b = build_publish_batch(
             "제목",

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{Emitter, Runtime};
 
+use crate::ipc::log_batches::PostedContent;
 use crate::naver_automation::{
     run_naver_discussion_macro, run_naver_post_with_comment_macro, AutomationError,
     AutomationReport, AutomationTarget, DiscussionStock, NaverDiscussionRequest,
@@ -98,6 +99,9 @@ pub struct ForumPublishResult {
     /// 사용자용 `message`와 분리해, 메인 라인엔 안 나오고 자세히 보기에만 노출한다(#199).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace: Option<String>,
+    /// 종목별 실제 게시 내용(제목/본문/댓글/URL). 게시 성공 시에만 채운다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posted: Option<PostedContent>,
 }
 
 // 선택한 종목들에 글/댓글을 게시하고 종목별 성공/실패 결과를 돌려주는 함수입니다.
@@ -115,9 +119,10 @@ pub fn run_forum_publish<R: Runtime>(
     for (index, stock) in request.stocks.iter().enumerate() {
         let outcome = run_one_forum_stock(&request, stock, title, body, comment, &app);
         // 실패면 사용자용 메시지(message)와 캡처된 스택(trace)을 분리해 들고 간다(#199).
-        let (ok, message, trace) = match outcome {
-            Ok(()) => (true, "게시 완료".to_owned(), None),
-            Err(error) => (false, error.message().to_owned(), Some(error.trace())),
+        // 성공 시 작성된 글 URL을 메시지에 함께 실어, 완료 로그에서 올라간 글을 확인할 수 있게 한다.
+        let (ok, message, trace, posted) = match outcome {
+            Ok(posted) => (true, "게시 완료".to_owned(), None, Some(posted)),
+            Err(error) => (false, error.message().to_owned(), Some(error.trace()), None),
         };
 
         // 작업 결과를 pstmacro.log에 기록(가독성·상세화). 동작 무변경, 로그 줄만 추가.
@@ -143,6 +148,7 @@ pub fn run_forum_publish<R: Runtime>(
             ok,
             message,
             trace,
+            posted,
         });
 
         // 마지막 종목이 아니면 다음 게시 전 1분 대기(타이머 이벤트 emit).
@@ -165,7 +171,7 @@ fn run_one_forum_stock<R: Runtime>(
     app: &tauri::AppHandle<R>,
     // AutomationError를 그대로 돌려준다(메시지+캡처된 스택). 호출부가 message/backtrace로
     // 나눠 ForumPublishResult에 싣는다(#199).
-) -> Result<(), AutomationError> {
+) -> Result<PostedContent, AutomationError> {
     // 종목별로 변수 토큰을 치환한다(미리보기 resolveTemplate와 동일 결과).
     // #{종목명}/#{종목코드}는 이 종목 값으로, #{링크}는 링크값(있으면) 또는 종목 시세 링크로.
     let link = crate::template_tokens::resolve_link(&request.link_override, &stock.code);
@@ -188,7 +194,12 @@ fn run_one_forum_stock<R: Runtime>(
             app,
             false,
         )
-        .map(|_| ())
+        .map(|reports| PostedContent {
+            title: title.to_owned(),
+            body: body.to_owned(),
+            comment: Some(comment.to_owned()),
+            url: reports.into_iter().find_map(|r| r.post_url),
+        })
     } else {
         let target = if request.run_comment {
             AutomationTarget::Comment
@@ -206,7 +217,24 @@ fn run_one_forum_stock<R: Runtime>(
             stock: Some(stock.clone()),
             account_id: Some(request.account_id.clone()),
         })
-        .map(|_| ())
+        .map(|report| {
+            if request.run_comment {
+                // 댓글 전용: 게시한 글은 없고 댓글 내용을 보존한다.
+                PostedContent {
+                    title: String::new(),
+                    body: String::new(),
+                    comment: Some(comment.to_owned()),
+                    url: report.post_url,
+                }
+            } else {
+                PostedContent {
+                    title: title.to_owned(),
+                    body: body.to_owned(),
+                    comment: None,
+                    url: report.post_url,
+                }
+            }
+        })
     }
 }
 

@@ -189,6 +189,7 @@ mod tests {
             status,
             msg: "".into(),
             trace: None,
+            posted: None,
         }
     }
 

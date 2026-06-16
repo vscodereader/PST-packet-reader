@@ -209,6 +209,17 @@ pub fn open_chrome_download() -> Result<(), String> {
         .map_err(|e| format!("브라우저를 여는 중 문제가 발생했습니다: {e}"))
 }
 
+/// 임의의 외부 URL(작성된 글 등)을 기본 브라우저로 연다. 완료 로그의 "올라간 글 열기"가 쓴다.
+/// http/https만 허용해 안전하게 막는다.
+#[tauri::command]
+pub fn open_url(url: String) -> Result<(), String> {
+    let url = url.trim();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("열 수 없는 주소입니다.".to_owned());
+    }
+    open::that_detached(url).map_err(|e| format!("브라우저를 여는 중 문제가 발생했습니다: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

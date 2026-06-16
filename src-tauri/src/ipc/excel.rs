@@ -446,6 +446,7 @@ mod tests {
                 status: BatchItemStatus::Success,
                 msg: "게시 완료".into(),
                 trace: None,
+                posted: None,
             }],
         };
         let act = ActivityItem {

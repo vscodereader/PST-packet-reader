@@ -1,5 +1,6 @@
 import {
   ActionIcon,
+  Anchor,
   Badge,
   Box,
   Button,
@@ -50,6 +51,7 @@ function statusColor(s: string) {
 
 export function SubLog({ item }: { item: BatchItem }) {
   const [showTrace, setShowTrace] = useState(false);
+  const [showPosted, setShowPosted] = useState(false);
   const ok = item.status === "success";
   const fail = item.status === "fail";
   const color = statusColor(item.status);
@@ -126,7 +128,80 @@ export function SubLog({ item }: { item: BatchItem }) {
             {showTrace ? "접기" : "자세히 보기"}
           </Button>
         )}
+        {item.posted && (
+          <Button
+            size="compact-xs"
+            variant="default"
+            radius="xl"
+            rightSection={
+              <Icon.chevronDown
+                size={12}
+                style={{
+                  transform: showPosted ? "rotate(180deg)" : "none",
+                  transition: "transform .15s",
+                }}
+              />
+            }
+            onClick={() => setShowPosted((s) => !s)}
+          >
+            {showPosted ? "접기" : "게시 내용"}
+          </Button>
+        )}
       </Group>
+      {item.posted && showPosted && (
+        <Box
+          ml={33}
+          mt={9}
+          p="sm"
+          style={{
+            background: "var(--mantine-color-gray-1)",
+            borderRadius: "var(--mantine-radius-sm)",
+          }}
+        >
+          {item.posted.title && (
+            <Text fz={13} fw={700} mb={6} style={{ whiteSpace: "pre-wrap" }}>
+              {item.posted.title}
+            </Text>
+          )}
+          {item.posted.body && (
+            <Text
+              fz={12.5}
+              mb={item.posted.comment ? 8 : 0}
+              style={{ whiteSpace: "pre-wrap" }}
+            >
+              {item.posted.body}
+            </Text>
+          )}
+          {item.posted.comment && (
+            <>
+              <Text fz={11.5} c="dimmed" mb={2}>
+                댓글
+              </Text>
+              <Text
+                fz={12.5}
+                mb={item.posted.url ? 8 : 0}
+                style={{ whiteSpace: "pre-wrap" }}
+              >
+                {item.posted.comment}
+              </Text>
+            </>
+          )}
+          {item.posted.url && (
+            <Anchor
+              component="button"
+              type="button"
+              fz={11.5}
+              ff="monospace"
+              onClick={() => {
+                const u = item.posted?.url;
+                if (u) void ipc.diagnostics.openUrl(u).catch(() => {});
+              }}
+            >
+              올라간 글 열기 ↗
+            </Anchor>
+          )}
+        </Box>
+      )}
       {fail && item.trace && showTrace && (
         <Box
           component="pre"
