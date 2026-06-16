@@ -167,6 +167,15 @@ export interface QueueScheduledItem {
   plan?: PublishPlan;
 }
 
+/** 한 대상에 실제로 게시된 내용(종목별 토큰 치환 후). 글이 빛삭돼도 무엇을 보냈는지
+ *  완료 로그에서 확인할 수 있게 종목별로 보존한다. */
+export interface PostedContent {
+  title: string;
+  body: string;
+  comment?: string;
+  url?: string;
+}
+
 export interface BatchItem {
   platform: PlatformId;
   target: string;
@@ -176,6 +185,8 @@ export interface BatchItem {
   status: "success" | "fail" | "running" | "waiting";
   msg: string;
   trace?: string;
+  /** 종목별 실제 게시 내용(제목/본문/댓글/URL). 게시 성공 시에만. */
+  posted?: PostedContent;
 }
 
 export interface LogBatch {

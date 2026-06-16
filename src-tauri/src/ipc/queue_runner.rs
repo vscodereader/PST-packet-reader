@@ -516,6 +516,7 @@ async fn run_forum_targets<R: Runtime>(
                             ok: false,
                             trace: Some(message.clone()),
                             message,
+                            posted: None,
                         }
                     })
                     .collect(),
@@ -535,6 +536,7 @@ async fn run_forum_targets<R: Runtime>(
                         ok: false,
                         trace: Some(message.clone()),
                         message,
+                        posted: None,
                     }
                 })
                 .collect(),
@@ -1010,6 +1012,7 @@ fn build_log_batch(
             trace: r.error.as_ref().map(|e| {
                 failure_trace(&e.code, &e.message, e.error_data.as_ref().map(|d| &d.cafe))
             }),
+            posted: None,
         });
     }
 
@@ -1035,6 +1038,7 @@ fn build_log_batch(
             trace: r.error.as_ref().map(|e| {
                 failure_trace(&e.code, &e.message, e.error_data.as_ref().map(|d| &d.cafe))
             }),
+            posted: None,
         });
     }
 
@@ -1053,6 +1057,7 @@ fn build_log_batch(
                 failure_reason(&f.code, f.cafe.as_ref())
             ),
             trace: Some(failure_trace(&f.code, &f.message, f.cafe.as_ref())),
+            posted: None,
         });
     }
 
@@ -1072,6 +1077,7 @@ fn build_log_batch(
                 "종목토론방 게시에 실패했습니다".to_owned()
             },
             trace: o.result.trace.clone(),
+            posted: o.result.posted.clone(),
         });
     }
 
@@ -1136,6 +1142,7 @@ fn build_log_batch(
             status,
             msg,
             trace,
+            posted: None,
         });
     }
 
@@ -1422,6 +1429,7 @@ mod tests {
                 ok: true,
                 message: "게시 완료".into(),
                 trace: None,
+                posted: None,
             },
         }
     }
@@ -1435,6 +1443,7 @@ mod tests {
                 ok: false,
                 message: "엔진 오류".into(),
                 trace: Some(trace.into()),
+                posted: None,
             },
         }
     }
