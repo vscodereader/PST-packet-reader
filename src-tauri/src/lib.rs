@@ -658,6 +658,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         bands::list_bands,
         diagnostics::get_environment_status,
         diagnostics::open_chrome_download,
+        diagnostics::open_url,
         bootstrap_runtime,
         save_accounts,
         band_publish,

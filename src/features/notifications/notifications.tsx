@@ -188,10 +188,14 @@ export function SubLog({ item }: { item: BatchItem }) {
           )}
           {item.posted.url && (
             <Anchor
-              href={item.posted.url}
-              target="_blank"
+              component="button"
+              type="button"
               fz={11.5}
               ff="monospace"
+              onClick={() => {
+                const u = item.posted?.url;
+                if (u) void ipc.diagnostics.openUrl(u).catch(() => {});
+              }}
             >
               올라간 글 열기 ↗
             </Anchor>

@@ -1167,6 +1167,7 @@ export const invoke = vi.fn(
       }
       case "get_environment_status":
         return clone(SEED_ENV_STATUS);
+      case "open_url":
       case "open_chrome_download":
         // 브라우저 열기는 사이드이펙트뿐 — 목에서는 성공(void)으로 처리.
         return undefined;
