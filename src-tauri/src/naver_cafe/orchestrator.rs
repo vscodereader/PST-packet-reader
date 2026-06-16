@@ -208,6 +208,38 @@ fn cafe_ref_err_to_post_error(err: CafeRefError) -> PostError {
     }
 }
 
+/// [`MenuError`]를 [`PostError`]로 변환한다(게시 직전 boardType 해석 단계의 실패).
+/// 코드/메시지/공통 데이터를 보존해, 글 게시 실패와 동일한 사유 매핑·자세히 보기를 탄다.
+fn menu_err_to_post_error(err: MenuError) -> PostError {
+    ErrorEnvelope {
+        trace_id: err.trace_id,
+        code: err.code,
+        message: err.message,
+        error_data: Some(PostErrorData {
+            cafe: err.error_data.unwrap_or_else(empty_common_error),
+            menu_id: None,
+            subject: None,
+            validation_errors: vec![],
+        }),
+    }
+}
+
+/// 선택한 메뉴를 게시판 목록에서 찾지 못했을 때의 [`PostError`]. boardType을 해석할 수
+/// 없으므로(기본값 강제 금지) 명시적 실패로 끝낸다.
+fn menu_not_found_post_error(menu_id: u64) -> PostError {
+    ErrorEnvelope {
+        trace_id: String::new(),
+        code: CODE_INVALID_CAFE_INPUT.to_string(),
+        message: format!("선택한 게시판(menuId={menu_id})을 카페 게시판 목록에서 찾지 못했습니다"),
+        error_data: Some(PostErrorData {
+            cafe: empty_common_error(),
+            menu_id: Some(menu_id),
+            subject: None,
+            validation_errors: vec![],
+        }),
+    }
+}
+
 /// `serde_json::Error`를 [`PostError`]로 변환한다.
 fn serde_err_to_post_error(err: serde_json::Error) -> PostError {
     ErrorEnvelope {
@@ -384,10 +416,28 @@ impl CafeOrchestrator {
             .await
             .map_err(cafe_ref_err_to_post_error)?;
 
+        // boardType이 비어 있으면(예약 시점에 동결하지 못한 레거시/UI 경로) 게시 직전에
+        // 게시판 목록을 조회해 menuId와 일치하는 메뉴의 boardType을 채운다. 기본값("L")을
+        // 강제하지 않고, 일치 메뉴가 없으면 명시적으로 실패한다. 이미 채워져 있으면(기존
+        // 동작) 추가 조회 없이 그대로 쓴다(하위호환).
+        let board_type = if job.board_type.is_empty() {
+            let boards = self
+                .list_boards(cafe_id, cookie_header)
+                .await
+                .map_err(menu_err_to_post_error)?;
+            boards
+                .into_iter()
+                .find(|m| m.menu_id == job.menu_id)
+                .map(|m| m.board_type)
+                .ok_or_else(|| menu_not_found_post_error(job.menu_id))?
+        } else {
+            job.board_type.clone()
+        };
+
         let request = PostRequest {
             cafe_id: cafe_id.to_string(),
             menu_id: job.menu_id,
-            board_type: job.board_type.clone(),
+            board_type,
             subject: job.subject.clone(),
             body_text: job.body_text.clone(),
             tag_list: job.tag_list.clone(),
@@ -795,6 +845,88 @@ mod tests {
         assert_eq!(result.cafe_id, 31732304);
         assert_eq!(result.article_id, 9);
         assert_eq!(result.menu_id, 1);
+    }
+
+    // ------------------------------------------------------------------
+    // post_one — 빈 boardType은 게시 직전 게시판 목록 조회로 해석
+    // ------------------------------------------------------------------
+
+    fn sample_job_no_board_type(cafe: &str, menu_id: u64) -> PostJob {
+        PostJob {
+            menu_id,
+            board_type: String::new(),
+            ..sample_job(cafe)
+        }
+    }
+
+    #[tokio::test]
+    async fn post_one_empty_board_type_resolves_from_menu_list() {
+        // boardType이 비면 게시판 목록에서 menuId와 일치하는 메뉴의 boardType을 채워 게시한다.
+        let server = MockServer::start().await;
+
+        // 게시판 목록: menuId=2의 boardType은 "P"다(기본값 "L" 강제가 아님을 확인하려 다른 값).
+        let menus = json!({
+            "result": [
+                {
+                    "cafeId": 31732304_u64, "menuId": 2_u64, "menuName": "공지게시판",
+                    "menuType": "B", "boardType": "P", "writable": true,
+                    "hidden": false, "separatorMenuType": false
+                }
+            ]
+        });
+        Mock::given(method("GET"))
+            .and(path_regex(r"/cafe-web/cafe-cafeinfo-api/.*/editor/menus"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(menus))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/editor/v2.0/cafes/31732304/menus/2/articles"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": { "cafeId": 31732304_u64, "articleId": 11_u64, "menuId": 2_u64 }
+            })))
+            .mount(&server)
+            .await;
+
+        let orch = CafeOrchestrator::with_base_url(server.uri());
+        let result = orch
+            .post_one(
+                &sample_job_no_board_type("31732304", 2),
+                Some("NID_AUT=FAKE; NID_SES=FAKE"),
+            )
+            .await
+            .expect("빈 boardType은 목록 조회로 해석돼 게시 성공해야 함");
+        assert_eq!(result.article_id, 11);
+    }
+
+    #[tokio::test]
+    async fn post_one_empty_board_type_errors_when_menu_absent() {
+        // 목록에 menuId 일치 메뉴가 없으면 기본값을 강제하지 않고 명시적으로 실패한다.
+        let server = MockServer::start().await;
+        let menus = json!({
+            "result": [
+                {
+                    "cafeId": 31732304_u64, "menuId": 1_u64, "menuName": "자유게시판",
+                    "menuType": "B", "boardType": "L", "writable": true,
+                    "hidden": false, "separatorMenuType": false
+                }
+            ]
+        });
+        Mock::given(method("GET"))
+            .and(path_regex(r"/cafe-web/cafe-cafeinfo-api/.*/editor/menus"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(menus))
+            .mount(&server)
+            .await;
+
+        let orch = CafeOrchestrator::with_base_url(server.uri());
+        let err = orch
+            .post_one(
+                &sample_job_no_board_type("31732304", 999),
+                Some("NID_AUT=FAKE"),
+            )
+            .await
+            .expect_err("일치 메뉴 없으면 Err여야 함");
+        assert_eq!(err.code, CODE_INVALID_CAFE_INPUT);
     }
 
     // ------------------------------------------------------------------
