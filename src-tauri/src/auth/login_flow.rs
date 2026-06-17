@@ -50,6 +50,10 @@ pub(crate) enum LoginOutcome {
     /// 로그인 접근이 차단된 상태(폼이 사라지고 세션도 없음). 일반 오류와 구분해 계정
     /// 상태를 `blocked`로 표시하기 위해 별도 variant로 둔다.
     Blocked,
+    /// 계정 보호조치(`idSafetyRelease`)로 로그인이 막힌 확정 상태. 휴리스틱 `Blocked`와 달리
+    /// 착지 URL로 명확히 판별되므로, 사람이 풀 수 없는 종료 상태로 보고 headed여도 즉시 실패한다
+    /// (180초 대기 회피, #228). 계정 상태는 `Blocked`로 매핑하되 메시지만 보호조치용으로 둔다.
+    Protected,
     Error(String),
 }
 
@@ -62,6 +66,8 @@ pub(crate) struct PageSignals {
     pub device: bool,
     pub bad_credentials: bool,
     pub blocked: bool,
+    /// 계정 보호조치 페이지(`idSafetyRelease`) 착지. 휴리스틱 `blocked`와 달리 명확한 종료 신호.
+    pub protected: bool,
 }
 
 /// 진행 중/확정 신호.
@@ -72,6 +78,8 @@ pub(crate) enum Signal {
     Challenge(ChallengeKind),
     BadCredentials,
     Blocked,
+    /// 보호조치 확정(착지 URL 기반). headed여도 즉시 실패시키기 위해 `Blocked`와 분리한다.
+    Protected,
 }
 
 /// 폴링 한 스텝의 판정 결과. 루프는 이 값을 실제 동작(반환/대기)으로 옮긴다.
@@ -81,6 +89,8 @@ enum LoopDecision {
     PromoteChallenge(ChallengeKind),
     ConfirmedBad,
     ConfirmedBlocked,
+    /// 보호조치 확정 — 즉시 실패(`LoginOutcome::Protected`)로 옮긴다.
+    ConfirmedProtected,
     KeepWaiting(Option<Signal>),
 }
 
@@ -96,6 +106,9 @@ fn decide_loop_step(
 ) -> LoopDecision {
     match signal {
         Signal::Success => LoopDecision::Success,
+        // 보호조치는 착지 URL로 명확히 판별되므로 2회 latch도, headed의 사람 대기도 적용하지
+        // 않고 즉시 확정한다(#228: 180초 대기 제거). `Blocked` 휴리스틱과 분리한 이유.
+        Signal::Protected => LoopDecision::ConfirmedProtected,
         Signal::Challenge(kind) => {
             if wait_for_human {
                 LoopDecision::KeepWaiting(None)
@@ -127,6 +140,10 @@ fn decide_loop_step(
 pub(crate) fn classify(signals: &PageSignals) -> Signal {
     if signals.logged_in {
         Signal::Success
+    } else if signals.protected {
+        // 보호조치는 휴리스틱 blocked보다 먼저 본다 — 보호조치 페이지도 로그인 폼이 없어
+        // blocked 조건을 동시에 만족하지만, 명확한 종료 신호인 Protected로 분류해야 한다.
+        Signal::Protected
     } else if signals.captcha {
         Signal::Challenge(ChallengeKind::Captcha)
     } else if signals.otp {
@@ -260,6 +277,7 @@ fn run_inner(
             }
             LoopDecision::ConfirmedBad => return Ok(LoginOutcome::BadCredentials),
             LoopDecision::ConfirmedBlocked => return Ok(LoginOutcome::Blocked),
+            LoopDecision::ConfirmedProtected => return Ok(LoginOutcome::Protected),
             LoopDecision::KeepWaiting(next) => last_negative = next,
         }
 
@@ -580,6 +598,10 @@ fn read_signals(client: &mut CdpClient) -> Result<PageSignals, AutomationError> 
             .unwrap_or(false);
         on_login && !has_form && !logged_in
     };
+    // 계정 보호조치(평소와 다른 환경 로그인 차단) 페이지. 로그인 POST 응답이 JS로
+    // /user2/help/idSafetyRelease 로 보내며, 리다이렉트 체인의 모든 단계가 이 경로를 유지한다
+    // (#228, 패킷 분석). 사람이 즉석에서 풀 수 없는 종료 상태라 즉시 실패시킨다.
+    let protected = current_url.contains("idSafetyRelease");
 
     Ok(PageSignals {
         logged_in,
@@ -588,6 +610,7 @@ fn read_signals(client: &mut CdpClient) -> Result<PageSignals, AutomationError> 
         device,
         bad_credentials,
         blocked,
+        protected,
     })
 }
 
@@ -669,6 +692,20 @@ mod tests {
     }
 
     #[test]
+    fn classify_protected_wins_over_blocked() {
+        // 보호조치 페이지도 로그인 폼이 없어 blocked 휴리스틱을 동시에 만족하지만,
+        // 명확한 종료 신호인 Protected로 분류돼야 한다(#228).
+        assert_eq!(
+            classify(&PageSignals {
+                protected: true,
+                blocked: true,
+                ..Default::default()
+            }),
+            Signal::Protected
+        );
+    }
+
+    #[test]
     fn credentials_present_rejects_empty_or_whitespace() {
         assert!(credentials_present("user", "pw"));
         assert!(!credentials_present("", "pw"));
@@ -722,6 +759,20 @@ mod tests {
         assert_eq!(
             decide_loop_step(Some(Signal::Blocked), Signal::Blocked, false),
             LoopDecision::ConfirmedBlocked
+        );
+    }
+
+    #[test]
+    fn loop_protected_fails_fast_even_in_headed_without_latch() {
+        // 핵심(#228): 보호조치는 headed에서도, 직전 음성 신호 없이도 즉시 확정한다 —
+        // 180초 HEADED_TIMEOUT 대기나 2회 latch를 적용하지 않는다.
+        assert_eq!(
+            decide_loop_step(None, Signal::Protected, true),
+            LoopDecision::ConfirmedProtected
+        );
+        assert_eq!(
+            decide_loop_step(None, Signal::Protected, false),
+            LoopDecision::ConfirmedProtected
         );
     }
 

@@ -1,4 +1,4 @@
-﻿use std::thread::sleep;
+use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -137,10 +137,9 @@ impl CdpClient {
             return Ok(false);
         }
 
-        // 약관 페이지면 1회 자동 동의 처리하고 결과로 빠져나온다(loop는 항상 return으로 종료).
-        loop {
-            let result = self.evaluate_string(
-                r#"
+        // 약관 페이지면 1회 자동 동의 처리하고 결과로 빠져나온다.
+        let result = self.evaluate_string(
+            r#"
                 (async () => {
                   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
                   const requiredItems = [
@@ -260,27 +259,26 @@ impl CdpClient {
                   return JSON.stringify({ ok: true, clicked });
                 })()
                 "#,
-            )?;
+        )?;
 
-            let data: Value = serde_json::from_str(&result)?;
+        let data: Value = serde_json::from_str(&result)?;
 
-            if !data.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-                return Err(AutomationError::new(
-                    data.get("error")
-                        .and_then(Value::as_str)
-                        .unwrap_or("약관 동의 처리 실패"),
-                ));
-            }
-
-            self.wait_for_ready_state(Duration::from_secs(10)).ok();
-            sleep(Duration::from_secs(4));
-
-            if !self.current_url()?.contains("stock.naver.com/discussion") {
-                self.navigate(DISCUSSION_URL)?;
-            }
-
-            return Ok(true);
+        if !data.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+            return Err(AutomationError::new(
+                data.get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("약관 동의 처리 실패"),
+            ));
         }
+
+        self.wait_for_ready_state(Duration::from_secs(10)).ok();
+        sleep(Duration::from_secs(4));
+
+        if !self.current_url()?.contains("stock.naver.com/discussion") {
+            self.navigate(DISCUSSION_URL)?;
+        }
+
+        Ok(true)
     }
 
     // 자동화 시작 전에 네이버 증권 토론 메인 화면으로 이동시키는 함수입니다.
