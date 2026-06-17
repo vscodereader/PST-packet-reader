@@ -455,36 +455,8 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                         ),
                     );
                 }
-
-                // 3. 종목토론방 게시 — 이 계정 대상만(account_filter).
-                if !plan.forum.is_empty() && item_present(app, id) {
-                    let base = build_items(
-                        plan,
-                        &all_posts,
-                        &all_comments,
-                        &all_fetch_failures,
-                        &all_forum,
-                        &all_band,
-                    );
-                    let outcomes =
-                        run_forum_targets(app, plan, id, base, done, total, Some(acc)).await;
-                    all_forum.extend(outcomes);
-                    done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band);
-                    set_progress_and_items(
-                        app,
-                        id,
-                        done,
-                        total,
-                        build_items(
-                            plan,
-                            &all_posts,
-                            &all_comments,
-                            &all_fetch_failures,
-                            &all_forum,
-                            &all_band,
-                        ),
-                    );
-                }
+                // 종목토론방(forum)은 이 그룹 루프에서 처리하지 않는다 — 루프 종료 후 전 계정을
+                // 한 번에 병렬 게시한다(#237). 카페(9222)·밴드(HTTP)와 자원이 안 겹쳐 병렬 안전.
             }
             AccountFamily::Band => {
                 // 4. 밴드 게시 — 이 계정 대상만(account_filter).
@@ -518,6 +490,37 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                 }
             }
         }
+    }
+
+    // 종목토론방: 모든 계정을 한 번에 — run_forum_targets가 계정별로 전용 Chrome을 띄워
+    // 동시에 게시한다(#237). 카페/밴드(위 계정 그룹 루프)와 자원이 겹치지 않아, 카페/밴드가
+    // 도는 것과 무관하게 종토방만 병렬로 흐른다. account_filter=None으로 전 계정을 한 번에 넘긴다.
+    if !plan.forum.is_empty() && item_present(app, id) {
+        let base = build_items(
+            plan,
+            &all_posts,
+            &all_comments,
+            &all_fetch_failures,
+            &all_forum,
+            &all_band,
+        );
+        let outcomes = run_forum_targets(app, plan, id, base, done, total, None).await;
+        all_forum.extend(outcomes);
+        done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band);
+        set_progress_and_items(
+            app,
+            id,
+            done,
+            total,
+            build_items(
+                plan,
+                &all_posts,
+                &all_comments,
+                &all_fetch_failures,
+                &all_forum,
+                &all_band,
+            ),
+        );
     }
 
     // 완료 로그(LogBatch)/activity: 누적된 카페 글·댓글·토론방·밴드 결과 + 댓글 조회 실패를
@@ -1157,12 +1160,17 @@ async fn do_login_and_capture_ip<R: Runtime>(
     Ok(crate::auth::fetch_external_ip().await)
 }
 
-/// 종목토론방 대상을 계정별로 게시한다. 계정마다 디버그 포트 Chrome을 직접 띄워
-/// (run_forum_publish_now와 동일 패턴) 패킷 엔진으로 게시하고, 계정·종목별 결과를
-/// 돌려준다(완료 로그용). 단일 워커가 순차로 돌므로 Chrome 인스턴스 충돌이 없다.
-/// Chrome 기동 실패 시 그 계정의 종목들을 실패 결과로 합성해, 진행률·로그가 조용히
-/// 누락되지 않게 한다(거짓 100% 방지). 계정마다 게시를 시작하기 전 협조적 취소(item_present)를
-/// 확인해, 취소된 아이템의 남은 계정은 게시하지 않는다.
+/// 종목토론방 동시 게시 상한(#237). 계정마다 전용 디버그 Chrome을 띄우므로, 한 번에 너무
+/// 많이 띄우면 메모리/CPU가 고갈된다. 이 수만큼씩 묶어 동시에 돌리고 다음 묶음으로 넘어간다.
+const FORUM_PARALLEL_CAP: usize = 4;
+
+/// 종목토론방 대상을 **계정별로 동시에** 게시한다(#237). 계정마다 디버그 포트 Chrome을 직접
+/// 띄우는데(`launch_debug_chrome` = 빈 포트 자동배정 + 고유 프로필), 포트·프로필이 모두 달라
+/// 여러 개를 동시에 띄워도 충돌이 없다. 카페(9222)·밴드(HTTP)와도 자원이 겹치지 않아, 카페/밴드가
+/// 도는 중에도 종토방은 병렬로 흐른다. 동시 수는 `FORUM_PARALLEL_CAP`로 제한한다. 계정·종목별
+/// 결과를 돌려준다(완료 로그용). Chrome 기동/태스크 실패 시 그 계정의 종목들을 실패 결과로
+/// 합성해 진행률·로그가 조용히 누락되지 않게 한다(거짓 100% 방지). 각 묶음 시작 전 협조적
+/// 취소(item_present)를 확인해, 취소된 아이템의 남은 계정은 게시하지 않는다.
 async fn run_forum_targets<R: Runtime>(
     app: &AppHandle<R>,
     plan: &PublishPlan,
@@ -1187,117 +1195,136 @@ async fn run_forum_targets<R: Runtime>(
         let live = lock_or_poisoned(&forum_live);
         write_live_phase(app, id, &base_items, &live, base_done, total);
     }
+    // 계정별 스켈레톤 오프셋을 미리 계산한다 — 각 계정은 자기 슬롯(off+local)만 갱신하므로
+    // 동시에 돌려도 forum_live(Arc<Mutex>) 충돌이 없다(#237).
+    let mut starts = Vec::with_capacity(reqs.len());
+    let mut acc_off = 0usize;
+    for req in &reqs {
+        starts.push(acc_off);
+        acc_off += req.stocks.len();
+    }
+    // 계정마다 전용 디버그 Chrome을 띄워 FORUM_PARALLEL_CAP개씩 동시에 게시한다. 결과는
+    // 계정(req) 순서대로 모은다(#237).
     let mut outcomes = Vec::new();
-    let mut offset = 0usize;
-    for req in reqs {
-        // 계정별 Chrome 게시는 비싸고 비가역적이라, 시작 전마다 취소를 확인해 멈춘다.
+    let mut req_iter = reqs.into_iter().enumerate();
+    loop {
+        // 묶음 시작 전 취소 확인 — 취소됐으면 남은 계정은 게시하지 않는다.
         if !item_present(app, id) {
             break;
         }
-        let account_id = req.account_id.clone();
-        let n_stocks = req.stocks.len();
-        // spawn_blocking 태스크가 패닉(JoinError)하면 결과를 잃으므로, 합성 실패에 쓸
-        // 종목 목록을 미리 복제해 둔다(누락 대신 명시 실패).
-        let stocks_for_panic = req.stocks.clone();
-        let app_for_job = app.clone();
-        // 종목 시작/완료마다(blocking 스레드) 스켈레톤의 해당 칸만 바꾸기 위한 캡처들.
-        let off = offset;
-        let app_start = app.clone();
-        let id_start = id.to_owned();
-        let base_start = base_items.clone();
-        let live_start = Arc::clone(&forum_live);
-        let app_done = app.clone();
-        let id_done = id.to_owned();
-        let base_done_items = base_items.clone();
-        let account_done = account_id.clone();
-        let live_done = Arc::clone(&forum_live);
-        let results = match tauri::async_runtime::spawn_blocking(move || {
-            // 종목 게시 시작 직전: 그 종목을 "게시 중"으로(진행률은 그대로 — 완료분만 센다).
-            let on_start = move |local: usize| {
-                let mut live = lock_or_poisoned(&live_start);
-                if let Some(it) = live.get_mut(off + local) {
-                    it.status = BatchItemStatus::Running;
-                    it.msg = "게시 중…".to_owned();
-                }
-                write_live_phase(&app_start, &id_start, &base_start, &live, base_done, total);
+        let mut handles = Vec::new();
+        for _ in 0..FORUM_PARALLEL_CAP {
+            let Some((idx, req)) = req_iter.next() else {
+                break;
             };
-            // 종목 완료 직후: 그 자리만 성공/실패로 교체(60초 대기 전에 갱신).
-            let on_result = move |local: usize, result: &ForumPublishResult| {
-                let mut live = lock_or_poisoned(&live_done);
-                if let Some(slot) = live.get_mut(off + local) {
-                    *slot = forum_result_to_item(&account_done, result);
-                }
-                write_live_phase(
-                    &app_done,
-                    &id_done,
-                    &base_done_items,
-                    &live,
-                    base_done,
-                    total,
-                );
-            };
-            match crate::auth::launch_debug_chrome(true) {
-                Ok(chrome) => {
-                    let mut req = req;
-                    // host는 plan_to_forum_requests에서 이미 127.0.0.1; 포트만 띄운 Chrome 값으로.
-                    req.port = chrome.port;
-                    let results = run_forum_publish(req, app_for_job, on_start, on_result);
-                    drop(chrome);
-                    results
-                }
-                // Chrome 기동 실패 → 이 계정 종목 전부 실패로 기록(누락 대신 명시). on_result로
-                // 흘려 그 자리들을 즉시 실패로 바꾼다(다음 계정까지 대기 중으로 멈춰 보이지 않게).
-                Err(error) => {
-                    // 인프라 실패(엔진 진입 전)는 backtrace가 없어 메시지를 trace로도 쓴다.
-                    let synth: Vec<ForumPublishResult> = req
-                        .stocks
-                        .iter()
-                        .map(|s| {
-                            let message = format!("Chrome 실행 실패: {error}");
-                            ForumPublishResult {
-                                code: s.code.clone(),
-                                name: s.name.clone(),
-                                ok: false,
-                                trace: Some(message.clone()),
-                                message,
-                                posted: None,
-                            }
-                        })
-                        .collect();
-                    for (i, result) in synth.iter().enumerate() {
-                        on_result(i, result);
+            let account_id = req.account_id.clone();
+            // spawn_blocking 태스크가 패닉(JoinError)하면 결과를 잃으므로, 합성 실패에 쓸
+            // 종목 목록을 미리 복제해 둔다(누락 대신 명시 실패).
+            let stocks_for_panic = req.stocks.clone();
+            let app_for_job = app.clone();
+            // 종목 시작/완료마다(blocking 스레드) 스켈레톤의 해당 칸만 바꾸기 위한 캡처들.
+            let off = starts[idx];
+            let app_start = app.clone();
+            let id_start = id.to_owned();
+            let base_start = base_items.clone();
+            let live_start = Arc::clone(&forum_live);
+            let app_done = app.clone();
+            let id_done = id.to_owned();
+            let base_done_items = base_items.clone();
+            let account_done = account_id.clone();
+            let live_done = Arc::clone(&forum_live);
+            let handle = tauri::async_runtime::spawn_blocking(move || {
+                // 종목 게시 시작 직전: 그 종목을 "게시 중"으로(진행률은 그대로 — 완료분만 센다).
+                let on_start = move |local: usize| {
+                    let mut live = lock_or_poisoned(&live_start);
+                    if let Some(it) = live.get_mut(off + local) {
+                        it.status = BatchItemStatus::Running;
+                        it.msg = "게시 중…".to_owned();
                     }
-                    synth
-                }
-            }
-        })
-        .await
-        {
-            Ok(results) => results,
-            // 블로킹 태스크 패닉 → 빈 결과로 조용히 누락하지 않고 그 계정 종목 전부 실패로 합성.
-            // (이 합성분은 라이브 스켈레톤엔 못 반영되지만, execute_item의 최종 보정이 채운다.)
-            Err(join_error) => stocks_for_panic
-                .iter()
-                .map(|s| {
-                    let message = format!("게시 작업이 비정상 종료됐어요: {join_error}");
-                    ForumPublishResult {
-                        code: s.code.clone(),
-                        name: s.name.clone(),
-                        ok: false,
-                        trace: Some(message.clone()),
-                        message,
-                        posted: None,
+                    write_live_phase(&app_start, &id_start, &base_start, &live, base_done, total);
+                };
+                // 종목 완료 직후: 그 자리만 성공/실패로 교체(60초 대기 전에 갱신).
+                let on_result = move |local: usize, result: &ForumPublishResult| {
+                    let mut live = lock_or_poisoned(&live_done);
+                    if let Some(slot) = live.get_mut(off + local) {
+                        *slot = forum_result_to_item(&account_done, result);
                     }
-                })
-                .collect(),
-        };
-        for result in results {
-            outcomes.push(ForumOutcome {
-                account_id: account_id.clone(),
-                result,
+                    write_live_phase(
+                        &app_done,
+                        &id_done,
+                        &base_done_items,
+                        &live,
+                        base_done,
+                        total,
+                    );
+                };
+                match crate::auth::launch_debug_chrome(true) {
+                    Ok(chrome) => {
+                        let mut req = req;
+                        // host는 plan_to_forum_requests에서 이미 127.0.0.1; 포트만 띄운 Chrome 값으로.
+                        req.port = chrome.port;
+                        let results = run_forum_publish(req, app_for_job, on_start, on_result);
+                        drop(chrome);
+                        results
+                    }
+                    // Chrome 기동 실패 → 이 계정 종목 전부 실패로 기록(누락 대신 명시). on_result로
+                    // 흘려 그 자리들을 즉시 실패로 바꾼다(다음 계정까지 대기 중으로 멈춰 보이지 않게).
+                    Err(error) => {
+                        // 인프라 실패(엔진 진입 전)는 backtrace가 없어 메시지를 trace로도 쓴다.
+                        let synth: Vec<ForumPublishResult> = req
+                            .stocks
+                            .iter()
+                            .map(|s| {
+                                let message = format!("Chrome 실행 실패: {error}");
+                                ForumPublishResult {
+                                    code: s.code.clone(),
+                                    name: s.name.clone(),
+                                    ok: false,
+                                    trace: Some(message.clone()),
+                                    message,
+                                    posted: None,
+                                }
+                            })
+                            .collect();
+                        for (i, result) in synth.iter().enumerate() {
+                            on_result(i, result);
+                        }
+                        synth
+                    }
+                }
             });
+            handles.push((account_id, stocks_for_panic, handle));
         }
-        offset += n_stocks;
+        if handles.is_empty() {
+            break;
+        }
+        // 묶음 내 계정들을 동시에 기다린다(각자 자기 Chrome). 결과는 spawn 순서대로 모은다.
+        for (account_id, stocks_for_panic, handle) in handles {
+            let results = match handle.await {
+                Ok(results) => results,
+                // 블로킹 태스크 패닉 → 그 계정 종목 전부 실패로 합성(누락 방지).
+                Err(join_error) => stocks_for_panic
+                    .iter()
+                    .map(|s| {
+                        let message = format!("게시 작업이 비정상 종료됐어요: {join_error}");
+                        ForumPublishResult {
+                            code: s.code.clone(),
+                            name: s.name.clone(),
+                            ok: false,
+                            trace: Some(message.clone()),
+                            message,
+                            posted: None,
+                        }
+                    })
+                    .collect(),
+            };
+            for result in results {
+                outcomes.push(ForumOutcome {
+                    account_id: account_id.clone(),
+                    result,
+                });
+            }
+        }
     }
     outcomes
 }
