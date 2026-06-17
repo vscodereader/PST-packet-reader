@@ -327,8 +327,17 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
         }
         let acc = group.account_id.as_str();
 
-        // (a)(b) 회전+로그인+IP검증. 실패하면 그 그룹 타깃 전부 합성 실패로 남기고 다음 그룹으로.
-        if let Err(skip) = prepare_group_login(app, group).await {
+        // (a)(b) 회전+로그인+IP검증. 단 **종목토론방 전용 그룹**은 큐 실행 시 재로그인하지 않고
+        // 선택 로그인 때 저장된 쿠키(cookies/{loginId}.json)를 그대로 쓴다(사수 지침) — forum
+        // 게시는 매번 그 쿠키 파일을 디스크에서 새로 읽으므로 1차 로그인분으로 충분하고, 2차
+        // 로그인은 같은 파일을 덮어쓸 뿐 불필요하다. 카페가 섞인 그룹은 10004(IP check failure)
+        // 때문에 기존대로 회전+로그인+IP검증을 유지한다. 실패하면 그룹 타깃 전부 합성 실패로 남긴다.
+        let prep = if forum_only_group(plan, group) {
+            Ok(())
+        } else {
+            prepare_group_login(app, group).await
+        };
+        if let Err(skip) = prep {
             match group.family {
                 AccountFamily::Naver => {
                     if runs_post(plan) {
@@ -1050,6 +1059,15 @@ fn synth_band_failures(plan: &PublishPlan, account_id: &str, skip: &GroupSkip) -
 /// 재로그인(회전 포함)하고 그래도 다르면 `IP_MISMATCH`로 실패한다. login이 None이면
 /// (기존 즉시/예약 게시) 회전·로그인·IP검증을 건너뛰고 저장 쿠키로 바로 게시한다(하위호환).
 /// 성공 시 `Ok(())`, 게시를 건너뛰어야 하면 `Err(GroupSkip)`.
+/// 이 그룹이 **종목토론방 전용**(카페 글/댓글 대상이 없고 forum만)인지. 이런 Naver 그룹은
+/// 큐 실행 시 재로그인하지 않고 선택 로그인 때 저장된 쿠키를 그대로 쓴다(사수 지침). 카페가
+/// 한 대상이라도 섞이면 false → 10004(IP check) 때문에 회전+로그인+IP검증을 유지한다. 밴드
+/// 그룹은 항상 false(밴드는 별도 쿠키·경로). account_id로 카페(plan.naver) 대상 유무만 본다.
+fn forum_only_group(plan: &PublishPlan, group: &PublishGroup) -> bool {
+    matches!(group.family, AccountFamily::Naver)
+        && !plan.naver.iter().any(|t| t.account_id == group.account_id)
+}
+
 async fn prepare_group_login<R: Runtime>(
     app: &AppHandle<R>,
     group: &PublishGroup,
@@ -2272,9 +2290,14 @@ fn record_completion<R: Runtime>(app: &AppHandle<R>, batch: LogBatch) {
 /// 확정되기 전에도 "처리 중 N/N"이 빈칸("/")으로 보이지 않게 한다. 이후 execute_item이
 /// 실제 작업 수로 정밀화한다(실패·빈 풀로 실제치가 더 작아질 수 있다).
 fn estimate_total(plan: &PublishPlan) -> u32 {
-    // 로그인 전용 아이템(#210)은 진행률 분모가 계정 수로 확정돼 있다(게시 추정과 별개).
-    if let Some(login) = plan.login.as_ref().filter(|l| !l.is_empty()) {
-        return login.len() as u32;
+    // 로그인 **전용** 아이템(#210)만 진행률 분모 = 계정 수. 게시 타깃(naver/forum/band)이
+    // 동봉돼 있으면(종토방 선택 로그인 등) 분모는 아래 실제 게시 작업 수로 잡는다 — 안 그러면
+    // 3계정×3글이 0/9가 아니라 0/3으로 시작하고 done이 분모를 넘어(5/3) 보인다.
+    let no_publish_targets = plan.naver.is_empty() && plan.forum.is_empty() && plan.band.is_empty();
+    if no_publish_targets {
+        if let Some(login) = plan.login.as_ref().filter(|l| !l.is_empty()) {
+            return login.len() as u32;
+        }
     }
     let posts = if runs_post(plan) { plan.naver.len() } else { 0 };
     let comments = if runs_comment(plan) {
@@ -2417,15 +2440,38 @@ mod tests {
     }
 
     #[test]
-    fn estimate_total_uses_login_account_count() {
-        // 로그인 전용 아이템의 진행률 분모는 계정 수다(게시 필드는 무시).
-        let mut p = plan(ModeValue::Post, vec![naver_target("a"), naver_target("b")]);
+    fn estimate_total_login_only_uses_account_count() {
+        // 로그인 **전용** 아이템(게시 타깃 없음)만 분모 = 계정 수.
+        let mut p = plan(ModeValue::Post, vec![]);
         p.login = Some(vec![
             login_target("a", PlatformId::Naver),
             login_target("b", PlatformId::Band),
             login_target("c", PlatformId::Naver),
         ]);
         assert_eq!(estimate_total(&p), 3);
+    }
+
+    #[test]
+    fn estimate_total_counts_publish_work_even_with_login_attached() {
+        // 게시 타깃이 동봉되면(종토방 선택 로그인 등) 분모는 실제 게시 작업 수 — 로그인 계정
+        // 수가 아니다. 3계정×글이 0/3으로 시작하던 버그 수정: 글 2개면 2(로그인 3개여도).
+        let mut p = plan(ModeValue::Post, vec![naver_target("a"), naver_target("b")]);
+        p.login = Some(vec![
+            login_target("a", PlatformId::Naver),
+            login_target("b", PlatformId::Naver),
+            login_target("c", PlatformId::Naver),
+        ]);
+        assert_eq!(estimate_total(&p), 2); // 로그인 3개가 아니라 글 2개
+
+        // 종토방도 동일: 종목 수가 분모(로그인 동봉돼도).
+        let mut f = plan(ModeValue::Post, vec![]);
+        f.forum = vec![
+            forum_target("a", "삼성", "005930"),
+            forum_target("a", "현대", "005380"),
+            forum_target("b", "네이버", "035420"),
+        ];
+        f.login = Some(vec![login_target("a", PlatformId::Naver)]);
+        assert_eq!(estimate_total(&f), 3); // 종목 3개
     }
 
     fn now_item(id: &str, state: QueueState, p: Option<PublishPlan>) -> QueueNowItem {
@@ -2838,6 +2884,35 @@ mod tests {
         assert_eq!(groups[0].account_id, "u0");
         assert_eq!(groups[0].family, AccountFamily::Naver);
         assert!(groups[0].login.is_none());
+    }
+
+    #[test]
+    fn forum_only_group_skips_relogin_but_cafe_group_keeps_it() {
+        // 종토방 전용 계정(u0)은 재로그인 스킵(저장 쿠키 사용), 카페가 섞인 계정(u1)은 유지.
+        let mut p = plan(ModeValue::Post, vec![naver_target("u1")]); // u1 = 카페
+        p.forum = vec![
+            forum_target("u0", "삼성", "005930"), // u0 = 종토방 전용
+            forum_target("u1", "현대", "005380"), // u1 = 카페 + 종토방
+        ];
+        let groups = group_accounts_for_publish(&p);
+        for g in &groups {
+            match g.account_id.as_str() {
+                "u0" => assert!(forum_only_group(&p, g), "종토방 전용은 재로그인 스킵"),
+                "u1" => assert!(!forum_only_group(&p, g), "카페 섞이면 재로그인 유지(10004)"),
+                other => panic!("예상치 못한 계정 {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn forum_only_group_false_for_band_group() {
+        // 밴드 그룹은 항상 false(별도 쿠키·경로) — 재로그인 유지.
+        let mut p = plan(ModeValue::Post, vec![]);
+        p.band = vec![band_target("u0", "밴드", "https://band.us/band/1")];
+        let groups = group_accounts_for_publish(&p);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].family, AccountFamily::Band);
+        assert!(!forum_only_group(&p, &groups[0]));
     }
 
     #[test]
