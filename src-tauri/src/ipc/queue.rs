@@ -242,6 +242,50 @@ pub fn apply_reorder_now(items: Vec<QueueNowItem>, ordered_ids: &[String]) -> Ve
     running
 }
 
+/// 큐 아이템의 자동 우선순위(낮을수록 먼저 실행). **0 = 로그인 전용, 1 = 종목토론방 포함,
+/// 2 = 그 외(카페/밴드/표시 전용)**. 사수 지침: 로그인 1순위·종토 2순위(#229).
+///
+/// - 로그인 전용 = `plan.login`이 비어있지 않고 게시 타깃(naver/forum/band)이 하나도 없는
+///   아이템(#210). 게시에 로그인이 동봉된 아이템은 그 게시 등급으로 본다(로그인 전용 아님).
+/// - 종목토론방 = `plan.forum` 비어있지 않음. 카페·밴드와 섞인 혼합 아이템도 forum이 끼면
+///   2순위(=1)로 승격한다.
+pub fn item_priority(item: &QueueNowItem) -> u8 {
+    let Some(plan) = item.plan.as_ref() else {
+        return 2;
+    };
+    let login_only = plan.login.as_ref().is_some_and(|l| !l.is_empty())
+        && plan.naver.is_empty()
+        && plan.forum.is_empty()
+        && plan.band.is_empty();
+    if login_only {
+        0
+    } else if !plan.forum.is_empty() {
+        1
+    } else {
+        2
+    }
+}
+
+/// now 큐를 자동 우선순위로 재정렬한다(로그인 1 > 종토 2 > 카페/밴드). 실행 중(Running)
+/// 아이템은 `apply_reorder_now`와 동일하게 맨 앞에 고정한다(워커가 처리 중이라 건드리지
+/// 않는다). 대기(Waiting)는 `item_priority`로 **안정 정렬** — 같은 등급은 들어온 순서(FIFO)와
+/// 사용자가 수동으로 잡아둔 순서를 그대로 보존한다(수동 드래그는 등급 안에서만 유효, #229).
+pub fn apply_priority_order(items: Vec<QueueNowItem>) -> Vec<QueueNowItem> {
+    let mut running = Vec::new();
+    let mut waiting = Vec::new();
+    for item in items {
+        if item.state == QueueState::Running {
+            running.push(item);
+        } else {
+            waiting.push(item);
+        }
+    }
+    // slice::sort_by_key는 안정 정렬 — 동일 우선순위의 기존 상대 순서를 보존한다.
+    waiting.sort_by_key(item_priority);
+    running.extend(waiting);
+    running
+}
+
 /// 즉시 처리 대기열(now 큐)에 새로 적재되는 아이템을 정규화한다 — 워커가 실행 상태를
 /// 채우므로 항상 대기 상태로 시작하고 실행 메타(batch_id/progress)는 비운다. 프론트가
 /// 보낸 값에 대한 방어(add_queue_scheduled가 missed를 강제 해제하는 것과 같은 취지).
@@ -322,7 +366,9 @@ pub fn add_queue_now<R: tauri::Runtime>(
     let title = item.title.clone();
     let after = now.mutate(|mut items| {
         items.push(as_fresh_now_item(item));
-        items
+        // 적재 직후 자동 우선순위로 재정렬해, 새 종토/로그인이 대기열(및 화면)에서 위로
+        // 올라가게 한다(#229). 실행 중 아이템은 맨 앞 고정이라 안 건드린다.
+        apply_priority_order(items)
     });
     super::queue_runner::start_if_idle(runner.inner(), app);
     record(
@@ -340,7 +386,9 @@ pub fn reorder_queue_now(
     store: tauri::State<'_, JsonStore<QueueNowItem>>,
     ordered_ids: Vec<String>,
 ) -> Vec<QueueNowItem> {
-    store.mutate(|items| apply_reorder_now(items, &ordered_ids))
+    // 사용자가 잡은 수동 순서를 적용한 뒤 자동 우선순위로 한 번 더 정렬한다 — 수동 드래그는
+    // 같은 등급 안에서만 유효하고, 등급 간 순서(로그인>종토>카페/밴드)는 항상 우선한다(#229).
+    store.mutate(|items| apply_priority_order(apply_reorder_now(items, &ordered_ids)))
 }
 
 #[tauri::command]
@@ -474,7 +522,8 @@ fn promote_one<R: tauri::Runtime>(
     // 비결정적이 되므로(이슈 #181), push 결과(mutate 반환)를 그대로 돌려준다.
     let after = now.mutate(|mut items| {
         items.push(to_now_item(s));
-        items
+        // 승격된 종토/로그인도 자동 우선순위로 위로 올라가게 재정렬한다(#229).
+        apply_priority_order(items)
     });
     super::queue_runner::start_if_idle(runner, app.clone());
     Some(after)
@@ -781,6 +830,152 @@ mod tests {
         let next = apply_reorder_now(items, &["w1".to_string()]);
         let ids: Vec<&str> = next.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, vec!["r1", "r2", "w1"]);
+    }
+
+    // --- 자동 우선순위(#229): 로그인 1 > 종토 2 > 카페/밴드 FIFO ---
+
+    fn empty_plan() -> PublishPlan {
+        PublishPlan {
+            post_id: "p".into(),
+            kind: ModeValue::Post,
+            title: "t".into(),
+            body_text: "b".into(),
+            comments: vec![],
+            link_override: String::new(),
+            naver: vec![],
+            forum: vec![],
+            band: vec![],
+            login: None,
+        }
+    }
+
+    fn now_item_with(id: &str, state: QueueState, plan: PublishPlan) -> QueueNowItem {
+        let mut it = sample_now_item(id, state);
+        it.plan = Some(plan);
+        it
+    }
+
+    fn login_only_plan() -> PublishPlan {
+        let mut p = empty_plan();
+        p.login = Some(vec![sample_login_target("u", PlatformId::Naver)]);
+        p
+    }
+
+    fn forum_plan() -> PublishPlan {
+        let mut p = empty_plan();
+        p.forum = vec![ForumTarget {
+            account_id: "u".into(),
+            name: "삼성전자".into(),
+            code: "005930".into(),
+        }];
+        p
+    }
+
+    fn cafe_plan() -> PublishPlan {
+        let mut p = empty_plan();
+        p.naver = sample_plan().naver;
+        p
+    }
+
+    fn band_plan() -> PublishPlan {
+        let mut p = empty_plan();
+        p.band = sample_plan().band;
+        p
+    }
+
+    #[test]
+    fn item_priority_login_only_is_highest() {
+        // 로그인 전용(plan.login 있고 게시 타깃 없음) = 0(최우선).
+        let it = now_item_with("l", QueueState::Waiting, login_only_plan());
+        assert_eq!(item_priority(&it), 0);
+    }
+
+    #[test]
+    fn item_priority_forum_is_second() {
+        let it = now_item_with("f", QueueState::Waiting, forum_plan());
+        assert_eq!(item_priority(&it), 1);
+    }
+
+    #[test]
+    fn item_priority_cafe_and_band_are_lowest() {
+        assert_eq!(
+            item_priority(&now_item_with("c", QueueState::Waiting, cafe_plan())),
+            2
+        );
+        assert_eq!(
+            item_priority(&now_item_with("b", QueueState::Waiting, band_plan())),
+            2
+        );
+    }
+
+    #[test]
+    fn item_priority_mixed_with_forum_is_promoted() {
+        // 카페+종토 혼합이면 forum이 끼었으므로 2순위(=1)로 승격.
+        let mut p = cafe_plan();
+        p.forum = forum_plan().forum;
+        assert_eq!(
+            item_priority(&now_item_with("m", QueueState::Waiting, p)),
+            1
+        );
+    }
+
+    #[test]
+    fn item_priority_login_attached_to_publish_is_not_login_only() {
+        // 게시(카페)에 로그인이 동봉된 아이템은 로그인 전용이 아니라 그 게시 등급(카페=2).
+        let mut p = cafe_plan();
+        p.login = Some(vec![sample_login_target("u", PlatformId::Naver)]);
+        assert_eq!(
+            item_priority(&now_item_with("p", QueueState::Waiting, p)),
+            2
+        );
+    }
+
+    #[test]
+    fn item_priority_no_plan_is_lowest() {
+        assert_eq!(item_priority(&sample_now_item("x", QueueState::Waiting)), 2);
+    }
+
+    #[test]
+    fn priority_order_login_then_forum_then_cafe_band_fifo() {
+        // 들어온 순서: 카페c1, 밴드b1, 종토f1, 로그인l1, 카페c2, 종토f2.
+        // 기대: 로그인 → 종토(FIFO f1,f2) → 카페/밴드(FIFO c1,b1,c2).
+        let items = vec![
+            now_item_with("c1", QueueState::Waiting, cafe_plan()),
+            now_item_with("b1", QueueState::Waiting, band_plan()),
+            now_item_with("f1", QueueState::Waiting, forum_plan()),
+            now_item_with("l1", QueueState::Waiting, login_only_plan()),
+            now_item_with("c2", QueueState::Waiting, cafe_plan()),
+            now_item_with("f2", QueueState::Waiting, forum_plan()),
+        ];
+        let next = apply_priority_order(items);
+        let ids: Vec<&str> = next.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["l1", "f1", "f2", "c1", "b1", "c2"]);
+    }
+
+    #[test]
+    fn priority_order_pins_running_first_even_if_lower_priority() {
+        // 실행 중(Running) 카페는 더 높은 우선순위 로그인보다도 맨 앞 고정(실행 중은 안 건드림).
+        let items = vec![
+            now_item_with("r1", QueueState::Running, cafe_plan()),
+            now_item_with("l1", QueueState::Waiting, login_only_plan()),
+            now_item_with("c1", QueueState::Waiting, cafe_plan()),
+        ];
+        let next = apply_priority_order(items);
+        let ids: Vec<&str> = next.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["r1", "l1", "c1"]);
+    }
+
+    #[test]
+    fn priority_order_preserves_fifo_within_same_class() {
+        // 같은 등급(카페)끼리는 들어온 순서·수동 순서를 그대로 보존(안정 정렬).
+        let items = vec![
+            now_item_with("c1", QueueState::Waiting, cafe_plan()),
+            now_item_with("c2", QueueState::Waiting, cafe_plan()),
+            now_item_with("c3", QueueState::Waiting, cafe_plan()),
+        ];
+        let next = apply_priority_order(items);
+        let ids: Vec<&str> = next.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["c1", "c2", "c3"]);
     }
 
     #[test]

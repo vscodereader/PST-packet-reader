@@ -17,7 +17,9 @@ use super::accounts::{AccountStatus, PlatformId};
 use super::activity::{record, ActivityItem, ActivityType};
 use super::log_batches::{BatchItem, BatchItemStatus, LogBatch, PostedContent, MAX_LOG_BATCHES};
 use super::posts::{CommentTarget, ModeValue};
-use super::queue::{apply_cancel_now, LoginTarget, PublishPlan, QueueNowItem, QueueState};
+use super::queue::{
+    apply_cancel_now, item_priority, LoginTarget, PublishPlan, QueueNowItem, QueueState,
+};
 use crate::auth::outcome::LoginResolution;
 use crate::auth::OrchestratorError;
 use crate::band_post::error::{BandPostError, BandPostErrorKind};
@@ -118,11 +120,15 @@ struct BandOutcome {
     result: Result<BandJobResult, BandPostError>,
 }
 
-/// 위에서부터 첫 `Waiting` 아이템을 고른다(`Running`은 건너뛴다).
+/// 대기(`Waiting`) 아이템 중 **우선순위가 가장 높은 것**을 고른다(`Running`은 건너뛴다).
+/// 우선순위는 `item_priority`(로그인 0 > 종토 1 > 카페/밴드 2). 동순위면 `min_by_key`가
+/// 먼저 나오는 것을 돌려주므로 들어온 순서(FIFO)가 보존된다(#229). 큐는 적재/재정렬 시
+/// 이미 우선순위 순으로 정렬되지만, 픽에서도 우선순위를 직접 보장해 실행 순서를 못 박는다.
 pub fn pick_next_waiting(items: &[QueueNowItem]) -> Option<QueueNowItem> {
     items
         .iter()
-        .find(|i| i.state == QueueState::Waiting)
+        .filter(|i| i.state == QueueState::Waiting)
+        .min_by_key(|i| item_priority(i))
         .cloned()
 }
 
@@ -2407,6 +2413,62 @@ mod tests {
     fn pick_next_waiting_none_when_empty_or_all_running() {
         assert!(pick_next_waiting(&[]).is_none());
         assert!(pick_next_waiting(&[now_item("r", QueueState::Running, None)]).is_none());
+    }
+
+    fn login_only_plan() -> PublishPlan {
+        let mut p = plan(ModeValue::Post, vec![]);
+        p.login = Some(vec![login_target("u", PlatformId::Naver)]);
+        p
+    }
+
+    fn forum_plan() -> PublishPlan {
+        let mut p = plan(ModeValue::Post, vec![]);
+        p.forum = vec![forum_target("u", "삼성전자", "005930")];
+        p
+    }
+
+    #[test]
+    fn pick_next_waiting_prefers_login_then_forum_then_fifo() {
+        let cafe = plan(ModeValue::Post, vec![naver_target("u")]);
+        // 들어온 순서: 카페 → 종토 → 로그인. 픽은 로그인(1순위)부터.
+        let items = vec![
+            now_item("c1", QueueState::Waiting, Some(cafe.clone())),
+            now_item("f1", QueueState::Waiting, Some(forum_plan())),
+            now_item("l1", QueueState::Waiting, Some(login_only_plan())),
+        ];
+        assert_eq!(pick_next_waiting(&items).unwrap().id, "l1");
+        // 로그인이 빠지면 종토(2순위).
+        let items = vec![
+            now_item("c1", QueueState::Waiting, Some(cafe.clone())),
+            now_item("f1", QueueState::Waiting, Some(forum_plan())),
+        ];
+        assert_eq!(pick_next_waiting(&items).unwrap().id, "f1");
+        // 종토까지 빠지면 카페(FIFO).
+        let items = vec![now_item("c1", QueueState::Waiting, Some(cafe))];
+        assert_eq!(pick_next_waiting(&items).unwrap().id, "c1");
+    }
+
+    #[test]
+    fn pick_next_waiting_same_priority_is_fifo() {
+        // 같은 등급(카페)끼리는 먼저 들어온 것을 집는다(안정 선택).
+        let cafe = plan(ModeValue::Post, vec![naver_target("u")]);
+        let items = vec![
+            now_item("c1", QueueState::Waiting, Some(cafe.clone())),
+            now_item("c2", QueueState::Waiting, Some(cafe)),
+        ];
+        assert_eq!(pick_next_waiting(&items).unwrap().id, "c1");
+    }
+
+    #[test]
+    fn pick_next_waiting_skips_running_and_picks_by_priority() {
+        // Running은 건너뛰고, 대기 중에서 우선순위 높은 종토를 카페보다 먼저 집는다.
+        let cafe = plan(ModeValue::Post, vec![naver_target("u")]);
+        let items = vec![
+            now_item("r1", QueueState::Running, Some(cafe.clone())),
+            now_item("c1", QueueState::Waiting, Some(cafe)),
+            now_item("f1", QueueState::Waiting, Some(forum_plan())),
+        ];
+        assert_eq!(pick_next_waiting(&items).unwrap().id, "f1");
     }
 
     #[test]
