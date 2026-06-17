@@ -53,6 +53,10 @@ pub struct NowQueueRunner {
 #[derive(Default)]
 struct RunnerInner {
     is_running: bool,
+    /// 지금 동시에 돌고 있는 종목토론방 전용 아이템 수(#240). 종토방은 카페(9222)·밴드와
+    /// 자원이 겹치지 않아 여러 아이템을 동시에 돌리는데, 이 수를 FORUM_ITEM_PARALLEL_CAP로
+    /// 제한해 자원 고갈을 막는다. 카페·밴드·로그인은 이 카운터를 쓰지 않고 기존대로 순차다.
+    active_forum: usize,
 }
 
 /// 워커 종료(정상/패닉) 시 `is_running`을 반드시 해제해, 패닉 한 번에 큐가 영구히
@@ -220,29 +224,88 @@ async fn worker_loop<R: Runtime>(app: AppHandle<R>, runner: NowQueueRunner) {
             }
         };
 
-        now_store.mutate(|items| mark_running(items, &job.id));
-
-        match execute_item(&app, &job).await {
-            ItemOutcome::Completed => {
-                // 완료(N/N) 진행률이 프론트 폴링에 한 번은 잡혀 "N/N까지 차오른 뒤 사라짐"이
-                // 보이도록, 실제 작업을 한 아이템은 큐에서 빼기 전 한 폴링 주기(750ms)보다 살짝
-                // 길게 100% 상태로 머문다. plan 없는(표시 전용) 아이템은 곧장 제거한다.
-                if job.plan.is_some() {
-                    tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+        // 종목토론방 전용 아이템(#240): 카페(9222 공유)·밴드(HTTP)와 자원이 겹치지 않고 계정마다
+        // 전용 헤드리스 Chrome을 쓰므로, 여러 아이템을 동시에 돌려도 안전하다. 우선순위 픽(#231)이
+        // 그대로라 종토방이 카페·밴드보다 먼저 집히고(대기 중 밴드·카페보다 앞서 실행), 여기서
+        // 기다리지 않고 곧장 다음 아이템을 집어 종토방 아이템들이 동시에 돈다. 동시 수는
+        // FORUM_ITEM_PARALLEL_CAP로 제한한다.
+        if is_forum_only_item(&job) {
+            let claimed = {
+                let Ok(mut inner) = runner.inner.lock() else {
+                    return;
+                };
+                if inner.active_forum < FORUM_ITEM_PARALLEL_CAP {
+                    inner.active_forum += 1;
+                    true
+                } else {
+                    false
                 }
-                // 완료된 아이템은 큐에서 제거한다(취소와 동일 경로 재사용).
-                app.state::<JsonStore<QueueNowItem>>()
-                    .mutate(|items| apply_cancel_now(items, &job.id));
+            };
+            if !claimed {
+                // 동시 한도 도달 — 슬롯이 빌 때까지 잠깐 대기 후 같은 아이템을 다시 집는다
+                // (바쁜 루프 방지). 우선순위 픽이라 카페·밴드보다 여전히 종토방이 먼저다.
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                continue;
             }
-            ItemOutcome::Yielded(remaining) => {
-                // 삭제가 아니라 중지(#232): 잔여 plan(아직 안 한 그룹만)으로 Waiting 복귀 후 재정렬.
-                // sleep 없이 곧장 다음 루프로 가, 선점한 더 높은 우선순위 아이템을 머뭇거림 없이
-                // 바로 집어 실행한다("칼같이" 전환). 완료 그룹은 plan에서 빠져 재개 시 중복게시 0.
-                app.state::<JsonStore<QueueNowItem>>()
-                    .mutate(|items| apply_yield_now(items, &job.id, *remaining));
+            now_store.mutate(|items| mark_running(items, &job.id));
+            let app_bg = app.clone();
+            let runner_bg = runner.clone();
+            tauri::async_runtime::spawn(async move {
+                finish_item(&app_bg, &job).await;
+                if let Ok(mut inner) = runner_bg.inner.lock() {
+                    inner.active_forum = inner.active_forum.saturating_sub(1);
+                }
+                // 남은 대기 아이템을 이어서 처리하도록 워커를 깨운다(이미 돌고 있으면 무시).
+                start_if_idle(&runner_bg, app_bg);
+            });
+            // 기다리지 않고 곧장 다음 아이템을 집는다 → 종토방 아이템들이 동시에 진행된다.
+            continue;
+        }
+
+        // 그 외(카페·밴드·로그인)는 자원 공유(9222·폰 IP) 때문에 기존과 동일하게 하나씩 순차
+        // 처리한다 — 이 경로의 동작은 한 글자도 바꾸지 않는다.
+        now_store.mutate(|items| mark_running(items, &job.id));
+        finish_item(&app, &job).await;
+    }
+}
+
+/// 한 아이템 실행을 끝내고 결과를 큐에 반영한다 — 완료면 큐에서 제거(취소와 동일 경로),
+/// 우선순위 양보(#232)면 잔여 plan으로 Waiting 복귀. worker_loop의 순차 경로(카페·밴드·
+/// 로그인)와 종토방 동시 경로가 함께 쓴다(#240). 동작은 기존 worker_loop 본문 그대로다.
+async fn finish_item<R: Runtime>(app: &AppHandle<R>, job: &QueueNowItem) {
+    match execute_item(app, job).await {
+        ItemOutcome::Completed => {
+            // 완료(N/N) 진행률이 프론트 폴링에 한 번은 잡혀 "N/N까지 차오른 뒤 사라짐"이
+            // 보이도록, 실제 작업을 한 아이템은 큐에서 빼기 전 한 폴링 주기(750ms)보다 살짝
+            // 길게 100% 상태로 머문다. plan 없는(표시 전용) 아이템은 곧장 제거한다.
+            if job.plan.is_some() {
+                tokio::time::sleep(std::time::Duration::from_millis(900)).await;
             }
+            // 완료된 아이템은 큐에서 제거한다(취소와 동일 경로 재사용).
+            app.state::<JsonStore<QueueNowItem>>()
+                .mutate(|items| apply_cancel_now(items, &job.id));
+        }
+        ItemOutcome::Yielded(remaining) => {
+            // 삭제가 아니라 중지(#232): 잔여 plan(아직 안 한 그룹만)으로 Waiting 복귀 후 재정렬.
+            // 완료 그룹은 plan에서 빠져 재개 시 중복게시 0.
+            app.state::<JsonStore<QueueNowItem>>()
+                .mutate(|items| apply_yield_now(items, &job.id, *remaining));
         }
     }
+}
+
+/// 종토방 아이템 동시 실행 한도(#240). 각 아이템은 계정마다 또 전용 Chrome을 띄우므로
+/// (run_forum_targets), 너무 많은 아이템을 동시에 돌리면 자원이 고갈된다.
+const FORUM_ITEM_PARALLEL_CAP: usize = 4;
+
+/// 이 아이템이 **종목토론방 전용**인지 — forum 타깃만 있고 카페(naver)·밴드 게시가 없으면 true.
+/// 이런 아이템은 전용 헤드리스 Chrome으로 게시해 카페(9222)·밴드(HTTP)와 자원이 겹치지 않아,
+/// 여러 아이템을 동시에 돌려도 안전하다(#240). 로그인 동봉 여부는 무관하다 — 게시 시 저장된
+/// 쿠키를 쓰고 재로그인하지 않으므로(#234). 카페가 섞이면(9222 공유) false → 순차 경로로 간다.
+fn is_forum_only_item(item: &QueueNowItem) -> bool {
+    item.plan
+        .as_ref()
+        .is_some_and(|p| !p.forum.is_empty() && p.naver.is_empty() && p.band.is_empty())
 }
 
 /// 큐에 해당 id의 아이템이 아직 있는지(협조적 취소 확인용). cancel_queue_now가
@@ -2699,6 +2762,51 @@ mod tests {
             now_item("f1", QueueState::Waiting, Some(forum_plan())),
         ];
         assert_eq!(pick_next_waiting(&items).unwrap().id, "f1");
+    }
+
+    // --- 종토방 아이템 동시 실행 분류(#240) ---
+
+    #[test]
+    fn is_forum_only_item_true_only_for_forum_targets() {
+        // 종토방만 있는 아이템 → 동시 실행 경로(true).
+        assert!(is_forum_only_item(&now_item(
+            "f",
+            QueueState::Waiting,
+            Some(forum_plan())
+        )));
+
+        // 카페가 섞이면 9222 공유라 false → 순차 경로.
+        let mut cafe_and_forum = plan(ModeValue::Post, vec![naver_target("u")]);
+        cafe_and_forum.forum = forum_plan().forum;
+        assert!(!is_forum_only_item(&now_item(
+            "m",
+            QueueState::Waiting,
+            Some(cafe_and_forum)
+        )));
+
+        // 카페만, 밴드만, 로그인 전용, plan 없음 → 모두 false.
+        assert!(!is_forum_only_item(&now_item(
+            "c",
+            QueueState::Waiting,
+            Some(plan(ModeValue::Post, vec![naver_target("u")]))
+        )));
+        let mut band = plan(ModeValue::Post, vec![]);
+        band.band = vec![band_target("u", "밴드", "https://band.us/band/1")];
+        assert!(!is_forum_only_item(&now_item(
+            "b",
+            QueueState::Waiting,
+            Some(band)
+        )));
+        assert!(!is_forum_only_item(&now_item(
+            "l",
+            QueueState::Waiting,
+            Some(login_only_plan())
+        )));
+        assert!(!is_forum_only_item(&now_item(
+            "x",
+            QueueState::Waiting,
+            None
+        )));
     }
 
     // --- 우선순위 선점 중지/재개(#232) ---
