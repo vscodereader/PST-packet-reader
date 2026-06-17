@@ -139,8 +139,8 @@ pub fn plan_to_post_jobs(plan: &PublishPlan) -> Vec<PostJob> {
             cafe: t.cafe.clone(),
             menu_id: t.menu_id,
             board_type: t.board_type.clone(),
-            subject: crate::template_tokens::resolve_link_only(&plan.title, &link),
-            body_text: crate::template_tokens::resolve_link_only(&plan.body_text, &link),
+            subject: crate::template_tokens::resolve_cafe_band(&plan.title, &link),
+            body_text: crate::template_tokens::resolve_cafe_band(&plan.body_text, &link),
             tag_list: Vec::new(),
         })
         .collect()
@@ -281,7 +281,7 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) {
     let cafe_comments: Vec<String> = plan
         .comments
         .iter()
-        .map(|c| crate::template_tokens::resolve_link_only(c, &cafe_link))
+        .map(|c| crate::template_tokens::resolve_cafe_band(c, &cafe_link))
         .collect();
 
     for group in &groups {
@@ -766,6 +766,22 @@ fn ip_matches(login_ip: &str, egress_ip: &str) -> bool {
 struct GroupSkip {
     code: String,
     message: String,
+    /// CDP/자동화 오류(`LoginOutcome::Error`)로 게시 전 로그인이 죽었을 때 캡처된 백트레이스
+    /// (자세히 보기용). 비번오류·차단·IP 불일치 등 일반 실패는 None — backtrace가 없는 정상
+    /// 분기라 찍어봐야 분류 코드 위치만 가리켜 무의미하다.
+    trace: Option<String>,
+}
+
+impl GroupSkip {
+    /// 자세히 보기 trace 본문: 원본 사유 메시지 + (CDP 오류면) 캡처된 백트레이스. 각 플랫폼의
+    /// trace 빌더(`failure_trace`/`band_failure_trace` 등)가 이 문자열을 message/detail로 받아
+    /// "자세히 보기"에 backtrace까지 노출한다. 메인 사유는 code 기반(`failure_reason`)이라 영향 없다.
+    fn trace_body(&self) -> String {
+        match &self.trace {
+            Some(bt) => format!("{}\n\n{}", self.message, bt),
+            None => self.message.clone(),
+        }
+    }
 }
 
 /// 한 그룹의 네이버 카페 글 대상을 합성 실패 리포트로 만든다(로그인/IP 실패로 게시조차 못 함).
@@ -783,7 +799,9 @@ fn synth_post_failures(plan: &PublishPlan, account_id: &str, skip: &GroupSkip) -
             error: Some(crate::naver_cafe::ErrorEnvelope {
                 trace_id: String::new(),
                 code: skip.code.clone(),
-                message: skip.message.clone(),
+                // message는 메인 사유가 아니라 failure_trace(자세히 보기)로만 흐르므로, CDP
+                // 오류면 여기에 backtrace를 실어 자세히 보기에 노출한다.
+                message: skip.trace_body(),
                 error_data: None,
             }),
         })
@@ -813,7 +831,8 @@ fn synth_comment_failures(
                 account_id: t.account_id.clone(),
                 cafe_id,
                 code: skip.code.clone(),
-                message: skip.message.clone(),
+                // 글 합성 실패와 동일: message는 자세히 보기 trace로만 흐르므로 backtrace를 싣는다.
+                message: skip.trace_body(),
                 cafe: None,
             })
         })
@@ -836,7 +855,7 @@ fn synth_forum_failures(
                 name: f.name.clone(),
                 ok: false,
                 message: failure_reason(&skip.code, None),
-                trace: Some(format!("{}\n{}", skip.code, skip.message)),
+                trace: Some(format!("{}\n{}", skip.code, skip.trace_body())),
                 posted: None,
             },
         })
@@ -852,9 +871,12 @@ fn synth_band_failures(plan: &PublishPlan, account_id: &str, skip: &GroupSkip) -
         .map(|b| BandOutcome {
             account_id: b.account_id.clone(),
             band_name: b.name.clone(),
+            // transport 오류의 detail로 흐른다(band_failure_trace가 detail+생성지점 backtrace를
+            // 실음). CDP 오류면 trace_body가 detail에 그 backtrace를 끼워 자세히 보기에 노출한다.
             result: Err(BandPostError::transport(format!(
                 "{}: {}",
-                skip.code, skip.message
+                skip.code,
+                skip.trace_body()
             ))),
         })
         .collect()
@@ -897,6 +919,8 @@ async fn prepare_group_login<R: Runtime>(
     Err(GroupSkip {
         code: "IP_MISMATCH".to_owned(),
         message: "로그인 IP와 게시 IP가 끝내 일치하지 않아 게시를 건너뜀".to_owned(),
+        // IP 불일치는 자동화 오류가 아니라 정상 판정이라 backtrace가 없다.
+        trace: None,
     })
 }
 
@@ -925,12 +949,28 @@ async fn do_login_and_capture_ip<R: Runtime>(
         )
         .await
     };
+    // 게시 직전 로그인 결과를 계정 상태 배지에 반영한다(게시 경로에서 상태가 갱신되지 않던
+    // 문제 수정). 성공이면 Active(정상), 실패면 BadCredentials/Challenge/Blocked/Error로 바뀐다.
+    // loginId가 같은 모든 행을 함께 갱신한다(run_login_targets와 동일). 실패 사유 자체는
+    // 완료 로그(LogBatch)가 이미 보여주므로 여기선 상태만 갱신해 활동 피드 스팸을 피한다.
+    // trace는 CDP/자동화 오류에서만 채워진다(비번오류·차단은 None) — 게시 그룹 경로도
+    // 순수 로그인 아이템처럼 그 backtrace를 자세히 보기에 보존한다.
+    let (status, msg, trace) = resolve_login_status(&result);
+    app.state::<JsonStore<crate::ipc::accounts::Account>>()
+        .mutate(|list| {
+            crate::ipc::accounts::apply_status_by_login_id(
+                list,
+                &login.account_id,
+                status.clone(),
+                Some(msg.clone()),
+            )
+        });
     let succeeded = matches!(&result, Ok(res) if res.succeeded);
     if !succeeded {
-        let (_, msg, _) = resolve_login_status(&result);
         return Err(GroupSkip {
             code: "LOGIN_FAILED".to_owned(),
             message: msg,
+            trace,
         });
     }
     Ok(crate::auth::fetch_external_ip().await)
@@ -1104,14 +1144,14 @@ async fn run_band_targets<R: Runtime>(
         .collect();
     // 밴드는 종목이 없어 #{링크}만 치환한다(링크값 있으면 그 값, 없으면 빈 문자열).
     let band_link = crate::template_tokens::resolve_link(&plan.link_override, "");
-    let band_title = crate::template_tokens::resolve_link_only(&plan.title, &band_link);
-    let band_body = crate::template_tokens::resolve_link_only(&plan.body_text, &band_link);
+    let band_title = crate::template_tokens::resolve_cafe_band(&plan.title, &band_link);
+    let band_body = crate::template_tokens::resolve_cafe_band(&plan.body_text, &band_link);
     // comment/both면 댓글 풀 전체를 넘긴다. post/both는 새 글에, comment 전용은 기존
     // 글(최신/인기)에 같은 풀을 분배해 단다. post 전용 모드면 빈 슬라이스라 댓글 없음.
     let resolved_comments: Vec<String> = if runs_comment(plan) {
         plan.comments
             .iter()
-            .map(|c| crate::template_tokens::resolve_link_only(c, &band_link))
+            .map(|c| crate::template_tokens::resolve_cafe_band(c, &band_link))
             .collect()
     } else {
         Vec::new()
@@ -1603,11 +1643,19 @@ fn post_report_to_item(plan: &PublishPlan, r: &JobReport) -> BatchItem {
             .error
             .as_ref()
             .map(|e| failure_trace(&e.code, &e.message, e.error_data.as_ref().map(|d| &d.cafe))),
-        // 성공 시 등록 결과(cafe_id/article_id)로 글 URL을 채워 "올라간 글 열기"를 띄운다.
-        // 카페 엔진은 제목/본문을 결과로 돌려주지 않아 url만 보존한다(#219).
-        posted: r.result.as_ref().map(|res| PostedContent {
-            url: Some(cafe_article_url(res.cafe_id, res.article_id)),
-            ..Default::default()
+        // 성공 시 작성 내용(제목/본문)과 등록 결과(cafe_id/article_id)로 만든 글 URL을 채운다.
+        // 카페 엔진은 제목/본문을 결과로 돌려주지 않지만, 게시한 내용은 plan에 그대로 있고
+        // 대상별로 동일하다(plan_to_post_jobs와 같은 #{링크} 치환). 밴드·종토방처럼 작성 내용을
+        // 실어, 빛삭돼도 무엇을 보냈는지 + "올라간 글 열기"가 되게 한다(#219).
+        posted: r.result.as_ref().map(|res| {
+            let link = crate::template_tokens::resolve_link(&plan.link_override, "");
+            PostedContent {
+                title: crate::template_tokens::resolve_cafe_band(&plan.title, &link),
+                body: crate::template_tokens::resolve_cafe_band(&plan.body_text, &link),
+                // 카페 댓글은 별도 BatchItem(comment_report_to_item)으로 표시하므로 비운다.
+                comment: None,
+                url: Some(cafe_article_url(res.cafe_id, res.article_id)),
+            }
         }),
     }
 }
@@ -1842,13 +1890,13 @@ fn build_items(
     items.extend(forum_outcomes.iter().map(forum_outcome_to_item));
     // 밴드 완료 로그에 작성 내용(#{링크} 치환 후)을 싣는다(URL은 엔진 web_url 사용).
     let band_link = crate::template_tokens::resolve_link(&plan.link_override, "");
-    let band_title = crate::template_tokens::resolve_link_only(&plan.title, &band_link);
-    let band_body = crate::template_tokens::resolve_link_only(&plan.body_text, &band_link);
+    let band_title = crate::template_tokens::resolve_cafe_band(&plan.title, &band_link);
+    let band_body = crate::template_tokens::resolve_cafe_band(&plan.body_text, &band_link);
     let band_comment = plan
         .comments
         .iter()
         .find(|c| !c.trim().is_empty())
-        .map(|c| crate::template_tokens::resolve_link_only(c, &band_link));
+        .map(|c| crate::template_tokens::resolve_cafe_band(c, &band_link));
     items.extend(
         band_outcomes
             .iter()
@@ -3004,6 +3052,7 @@ mod tests {
         let skip = GroupSkip {
             code: "IP_MISMATCH".into(),
             message: "재시도 후에도 불일치".into(),
+            trace: None,
         };
         // 카페: u0 대상만 합성 실패(u1 제외).
         let posts = synth_post_failures(&p, "u0", &skip);
@@ -3027,6 +3076,67 @@ mod tests {
     }
 
     #[test]
+    fn synth_failures_surface_login_cdp_backtrace_in_trace() {
+        // CDP/자동화 오류로 게시 전 로그인이 죽으면 캡처된 backtrace가 카페·종토방·밴드의
+        // "자세히 보기" trace에 모두 실린다(비번오류는 trace None이라 안 실림 — 그건 별개).
+        let mut p = plan(ModeValue::Post, vec![naver_target("u0")]);
+        p.forum = vec![forum_target("u0", "삼성전자", "005930")];
+        p.band = vec![band_target("u0", "밴드", "https://band.us/band/1")];
+        let skip = GroupSkip {
+            code: "LOGIN_FAILED".into(),
+            message: "로그인 중 오류가 발생했습니다".into(),
+            trace: Some("at login_flow.rs:12:3\n\nframe0: cdp_disconnect".into()),
+        };
+        let posts = synth_post_failures(&p, "u0", &skip);
+        let forum = synth_forum_failures(&p, "u0", &skip);
+        let band = synth_band_failures(&p, "u0", &skip);
+        let items = build_items(&p, &posts, &[], &[], &forum, &band);
+        assert_eq!(items.len(), 3, "카페·종토방·밴드 3개 항목");
+        for it in &items {
+            let tr = it.trace.as_deref().unwrap_or_default();
+            assert!(
+                tr.contains("frame0: cdp_disconnect"),
+                "{:?} trace에 backtrace가 없음: {tr}",
+                it.platform
+            );
+            // 메인 사유 라인엔 backtrace가 새지 않는다(자세히 보기에만).
+            assert!(
+                !it.msg.contains("frame0"),
+                "{:?} msg에 backtrace 누출",
+                it.platform
+            );
+        }
+    }
+
+    #[test]
+    fn synth_failures_without_trace_omit_backtrace() {
+        // 비번오류·IP 불일치(trace None)는 trace 본문에 backtrace 없이 사유 메시지만 남는다.
+        let p = plan(ModeValue::Post, vec![naver_target("u0")]);
+        let skip = GroupSkip {
+            code: "LOGIN_FAILED".into(),
+            message: "아이디 또는 비밀번호가 올바르지 않습니다".into(),
+            trace: None,
+        };
+        assert_eq!(
+            skip.trace_body(),
+            "아이디 또는 비밀번호가 올바르지 않습니다"
+        );
+        let items = build_items(
+            &p,
+            &synth_post_failures(&p, "u0", &skip),
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        assert!(!items[0]
+            .trace
+            .as_deref()
+            .unwrap_or_default()
+            .contains("\n\n"));
+    }
+
+    #[test]
     fn synth_comment_failures_cover_comment_only_targets_not_both() {
         // comment 전용: 로그인/IP 실패 시 댓글 대상도 조용히 누락하지 않고 Fail로 남긴다.
         let mut t = naver_target("u0");
@@ -3040,6 +3150,7 @@ mod tests {
         let skip = GroupSkip {
             code: "LOGIN_FAILED".into(),
             message: "쿠키 저장 실패".into(),
+            trace: None,
         };
         let fails = synth_comment_failures(&p, "u0", &skip);
         assert_eq!(fails.len(), 1);
@@ -3393,10 +3504,16 @@ mod tests {
             error: None,
         };
         let item = post_report_to_item(&p, &report);
+        let posted = item.posted.expect("성공이면 posted가 있어야 한다");
         assert_eq!(
-            item.posted.and_then(|c| c.url).as_deref(),
+            posted.url.as_deref(),
             Some("https://cafe.naver.com/ca-fe/cafes/999/articles/42")
         );
+        // 종토방·밴드처럼 작성 내용(plan의 제목/본문)도 실어 "게시 내용"에 보이게 한다.
+        assert_eq!(posted.title, "T");
+        assert_eq!(posted.body, "B");
+        // 카페 댓글은 별도 항목이라 글 항목의 comment는 비운다.
+        assert_eq!(posted.comment, None);
     }
 
     #[test]

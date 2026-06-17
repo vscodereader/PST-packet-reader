@@ -13,12 +13,21 @@ export function jobLink(job: { code?: string; url?: string } | null): string {
 
 export function resolveTemplate(
   text: string,
-  job: { targetName?: string; code?: string; url?: string } | null,
+  job: {
+    platform?: PlatformId;
+    targetName?: string;
+    code?: string;
+    url?: string;
+  } | null,
   linkOverride?: string,
 ): string {
   if (!text) return text;
-  const name = (job && job.targetName) || "";
-  const code = (job && job.code) || "";
+  // 종목 토큰(#{종목명}/#{종목코드})은 종목토론방 전용이다. 카페·밴드는 종목 개념이 없어
+  // 변수명을 글에 그대로 남기지 않고 빈값으로 지운다(백엔드 resolve_cafe_band와 일치).
+  // platform 미지정(기본 미리보기/레거시 호출)은 forum으로 본다.
+  const isForum = !job?.platform || job.platform === "forum";
+  const name = isForum ? job?.targetName || "" : "";
+  const code = isForum ? job?.code || "" : "";
   const link = (linkOverride && linkOverride.trim()) || jobLink(job);
   return text
     .replace(/#\{\s*종목명\s*\}/g, name)

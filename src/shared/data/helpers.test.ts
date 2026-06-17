@@ -37,6 +37,24 @@ describe("resolveTemplate", () => {
     );
   });
 
+  it("blanks 종목명/종목코드 for 카페·밴드 (non-forum) jobs", () => {
+    const out = resolveTemplate(
+      "#{종목명}(#{종목코드}) 보세요 → #{링크}",
+      { platform: "naver", targetName: "내카페", code: "005930" },
+      "https://cafe.example",
+    );
+    expect(out).toBe("() 보세요 → https://cafe.example");
+  });
+
+  it("keeps substituting 종목명/종목코드 for 종목토론방(forum) jobs", () => {
+    const out = resolveTemplate(
+      "#{종목명}(#{종목코드})",
+      { platform: "forum", targetName: "삼성전자", code: "005930" },
+      undefined,
+    );
+    expect(out).toBe("삼성전자(005930)");
+  });
+
   it("honors a link override", () => {
     const out = resolveTemplate("#{링크}", { code: "005930" }, "https://x.io");
     expect(out).toBe("https://x.io");
