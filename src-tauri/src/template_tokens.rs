@@ -38,10 +38,13 @@ pub fn resolve_forum(text: &str, name: &str, code: &str, link: &str) -> String {
         .replace(LINK_TOKEN, link)
 }
 
-/// 카페·밴드용: `#{링크}`만 치환한다. `#{종목명}`/`#{종목코드}`는 종토 전용이라
-/// 건드리지 않고 그대로 둔다.
-pub fn resolve_link_only(text: &str, link: &str) -> String {
-    text.replace(LINK_TOKEN, link)
+/// 카페·밴드용: `#{링크}`는 실제 값으로 치환하고, 종목 토큰(`#{종목명}`/`#{종목코드}`)은
+/// **빈 문자열로 지운다**. 카페·밴드엔 종목 개념이 없어, 변수명이 글에 그대로 남지 않도록
+/// 빈값으로 대체한다(프론트 `resolveTemplate`의 비-forum 동작과 일치).
+pub fn resolve_cafe_band(text: &str, link: &str) -> String {
+    text.replace(NAME_TOKEN, "")
+        .replace(CODE_TOKEN, "")
+        .replace(LINK_TOKEN, link)
 }
 
 #[cfg(test)]
@@ -95,12 +98,12 @@ mod tests {
     }
 
     #[test]
-    fn link_only_leaves_stock_tokens_untouched() {
-        // 카페/밴드: #{링크}만 치환, #{종목명}/#{종목코드}는 그대로 남는다.
+    fn cafe_band_blanks_stock_tokens_and_keeps_link() {
+        // 카페/밴드: #{링크}는 치환, #{종목명}/#{종목코드}는 빈값으로 지운다(변수명 미노출).
         let text = "#{종목명} 링크: #{링크} 코드 #{종목코드}";
         assert_eq!(
-            resolve_link_only(text, "https://band.us/123"),
-            "#{종목명} 링크: https://band.us/123 코드 #{종목코드}"
+            resolve_cafe_band(text, "https://band.us/123"),
+            " 링크: https://band.us/123 코드 "
         );
     }
 
@@ -116,7 +119,7 @@ mod tests {
             "보세요->삼성전자(005930)!"
         );
         assert_eq!(
-            resolve_link_only("링크#{링크}끝", "http://y"),
+            resolve_cafe_band("링크#{링크}끝", "http://y"),
             "링크http://y끝"
         );
     }
@@ -127,6 +130,6 @@ mod tests {
             resolve_forum("그냥 본문", "삼성", "005930", "x"),
             "그냥 본문"
         );
-        assert_eq!(resolve_link_only("그냥 본문", "x"), "그냥 본문");
+        assert_eq!(resolve_cafe_band("그냥 본문", "x"), "그냥 본문");
     }
 }

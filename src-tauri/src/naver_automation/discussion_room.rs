@@ -11,7 +11,7 @@ impl CdpClient {
         &mut self,
         packet_client: &NaverPacketClient,
     ) -> AutomationResult<DiscussionSelection> {
-        self.require_manual_npay_agreement_if_present()?;
+        self.handle_npay_agreement_if_present()?;
         let room = packet_client.select_random_discussion_room()?;
         self.navigate(&room.discussion_url)?;
         self.wait_for_stock_discussion_url(Duration::from_secs(12))?;
@@ -24,7 +24,7 @@ impl CdpClient {
         &mut self,
         stock: &DiscussionStock,
     ) -> AutomationResult<DiscussionSelection> {
-        self.require_manual_npay_agreement_if_present()?;
+        self.handle_npay_agreement_if_present()?;
         let discussion_url = format!(
             "https://stock.naver.com/domestic/stock/{}/discussion?chip=all",
             stock.code.trim()

@@ -26,7 +26,7 @@ pub(crate) use util::mask_id;
 use accounts::{has_valid_account_cookies, load_accounts_file};
 // band_auth가 ADB IP 회전을 재사용하도록 재노출한다(동작 무변경 — 기존 private import의
 // 가시성만 crate 범위로 넓힌다). process_account도 이 경로로 동일하게 호출한다.
-pub(crate) use adb::{assert_adb_device, toggle_airplane_mode};
+pub(crate) use adb::{assert_adb_device, fetch_external_ip, toggle_airplane_mode};
 use paths::ensure_runtime_dirs;
 
 /// 런타임 환경을 초기화하고 필요한 디렉토리와 도구들을 준비한다.

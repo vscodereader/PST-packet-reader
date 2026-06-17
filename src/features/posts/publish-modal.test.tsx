@@ -41,6 +41,21 @@ function renderPublish(over: Partial<Parameters<typeof PublishModal>[0]> = {}) {
   return { go };
 }
 
+/** 새 흐름(밴드 미러): 게시판 링크를 붙여넣어 카페 대상을 추가하고 선택한다. cafeId+menuId만
+ *  링크에서 파싱되고, boardType은 게시 시점 백엔드가 해결한다(모달은 쿠키를 안 쓴다). */
+async function addNaverCafe(cafeId: number, menuId = 1) {
+  const input = await screen.findByPlaceholderText(
+    "https://cafe.naver.com/f-e/cafes/31732304/menus/1",
+  );
+  await userEvent.clear(input);
+  await userEvent.type(
+    input,
+    `https://cafe.naver.com/f-e/cafes/${cafeId}/menus/${menuId}`,
+  );
+  await userEvent.click(screen.getByRole("button", { name: "추가" }));
+  await pickOption(0, `카페 ${cafeId} · 게시판 ${menuId}`);
+}
+
 /**
  * 즉시 게시("지금 바로")는 백엔드 게시를 직접 호출하지 않고, 게시 큐의 즉시 처리
  * 대기열에 아이템 하나를 적재한다(add_queue_now, #198). 그 아이템에 동결된 plan을
@@ -165,8 +180,7 @@ describe("PublishModal", () => {
     // board auto-selected), which drives a real backend publish.
     await userEvent.click(await screen.findByText("invest_king7"));
     await userEvent.click(screen.getByText("money_lab"));
-    await screen.findByPlaceholderText("가입 카페 선택");
-    await pickOption(0, "주식투자연구소 카페");
+    await addNaverCafe(11111111);
     // boards resolve and the first board is auto-selected → the naver job
     // becomes valid, so the publish button's count ticks up to 1.
     await userEvent.click(
@@ -194,7 +208,7 @@ describe("PublishModal", () => {
                 accountId: "money_lab",
                 cafe: "11111111",
                 menuId: 1,
-                boardType: "L",
+                boardType: "",
               }),
             ],
           }),
@@ -203,19 +217,54 @@ describe("PublishModal", () => {
     );
   });
 
-  it("loads an account's joined cafes when a naver account is selected", async () => {
+  it("attaches plan.login and saves credentials for the target account (#225)", async () => {
+    // 선택 로그인을 없앤 대신, 게시가 대상 계정마다 plan.login(force+useAdb)을 동봉하고
+    // 자격증명을 accounts.json에 저장한다 — 워커가 게시 직전 [회전→로그인→게시]를 하도록.
+    renderPublish();
+    await userEvent.click(await screen.findByText("invest_king7")); // drop forum
+    await userEvent.click(screen.getByText("money_lab"));
+    await addNaverCafe(11111111);
+    await userEvent.click(
+      await screen.findByRole(
+        "button",
+        { name: /^게시 \(1\)/ },
+        { timeout: 3000 },
+      ),
+    );
+    await screen.findByText(/대기열에 추가됨/, undefined, { timeout: 3000 });
+    // 게시 plan에 그 계정 로그인 스펙이 동봉된다(force=재로그인, useAdb=IP 회전).
+    expect(enqueuedPlan().login).toEqual([
+      {
+        accountId: "money_lab",
+        platform: "naver",
+        headless: false,
+        useAdb: true,
+        force: true,
+      },
+    ]);
+    // 자격증명이 저장돼야 백엔드가 게시 직전에 로그인할 수 있다.
+    expect(ipcBackend).toHaveBeenCalledWith("save_accounts", {
+      accounts: [
+        { id: "money_lab", password: "mlab2024!!", label: "money_lab" },
+      ],
+    });
+  });
+
+  it("adds a cafe target from a board link — no joined-cafe lookup (cookie-free)", async () => {
+    // 카페는 게시판 링크로 추가한다(시드 로그인 없이). 게시판 목록은 쿠키 필수라
+    // 모달은 list_joined_cafes를 절대 부르지 않는다(회귀 가드).
     renderPublish();
     await userEvent.click(await screen.findByText("money_lab"));
-    // The joined-cafe loader populates the per-account cafe select.
-    await screen.findByPlaceholderText("가입 카페 선택");
-    // 가입 카페는 쿠키 파일 키(loginId)로 조회해야 한다 — UI 고유 id("a5")로 조회하면
-    // 백엔드가 쿠키 파일을 못 찾아 빈 목록을 돌려준다(회귀: 가입 카페가 안 뜨던 버그).
-    expect(ipcBackend).toHaveBeenCalledWith("list_joined_cafes", {
-      accountId: "money_lab",
-    });
-    expect(ipcBackend).not.toHaveBeenCalledWith("list_joined_cafes", {
-      accountId: "a5",
-    });
+    await addNaverCafe(11111111);
+    // 링크에서 파싱된 카페·게시판이 칩으로 떠야 한다(제거 버튼 aria-label로 단언 —
+    // 같은 라벨이 열린 Select 옵션에도 있어 텍스트로는 중복됨).
+    expect(
+      await screen.findByLabelText("카페 11111111 · 게시판 1 제거"),
+    ).toBeInTheDocument();
+    expect(ipcBackend).not.toHaveBeenCalledWith(
+      "list_joined_cafes",
+      expect.anything(),
+    );
   });
 
   it("deselects an account when its row is clicked again", async () => {
@@ -321,8 +370,7 @@ describe("PublishModal", () => {
     // forum(a1)을 빼고 naver(money_lab) 선택 → 카페/게시판이 정해지면 naver job 1건.
     await userEvent.click(await screen.findByText("invest_king7"));
     await userEvent.click(screen.getByText("money_lab"));
-    await screen.findByPlaceholderText("가입 카페 선택");
-    await pickOption(0, "주식투자연구소 카페");
+    await addNaverCafe(11111111);
     // 카페·게시판이 정해지면 naver job 1건 → 버튼 카운트가 1로 오른다(아직 now 모드).
     await screen.findByRole(
       "button",
@@ -351,7 +399,7 @@ describe("PublishModal", () => {
             accountId: "money_lab",
             cafe: "11111111",
             menuId: 1,
-            boardType: "L",
+            boardType: "",
           }),
         ],
         forum: [],
@@ -417,8 +465,7 @@ describe("PublishModal", () => {
     renderPublish({ doc: bothDoc });
     await userEvent.click(await screen.findByText("invest_king7"));
     await userEvent.click(screen.getByText("money_lab"));
-    await screen.findByPlaceholderText("가입 카페 선택");
-    await pickOption(0, "주식투자연구소 카페");
+    await addNaverCafe(11111111);
     await screen.findByRole(
       "button",
       { name: /^게시 \(1\)/ },
@@ -447,10 +494,10 @@ describe("PublishModal", () => {
     // 기본 forum(a1) 유지 + naver(money_lab) + band(value_invest) 선택.
     await userEvent.click(await screen.findByText("money_lab"));
     await userEvent.click(screen.getByText("value_invest"));
-    await screen.findByPlaceholderText("가입 카페 선택");
-    await pickOption(0, "개미투자 카페");
+    await addNaverCafe(11111111);
 
-    // 밴드 링크를 저장하고 조회된 밴드(데일밴드)를 골라 게시 대상으로 추가한다.
+    // 밴드 링크를 저장하고 조회된 밴드(데일밴드)를 골라 게시 대상으로 추가한다. naver 카페
+    // Select가 콤보박스 0이므로 밴드 Select는 1이다.
     const linkInput = screen.getByLabelText("밴드 링크");
     const saveBtn = screen.getByRole("button", { name: "저장" });
     await userEvent.type(linkInput, "https://band.us/band/103043410");
@@ -458,7 +505,7 @@ describe("PublishModal", () => {
     await userEvent.click(saveBtn);
     await waitFor(() => expect(linkInput).toHaveValue(""));
     await screen.findByPlaceholderText("게시할 밴드 선택");
-    await pickOption(0, "데일밴드");
+    await pickOption(1, "데일밴드");
     await screen.findByLabelText("데일밴드 제거"); // 칩 등장 확인
 
     // forum + naver + band = 3곳.
@@ -608,8 +655,7 @@ describe("PublishModal", () => {
     renderPublish({ doc: bothDoc });
     await userEvent.click(await screen.findByText("invest_king7")); // drop forum
     await userEvent.click(screen.getByText("money_lab")); // a5 naver
-    await screen.findByPlaceholderText("가입 카페 선택");
-    await pickOption(0, "주식투자연구소 카페");
+    await addNaverCafe(11111111);
     await userEvent.click(
       await screen.findByRole(
         "button",
@@ -649,8 +695,7 @@ describe("PublishModal", () => {
     renderPublish({ doc: bothNoComments });
     await userEvent.click(await screen.findByText("invest_king7")); // drop forum
     await userEvent.click(screen.getByText("money_lab")); // a5 naver
-    await screen.findByPlaceholderText("가입 카페 선택");
-    await pickOption(0, "주식투자연구소 카페");
+    await addNaverCafe(11111111);
     await userEvent.click(
       await screen.findByRole(
         "button",
@@ -721,10 +766,9 @@ describe("PublishModal", () => {
     renderPublish({ doc: latestDoc });
     await userEvent.click(await screen.findByText("invest_king7")); // drop forum
     await userEvent.click(screen.getByText("money_lab")); // a5 naver
-    await screen.findByPlaceholderText("가입 카페 선택");
     // 주식투자연구소 카페 (cafeId 11111111) has 10 latest articles in the mock.
     // 개수(3)는 템플릿(doc.commentCount)에서 동결 — 게시 모달엔 개수 UI가 없다.
-    await pickOption(0, "주식투자연구소 카페");
+    await addNaverCafe(11111111);
     await userEvent.click(
       await screen.findByRole(
         "button",
@@ -759,8 +803,7 @@ describe("PublishModal", () => {
     renderPublish({ doc: popularDoc });
     await userEvent.click(await screen.findByText("invest_king7"));
     await userEvent.click(screen.getByText("money_lab"));
-    await screen.findByPlaceholderText("가입 카페 선택");
-    await pickOption(0, "주식투자연구소 카페");
+    await addNaverCafe(11111111);
     await userEvent.click(
       await screen.findByRole(
         "button",
@@ -801,11 +844,8 @@ describe("PublishModal", () => {
     await userEvent.click(await screen.findByText("invest_king7")); // drop forum
     await userEvent.click(screen.getByText("money_lab")); // a5 naver
     await userEvent.click(screen.getByText("insight_note")); // a10 naver
-    // Two naver rows each expose a cafe-select placeholder.
-    await screen.findAllByPlaceholderText("가입 카페 선택");
-    // Two naver rows → cafe selects at listbox index 0 and 2 (board selects 1/3).
-    await pickOption(0, "주식투자연구소 카페");
-    await pickOption(2, "가치투자 모임");
+    // 카페 대상은 전역(밴드 미러)이라 게시판 1개를 추가하면 두 계정 모두에 적용된다.
+    await addNaverCafe(11111111);
     await userEvent.click(
       await screen.findByRole(
         "button",
@@ -834,7 +874,7 @@ describe("PublishModal", () => {
           commentTarget: expect.objectContaining({
             mode: "latest",
             count: 1,
-            cafeId: 33333333,
+            cafeId: 11111111,
           }),
         }),
       ]),
@@ -859,9 +899,8 @@ describe("PublishModal", () => {
     renderPublish({ doc: latestDoc });
     await userEvent.click(await screen.findByText("invest_king7")); // drop forum
     await userEvent.click(screen.getByText("money_lab")); // a5 naver
-    await screen.findByPlaceholderText("가입 카페 선택");
     // 주식투자연구소 카페 (cafeId 11111111) has 10 latest articles in the mock.
-    await pickOption(0, "주식투자연구소 카페");
+    await addNaverCafe(11111111);
     await userEvent.click(
       await screen.findByRole(
         "button",
@@ -893,41 +932,35 @@ describe("PublishModal", () => {
     renderPublish({ doc: latestDoc });
     await userEvent.click(await screen.findByText("invest_king7")); // drop forum
     await userEvent.click(screen.getByText("money_lab")); // a5 naver, no cafe yet
-    await screen.findByPlaceholderText("가입 카페 선택");
     // No cafe picked → no comment job is built, so the publish button is (0) and
     // disabled (listTargetReady guard).
     const publish = await screen.findByRole("button", { name: /^게시 \(0\)/ });
     expect(publish).toBeDisabled();
     // Picking a cafe satisfies the guard and re-enables it.
-    await pickOption(0, "주식투자연구소 카페");
+    await addNaverCafe(11111111);
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^게시 \(1\)/ })).toBeEnabled(),
     );
   });
 
-  it("picks a per-account cafe/board with a band account selected too", async () => {
+  it("adds a cafe target with a band account selected too", async () => {
     renderPublish();
     // Add a naver and a band account alongside the default forum one.
     await userEvent.click(await screen.findByText("money_lab")); // a5 naver
     await userEvent.click(screen.getByText("value_invest")); // a7 band
-    await screen.findByPlaceholderText("가입 카페 선택");
-    // naver row exposes cafe (0) + board (1); 밴드는 링크/실제밴드명 드롭다운(2).
-    await pickOption(0, "개미투자 카페");
-    // forum (a1) = 1 job; the naver job lands once its first board auto-selects → 2.
+    // 카페는 게시판 링크로 추가한다(naver Select=콤보박스 0).
+    await addNaverCafe(11111111);
+    // forum (a1) = 1 job; the naver job lands once the cafe is added → 2.
     // (밴드 계정은 선택됐지만 게시할 밴드 미선택 → 밴드 잡 0건.)
     await screen.findByRole(
       "button",
       { name: /^게시 \(2\)/ },
       { timeout: 3000 },
     );
-    await pickOption(1, "공지사항");
-    const combos = [
-      ...document.querySelectorAll<HTMLInputElement>(
-        'input[aria-haspopup="listbox"]',
-      ),
-    ];
-    expect(combos[0]).toHaveValue("개미투자 카페");
-    expect(combos[1]).toHaveValue("공지사항");
+    // 추가한 카페가 칩으로 뜨고, 밴드 링크 입력란도 함께 보인다.
+    expect(
+      screen.getByLabelText("카페 11111111 · 게시판 1 제거"),
+    ).toBeInTheDocument();
     // 밴드 링크 입력란이 있고, 시드 밴드명(단타클럽 BAND 등)은 더 이상 없다.
     expect(screen.getByLabelText("밴드 링크")).toBeInTheDocument();
     expect(screen.queryByText("단타클럽 BAND")).not.toBeInTheDocument();

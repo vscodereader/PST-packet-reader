@@ -129,17 +129,16 @@ impl CdpClient {
         )
     }
 
-    #[allow(dead_code)]
-    // 네이버페이 약관 동의 화면을 자동 처리하던 보조 함수입니다. 현재는 안전상 직접 동의를 요구합니다.
-    fn handle_npay_agreement_if_present(&mut self, timeout: Duration) -> AutomationResult<bool> {
-        let end = Instant::now() + timeout;
+    // 네이버페이 약관 동의 화면이 떠 있으면 자동으로 동의 처리한다(약관 모두 동의 → 필수
+    // 항목 체크 → 동의하기). 종토방 게시 전 로그인 직후 이 화면이 떠 있으면 막지 않고
+    // 자동 진행한다. 약관 페이지가 아니면 즉시 통과해 매 게시에 불필요한 대기를 넣지 않는다.
+    pub(super) fn handle_npay_agreement_if_present(&mut self) -> AutomationResult<bool> {
+        if !self.is_npay_agreement_page()? {
+            return Ok(false);
+        }
 
-        while Instant::now() < end {
-            if !self.is_npay_agreement_page()? {
-                sleep(Duration::from_millis(500));
-                continue;
-            }
-
+        // 약관 페이지면 1회 자동 동의 처리하고 결과로 빠져나온다(loop는 항상 return으로 종료).
+        loop {
             let result = self.evaluate_string(
                 r#"
                 (async () => {
@@ -282,25 +281,12 @@ impl CdpClient {
 
             return Ok(true);
         }
-
-        Ok(false)
-    }
-
-    // 약관 동의 화면이 뜨면 자동 진행을 멈추고 사용자가 직접 처리하도록 안내하는 함수입니다.
-    pub(super) fn require_manual_npay_agreement_if_present(&mut self) -> AutomationResult<()> {
-        if self.is_npay_agreement_page()? {
-            return Err(AutomationError::new(
-                "네이버페이 약관 동의 화면이 열려 있습니다. 동의는 직접 확인해서 처리한 뒤 다시 실행하세요.",
-            ));
-        }
-
-        Ok(())
     }
 
     // 자동화 시작 전에 네이버 증권 토론 메인 화면으로 이동시키는 함수입니다.
     pub(super) fn ensure_discussion_page(&mut self) -> AutomationResult<()> {
         self.click_device_dontsave_if_present(Duration::from_secs(2))?;
-        self.require_manual_npay_agreement_if_present()?;
+        self.handle_npay_agreement_if_present()?;
 
         if !self.current_url()?.contains("stock.naver.com/discussion")
             || self.is_npay_agreement_page()?
@@ -309,13 +295,13 @@ impl CdpClient {
         }
 
         self.click_device_dontsave_if_present(Duration::from_secs(2))?;
-        self.require_manual_npay_agreement_if_present()?;
+        self.handle_npay_agreement_if_present()?;
 
         if !self.current_url()?.contains("stock.naver.com/discussion") {
             self.navigate(DISCUSSION_URL)?;
         }
 
-        self.require_manual_npay_agreement_if_present()?;
+        self.handle_npay_agreement_if_present()?;
 
         Ok(())
     }
