@@ -83,7 +83,9 @@ pub(crate) fn outcome_to_status(outcome: &LoginOutcome) -> AccountStatus {
         LoginOutcome::Ok { .. } => AccountStatus::Active,
         LoginOutcome::ChallengeRequired { .. } => AccountStatus::Challenge,
         LoginOutcome::BadCredentials => AccountStatus::BadCredentials,
-        LoginOutcome::Blocked => AccountStatus::Blocked,
+        // 보호조치도 접근 차단 계열로 본다(별도 배지/바인딩 추가 없이 Blocked 재사용). 메시지만
+        // resolve_non_ok에서 보호조치용으로 구분한다(#228).
+        LoginOutcome::Blocked | LoginOutcome::Protected => AccountStatus::Blocked,
         LoginOutcome::Error(_) => AccountStatus::Error,
     }
 }
@@ -108,6 +110,12 @@ pub(crate) fn resolve_non_ok(outcome: LoginOutcome, trace: Option<String>) -> Lo
             challenge_label(kind)
         ),
         LoginOutcome::Error(msg) => msg.clone(),
+        // 보호조치는 Blocked 상태로 매핑되지만 안내는 "잠시 후 다시"가 아니라 해제 절차를
+        // 알려야 한다(#228) — 일시적 차단이 아니라 사용자가 네이버에서 직접 풀어야 하는 상태다.
+        LoginOutcome::Protected => {
+            "계정에 보호조치가 적용되어 로그인이 차단되었습니다. 네이버에서 보호조치를 해제한 뒤 다시 시도하세요."
+                .to_owned()
+        }
         // Ok/BadCredentials/Blocked는 정적 안내 문구를 그대로 쓴다.
         _ => guide(&status).to_owned(),
     };
@@ -198,6 +206,25 @@ mod tests {
         let r = resolve_non_ok(LoginOutcome::Blocked, None);
         assert_eq!(r.status, AccountStatus::Blocked);
         assert!(r.message.contains("차단"));
+        assert!(!r.succeeded);
+    }
+
+    #[test]
+    fn protected_maps_to_blocked_status() {
+        // 보호조치는 별도 배지 없이 Blocked 상태로 매핑한다(#228).
+        assert_eq!(
+            outcome_to_status(&LoginOutcome::Protected),
+            AccountStatus::Blocked
+        );
+    }
+
+    #[test]
+    fn resolve_non_ok_protected_uses_release_guidance() {
+        // 보호조치 메시지는 "잠시 후 다시"가 아니라 해제 절차를 안내해야 한다(#228).
+        let r = resolve_non_ok(LoginOutcome::Protected, None);
+        assert_eq!(r.status, AccountStatus::Blocked);
+        assert!(r.message.contains("보호조치"));
+        assert!(!r.message.contains("잠시 후 다시"));
         assert!(!r.succeeded);
     }
 
