@@ -286,6 +286,33 @@ pub fn apply_priority_order(items: Vec<QueueNowItem>) -> Vec<QueueNowItem> {
     running
 }
 
+/// 실행 중(Running) 아이템을 **삭제하지 않고** 대기(Waiting)로 되돌린다 — 더 높은 우선순위
+/// 작업(로그인/종토방)에 자리를 내주는 "중지(yield)"용(#232). `remaining_plan`은 **아직 게시하지
+/// 않은 계정 그룹만** 담은 축소 plan이라(완료 그룹은 `retain_plan_accounts`로 제거됨) 재개 시
+/// 중복 게시가 0이다. 진행 메타(batch_id/progress/items)는 비워 잔여 작업 기준으로 다시 채워지게
+/// 하고, `apply_priority_order`로 재정렬해 양보한 아이템이 선점한 고우선 대기자 아래로 내려가게
+/// 한다. id가 큐에 없으면(양보 직전 사용자가 취소) 아무것도 되살리지 않는다(no-op).
+pub fn apply_yield_now(
+    items: Vec<QueueNowItem>,
+    id: &str,
+    remaining_plan: PublishPlan,
+) -> Vec<QueueNowItem> {
+    let items = items
+        .into_iter()
+        .map(|mut item| {
+            if item.id == id {
+                item.state = QueueState::Waiting;
+                item.plan = Some(remaining_plan.clone());
+                item.batch_id = None;
+                item.progress = None;
+                item.items = Vec::new();
+            }
+            item
+        })
+        .collect();
+    apply_priority_order(items)
+}
+
 /// 즉시 처리 대기열(now 큐)에 새로 적재되는 아이템을 정규화한다 — 워커가 실행 상태를
 /// 채우므로 항상 대기 상태로 시작하고 실행 메타(batch_id/progress)는 비운다. 프론트가
 /// 보낸 값에 대한 방어(add_queue_scheduled가 missed를 강제 해제하는 것과 같은 취지).
@@ -976,6 +1003,37 @@ mod tests {
         let next = apply_priority_order(items);
         let ids: Vec<&str> = next.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, vec!["c1", "c2", "c3"]);
+    }
+
+    // --- 실행 중 작업 중지/재개(#232): 삭제 아님 = Waiting 복귀 + 잔여 plan ---
+
+    #[test]
+    fn apply_yield_now_returns_to_waiting_with_remaining_plan_and_reorders() {
+        // 실행 중 카페 c1 + 대기 종토 f1. c1을 (잔여=카페) plan으로 양보.
+        let remaining = cafe_plan();
+        let items = vec![
+            now_item_with("c1", QueueState::Running, cafe_plan()),
+            now_item_with("f1", QueueState::Waiting, forum_plan()),
+        ];
+        let after = apply_yield_now(items, "c1", remaining.clone());
+        // 양보한 c1은 Waiting으로 내려가고, 종토 f1(2순위=1)이 위로 올라간다(둘 다 Waiting).
+        let ids: Vec<&str> = after.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["f1", "c1"]);
+        let c1 = after.iter().find(|i| i.id == "c1").unwrap();
+        assert_eq!(c1.state, QueueState::Waiting);
+        assert_eq!(c1.plan.as_ref(), Some(&remaining));
+        assert_eq!(c1.progress, None);
+        assert_eq!(c1.batch_id, None);
+        assert!(c1.items.is_empty());
+    }
+
+    #[test]
+    fn apply_yield_now_unknown_id_is_noop_no_resurrection() {
+        // 양보 직전 사용자가 취소(아이템 제거)했으면, 없는 id로의 yield는 아무것도 되살리지 않는다.
+        let items = vec![now_item_with("f1", QueueState::Waiting, forum_plan())];
+        let after = apply_yield_now(items, "gone", cafe_plan());
+        let ids: Vec<&str> = after.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["f1"]);
     }
 
     #[test]
