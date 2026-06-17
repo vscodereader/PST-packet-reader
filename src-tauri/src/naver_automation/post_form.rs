@@ -339,7 +339,19 @@ impl CdpClient {
                       selection.removeAllRanges();
                       selection.addRange(range);
                       document.execCommand('delete', false, null);
-                      const inserted = document.execCommand('insertText', false, value);
+                      // insertText는 '\n'을 줄바꿈으로 만들지 않아 여러 줄이 한 줄로 붙는다.
+                      // 줄 단위로 넣고 줄 사이마다 insertLineBreak로 실제 줄바꿈을 만들어
+                      // 원문 줄바꿈을 보존한다(한 줄 본문은 기존과 동일하게 insertText 1회).
+                      const lines = String(value).split('\n');
+                      let inserted = true;
+                      lines.forEach((line, index) => {{
+                        if (index > 0) {{
+                          inserted = document.execCommand('insertLineBreak', false, null) && inserted;
+                        }}
+                        if (line.length > 0) {{
+                          inserted = document.execCommand('insertText', false, line) && inserted;
+                        }}
+                      }});
                       fire(editor);
 
                       if (
@@ -520,7 +532,18 @@ impl CdpClient {
                   selection.removeAllRanges();
                   selection.addRange(range);
                   document.execCommand('delete', false, null);
-                  const inserted = document.execCommand('insertText', false, bodyValue);
+                  // insertText는 '\n'을 줄바꿈으로 만들지 않아 여러 줄이 한 줄로 붙는다.
+                  // 줄 단위로 넣고 줄 사이마다 insertLineBreak로 실제 줄바꿈을 만들어 보존한다.
+                  const bodyLines = String(bodyValue).split('\n');
+                  let inserted = true;
+                  bodyLines.forEach((line, index) => {{
+                    if (index > 0) {{
+                      inserted = document.execCommand('insertLineBreak', false, null) && inserted;
+                    }}
+                    if (line.length > 0) {{
+                      inserted = document.execCommand('insertText', false, line) && inserted;
+                    }}
+                  }});
                   fire(editor);
 
                   if (
