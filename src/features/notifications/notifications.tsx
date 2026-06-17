@@ -190,17 +190,22 @@ export function SubLog({ item }: { item: BatchItem }) {
             </>
           )}
           {item.posted.url && (
+            // 글이 올라간 곳의 링크를 그대로 노출한다(선택·복사 가능). 클릭하면 기존처럼
+            // 기본 브라우저로 열리되, "글 열기" 버튼 대신 링크 주소 자체가 보이게 한다.
             <Anchor
-              component="button"
-              type="button"
+              href={item.posted.url}
+              target="_blank"
+              rel="noreferrer"
               fz={11.5}
               ff="monospace"
-              onClick={() => {
+              style={{ wordBreak: "break-all" }}
+              onClick={(e) => {
+                e.preventDefault();
                 const u = item.posted?.url;
                 if (u) void ipc.diagnostics.openUrl(u).catch(() => {});
               }}
             >
-              올라간 글 열기 ↗
+              {item.posted.url}
             </Anchor>
           )}
         </Box>
