@@ -18,7 +18,8 @@ use super::activity::{record, ActivityItem, ActivityType};
 use super::log_batches::{BatchItem, BatchItemStatus, LogBatch, PostedContent, MAX_LOG_BATCHES};
 use super::posts::{CommentTarget, ModeValue};
 use super::queue::{
-    apply_cancel_now, item_priority, LoginTarget, PublishPlan, QueueNowItem, QueueState,
+    apply_cancel_now, apply_yield_now, item_priority, LoginTarget, PublishPlan, QueueNowItem,
+    QueueState,
 };
 use crate::auth::outcome::LoginResolution;
 use crate::auth::OrchestratorError;
@@ -221,18 +222,26 @@ async fn worker_loop<R: Runtime>(app: AppHandle<R>, runner: NowQueueRunner) {
 
         now_store.mutate(|items| mark_running(items, &job.id));
 
-        execute_item(&app, &job).await;
-
-        // 완료(N/N) 진행률이 프론트 폴링에 한 번은 잡혀 "N/N까지 차오른 뒤 사라짐"이 보이도록,
-        // 실제 작업을 한 아이템은 큐에서 빼기 전 한 폴링 주기(750ms)보다 살짝 길게 100% 상태로
-        // 머문다. plan 없는(표시 전용) 아이템은 곧장 제거한다.
-        if job.plan.is_some() {
-            tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+        match execute_item(&app, &job).await {
+            ItemOutcome::Completed => {
+                // 완료(N/N) 진행률이 프론트 폴링에 한 번은 잡혀 "N/N까지 차오른 뒤 사라짐"이
+                // 보이도록, 실제 작업을 한 아이템은 큐에서 빼기 전 한 폴링 주기(750ms)보다 살짝
+                // 길게 100% 상태로 머문다. plan 없는(표시 전용) 아이템은 곧장 제거한다.
+                if job.plan.is_some() {
+                    tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+                }
+                // 완료된 아이템은 큐에서 제거한다(취소와 동일 경로 재사용).
+                app.state::<JsonStore<QueueNowItem>>()
+                    .mutate(|items| apply_cancel_now(items, &job.id));
+            }
+            ItemOutcome::Yielded(remaining) => {
+                // 삭제가 아니라 중지(#232): 잔여 plan(아직 안 한 그룹만)으로 Waiting 복귀 후 재정렬.
+                // sleep 없이 곧장 다음 루프로 가, 선점한 더 높은 우선순위 아이템을 머뭇거림 없이
+                // 바로 집어 실행한다("칼같이" 전환). 완료 그룹은 plan에서 빠져 재개 시 중복게시 0.
+                app.state::<JsonStore<QueueNowItem>>()
+                    .mutate(|items| apply_yield_now(items, &job.id, *remaining));
+            }
         }
-
-        // 완료된 아이템은 큐에서 제거한다(취소와 동일 경로 재사용).
-        app.state::<JsonStore<QueueNowItem>>()
-            .mutate(|items| apply_cancel_now(items, &job.id));
     }
 }
 
@@ -248,9 +257,9 @@ fn item_present<R: Runtime>(app: &AppHandle<R>, id: &str) -> bool {
 /// 한 큐 아이템을 실제로 게시한다(카페 글 + 카페 댓글). 각 단계 진입 전 아이템이
 /// 아직 큐에 있는지 확인해, 진행 중 단계는 끝까지 두되 다음 단계는 협조적으로 멈춘다.
 /// (실행 중 단계의 강한 중단과 종목토론방·완료 로그는 후속 단계.)
-async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) {
+async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> ItemOutcome {
     let Some(plan) = item.plan.as_ref() else {
-        return;
+        return ItemOutcome::Completed;
     };
     let id = item.id.as_str();
 
@@ -261,7 +270,7 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) {
     if let Some(login) = plan.login.as_ref().filter(|l| !l.is_empty()) {
         if no_publish_targets {
             run_login_targets(app, id, login).await;
-            return;
+            return ItemOutcome::Completed;
         }
     }
 
@@ -290,10 +299,31 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) {
         .map(|c| crate::template_tokens::resolve_cafe_band(c, &cafe_link))
         .collect();
 
-    for group in &groups {
+    for (gi, group) in groups.iter().enumerate() {
         // 협조적 취소: 그룹 시작 전 큐에서 빠졌으면(취소) 남은 그룹은 게시하지 않는다.
         if !item_present(app, id) {
             break;
+        }
+        // 우선순위 선점(#232): 더 높은 우선순위(로그인/종토방)가 대기하면, 이 계정 그룹을
+        // **시작하기 전** 안전지점에서 양보한다. 그룹은 [회전→로그인→IP검증→게시]가 원자적이라
+        // 이 경계가 "여기까지만 하고 멈춰도 무방"한 지점이다. 이미 끝난 그룹(groups[..gi])은
+        // 완료 로그로 남기고, 남은 그룹(groups[gi..])만 잔여 plan으로 되돌려 재개 시 중복게시 0.
+        if should_yield(app, id) {
+            let (rem_naver, rem_band) = account_sets(&groups[gi..]);
+            let (done_naver, done_band) = account_sets(&groups[..gi]);
+            let completed = retain_plan_accounts(plan, &done_naver, &done_band);
+            flush_completion_log(
+                app,
+                &completed,
+                &all_posts,
+                &all_comments,
+                &all_forum,
+                &all_band,
+                &all_fetch_failures,
+            );
+            return ItemOutcome::Yielded(Box::new(retain_plan_accounts(
+                plan, &rem_naver, &rem_band,
+            )));
         }
         let acc = group.account_id.as_str();
 
@@ -483,13 +513,39 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) {
 
     // 완료 로그(LogBatch)/activity: 누적된 카페 글·댓글·토론방·밴드 결과 + 댓글 조회 실패를
     // 알림에 남긴다. 실행한 작업이 하나도 없으면(빈 plan) 빈 배치는 만들지 않는다.
-    let batch = build_log_batch(
+    flush_completion_log(
+        app,
         plan,
         &all_posts,
         &all_comments,
         &all_forum,
         &all_band,
         &all_fetch_failures,
+    );
+    ItemOutcome::Completed
+}
+
+/// 누적 결과로 완료 로그(LogBatch)/activity를 남긴다. 정상 종료 시 **전체 plan**으로, 우선순위
+/// 양보(#232) 시 **완료분 plan**으로 호출한다 — `build_log_batch`가 plan 스켈레톤으로 항목을
+/// 만들므로 결과와 일치하는 plan을 넘겨야 미게시 대상이 유령 항목으로 새지 않는다. 실행한 작업이
+/// 하나도 없으면(빈 결과) 빈 배치는 만들지 않는다.
+#[allow(clippy::too_many_arguments)]
+fn flush_completion_log<R: Runtime>(
+    app: &AppHandle<R>,
+    plan: &PublishPlan,
+    posts: &[JobReport],
+    comments: &[CommentJobReport],
+    forum: &[ForumOutcome],
+    band: &[BandOutcome],
+    fetch_failures: &[CommentFetchFailure],
+) {
+    let batch = build_log_batch(
+        plan,
+        posts,
+        comments,
+        forum,
+        band,
+        fetch_failures,
         now_ms(),
         LB_SEQ.fetch_add(1, Ordering::Relaxed),
     );
@@ -755,6 +811,107 @@ fn group_accounts_for_publish(plan: &PublishPlan) -> Vec<PublishGroup> {
     }
 
     out
+}
+
+/// `execute_item`의 결과(#232). 워커가 아이템을 큐에서 **제거**(완료)할지, 잔여 plan으로
+/// **Waiting 복귀**(중지/양보)할지 결정한다.
+enum ItemOutcome {
+    /// 아이템 전체를 끝까지 처리했다 → 큐에서 제거(기존 동작).
+    Completed,
+    /// 더 높은 우선순위 작업(로그인/종토방)에 자리를 내주려 **안전지점(계정 그룹 경계)에서**
+    /// 멈췄다 → 아직 게시하지 않은 그룹만 담은 잔여 plan으로 Waiting 복귀. 완료 그룹은 plan에서
+    /// 빠져 재개 시 중복게시가 0이다. (drop 비용 큰 plan은 박싱 — 양보는 드물어 무해.)
+    Yielded(Box<PublishPlan>),
+}
+
+/// 실행 중 아이템이 더 높은 우선순위 작업에 자리를 내줘야 하는지 판정한다(#232 순수 로직).
+/// 현재 실행 중(`running_id`) 아이템의 우선순위보다 **엄격히 높은(값이 작은)** Waiting 아이템이
+/// 하나라도 있으면 true.
+/// - 로그인(0)은 어떤 작업(종토 1·카페/밴드 2)도 선점한다.
+/// - 종토방(1)은 카페/밴드(2)를 선점하지만 다른 종토방(1)은 동순위라 선점하지 않는다(계속 진행).
+/// - 동순위는 선점하지 않는다 = FIFO 유지. `running_id`가 큐에 없으면(이미 제거) false.
+fn should_yield_now(items: &[QueueNowItem], running_id: &str) -> bool {
+    let Some(running) = items.iter().find(|i| i.id == running_id) else {
+        return false;
+    };
+    let p_run = item_priority(running);
+    items
+        .iter()
+        .any(|i| i.state == QueueState::Waiting && item_priority(i) < p_run)
+}
+
+/// 큐 스냅샷을 떠 `should_yield_now`을 평가한다(#232). 더 높은 우선순위 Waiting 아이템이 있으면
+/// true → 워커가 다음 계정 그룹을 시작하지 않고 안전지점에서 양보한다.
+fn should_yield<R: Runtime>(app: &AppHandle<R>, id: &str) -> bool {
+    let items = app.state::<JsonStore<QueueNowItem>>().snapshot();
+    should_yield_now(&items, id)
+}
+
+/// 게시 그룹들을 패밀리별 계정 집합으로 가른다(#232). Naver 그룹의 account_id는 첫 집합,
+/// Band 그룹은 둘째 집합으로 모인다. 잔여/완료 plan을 `retain_plan_accounts`로 복원할 때 쓴다.
+fn account_sets(
+    groups: &[PublishGroup],
+) -> (
+    std::collections::BTreeSet<String>,
+    std::collections::BTreeSet<String>,
+) {
+    let mut naver = std::collections::BTreeSet::new();
+    let mut band = std::collections::BTreeSet::new();
+    for g in groups {
+        match g.family {
+            AccountFamily::Naver => naver.insert(g.account_id.clone()),
+            AccountFamily::Band => band.insert(g.account_id.clone()),
+        };
+    }
+    (naver, band)
+}
+
+/// plan을 계정 집합으로 필터링한 축소 plan을 만든다(#232). naver·forum 타깃은 `keep_naver`에
+/// 속한 account_id만, band 타깃은 `keep_band`만, login 타깃은 그 패밀리의 keep 집합에 속한
+/// account_id만 남긴다. 스칼라 필드(post_id/kind/title/body/comments/link)는 그대로 복사한다.
+/// 완료분·잔여분처럼 **서로소** 집합으로 두 번 호출하면 합집합이 원본과 같아 누락·중복이 0이다.
+fn retain_plan_accounts(
+    plan: &PublishPlan,
+    keep_naver: &std::collections::BTreeSet<String>,
+    keep_band: &std::collections::BTreeSet<String>,
+) -> PublishPlan {
+    let login = plan.login.as_ref().map(|targets| {
+        targets
+            .iter()
+            .filter(|t| match family_of(&t.platform) {
+                AccountFamily::Naver => keep_naver.contains(&t.account_id),
+                AccountFamily::Band => keep_band.contains(&t.account_id),
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    PublishPlan {
+        post_id: plan.post_id.clone(),
+        kind: plan.kind.clone(),
+        title: plan.title.clone(),
+        body_text: plan.body_text.clone(),
+        comments: plan.comments.clone(),
+        link_override: plan.link_override.clone(),
+        naver: plan
+            .naver
+            .iter()
+            .filter(|t| keep_naver.contains(&t.account_id))
+            .cloned()
+            .collect(),
+        forum: plan
+            .forum
+            .iter()
+            .filter(|t| keep_naver.contains(&t.account_id))
+            .cloned()
+            .collect(),
+        band: plan
+            .band
+            .iter()
+            .filter(|t| keep_band.contains(&t.account_id))
+            .cloned()
+            .collect(),
+        login,
+    }
 }
 
 /// 로그인 IP와 게시 직전 egress IP가 같은지 본다. 동일하면 true, 다르면 false. 단, 어느
@@ -2469,6 +2626,111 @@ mod tests {
             now_item("f1", QueueState::Waiting, Some(forum_plan())),
         ];
         assert_eq!(pick_next_waiting(&items).unwrap().id, "f1");
+    }
+
+    // --- 우선순위 선점 중지/재개(#232) ---
+
+    #[test]
+    fn should_yield_when_higher_priority_waiting_exists() {
+        let cafe = plan(ModeValue::Post, vec![naver_target("u")]);
+        // 실행 중 카페(2)는 대기 종토(1)·로그인(0)에 양보한다.
+        assert!(should_yield_now(
+            &[
+                now_item("c1", QueueState::Running, Some(cafe.clone())),
+                now_item("f1", QueueState::Waiting, Some(forum_plan())),
+            ],
+            "c1"
+        ));
+        assert!(should_yield_now(
+            &[
+                now_item("c1", QueueState::Running, Some(cafe.clone())),
+                now_item("l1", QueueState::Waiting, Some(login_only_plan())),
+            ],
+            "c1"
+        ));
+        // 실행 중 종토(1)는 로그인(0)에만 양보한다.
+        assert!(should_yield_now(
+            &[
+                now_item("f1", QueueState::Running, Some(forum_plan())),
+                now_item("l1", QueueState::Waiting, Some(login_only_plan())),
+            ],
+            "f1"
+        ));
+    }
+
+    #[test]
+    fn should_not_yield_to_same_or_lower_priority_or_when_idle() {
+        let cafe = plan(ModeValue::Post, vec![naver_target("u")]);
+        // 동순위(카페↔카페)는 선점 안 함 = FIFO 유지.
+        assert!(!should_yield_now(
+            &[
+                now_item("c1", QueueState::Running, Some(cafe.clone())),
+                now_item("c2", QueueState::Waiting, Some(cafe.clone())),
+            ],
+            "c1"
+        ));
+        // 실행 중 종토(1)는 동순위 종토(1)·더 낮은 카페(2)에 양보 안 함(계속 진행).
+        assert!(!should_yield_now(
+            &[
+                now_item("f1", QueueState::Running, Some(forum_plan())),
+                now_item("f2", QueueState::Waiting, Some(forum_plan())),
+                now_item("c1", QueueState::Waiting, Some(cafe.clone())),
+            ],
+            "f1"
+        ));
+        // 대기 아이템이 없거나 running_id가 큐에 없으면 false.
+        let only = [now_item("c1", QueueState::Running, Some(cafe))];
+        assert!(!should_yield_now(&only, "c1"));
+        assert!(!should_yield_now(&only, "missing"));
+    }
+
+    #[test]
+    fn retain_plan_accounts_splits_without_loss_or_duplication() {
+        // 2계정 plan: 카페+종토(계정 a), 밴드(계정 b).
+        let mut p = plan(ModeValue::Post, vec![naver_target("a")]);
+        p.forum = vec![forum_target("a", "삼성전자", "005930")];
+        p.band = vec![band_target("b", "밴드B", "https://band.us/band/1")];
+        p.login = Some(vec![
+            login_target("a", PlatformId::Naver),
+            login_target("b", PlatformId::Band),
+        ]);
+
+        let a: std::collections::BTreeSet<String> = ["a".to_owned()].into_iter().collect();
+        let b: std::collections::BTreeSet<String> = ["b".to_owned()].into_iter().collect();
+        let empty = std::collections::BTreeSet::new();
+
+        // 완료분 = 계정 a(naver), 잔여분 = 계정 b(band).
+        let done = retain_plan_accounts(&p, &a, &empty);
+        let rest = retain_plan_accounts(&p, &empty, &b);
+
+        assert_eq!(done.naver.len(), 1);
+        assert_eq!(done.forum.len(), 1);
+        assert!(done.band.is_empty());
+        assert_eq!(done.login.as_deref().unwrap().len(), 1); // a/Naver 로그인만
+        assert!(rest.naver.is_empty());
+        assert!(rest.forum.is_empty());
+        assert_eq!(rest.band.len(), 1);
+        assert_eq!(rest.login.as_deref().unwrap().len(), 1); // b/Band 로그인만
+
+        // 서로소 분할 → 합집합이 원본과 동일(누락·중복 0).
+        assert_eq!(done.naver.len() + rest.naver.len(), p.naver.len());
+        assert_eq!(done.forum.len() + rest.forum.len(), p.forum.len());
+        assert_eq!(done.band.len() + rest.band.len(), p.band.len());
+        // 스칼라 필드는 보존.
+        assert_eq!(rest.title, p.title);
+        assert_eq!(rest.body_text, p.body_text);
+    }
+
+    #[test]
+    fn account_sets_partitions_groups_by_family() {
+        let mut p = plan(ModeValue::Post, vec![naver_target("a")]);
+        p.band = vec![band_target("b", "밴드B", "https://band.us/band/1")];
+        let groups = group_accounts_for_publish(&p);
+        let (naver, band) = account_sets(&groups);
+        assert!(naver.contains("a"));
+        assert!(band.contains("b"));
+        assert!(!naver.contains("b"));
+        assert!(!band.contains("a"));
     }
 
     #[test]
