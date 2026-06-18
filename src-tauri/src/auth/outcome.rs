@@ -83,9 +83,11 @@ pub(crate) fn outcome_to_status(outcome: &LoginOutcome) -> AccountStatus {
         LoginOutcome::Ok { .. } => AccountStatus::Active,
         LoginOutcome::ChallengeRequired { .. } => AccountStatus::Challenge,
         LoginOutcome::BadCredentials => AccountStatus::BadCredentials,
-        // 보호조치도 접근 차단 계열로 본다(별도 배지/바인딩 추가 없이 Blocked 재사용). 메시지만
-        // resolve_non_ok에서 보호조치용으로 구분한다(#228).
-        LoginOutcome::Blocked | LoginOutcome::Protected => AccountStatus::Blocked,
+        // 보호조치/잠금도 접근 차단 계열로 본다(별도 배지/바인딩 추가 없이 Blocked 재사용). 메시지만
+        // resolve_non_ok에서 보호조치/잠금용으로 구분한다(#228/#243).
+        LoginOutcome::Blocked | LoginOutcome::Protected | LoginOutcome::Locked => {
+            AccountStatus::Blocked
+        }
         LoginOutcome::Error(_) => AccountStatus::Error,
     }
 }
@@ -114,6 +116,12 @@ pub(crate) fn resolve_non_ok(outcome: LoginOutcome, trace: Option<String>) -> Lo
         // 알려야 한다(#228) — 일시적 차단이 아니라 사용자가 네이버에서 직접 풀어야 하는 상태다.
         LoginOutcome::Protected => {
             "계정에 보호조치가 적용되어 로그인이 차단되었습니다. 네이버에서 보호조치를 해제한 뒤 다시 시도하세요."
+                .to_owned()
+        }
+        // 잠금도 Blocked 상태로 매핑되지만 안내는 "잠시 후 다시"가 아니라 해제 절차를 알려야
+        // 한다(#243) — 사용자가 네이버에서 본인 확인으로 직접 풀어야 하는 종료 상태다.
+        LoginOutcome::Locked => {
+            "계정이 잠겨 로그인할 수 없습니다. 네이버에서 본인 확인으로 잠금을 해제한 뒤 다시 시도하세요."
                 .to_owned()
         }
         // Ok/BadCredentials/Blocked는 정적 안내 문구를 그대로 쓴다.
@@ -224,6 +232,25 @@ mod tests {
         let r = resolve_non_ok(LoginOutcome::Protected, None);
         assert_eq!(r.status, AccountStatus::Blocked);
         assert!(r.message.contains("보호조치"));
+        assert!(!r.message.contains("잠시 후 다시"));
+        assert!(!r.succeeded);
+    }
+
+    #[test]
+    fn locked_maps_to_blocked_status() {
+        // 잠금은 별도 배지 없이 Blocked 상태로 매핑한다(#243).
+        assert_eq!(
+            outcome_to_status(&LoginOutcome::Locked),
+            AccountStatus::Blocked
+        );
+    }
+
+    #[test]
+    fn resolve_non_ok_locked_uses_release_guidance() {
+        // 잠금 메시지는 "잠시 후 다시"가 아니라 해제 절차(본인 확인)를 안내해야 한다(#243).
+        let r = resolve_non_ok(LoginOutcome::Locked, None);
+        assert_eq!(r.status, AccountStatus::Blocked);
+        assert!(r.message.contains("잠겨"));
         assert!(!r.message.contains("잠시 후 다시"));
         assert!(!r.succeeded);
     }

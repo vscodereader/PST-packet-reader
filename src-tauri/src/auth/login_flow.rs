@@ -54,6 +54,12 @@ pub(crate) enum LoginOutcome {
     /// 착지 URL로 명확히 판별되므로, 사람이 풀 수 없는 종료 상태로 보고 headed여도 즉시 실패한다
     /// (180초 대기 회피, #228). 계정 상태는 `Blocked`로 매핑하되 메시지만 보호조치용으로 둔다.
     Protected,
+    /// 계정 잠금조치로 로그인이 막힌 확정 상태(#243). 보호조치(`idSafetyRelease` URL 리다이렉트)와
+    /// 달리, 잠금은 같은 `nidlogin.login`에서 200 + 잠금 안내 HTML 본문으로 응답되고 성공 쿠키가
+    /// 없다(패킷 login-lock2). URL이 아니라 본문 텍스트로 식별하며, 사람이 즉석에서 풀 수 없는
+    /// 종료 상태라 `Protected`처럼 headed여도 즉시 실패한다. 계정 상태는 `Blocked`로 매핑하고
+    /// 메시지만 잠금용으로 둔다.
+    Locked,
     Error(String),
 }
 
@@ -68,6 +74,8 @@ pub(crate) struct PageSignals {
     pub blocked: bool,
     /// 계정 보호조치 페이지(`idSafetyRelease`) 착지. 휴리스틱 `blocked`와 달리 명확한 종료 신호.
     pub protected: bool,
+    /// 계정 잠금 안내 본문("아이디 잠금") 감지(#243). `blocked`와 겹치지만 명확한 종료 신호.
+    pub locked: bool,
 }
 
 /// 진행 중/확정 신호.
@@ -80,6 +88,8 @@ pub(crate) enum Signal {
     Blocked,
     /// 보호조치 확정(착지 URL 기반). headed여도 즉시 실패시키기 위해 `Blocked`와 분리한다.
     Protected,
+    /// 계정 잠금 확정(본문 텍스트 기반, #243). `Protected`와 같이 headed여도 즉시 실패시킨다.
+    Locked,
 }
 
 /// 폴링 한 스텝의 판정 결과. 루프는 이 값을 실제 동작(반환/대기)으로 옮긴다.
@@ -91,6 +101,8 @@ enum LoopDecision {
     ConfirmedBlocked,
     /// 보호조치 확정 — 즉시 실패(`LoginOutcome::Protected`)로 옮긴다.
     ConfirmedProtected,
+    /// 잠금 확정 — 즉시 실패(`LoginOutcome::Locked`)로 옮긴다(#243).
+    ConfirmedLocked,
     KeepWaiting(Option<Signal>),
 }
 
@@ -109,6 +121,8 @@ fn decide_loop_step(
         // 보호조치는 착지 URL로 명확히 판별되므로 2회 latch도, headed의 사람 대기도 적용하지
         // 않고 즉시 확정한다(#228: 180초 대기 제거). `Blocked` 휴리스틱과 분리한 이유.
         Signal::Protected => LoopDecision::ConfirmedProtected,
+        // 잠금도 본문 텍스트로 명확히 판별되므로 보호조치와 동일하게 즉시 확정한다(#243).
+        Signal::Locked => LoopDecision::ConfirmedLocked,
         Signal::Challenge(kind) => {
             if wait_for_human {
                 LoopDecision::KeepWaiting(None)
@@ -152,6 +166,13 @@ pub(crate) fn classify(signals: &PageSignals) -> Signal {
         Signal::Challenge(ChallengeKind::Device)
     } else if signals.bad_credentials {
         Signal::BadCredentials
+    } else if signals.locked {
+        // 잠금은 캡차/OTP/기기인증/비번오류 같은 **회복 가능한** 명시적 신호보다 뒤에, blocked
+        // 휴리스틱보다는 앞에 둔다(#243). 보호조치(URL `idSafetyRelease`)와 달리 잠금은 본문
+        // 텍스트로 식별해 정밀도가 낮으므로, 회복 가능한 페이지에 잠금 경고 문구가 섞여 있어도
+        // 그 신호를 먼저 살려 사용자가 풀 기회를 잃지 않게 한다. 잠금 안내 HTML은 로그인 폼이
+        // 없어 blocked 조건을 동시에 만족하므로, 그보다는 앞에서 명확한 종료 신호로 분류한다.
+        Signal::Locked
     } else if signals.blocked {
         Signal::Blocked
     } else {
@@ -278,6 +299,7 @@ fn run_inner(
             LoopDecision::ConfirmedBad => return Ok(LoginOutcome::BadCredentials),
             LoopDecision::ConfirmedBlocked => return Ok(LoginOutcome::Blocked),
             LoopDecision::ConfirmedProtected => return Ok(LoginOutcome::Protected),
+            LoopDecision::ConfirmedLocked => return Ok(LoginOutcome::Locked),
             LoopDecision::KeepWaiting(next) => last_negative = next,
         }
 
@@ -591,8 +613,8 @@ fn read_signals(client: &mut CdpClient) -> Result<PageSignals, AutomationError> 
              return !!(e&&e.offsetParent!==null&&(e.textContent||'').trim().length>0);})()",
         )
         .unwrap_or(false);
+    let on_login = current_url.contains("nid.naver.com");
     let blocked = {
-        let on_login = current_url.contains("nid.naver.com");
         let has_form = client
             .evaluate_bool("!!document.querySelector('form#frmNIDLogin, #id')")
             .unwrap_or(false);
@@ -602,6 +624,15 @@ fn read_signals(client: &mut CdpClient) -> Result<PageSignals, AutomationError> 
     // /user2/help/idSafetyRelease 로 보내며, 리다이렉트 체인의 모든 단계가 이 경로를 유지한다
     // (#228, 패킷 분석). 사람이 즉석에서 풀 수 없는 종료 상태라 즉시 실패시킨다.
     let protected = current_url.contains("idSafetyRelease");
+    // 계정 잠금 안내 페이지(#243). 보호조치와 달리 별도 URL 없이 같은 nid에서 200 + 잠금 안내
+    // HTML로 응답되고 성공 쿠키가 없어, URL이 아니라 본문 텍스트로 식별한다(패킷 login-lock2:
+    // "비정상적인 활동이 반복되어 아이디 잠금조치와 함께 …"). 단순 "아이디 잠금"은 비번오류
+    // 경고문 등에 섞여 오탐할 수 있어, 잠금 페이지 고유어인 "아이디 잠금조치"로 좁힌다. nid
+    // 도메인 안에서만 검사하고, classify에서 회복 가능한 신호(캡차/비번오류 등) 뒤에 둔다.
+    let locked = on_login
+        && client
+            .evaluate_bool("(document.body?.innerText||'').includes('아이디 잠금조치')")
+            .unwrap_or(false);
 
     Ok(PageSignals {
         logged_in,
@@ -611,6 +642,7 @@ fn read_signals(client: &mut CdpClient) -> Result<PageSignals, AutomationError> 
         bad_credentials,
         blocked,
         protected,
+        locked,
     })
 }
 
@@ -706,6 +738,42 @@ mod tests {
     }
 
     #[test]
+    fn classify_locked_wins_over_blocked() {
+        // 잠금 안내 페이지도 로그인 폼이 없어 blocked 휴리스틱을 동시에 만족하지만,
+        // 명확한 종료 신호인 Locked로 분류돼야 한다(#243).
+        assert_eq!(
+            classify(&PageSignals {
+                locked: true,
+                blocked: true,
+                ..Default::default()
+            }),
+            Signal::Locked
+        );
+    }
+
+    #[test]
+    fn classify_recoverable_signals_win_over_locked() {
+        // 잠금은 본문 텍스트 식별이라 정밀도가 낮으므로, 회복 가능한 명시적 신호(캡차/비번오류)가
+        // 함께 잡히면 그쪽을 우선해 사용자가 풀 기회를 잃지 않게 한다(#243 리뷰 보완).
+        assert_eq!(
+            classify(&PageSignals {
+                bad_credentials: true,
+                locked: true,
+                ..Default::default()
+            }),
+            Signal::BadCredentials
+        );
+        assert_eq!(
+            classify(&PageSignals {
+                captcha: true,
+                locked: true,
+                ..Default::default()
+            }),
+            Signal::Challenge(ChallengeKind::Captcha)
+        );
+    }
+
+    #[test]
     fn credentials_present_rejects_empty_or_whitespace() {
         assert!(credentials_present("user", "pw"));
         assert!(!credentials_present("", "pw"));
@@ -773,6 +841,20 @@ mod tests {
         assert_eq!(
             decide_loop_step(None, Signal::Protected, false),
             LoopDecision::ConfirmedProtected
+        );
+    }
+
+    #[test]
+    fn loop_locked_fails_fast_even_in_headed_without_latch() {
+        // 핵심(#243): 잠금도 보호조치처럼 headed에서도, 직전 음성 신호 없이도 즉시 확정한다 —
+        // 180초 HEADED_TIMEOUT 대기나 2회 latch를 적용하지 않는다.
+        assert_eq!(
+            decide_loop_step(None, Signal::Locked, true),
+            LoopDecision::ConfirmedLocked
+        );
+        assert_eq!(
+            decide_loop_step(None, Signal::Locked, false),
+            LoopDecision::ConfirmedLocked
         );
     }
 

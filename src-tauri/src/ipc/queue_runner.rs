@@ -1982,6 +1982,62 @@ fn fetch_failure_to_item(plan: &PublishPlan, f: &CommentFetchFailure) -> BatchIt
     }
 }
 
+/// 종목토론방 게시 실패의 기술 메시지(AutomationError)를 비개발자용 한국어 사유로 바꾼다(#243).
+/// 우선순위: (1) 메시지에 HTTP 상태코드가 있으면 카페와 동일한 [`status_reason`] 매핑 재사용
+/// (예: 403 → "권한이 없거나 로그인이 만료되었습니다"), (2) 매크로가 만든 이미-친절한 한국어
+/// 안내(로그인 미확인/입력 누락 등)는 그대로 노출, (3) 그 외 개발 용어가 섞인 기술 원문
+/// ("…패킷 HTTP 실패: HTTP status …", "txId를 찾지 못했습니다" 등)은 일반 폴백으로 가린다.
+/// 원문 기술 메시지는 호출부가 trace(자세히 보기)에 보존해 개발자가 확인할 수 있게 한다.
+fn forum_failure_reason(message: &str) -> String {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return "종목토론방 게시에 실패했습니다".to_owned();
+    }
+    if let Some(status) = parse_http_status(trimmed) {
+        return status_reason(status).to_owned();
+    }
+    // 개발 용어가 섞이지 않은 순수 안내문이면 사용자 친화로 보고 그대로 노출한다.
+    if contains_tech_jargon(trimmed) {
+        "게시에 실패했습니다. 계정 로그인·잠금 상태를 확인한 뒤 다시 시도해 주세요".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// 메시지에 섞인 HTTP 상태코드(3자리, "status" 토큰 뒤 첫 정수)를 추출한다(#243). packet_client가
+/// 만드는 "… HTTP status 403 Forbidden …" / "status=500, …" / reqwest "HTTP status: 403 …"
+/// 형식을 모두 잡는다.
+fn parse_http_status(message: &str) -> Option<u16> {
+    let lower = message.to_ascii_lowercase();
+    let after = &message[lower.find("status")? + "status".len()..];
+    let digits: String = after
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits
+        .parse::<u16>()
+        .ok()
+        .filter(|n| (100..=599).contains(n))
+}
+
+/// 사용자에게 그대로 보여주면 안 되는 개발 용어가 들어 있는지(#243). 종토방 매크로/패킷
+/// 클라이언트의 기술 원문을 거르는 데 쓴다.
+fn contains_tech_jargon(message: &str) -> bool {
+    const JARGON: [&str; 9] = [
+        "패킷",
+        "txId",
+        "HTTP",
+        "POST",
+        "PUT",
+        "DevTools",
+        "소켓",
+        "응답 읽기",
+        "JSON",
+    ];
+    JARGON.iter().any(|j| message.contains(j))
+}
+
 /// 종목토론방 게시 결과 1건(계정+종목별) → BatchItem. 라이브 갱신과 최종 로그가 공유한다.
 fn forum_result_to_item(account_id: &str, result: &ForumPublishResult) -> BatchItem {
     BatchItem {
@@ -1991,14 +2047,24 @@ fn forum_result_to_item(account_id: &str, result: &ForumPublishResult) -> BatchI
         board: None,
         login_id: account_id.to_owned(),
         status: status_of(result.ok),
-        // 성공은 엔진 문구("게시 완료"), 실패는 일반 친절 문구. 캡처된 호출 스택은
-        // ForumPublishResult.trace(자세히 보기)로 분리해 메인 라인엔 안 싣는다(#199).
+        // 성공은 엔진 문구("게시 완료"+URL). 실패는 비개발자용 한국어 사유로 변환해 "왜
+        // 실패했는지"를 한눈에 보이게 한다(#243: 카페 failure_reason과 동일 철학). 원문 기술
+        // 메시지·백트레이스는 trace(자세히 보기)로 분리해 메인 라인엔 개발 용어가 안 새게 한다.
         msg: if result.ok {
             result.message.clone()
         } else {
-            "종목토론방 게시에 실패했습니다".to_owned()
+            forum_failure_reason(&result.message)
         },
-        trace: result.trace.clone(),
+        // 실패 시 친절 사유로 가려진 원본 기술 메시지를 자세히 보기 맨 위에 보존한다(#243). 성공은
+        // 그대로(None). AutomationError::trace()는 위치+백트레이스만 담아 message가 빠지므로 합친다.
+        trace: if result.ok {
+            result.trace.clone()
+        } else {
+            Some(match &result.trace {
+                Some(t) => format!("{}\n\n{}", result.message, t),
+                None => result.message.clone(),
+            })
+        },
         // master #218: 종목별 게시 내용(제목/본문/댓글/URL)을 완료 로그·라이브 표시에 보존한다.
         posted: result.posted.clone(),
     }
@@ -3822,8 +3888,9 @@ mod tests {
     }
 
     #[test]
-    fn build_log_batch_forum_fail_shows_friendly_msg_and_raw_trace() {
-        // forum은 에러 코드가 없어 메인은 일반 친절 문구로, 원문은 자세히 보기(trace)로(#199).
+    fn build_log_batch_forum_fail_maps_friendly_msg_and_keeps_raw_trace() {
+        // 실패 시 친절 사유를 메인에, 원문 기술 메시지+백트레이스는 자세히 보기(trace)로
+        // 분리한다(#243). forum_fail 헬퍼의 message("엔진 오류")는 개발 용어가 없어 그대로 노출.
         let p = plan(ModeValue::Post, vec![]);
         let forum = vec![forum_fail(
             "u0",
@@ -3834,11 +3901,79 @@ mod tests {
         let b = build_log_batch(&p, &[], &[], &forum, &[], &[], 1, 0);
         assert_eq!(b.items.len(), 1);
         assert_eq!(b.items[0].status, BatchItemStatus::Fail);
-        assert_eq!(b.items[0].msg, "종목토론방 게시에 실패했습니다");
+        assert_eq!(b.items[0].msg, "엔진 오류");
+        // 원문 message가 trace 맨 위에 보존되고 그 아래 백트레이스가 붙는다.
         assert_eq!(
             b.items[0].trace.as_deref(),
-            Some("Chrome 실행 실패: connect refused")
+            Some("엔진 오류\n\nChrome 실행 실패: connect refused")
         );
+    }
+
+    #[test]
+    fn forum_failure_reason_maps_http_status_to_korean() {
+        // packet_client가 만드는 "… 패킷 HTTP 실패: HTTP status 403 …"를 비개발자용 사유로(#243).
+        let msg = "글쓰기 form 패킷 HTTP 실패: HTTP status 403 Forbidden for url (https://m.stock.naver.com/x)";
+        assert_eq!(
+            forum_failure_reason(msg),
+            "권한이 없거나 로그인이 만료되었습니다"
+        );
+        assert_eq!(parse_http_status(msg), Some(403));
+        // "status=500, body=…" 형식도 잡는다.
+        assert_eq!(
+            parse_http_status("글쓰기 form 패킷 HTTP 실패: status=500, body=x"),
+            Some(500)
+        );
+    }
+
+    #[test]
+    fn forum_failure_reason_keeps_friendly_korean_and_hides_jargon() {
+        // 개발 용어 없는 안내문은 그대로, 기술 원문은 일반 폴백으로 가린다(#243).
+        assert_eq!(
+            forum_failure_reason(
+                "네이버 로그인이 확인되지 않았습니다. Chrome에서 로그인한 뒤 다시 실행하세요."
+            ),
+            "네이버 로그인이 확인되지 않았습니다. Chrome에서 로그인한 뒤 다시 실행하세요."
+        );
+        assert_eq!(
+            forum_failure_reason("글쓰기 form 응답에서 txId를 찾지 못했습니다."),
+            "게시에 실패했습니다. 계정 로그인·잠금 상태를 확인한 뒤 다시 시도해 주세요"
+        );
+    }
+
+    #[test]
+    fn forum_result_to_item_maps_status_and_preserves_original_in_trace() {
+        // 메인은 친절 사유, trace 맨 위엔 원문 기술 메시지 보존(#243).
+        let result = ForumPublishResult {
+            code: "005930".into(),
+            name: "삼성전자".into(),
+            ok: false,
+            message: "글쓰기 form 패킷 HTTP 실패: HTTP status 403 Forbidden for url (https://x)"
+                .into(),
+            trace: Some("at foo.rs:1\n\nframe0".into()),
+            posted: None,
+        };
+        let item = forum_result_to_item("u0", &result);
+        assert_eq!(item.status, BatchItemStatus::Fail);
+        assert_eq!(item.msg, "권한이 없거나 로그인이 만료되었습니다");
+        assert_eq!(
+            item.trace.as_deref(),
+            Some("글쓰기 form 패킷 HTTP 실패: HTTP status 403 Forbidden for url (https://x)\n\nat foo.rs:1\n\nframe0")
+        );
+    }
+
+    #[test]
+    fn forum_result_to_item_empty_reason_falls_back() {
+        // 사유가 비는 예외적 경우에만 일반 폴백 문구를 쓴다(#243).
+        let result = ForumPublishResult {
+            code: "005930".into(),
+            name: "삼성전자".into(),
+            ok: false,
+            message: "   ".into(),
+            trace: None,
+            posted: None,
+        };
+        let item = forum_result_to_item("u0", &result);
+        assert_eq!(item.msg, "종목토론방 게시에 실패했습니다");
     }
 
     #[test]

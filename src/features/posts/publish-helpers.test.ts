@@ -48,6 +48,22 @@ describe("htmlToText", () => {
   it("collapses 3+ blank lines and trims", () => {
     expect(htmlToText("<p>a</p><p></p><p></p><p>b</p>")).toBe("a\n\nb");
   });
+
+  it("decodes HTML entities so they don't post literally", () => {
+    // The regression: contentEditable serializes spaces as `&nbsp;` into innerHTML,
+    // and stripping only tags left the literal "&nbsp;" text in the posted body.
+    expect(htmlToText("앞&nbsp;뒤")).toBe("앞 뒤");
+    expect(htmlToText("<p>한&nbsp;줄</p><p>둘&nbsp;째</p>")).toBe(
+      "한 줄\n둘 째",
+    );
+    // 다른 흔한 엔티티도 디코드된다.
+    expect(htmlToText("&lt;태그&gt;")).toBe("<태그>");
+    expect(htmlToText("&quot;인용&quot;")).toBe('"인용"');
+    expect(htmlToText("it&#39;s")).toBe("it's");
+    // `&amp;`는 마지막에 풀어 이중 디코드되지 않는다: `&amp;nbsp;` → "&nbsp;"(공백 아님).
+    expect(htmlToText("1 &amp; 2")).toBe("1 & 2");
+    expect(htmlToText("&amp;nbsp;")).toBe("&nbsp;");
+  });
 });
 
 describe("crawlToText", () => {
