@@ -1,11 +1,36 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  clampCommentCount,
   crawlToText,
   htmlToText,
   parseCafeBoardLink,
   unreadyNaverAccountIds,
 } from "./publish-helpers";
+
+describe("clampCommentCount", () => {
+  it("keeps an in-range integer (including non-preset values)", () => {
+    expect(clampCommentCount(7)).toBe(7);
+    expect(clampCommentCount(1)).toBe(1);
+    expect(clampCommentCount(50)).toBe(50);
+  });
+
+  it("clamps below 1 and above 50 to the bounds", () => {
+    expect(clampCommentCount(0)).toBe(1);
+    expect(clampCommentCount(-5)).toBe(1);
+    expect(clampCommentCount(100)).toBe(50);
+  });
+
+  it("floors fractional input", () => {
+    expect(clampCommentCount(3.9)).toBe(3);
+  });
+
+  it("falls back to 1 for missing or non-finite input", () => {
+    expect(clampCommentCount(undefined)).toBe(1);
+    expect(clampCommentCount(null)).toBe(1);
+    expect(clampCommentCount(NaN)).toBe(1);
+  });
+});
 
 describe("htmlToText", () => {
   it("flattens block tags and <br> into newlines", () => {

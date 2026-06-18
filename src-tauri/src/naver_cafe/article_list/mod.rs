@@ -12,4 +12,4 @@ pub mod service;
 
 pub use client::{ArticleListClient, ARTICLE_LIST_API_HOST};
 pub use models::{Article, ArticleListError, ArticleListResponse, SortBy};
-pub use service::fetch_article_list_for_account;
+pub use service::{fetch_article_list_for_account, fetch_latest_articles_for_account_up_to};

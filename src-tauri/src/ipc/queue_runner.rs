@@ -33,8 +33,8 @@ use crate::naver_cafe::article_list::models::SortBy;
 use crate::naver_cafe::distribute::{distribute_comments, mulberry32, seed_from_clock};
 use crate::naver_cafe::orchestrator::{CommentJob, CommentJobReport, JobReport, PostJob};
 use crate::naver_cafe::{
-    fetch_article_list_for_account, run_comment_jobs_with_progress, run_post_jobs_with_progress,
-    NaverCafeCommonErrorData,
+    fetch_article_list_for_account, fetch_latest_articles_for_account_up_to,
+    run_comment_jobs_with_progress, run_post_jobs_with_progress, NaverCafeCommonErrorData,
 };
 use crate::store::JsonStore;
 use crate::util::now_ms;
@@ -165,14 +165,6 @@ fn runs_post(plan: &PublishPlan) -> bool {
 /// 이 plan이 카페 댓글을 다는지(comment/both 모드).
 fn runs_comment(plan: &PublishPlan) -> bool {
     matches!(plan.kind, ModeValue::Comment | ModeValue::Both)
-}
-
-fn sort_by_for(mode: &CommentTarget) -> Option<SortBy> {
-    match mode {
-        CommentTarget::Latest => Some(SortBy::Latest),
-        CommentTarget::Popular => Some(SortBy::Popular),
-        CommentTarget::Url => None,
-    }
 }
 
 /// 워커가 돌고 있지 않으면 기동한다. promote(예약→즉시 처리) 시 호출한다.
@@ -716,16 +708,28 @@ async fn collect_comment_targets(
                 }
             }
             CommentTarget::Latest | CommentTarget::Popular => {
-                let (Some(cafe_id), Some(sort)) = (spec.cafe_id, sort_by_for(&spec.mode)) else {
+                let Some(cafe_id) = spec.cafe_id else {
                     continue;
                 };
                 let count = spec.count.unwrap_or(1).max(1) as usize;
+                let cafe_str = cafe_id.to_string();
                 // 실행 시점에 상위 N개를 다시 조회한다(예약과 실행 사이 새 글 반영).
-                match fetch_article_list_for_account(&cafe_id.to_string(), sort, &t.account_id)
-                    .await
-                {
-                    Ok(resp) => {
-                        for article in resp.articles.iter().take(count) {
+                // 최신글은 페이지당 15개라 N이 많으면 다음 페이지를 이어 조회하고,
+                // 인기글(주간 단일 API)은 페이징이 없어 상위 N개만 취한다.
+                let fetched = match spec.mode {
+                    CommentTarget::Latest => {
+                        fetch_latest_articles_for_account_up_to(&cafe_str, &t.account_id, count)
+                            .await
+                    }
+                    _ => {
+                        fetch_article_list_for_account(&cafe_str, SortBy::Popular, 1, &t.account_id)
+                            .await
+                            .map(|resp| resp.articles.into_iter().take(count).collect())
+                    }
+                };
+                match fetched {
+                    Ok(articles) => {
+                        for article in articles {
                             out.targets.push(CommentTargetEntry {
                                 account_id: t.account_id.clone(),
                                 cafe_id,

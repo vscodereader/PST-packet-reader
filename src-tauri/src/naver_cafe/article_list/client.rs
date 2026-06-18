@@ -13,7 +13,9 @@
 //! 쿠키 헤더 값은 사용자의 인증 자격 증명이다. 이 모듈은 쿠키 값을 로그,
 //! 에러 메시지, `Debug` 출력에 절대 포함하지 않는다.
 
-use crate::naver_cafe::article_list::models::{ArticleListError, ArticleListResponse, SortBy};
+use crate::naver_cafe::article_list::models::{
+    Article, ArticleListError, ArticleListResponse, SortBy,
+};
 use crate::naver_cafe::article_list::parser::{parse_latest_body, parse_popular_body};
 use crate::naver_cafe::error::{http_error_envelope, ErrorEnvelope, NaverCafeCommonErrorData};
 use crate::naver_cafe::headers::cafe_read_headers;
@@ -26,8 +28,13 @@ use crate::naver_cafe::post::BROWSER_USER_AGENT;
 /// 게시글 목록 API 호스트.
 pub const ARTICLE_LIST_API_HOST: &str = "apis.naver.com";
 
-/// 최신글 한 페이지당 게시글 수(실측값). 기능은 상위 N개(≤10)만 쓰므로 충분하다.
-const DEFAULT_PAGE_SIZE: u32 = 15;
+/// 최신글 한 페이지당 게시글 수(네이버 boardlist API 기본, 실측값). 페이징 종료
+/// 판단에 쓴다(한 페이지가 이보다 적으면 마지막 페이지).
+pub const DEFAULT_PAGE_SIZE: u32 = 15;
+
+/// 최신글 페이징 시 조회할 최대 페이지 수(연속 조회로 의심받지 않게 둔 상한).
+/// 페이지당 15개이므로 최대 약 60개까지 모은다.
+const MAX_LATEST_PAGES: u32 = 4;
 
 /// 전체글(모든 게시판 통합) 메뉴 ID.
 const ALL_MENU_ID: u32 = 0;
@@ -119,12 +126,14 @@ impl ArticleListClient {
         &self,
         cafe_id: &str,
         sort_by: SortBy,
+        page: u32,
         cookie_header: Option<&str>,
     ) -> Result<ArticleListResponse, ArticleListError> {
-        // 정렬 기준에 따라 경로·Referer·성공 파서가 달라진다.
+        // 정렬 기준에 따라 경로·Referer·성공 파서가 달라진다. 인기글(주간)은 페이징이
+        // 없어 page를 무시한다.
         let (path, referer, parse): (String, String, ParseFn) = match sort_by {
             SortBy::Latest => (
-                latest_articles_path(cafe_id, 1),
+                latest_articles_path(cafe_id, page),
                 latest_referer(cafe_id),
                 parse_latest_body,
             ),
@@ -193,6 +202,39 @@ impl ArticleListClient {
         tracing::debug!(count = response.articles.len(), "게시글 목록 조회 완료");
         Ok(response)
     }
+
+    /// 최신글을 `want`개 모일 때까지 페이지를 이어 조회한다(페이지당 15개).
+    ///
+    /// 한 페이지가 가득 차지 않으면(15개 미만) 마지막 페이지로 보고 멈추고,
+    /// 안전상 [`MAX_LATEST_PAGES`]까지만 조회한다. 첫 페이지 조회가 실패하면 그
+    /// 오류를 그대로 반환하고, 둘째 페이지 이후의 실패는 지금까지 모은 글로 진행한다.
+    pub async fn fetch_latest_up_to(
+        &self,
+        cafe_id: &str,
+        want: usize,
+        cookie_header: Option<&str>,
+    ) -> Result<Vec<Article>, ArticleListError> {
+        let mut articles: Vec<Article> = Vec::new();
+        for page in 1..=MAX_LATEST_PAGES {
+            let resp = match self
+                .fetch_article_list(cafe_id, SortBy::Latest, page, cookie_header)
+                .await
+            {
+                Ok(resp) => resp,
+                // 첫 페이지 실패는 댓글 대상이 0개가 되므로 오류로 알린다. 이후 페이지
+                // 실패는 부분 수집으로 진행한다(조용히 멈춘다).
+                Err(e) if page == 1 => return Err(e),
+                Err(_) => break,
+            };
+            let fetched = resp.articles.len();
+            articles.extend(resp.articles);
+            if articles.len() >= want || fetched < DEFAULT_PAGE_SIZE as usize {
+                break;
+            }
+        }
+        articles.truncate(want);
+        Ok(articles)
+    }
 }
 
 impl Default for ArticleListClient {
@@ -227,6 +269,19 @@ mod tests {
         "/cafe-web/cafe2/WeeklyPopularArticleListV3.json"
     }
 
+    /// 최신글 응답 본문을 articleId 목록으로 합성한다(페이징 테스트용).
+    fn latest_body(ids: &[u64]) -> String {
+        let items: Vec<String> = ids
+            .iter()
+            .map(|id| {
+                format!(
+                    r#"{{"type":"ARTICLE","item":{{"articleId":{id},"cafeId":1,"menuId":1,"menuName":"자유","subject":"제목{id}","summary":"요약","writeDateTimestamp":1,"commentCount":0,"readCount":0,"likeCount":0}}}}"#
+                )
+            })
+            .collect();
+        format!(r#"{{"result":{{"articleList":[{}]}}}}"#, items.join(","))
+    }
+
     // ------------------------------------------------------------------
     // 최신글 — boardlist 경로 + TIME/viewType 쿼리
     // ------------------------------------------------------------------
@@ -244,13 +299,65 @@ mod tests {
 
         let client = ArticleListClient::with_base_url(server.uri());
         let response = client
-            .fetch_article_list(cafe_id(), SortBy::Latest, None)
+            .fetch_article_list(cafe_id(), SortBy::Latest, 1, None)
             .await
             .expect("성공 응답이어야 함");
 
         assert_eq!(response.articles.len(), 2, "게시글 2건이 반환되어야 함");
         assert_eq!(response.articles[0].article_id, 12);
         assert_eq!(response.articles[0].subject, "Hello Java");
+    }
+
+    // ------------------------------------------------------------------
+    // 최신글 페이징 — count가 한 페이지(15)를 넘으면 다음 페이지를 이어 조회
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fetch_latest_up_to_pages_until_want_is_reached() {
+        let server = MockServer::start().await;
+        let page1: Vec<u64> = (1..=15).collect();
+        let page2: Vec<u64> = (16..=20).collect();
+        Mock::given(method("GET"))
+            .and(path(latest_path()))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(latest_body(&page1)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(latest_path()))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(latest_body(&page2)))
+            .mount(&server)
+            .await;
+
+        let client = ArticleListClient::with_base_url(server.uri());
+        let articles = client
+            .fetch_latest_up_to(cafe_id(), 20, None)
+            .await
+            .expect("페이징 조회 성공해야 함");
+        assert_eq!(articles.len(), 20, "두 페이지를 합쳐 20개여야 함");
+        assert_eq!(articles[0].article_id, 1);
+        assert_eq!(articles[19].article_id, 20);
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_up_to_stops_on_short_first_page() {
+        // 첫 페이지가 15개 미만이면 마지막 페이지로 보고 멈춘다(page=2를 요청하지 않으므로
+        // page=2 목이 없어도 성공한다).
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(latest_path()))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(latest_body(&[1, 2, 3])))
+            .mount(&server)
+            .await;
+
+        let client = ArticleListClient::with_base_url(server.uri());
+        let articles = client
+            .fetch_latest_up_to(cafe_id(), 20, None)
+            .await
+            .expect("조회 성공해야 함");
+        assert_eq!(articles.len(), 3, "있는 만큼(3개)만 반환되어야 함");
     }
 
     // ------------------------------------------------------------------
@@ -269,7 +376,7 @@ mod tests {
 
         let client = ArticleListClient::with_base_url(server.uri());
         let response = client
-            .fetch_article_list(cafe_id(), SortBy::Popular, None)
+            .fetch_article_list(cafe_id(), SortBy::Popular, 1, None)
             .await
             .expect("인기글 조회 성공해야 함");
         assert_eq!(response.articles.len(), 2);
@@ -297,7 +404,7 @@ mod tests {
 
         let client = ArticleListClient::with_base_url(server.uri());
         client
-            .fetch_article_list(cafe_id(), SortBy::Latest, Some(fake_cookie))
+            .fetch_article_list(cafe_id(), SortBy::Latest, 1, Some(fake_cookie))
             .await
             .expect("헤더/쿠키 매칭 성공해야 함");
     }
@@ -319,7 +426,7 @@ mod tests {
 
         let client = ArticleListClient::with_base_url(server.uri());
         let err = client
-            .fetch_article_list(cafe_id(), SortBy::Latest, None)
+            .fetch_article_list(cafe_id(), SortBy::Latest, 1, None)
             .await
             .expect_err("500은 Err여야 함");
 
@@ -346,7 +453,7 @@ mod tests {
 
         let client = ArticleListClient::with_base_url(server.uri());
         let err = client
-            .fetch_article_list(cafe_id(), SortBy::Latest, None)
+            .fetch_article_list(cafe_id(), SortBy::Latest, 1, None)
             .await
             .expect_err("200-with-error는 Err여야 함");
 
@@ -370,7 +477,7 @@ mod tests {
 
         let client = ArticleListClient::with_base_url(server.uri());
         let err = client
-            .fetch_article_list(cafe_id(), SortBy::Latest, None)
+            .fetch_article_list(cafe_id(), SortBy::Latest, 1, None)
             .await
             .expect_err("파싱불가는 Err여야 함");
         assert_eq!(err.code, "ARTICLE_LIST_PARSE_ERROR");
@@ -385,7 +492,7 @@ mod tests {
         // 존재하지 않는 포트로 전송 → 연결 오류
         let client = ArticleListClient::with_base_url("http://127.0.0.1:1");
         let err = client
-            .fetch_article_list(cafe_id(), SortBy::Latest, None)
+            .fetch_article_list(cafe_id(), SortBy::Latest, 1, None)
             .await
             .expect_err("전송오류는 Err여야 함");
         assert_eq!(err.code, "ARTICLE_LIST_TRANSPORT_ERROR");

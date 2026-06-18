@@ -3,6 +3,23 @@
 
 import type { Stock } from "@/shared/data/types";
 
+/** 댓글 대상 글 개수의 허용 범위. 최신글은 페이지당 15개라 페이징해도 약 60개가
+ * 한계이고, 연속 조회로 의심받지 않게 50으로 제한한다. */
+export const MIN_COMMENT_COUNT = 1;
+export const MAX_COMMENT_COUNT = 50;
+
+/** 임의 입력값을 댓글 대상 글 개수(1~50 정수)로 정규화한다. 범위 밖·비정수·누락은
+ * 1로 떨어진다. 프리셋(1/3/5/10)과 직접 입력 양쪽의 단일 검증 지점이다. */
+export function clampCommentCount(value: number | null | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return MIN_COMMENT_COUNT;
+  }
+  const n = Math.floor(value);
+  if (n < MIN_COMMENT_COUNT) return MIN_COMMENT_COUNT;
+  if (n > MAX_COMMENT_COUNT) return MAX_COMMENT_COUNT;
+  return n;
+}
+
 /** A cafe publish target parsed from a board link — the cafe plus the board
  * (menu) to post into. `boardType` is resolved later (게시 시점, 쿠키 필요). */
 export interface CafeBoardTarget {
