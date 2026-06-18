@@ -90,7 +90,9 @@ fn chrome_candidates() -> Vec<String> {
 }
 
 // ADB
-pub const ADB_AIRPLANE_ENABLE_SECS: u64 = 1;
+/// 비행기모드를 켠 뒤 끄기 전까지 대기하는 시간(초). 너무 짧으면 단말 라디오가 실제로
+/// 끊겼다 붙을 새가 없어 IP가 그대로 유지될 수 있어, 넉넉히 3초를 둔다(사수 피드백).
+pub const ADB_AIRPLANE_ENABLE_SECS: u64 = 3;
 /// IP 회전(비행기모드 토글) 후 네트워크가 안정될 때까지 기다렸다가 Chrome을 띄운다(초).
 pub const ADB_SETTLE_AFTER_ROTATE_SECS: u64 = 3;
 pub const ADB_INTERNET_POLL_INTERVAL_MS: u64 = 1_000;

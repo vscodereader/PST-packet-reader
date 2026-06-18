@@ -76,6 +76,10 @@ pub async fn toggle_airplane_mode() -> Result<(), OrchestratorError> {
             .collect(),
     )
     .await?;
+    tracing::info!(
+        "[ADB]   └ 상태 확인: 비행기모드 {}",
+        airplane_mode_state().await
+    );
     sleep(Duration::from_secs(config::ADB_AIRPLANE_ENABLE_SECS)).await;
     tracing::info!("[ADB] ✈ 비행기모드 OFF — 인터넷 복구 대기");
     run_adb_timed(
@@ -85,6 +89,10 @@ pub async fn toggle_airplane_mode() -> Result<(), OrchestratorError> {
             .collect(),
     )
     .await?;
+    tracing::info!(
+        "[ADB]   └ 상태 확인: 비행기모드 {}",
+        airplane_mode_state().await
+    );
     wait_for_internet_connection().await?;
     let after = fetch_external_ip().await;
 
@@ -122,6 +130,32 @@ fn airplane_mode_args(enable: bool) -> [&'static str; 5] {
         "airplane-mode",
         if enable { "enable" } else { "disable" },
     ]
+}
+
+/// 비행기모드 *실제* 상태를 읽어 로그용 한 줄 라벨로 돌려준다(부작용 없는 상태 조회).
+/// 토글 명령이 먹혔는지 확인용 — `settings get global airplane_mode_on`이 "1"=ON / "0"=OFF.
+/// 조회 실패는 토글 자체를 막지 않도록 "(상태 확인 실패)"로 표기한다(로그 전용).
+async fn airplane_mode_state() -> String {
+    match run_adb_timed(
+        ["shell", "settings", "get", "global", "airplane_mode_on"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    )
+    .await
+    {
+        Ok(out) => airplane_state_label(out.trim()).to_string(),
+        Err(_) => "(상태 확인 실패)".to_string(),
+    }
+}
+
+/// `airplane_mode_on` 원시 출력("1"/"0")을 사람이 읽을 라벨로 변환한다(순수 함수).
+fn airplane_state_label(raw: &str) -> &'static str {
+    match raw {
+        "1" => "ON(켜짐)",
+        "0" => "OFF(꺼짐)",
+        _ => "(알 수 없음)",
+    }
 }
 
 /// 표준 adb CLI를 실행하고 stdout을 반환한다. 실행 실패/비-0 종료는 에러로 변환한다.
@@ -218,7 +252,18 @@ fn internet_probe_command() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{airplane_mode_args, has_authorized_device, internet_probe_command};
+    use super::{
+        airplane_mode_args, airplane_state_label, has_authorized_device, internet_probe_command,
+    };
+
+    #[test]
+    fn airplane_state_label_maps_raw_setting() {
+        assert_eq!(airplane_state_label("1"), "ON(켜짐)");
+        assert_eq!(airplane_state_label("0"), "OFF(꺼짐)");
+        // settings get은 끝에 개행이 붙으므로 호출부에서 trim 후 넘긴다.
+        assert_eq!(airplane_state_label("1\n".trim()), "ON(켜짐)");
+        assert_eq!(airplane_state_label("null"), "(알 수 없음)");
+    }
 
     #[test]
     fn airplane_mode_args_use_cli_shell_form() {
