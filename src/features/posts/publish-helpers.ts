@@ -106,17 +106,28 @@ function anchorToText(_tag: string, href: string, inner: string): string {
  * `<a href>` is likewise kept as `텍스트 (URL)` so links aren't lost.
  */
 export function htmlToText(html: string): string {
-  return html
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(p|div|li|h[1-6])>/gi, "\n")
-    .replace(/<img\b[^>]*>/gi, imgPlaceholder)
-    .replace(
-      /<a\b[^>]*\bhref\s*=\s*["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi,
-      anchorToText,
-    )
-    .replace(/<[^>]*>/g, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  return (
+    html
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/(p|div|li|h[1-6])>/gi, "\n")
+      .replace(/<img\b[^>]*>/gi, imgPlaceholder)
+      .replace(
+        /<a\b[^>]*\bhref\s*=\s*["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi,
+        anchorToText,
+      )
+      .replace(/<[^>]*>/g, "")
+      // HTML 엔티티를 디코드한다. contentEditable 본문기는 공백(특히 연속/줄끝 공백)을 직렬화할
+      // 때 innerHTML에 `&nbsp;`로 넣으므로, 태그만 벗기면 `&nbsp;`라는 글자가 그대로 본문에
+      // 박혀 카페에 게시된다. `&amp;`는 이중 디코드를 막기 위해 반드시 마지막에 푼다.
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/&quot;/gi, '"')
+      .replace(/&#0*39;|&apos;/gi, "'")
+      .replace(/&amp;/gi, "&")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim()
+  );
 }
 
 /**
