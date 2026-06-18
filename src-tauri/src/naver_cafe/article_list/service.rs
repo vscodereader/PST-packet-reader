@@ -6,7 +6,9 @@
 
 use crate::auth::read_account_cookies;
 use crate::naver_cafe::article_list::client::ArticleListClient;
-use crate::naver_cafe::article_list::models::{ArticleListError, ArticleListResponse, SortBy};
+use crate::naver_cafe::article_list::models::{
+    Article, ArticleListError, ArticleListResponse, SortBy,
+};
 use crate::naver_cafe::error::{ErrorEnvelope, NaverCafeCommonErrorData};
 use crate::naver_cafe::post::cookie_header_from_storage_state;
 
@@ -36,26 +38,48 @@ fn no_cookies_error(account_id: &str, detail: Option<String>) -> ArticleListErro
     }
 }
 
-/// `account_id`의 세션 쿠키로 카페 게시글 목록을 정렬 기준에 따라 조회한다.
+/// 계정의 세션 쿠키를 Cookie 헤더 문자열로 해석한다. 쿠키 값은 반환 오류/로그에
+/// 절대 노출되지 않는다.
+fn resolve_cookie_header(account_id: &str) -> Result<String, ArticleListError> {
+    let cookie_value = match read_account_cookies(account_id) {
+        Ok(Some(value)) => value,
+        Ok(None) => return Err(no_cookies_error(account_id, None)),
+        Err(e) => return Err(no_cookies_error(account_id, Some(e.to_string()))),
+    };
+    cookie_header_from_storage_state(&cookie_value).ok_or_else(|| no_cookies_error(account_id, None))
+}
+
+/// `account_id`의 세션 쿠키로 카페 게시글 목록을 정렬 기준·페이지에 따라 조회한다.
 ///
 /// # 쿠키 보안
 /// 계정 쿠키는 내부에서만 사용되며 반환되는 오류/로그에 절대 노출되지 않는다.
 pub async fn fetch_article_list_for_account(
     cafe_id: &str,
     sort_by: SortBy,
+    page: u32,
     account_id: &str,
 ) -> Result<ArticleListResponse, ArticleListError> {
-    let cookie_value = match read_account_cookies(account_id) {
-        Ok(Some(value)) => value,
-        Ok(None) => return Err(no_cookies_error(account_id, None)),
-        Err(e) => return Err(no_cookies_error(account_id, Some(e.to_string()))),
-    };
-    let cookie_header = cookie_header_from_storage_state(&cookie_value)
-        .ok_or_else(|| no_cookies_error(account_id, None))?;
-
+    let cookie_header = resolve_cookie_header(account_id)?;
     let client = ArticleListClient::new();
     client
-        .fetch_article_list(cafe_id, sort_by, Some(cookie_header.as_str()))
+        .fetch_article_list(cafe_id, sort_by, page, Some(cookie_header.as_str()))
+        .await
+}
+
+/// `account_id`의 세션 쿠키로 최신글을 `want`개 모일 때까지 페이지를 이어 조회한다.
+/// 페이징 정책은 [`ArticleListClient::fetch_latest_up_to`] 참고.
+///
+/// # 쿠키 보안
+/// 계정 쿠키는 내부에서만 사용되며 반환되는 오류/로그에 절대 노출되지 않는다.
+pub async fn fetch_latest_articles_for_account_up_to(
+    cafe_id: &str,
+    account_id: &str,
+    want: usize,
+) -> Result<Vec<Article>, ArticleListError> {
+    let cookie_header = resolve_cookie_header(account_id)?;
+    let client = ArticleListClient::new();
+    client
+        .fetch_latest_up_to(cafe_id, want, Some(cookie_header.as_str()))
         .await
 }
 
@@ -69,6 +93,7 @@ mod tests {
         let err = fetch_article_list_for_account(
             "no-such-account-xyz",
             SortBy::Latest,
+            1,
             "no-such-account-xyz",
         )
         .await

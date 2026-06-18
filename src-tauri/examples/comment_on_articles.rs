@@ -230,7 +230,7 @@ async fn main() {
     };
     println!("=== 2) {sort_label} 목록 조회 ===");
     let list = match ArticleListClient::new()
-        .fetch_article_list(&cafe_id, sort_by, lead_cookie)
+        .fetch_article_list(&cafe_id, sort_by, 1, lead_cookie)
         .await
     {
         Ok(list) => list,

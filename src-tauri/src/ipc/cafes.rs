@@ -230,7 +230,8 @@ pub async fn list_cafe_articles(
     account_id: String,
 ) -> Result<ArticleListResponse, ErrorEnvelope<NaverCafeCommonErrorData>> {
     let sort = parse_sort_by(&sort_by).map_err(|()| invalid_sort_by_error(&sort_by))?;
-    fetch_article_list_for_account(&cafe_id, sort, &account_id).await
+    // 미리보기는 첫 페이지(상위 15개)만 보여주면 충분하다.
+    fetch_article_list_for_account(&cafe_id, sort, 1, &account_id).await
 }
 
 /// Slim per-job result returned to the UI — exactly what the publish modal

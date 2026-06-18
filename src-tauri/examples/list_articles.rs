@@ -126,7 +126,7 @@ async fn main() {
     println!("요청: cafeId={cafe_id} ({sort_label})\n");
 
     let client = ArticleListClient::new();
-    match client.fetch_article_list(&cafe_id, sort_by, cookie).await {
+    match client.fetch_article_list(&cafe_id, sort_by, 1, cookie).await {
         Ok(response) => {
             print_articles(&response);
         }
