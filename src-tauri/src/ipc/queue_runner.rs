@@ -1955,8 +1955,9 @@ fn comment_report_to_item(plan: &PublishPlan, r: &CommentJobReport) -> BatchItem
             .error
             .as_ref()
             .map(|e| failure_trace(&e.code, &e.message, e.error_data.as_ref().map(|d| &d.cafe))),
-        // 성공 시 댓글을 단 대상 글로 이동할 수 있게 그 글 URL을 채운다(#219).
+        // 성공 시 단 댓글 본문과, 댓글을 단 대상 글로 이동할 수 있게 그 글 URL을 채운다(#219).
         posted: r.success.then(|| PostedContent {
+            comment: Some(r.content.clone()),
             url: Some(cafe_article_url(r.cafe_id, r.article_id)),
             ..Default::default()
         }),
@@ -2161,7 +2162,13 @@ fn band_outcome_to_item(
             } else {
                 Some("BAND_NO_TARGET · 댓글 대상 글을 찾지 못함".to_owned())
             };
-            (status_of(ok), msg, trace, None)
+            // 댓글 전용은 여러 글 대상이라 단일 글 URL이 없어 url은 비우되, 무엇을
+            // 보냈는지 보이도록 성공 시 단 댓글 본문은 채운다(#245).
+            let posted = ok.then(|| PostedContent {
+                comment: comment.map(str::to_owned),
+                ..Default::default()
+            });
+            (status_of(ok), msg, trace, posted)
         }
         Err(e) => (
             BatchItemStatus::Fail,
@@ -4201,7 +4208,7 @@ mod tests {
     }
 
     #[test]
-    fn cafe_comment_success_fills_target_article_url() {
+    fn cafe_comment_success_fills_comment_and_target_article_url() {
         let p = plan(ModeValue::Comment, vec![naver_target("u1")]);
         let report = CommentJobReport {
             account_id: "u1".into(),
@@ -4210,10 +4217,15 @@ mod tests {
             success: true,
             result: None,
             error: None,
+            content: "정말 좋은 글이네요".into(),
         };
         let item = comment_report_to_item(&p, &report);
+        let posted = item.posted.expect("성공 시 게시 내용이 채워진다");
+        // 단 댓글 본문이 보존된다.
+        assert_eq!(posted.comment.as_deref(), Some("정말 좋은 글이네요"));
+        // 댓글을 단 대상 글 URL도 함께 채워진다.
         assert_eq!(
-            item.posted.and_then(|c| c.url).as_deref(),
+            posted.url.as_deref(),
             Some("https://cafe.naver.com/ca-fe/cafes/123/articles/55")
         );
     }
@@ -4243,8 +4255,8 @@ mod tests {
     }
 
     #[test]
-    fn band_comment_only_has_no_url() {
-        // 댓글 전용은 여러 글 대상이라 단일 URL이 없어 posted를 비운다.
+    fn band_comment_only_fills_comment_without_url() {
+        // 댓글 전용은 여러 글 대상이라 단일 글 URL이 없어 url은 비우되, 단 댓글 본문은 채운다(#245).
         let outcome = BandOutcome {
             account_id: "u1".into(),
             band_name: "테스트밴드".into(),
@@ -4255,6 +4267,8 @@ mod tests {
             })),
         };
         let item = band_outcome_to_item(&outcome, "제목", "본문", Some("댓글"));
-        assert!(item.posted.is_none());
+        let posted = item.posted.expect("성공 시 게시 내용이 채워진다");
+        assert_eq!(posted.comment.as_deref(), Some("댓글"));
+        assert!(posted.url.is_none());
     }
 }

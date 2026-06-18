@@ -516,6 +516,7 @@ mod tests {
                 ref_comment_id: 62628988,
             }),
             error: None,
+            content: "댓글 본문".into(),
         }
     }
 
@@ -532,6 +533,7 @@ mod tests {
                 message: "댓글 등록 요청이 실패했습니다.".into(),
                 error_data: None,
             }),
+            content: "댓글 본문".into(),
         }
     }
 
