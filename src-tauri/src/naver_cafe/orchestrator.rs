@@ -592,19 +592,27 @@ pub async fn run_post_jobs_with_progress<F: FnMut(usize)>(
 /// 중단하지 않고 다음 작업으로 넘어간다**. 쿠키 값은 어떤 보고/로그에도 노출되지 않는다.
 /// 같은 계정이 한 게시글에 댓글을 연속으로 달 때, 네이버의 연속요청/도배 차단으로
 /// 두 번째 이후가 거부되는 것을 피하려고 작업 사이에 두는 기본 간격.
-const COMMENT_JOB_DELAY: Duration = Duration::from_millis(2000);
+const COMMENT_JOB_DELAY: Duration = Duration::from_millis(4000);
 
-pub async fn run_comment_jobs(jobs: &[CommentJob]) -> Vec<CommentJobReport> {
-    run_comment_jobs_with_progress(jobs, |_| {}).await
+/// 댓글 러너가 작업 1건의 진행을 호출부에 알리는 이벤트(게시 큐의 라이브 단계 표시용).
+pub enum CommentEvent<'a> {
+    /// `index`번째 작업을 막 시작했다(대기 → 게시 중 표시 전환용).
+    Started(usize),
+    /// `index`번째 작업이 끝났다(결과 포함, 게시 중 → 완료/실패 표시 전환용).
+    Finished(usize, &'a CommentJobReport),
 }
 
-/// [`run_comment_jobs`]와 같지만 댓글 1건을 끝낼 때마다 `on_each(누적_완료수)`를 호출해
-/// 진행률을 보고한다(글 러너의 progress 버전과 대칭). 작업 간 안티스팸 간격은 그대로 지킨다.
-pub async fn run_comment_jobs_with_progress<F: FnMut(usize)>(
+pub async fn run_comment_jobs(jobs: &[CommentJob]) -> Vec<CommentJobReport> {
+    run_comment_jobs_with_events(jobs, |_| {}).await
+}
+
+/// [`run_comment_jobs`]와 같지만 작업이 시작/완료될 때마다 [`CommentEvent`]를 호출부에
+/// 흘려, 카페 1곳=1행 라이브 단계 표시를 가능케 한다. 작업 간 안티스팸 간격은 그대로 지킨다.
+pub async fn run_comment_jobs_with_events<F: FnMut(CommentEvent)>(
     jobs: &[CommentJob],
-    on_each: F,
+    on_event: F,
 ) -> Vec<CommentJobReport> {
-    run_comment_jobs_with_delay(jobs, COMMENT_JOB_DELAY, on_each).await
+    run_comment_jobs_with_delay(jobs, COMMENT_JOB_DELAY, on_event).await
 }
 
 /// [`run_comment_jobs`]의 본체. 작업 간 간격을 인자로 받아 테스트에서 0으로 둘 수 있다.
@@ -612,17 +620,20 @@ pub async fn run_comment_jobs_with_progress<F: FnMut(usize)>(
 /// 각 작업의 시도/성공/실패를 `tracing`으로 남겨, 두 번째 이후 댓글이 누락될 때
 /// 네이버가 돌려준 오류 코드/사유를 로그에서 확인할 수 있게 한다. 쿠키 값은 절대
 /// 로그에 포함하지 않는다(본문 `content`도 남기지 않는다).
-async fn run_comment_jobs_with_delay<F: FnMut(usize)>(
+async fn run_comment_jobs_with_delay<F: FnMut(CommentEvent)>(
     jobs: &[CommentJob],
     delay: Duration,
-    mut on_each: F,
+    mut on_event: F,
 ) -> Vec<CommentJobReport> {
     let client = CafeCommentClient::new();
     let mut cookies = CookieHeaderCache::default();
     let total = jobs.len();
     let mut reports = Vec::with_capacity(total);
     for (index, job) in jobs.iter().enumerate() {
-        // 첫 작업 이후에는 작업 사이에 간격을 둬 연속 요청 차단을 피한다.
+        // 이 댓글을 곧 게시한다는 표시(게시 중…)를 먼저 띄우고, 그 상태로 연속요청 차단
+        // 회피용 간격을 둔다. 간격을 Started 앞에 두면 그 시간 동안 행이 "게시 전"으로 남아
+        // "게시 중"이 폴링에 거의 안 잡히므로(실제 게시 호출은 순식간), 순서를 뒤집는다.
+        on_event(CommentEvent::Started(index));
         if index > 0 && !delay.is_zero() {
             sleep(delay).await;
         }
@@ -650,8 +661,8 @@ async fn run_comment_jobs_with_delay<F: FnMut(usize)>(
                 "댓글 등록 실패"
             ),
         }
+        on_event(CommentEvent::Finished(index, &report));
         reports.push(report);
-        on_each(reports.len());
     }
     reports
 }
