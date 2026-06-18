@@ -394,6 +394,26 @@ describe("Accounts", () => {
       ).toBeInTheDocument();
     });
 
+    it("선택한 계정이 행에서 사라지면 카운트에서 빠진다(유령 선택 제거)", async () => {
+      await renderAccounts();
+      // 종토방 계정 2개 선택 → 카운트(2).
+      await toggleRow("invest_king7");
+      await toggleRow("value_pick");
+      expect(
+        screen.getByRole("button", { name: /선택 로그인 \(2\)/ }),
+      ).toBeInTheDocument();
+      // 선택해 둔 행 하나를 행 단위 삭제(휴지통)로 제거 — 이 경로는 sel을 비우지 않아
+      // 예전엔 카운트가 (2)로 남았다. 이제 존재하지 않는 id가 정리돼 (1)이 된다.
+      const row = screen.getByText("invest_king7").closest("tr")!;
+      await userEvent.click(within(row).getByRole("button", { name: "삭제" }));
+      await waitFor(() =>
+        expect(screen.queryByText("invest_king7")).not.toBeInTheDocument(),
+      );
+      expect(
+        screen.getByRole("button", { name: /선택 로그인 \(1\)/ }),
+      ).toBeInTheDocument();
+    });
+
     it("종토방이 아닌 계정(밴드·네이버)이 섞이면 버튼이 숨겨진다", async () => {
       await renderAccounts();
       await toggleRow("invest_king7"); // forum → 노출

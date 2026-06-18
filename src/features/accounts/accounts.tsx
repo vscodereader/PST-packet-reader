@@ -423,11 +423,16 @@ export function Accounts({ go }: { go: GoFn }) {
     }, 1000);
   };
 
+  // 선택 목록에서 더 이상 행에 존재하지 않는 id(삭제·재적재로 사라진 유령)를 걸러낸 실제
+  // 선택분. "선택 로그인 (N)" 카운트가 화면에 보이는 체크박스 수보다 커지던 문제를 막는다.
+  const selPresent = sel.filter((id) => rows.some((r) => r.id === id));
+
   // 선택 계정이 전부 종목토론방(forum)일 때만 선택 로그인을 허용한다(#228). 카페·밴드는
   // 게시 직전 백엔드가 [회전→로그인→게시]를 원자 처리하므로 별도 로그인이 불필요하다.
   // 네이버/밴드가 하나라도 섞이면 버튼을 숨긴다.
   const forumOnly =
-    sel.length > 0 && acctPlatforms(sel, rows).every((p) => p === "forum");
+    selPresent.length > 0 &&
+    acctPlatforms(selPresent, rows).every((p) => p === "forum");
 
   const allTags = useMemo(
     () => [...new Set([...rows.flatMap((r) => r.tags)])],
@@ -490,7 +495,7 @@ export function Accounts({ go }: { go: GoFn }) {
               leftSection={<Icon.bolt size={16} />}
               onClick={() => void runLogin()}
             >
-              선택 로그인 ({sel.length})
+              선택 로그인 ({selPresent.length})
             </Button>
           )}
           <Button
