@@ -51,7 +51,11 @@ import { PlatformLogo, PlatformPill } from "@/shared/ui/platform-logo";
 
 import { parseCafeArticleUrl } from "./comment-jobs";
 import { PreviewModal } from "./preview-modal";
-import { htmlToText, parseCafeBoardLink } from "./publish-helpers";
+import {
+  clampCommentCount,
+  htmlToText,
+  parseCafeBoardLink,
+} from "./publish-helpers";
 import { StockCrawlModal } from "./stock-crawl-modal";
 
 export interface PublishModalProps {
@@ -666,11 +670,9 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [time, setTime] = useState(() => nowParts().time);
   const [acctFilter, setAcctFilter] = useState<"all" | PlatformId>("all");
   // 댓글 대상 글 개수(최신글/인기글)는 댓글 템플릿(writer-modal)에서 정한 값을
-  // 그대로 쓴다. 게시 모달에서 다시 고르지 않는다(중복 UI 제거). 없거나 허용값이
-  // 아니면 1.
-  const commentCount = [1, 3, 5, 10].includes(doc?.commentCount ?? 0)
-    ? doc!.commentCount!
-    : 1;
+  // 그대로 쓴다. 게시 모달에서 다시 고르지 않는다(중복 UI 제거). 1~50로 정규화하고
+  // 범위 밖·누락은 1로 떨어진다.
+  const commentCount = clampCommentCount(doc?.commentCount);
   const [linkOverride, setLinkOverride] = useState("");
   const [showPreview, setShowPreview] = useState(false);
   const [flow, setFlow] = useState<null | "running" | PublishResult[]>(null);

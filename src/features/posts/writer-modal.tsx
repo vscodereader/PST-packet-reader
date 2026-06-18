@@ -3,9 +3,11 @@ import {
   Badge,
   Box,
   Button,
+  Divider,
   Group,
   Menu,
   Modal,
+  NumberInput,
   Stack,
   Text,
   Textarea,
@@ -25,7 +27,12 @@ import type {
 import { ipc } from "@/shared/ipc";
 import { Icon } from "@/shared/ui/icons";
 
-import { crawlToText } from "./publish-helpers";
+import {
+  clampCommentCount,
+  crawlToText,
+  MAX_COMMENT_COUNT,
+  MIN_COMMENT_COUNT,
+} from "./publish-helpers";
 
 export interface WriterModalProps {
   open: boolean;
@@ -151,7 +158,7 @@ function CommentComposer({
               <Text fz={12.5} fw={700} c="gray.7">
                 대상마다 {target === "popular" ? "인기글" : "최신글"}
               </Text>
-              <Group gap={4} ml="auto">
+              <Group gap={4} ml="auto" wrap="nowrap">
                 {COUNT_OPTS.map((n) => (
                   <Button
                     key={n}
@@ -164,6 +171,25 @@ function CommentComposer({
                     {n}
                   </Button>
                 ))}
+                <Divider orientation="vertical" />
+                {/* 프리셋 외 임의 개수 직접 입력(1~50). 프리셋과 같은 setCount로 연결돼
+                    선택값이 곧 입력칸에 반영된다. */}
+                <NumberInput
+                  aria-label="댓글 대상 글 개수 직접 입력"
+                  value={count}
+                  onChange={(v) => {
+                    const n = typeof v === "number" ? v : parseInt(v, 10);
+                    if (!Number.isNaN(n)) setCount(clampCommentCount(n));
+                  }}
+                  min={MIN_COMMENT_COUNT}
+                  max={MAX_COMMENT_COUNT}
+                  clampBehavior="strict"
+                  size="xs"
+                  w={68}
+                  styles={{
+                    input: { fontFamily: "monospace", textAlign: "center" },
+                  }}
+                />
               </Group>
               <Text fz={12.5} fw={700} c="gray.7">
                 개에 댓글
