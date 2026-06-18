@@ -298,6 +298,7 @@ export function Accounts({ go }: { go: GoFn }) {
   const [sel, setSel] = useState<string[]>([]);
   const [page, setPage] = useState(1);
   const [loggingIn, setLoggingIn] = useState(false);
+  const [rotatingIp, setRotatingIp] = useState(false);
   const loginPollRef = useRef<number | null>(null);
 
   // 화면을 떠날 때 로그인 상태 폴링 타이머를 정리한다.
@@ -563,6 +564,38 @@ export function Accounts({ go }: { go: GoFn }) {
             }}
           >
             내보내기
+          </Button>
+          <Button
+            size="sm"
+            variant="default"
+            loading={rotatingIp}
+            leftSection={<Icon.bolt size={16} />}
+            onClick={async () => {
+              // 로그인·게시 없이 연결된 폰의 비행기모드만 토글해 IP만 회전(#247).
+              // 비행기모드 ON/OFF·IP 회전 결과는 기존과 동일하게 로그에 남는다.
+              setRotatingIp(true);
+              try {
+                await ipc.auth.rotateIp();
+                toast("IP를 변경했어요 — 결과는 로그에서 확인하세요", "green");
+              } catch (err) {
+                toast(
+                  "IP 변경 실패: " +
+                    (err instanceof Error ? err.message : String(err)),
+                  "red",
+                );
+                ipc.activity
+                  .append(
+                    "error",
+                    "IP 변경 실패 — " +
+                      (err instanceof Error ? err.message : String(err)),
+                  )
+                  .catch(() => {});
+              } finally {
+                setRotatingIp(false);
+              }
+            }}
+          >
+            IP 변경
           </Button>
           <Button
             size="sm"
