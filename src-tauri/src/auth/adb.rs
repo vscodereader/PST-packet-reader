@@ -62,11 +62,21 @@ pub async fn probe_adb_connection() -> Result<(), OrchestratorError> {
     .map_err(|e| OrchestratorError::CommandFailed(format!("adb probe join error: {e}")))?
 }
 
+/// 비행기모드 토글(IP 회전) 결과. 프론트가 토스트·알림에 "원래/바뀐 IP·변경 여부"를
+/// 표시하는 데 쓴다(#247 후속). before/after가 `(`로 시작하면 IP 확인 실패라 changed=false.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IpRotation {
+    pub before: String,
+    pub after: String,
+    pub changed: bool,
+}
+
 /// 비행기 모드를 켬과 끔으로 토글하여 IP 변경을 유도한다.
 /// 토글 전후의 외부 IP를 stderr로 출력해 `pnpm tauri dev` 콘솔에서 IP 회전 여부를
 /// 직접 눈으로 확인할 수 있게 한다. (Samsung One UI는 `cmd connectivity airplane-mode`로
 /// 토글해도 상단 버튼에 불이 안 들어올 수 있으나, IP가 바뀌면 라디오는 실제로 순환한 것.)
-pub async fn toggle_airplane_mode() -> Result<(), OrchestratorError> {
+pub async fn toggle_airplane_mode() -> Result<IpRotation, OrchestratorError> {
     let before = fetch_external_ip().await;
     tracing::info!("[ADB] ✈ 비행기모드 ON");
     run_adb_timed(
@@ -99,9 +109,10 @@ pub async fn toggle_airplane_mode() -> Result<(), OrchestratorError> {
     tracing::info!("[ADB] ─────────── IP 회전 결과 ───────────");
     tracing::info!("[ADB]   기존 IP: {before}");
     tracing::info!("[ADB]   바뀐 IP: {after}");
+    let changed = !before.starts_with('(') && !after.starts_with('(') && before != after;
     if before.starts_with('(') || after.starts_with('(') {
         tracing::info!("[ADB]   (IP 확인 실패 — PC 인터넷/테더링 확인)");
-    } else if before == after {
+    } else if !changed {
         tracing::info!(
             "[ADB]   ⚠ IP가 그대로 — USB 테더링이 PC 기본 경로인지 / 통신사 CGNAT인지 확인 필요"
         );
@@ -109,7 +120,11 @@ pub async fn toggle_airplane_mode() -> Result<(), OrchestratorError> {
         tracing::info!("[ADB]   ✓ IP 변경됨!");
     }
     tracing::info!("[ADB] ────────────────────────────────────");
-    Ok(())
+    Ok(IpRotation {
+        before,
+        after,
+        changed,
+    })
 }
 
 /// `adb devices` 출력에 인증된(`device`) 디바이스가 하나라도 있는지 판별한다.

@@ -440,7 +440,7 @@ async fn band_resolve_name(account_id: String, band_link: String) -> Result<Stri
 /// 로그인 경로(`auth/mod.rs`)와 동일하게 `assert_adb_device` → `toggle_airplane_mode` 순서로
 /// 기존 함수를 그대로 재사용한다 — 비행기모드 ON/OFF·IP 회전 결과 로그도 기존과 동일.
 #[tauri::command]
-async fn rotate_ip() -> Result<(), String> {
+async fn rotate_ip() -> Result<auth::IpRotation, String> {
     auth::assert_adb_device().await.map_err(|e| e.to_string())?;
     auth::toggle_airplane_mode()
         .await
