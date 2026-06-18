@@ -34,7 +34,8 @@ use crate::naver_cafe::distribute::{distribute_comments, mulberry32, seed_from_c
 use crate::naver_cafe::orchestrator::{CommentJob, CommentJobReport, JobReport, PostJob};
 use crate::naver_cafe::{
     fetch_article_list_for_account, fetch_latest_articles_for_account_up_to,
-    run_comment_jobs_with_progress, run_post_jobs_with_progress, NaverCafeCommonErrorData,
+    run_comment_jobs_with_events, run_post_jobs_with_progress, CommentEvent,
+    NaverCafeCommonErrorData,
 };
 use crate::store::JsonStore;
 use crate::util::now_ms;
@@ -477,7 +478,9 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                         build_comment_jobs(collected.targets, &cafe_comments)
                     };
                     if !comment_jobs.is_empty() {
-                        let mut pre = build_items(
+                        // 댓글 1건 = 1행으로, 밴드/종토방(#219)과 동일한 라이브 단계 표시
+                        // (게시 전 → 게시 중… → 게시 완료/실패)를 댓글에도 적용한다(#252).
+                        let base_items = build_items(
                             plan,
                             &all_posts,
                             &all_comments,
@@ -485,11 +488,42 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                             &all_forum,
                             &all_band,
                         );
-                        pre.extend(running_comment_items(plan, &comment_jobs));
-                        set_queue_items(app, id, pre);
+                        let mut live: Vec<BatchItem> = comment_jobs
+                            .iter()
+                            .map(|j| comment_skeleton(plan, j, BatchItemStatus::Waiting))
+                            .collect();
                         let base_done = done;
-                        let reports = run_comment_jobs_with_progress(&comment_jobs, |c| {
-                            update_progress(app, id, base_done + c as u32, total);
+                        let mut completed = 0u32;
+                        // 시작 전 "게시 전" 스켈레톤을 먼저 깔아 진행 전 단계가 보이게 한다.
+                        write_live_items(app, id, &base_items, &live, base_done, total);
+                        let reports = run_comment_jobs_with_events(&comment_jobs, |ev| match ev {
+                            CommentEvent::Started(i) => {
+                                live[i] = comment_skeleton(
+                                    plan,
+                                    &comment_jobs[i],
+                                    BatchItemStatus::Running,
+                                );
+                                write_live_items(
+                                    app,
+                                    id,
+                                    &base_items,
+                                    &live,
+                                    base_done + completed,
+                                    total,
+                                );
+                            }
+                            CommentEvent::Finished(i, report) => {
+                                live[i] = comment_report_to_item(plan, report);
+                                completed += 1;
+                                write_live_items(
+                                    app,
+                                    id,
+                                    &base_items,
+                                    &live,
+                                    base_done + completed,
+                                    total,
+                                );
+                            }
                         })
                         .await;
                         all_comments.extend(reports);
@@ -1935,6 +1969,27 @@ fn post_report_to_item(plan: &PublishPlan, r: &JobReport) -> BatchItem {
     }
 }
 
+/// 댓글 1건을 "대기/진행 중" BatchItem으로 만든다(라이브 스켈레톤, #252). 결과가 나오면
+/// [`comment_report_to_item`]으로 교체된다.
+fn comment_skeleton(plan: &PublishPlan, job: &CommentJob, status: BatchItemStatus) -> BatchItem {
+    let msg = if matches!(status, BatchItemStatus::Running) {
+        "댓글 게시 중…"
+    } else {
+        "댓글 게시 전"
+    };
+    BatchItem {
+        platform: PlatformId::Naver,
+        target: cafe_label(plan, &job.cafe_id.to_string()),
+        code: None,
+        board: None,
+        login_id: job.account_id.clone(),
+        status,
+        msg: msg.to_owned(),
+        trace: None,
+        posted: None,
+    }
+}
+
 /// 카페 댓글 게시 결과 1건 → BatchItem.
 fn comment_report_to_item(plan: &PublishPlan, r: &CommentJobReport) -> BatchItem {
     BatchItem {
@@ -2276,21 +2331,20 @@ fn running_post_items(plan: &PublishPlan) -> Vec<BatchItem> {
         .collect()
 }
 
-/// 카페 댓글 작업을 "처리 중" 상태의 BatchItem으로. 실제 결과가 나오면 교체된다.
-fn running_comment_items(plan: &PublishPlan, jobs: &[CommentJob]) -> Vec<BatchItem> {
-    jobs.iter()
-        .map(|j| BatchItem {
-            platform: PlatformId::Naver,
-            target: cafe_label(plan, &j.cafe_id.to_string()),
-            code: None,
-            board: None,
-            login_id: j.account_id.clone(),
-            status: BatchItemStatus::Running,
-            msg: "댓글 게시 중…".to_owned(),
-            trace: None,
-            posted: None,
-        })
-        .collect()
+/// base 항목 뒤에 라이브 항목을 이어 붙여 큐 아이템·진행률을 갱신한다(#252). 진행률 done은
+/// 호출부가 직접 넘긴다 — 댓글은 1건마다 단계 표시를 갱신하되 done은 완료 건수로 세기에,
+/// [`write_live_phase`](완료 칸 수로 done 계산)와 달리 명시적으로 받는다.
+fn write_live_items<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    base_items: &[BatchItem],
+    live: &[BatchItem],
+    done: u32,
+    total: u32,
+) {
+    let mut items = base_items.to_vec();
+    items.extend(live.iter().cloned());
+    set_progress_and_items(app, id, done, total, items);
 }
 
 /// 큐 아이템의 대상별 라이브 상태(items)만 교체한다(진행률은 유지).
@@ -4223,15 +4277,35 @@ mod tests {
             error: None,
             content: "정말 좋은 글이네요".into(),
         };
+        // 댓글 1건 = 1행. 성공 시 댓글 본문과 대상 글 URL이 채워진다.
         let item = comment_report_to_item(&p, &report);
+        assert_eq!(item.status, BatchItemStatus::Success);
+        assert_eq!(item.msg, "댓글 게시 완료");
         let posted = item.posted.expect("성공 시 게시 내용이 채워진다");
-        // 단 댓글 본문이 보존된다.
         assert_eq!(posted.comment.as_deref(), Some("정말 좋은 글이네요"));
-        // 댓글을 단 대상 글 URL도 함께 채워진다.
         assert_eq!(
             posted.url.as_deref(),
             Some("https://cafe.naver.com/ca-fe/cafes/123/articles/55")
         );
+    }
+
+    #[test]
+    fn comment_skeleton_shows_pending_then_running_phase() {
+        let p = plan(ModeValue::Comment, vec![naver_target("u1")]);
+        let job = CommentJob {
+            account_id: "u1".into(),
+            cafe_id: 123,
+            article_id: 55,
+            content: "댓글".into(),
+        };
+        // 시작 전 "게시 전"(대기), 시작 후 "게시 중…"(진행)으로 단계가 바뀐다.
+        let pending = comment_skeleton(&p, &job, BatchItemStatus::Waiting);
+        assert_eq!(pending.status, BatchItemStatus::Waiting);
+        assert_eq!(pending.msg, "댓글 게시 전");
+        assert!(pending.posted.is_none());
+        let running = comment_skeleton(&p, &job, BatchItemStatus::Running);
+        assert_eq!(running.status, BatchItemStatus::Running);
+        assert_eq!(running.msg, "댓글 게시 중…");
     }
 
     #[test]

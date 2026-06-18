@@ -30,7 +30,7 @@ use link::band_no_from_link;
 use crate::naver_cafe::distribute::{distribute_comments, mulberry32, seed_from_clock};
 
 /// 같은 글에 댓글을 연속으로 달 때 band.us의 연속요청/도배 차단으로 두 번째 이후가
-/// 거부되는 것을 피하려고 댓글 사이에 두는 기본 간격(카페 `COMMENT_JOB_DELAY`와 동일).
+/// 거부되는 것을 피하려고 댓글 사이에 두는 기본 간격(카페 `COMMENT_JOB_DELAY`와 같은 취지의 별도 값).
 const BAND_COMMENT_DELAY: Duration = Duration::from_millis(2000);
 
 /// band 게시 결과(프론트로 반환).
@@ -312,7 +312,7 @@ async fn band_comment_inner(
 
     // best-effort: 한 글 댓글 실패가 다른 글을 막지 않고 성공 개수만 센다. 같은 계정이
     // 여러 글에 연속으로 댓글을 달면 밴드의 연속요청/도배 차단으로 두 번째 이후가 거부될
-    // 수 있어, 첫 댓글 이후에는 글 사이에 간격을 둔다(카페 COMMENT_JOB_DELAY 미러).
+    // 수 있어, 첫 댓글 이후에는 글 사이에 간격을 둔다(카페 COMMENT_JOB_DELAY와 같은 취지).
     let mut commented_count = 0usize;
     let mut attempted = 0usize;
     for (post_no, content) in post_nos.iter().zip(contents.iter()) {

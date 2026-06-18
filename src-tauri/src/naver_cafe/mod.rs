@@ -53,9 +53,9 @@ pub use menu::{
 };
 pub use models::CafeTarget;
 pub use orchestrator::{
-    run_comment_jobs, run_comment_jobs_with_progress, run_post_jobs, run_post_jobs_with_progress,
-    CafeOrchestrator, CommentJob, CommentJobReport, JobReport, PostJob, CODE_INVALID_CAFE_INPUT,
-    CODE_NO_COOKIES,
+    run_comment_jobs, run_comment_jobs_with_events, run_post_jobs, run_post_jobs_with_progress,
+    CafeOrchestrator, CommentEvent, CommentJob, CommentJobReport, JobReport, PostJob,
+    CODE_INVALID_CAFE_INPUT, CODE_NO_COOKIES,
 };
 pub use post::{PostError, PostErrorData, PostRequest};
 pub use response::{
