@@ -163,6 +163,8 @@ pub struct CommentJobReport {
     pub result: Option<CommentResult>,
     /// 실패 시 오류 (성공 시 `None`).
     pub error: Option<CommentError>,
+    /// 단 댓글 본문(게시 결과 표시용).
+    pub content: String,
 }
 
 impl CommentJobReport {
@@ -174,6 +176,7 @@ impl CommentJobReport {
             success: true,
             result: Some(result),
             error: None,
+            content: job.content.clone(),
         }
     }
 
@@ -185,6 +188,7 @@ impl CommentJobReport {
             success: false,
             result: None,
             error: Some(error),
+            content: job.content.clone(),
         }
     }
 }
