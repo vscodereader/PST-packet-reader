@@ -436,6 +436,17 @@ async fn band_resolve_name(account_id: String, band_link: String) -> Result<Stri
         .map_err(|e| e.to_string())
 }
 
+/// 로그인·게시 없이 연결된 ADB 디바이스(폰)의 비행기모드만 껐다 켜 IP를 회전시킨다(#247).
+/// 로그인 경로(`auth/mod.rs`)와 동일하게 `assert_adb_device` → `toggle_airplane_mode` 순서로
+/// 기존 함수를 그대로 재사용한다 — 비행기모드 ON/OFF·IP 회전 결과 로그도 기존과 동일.
+#[tauri::command]
+async fn rotate_ip() -> Result<(), String> {
+    auth::assert_adb_device().await.map_err(|e| e.to_string())?;
+    auth::toggle_airplane_mode()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// 프론트가 보내는 밴드 게시 결과 1건(알림 배치 기록용 최소 입력).
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -665,6 +676,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         band_publish,
         band_comment,
         band_resolve_name,
+        rotate_ip,
         get_account_cookies,
         run_naver_discussion,
         parse_template_csv,
