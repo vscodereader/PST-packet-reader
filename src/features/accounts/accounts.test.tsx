@@ -55,6 +55,40 @@ describe("Accounts", () => {
     expect(screen.getAllByRole("row").length).toBe(11);
   });
 
+  // 'IP 변경' 버튼(#247): 로그인 없이 폰 비행기모드만 토글해 IP 회전.
+  describe("IP 변경 버튼 (#247)", () => {
+    it("누르면 rotate_ip를 호출하고 성공 토스트를 띄운다", async () => {
+      const spy = vi.spyOn(ipc.auth, "rotateIp").mockResolvedValue(undefined);
+      await renderAccounts();
+      await userEvent.click(screen.getByRole("button", { name: "IP 변경" }));
+      expect(spy).toHaveBeenCalledTimes(1);
+      await waitFor(() =>
+        expect(notifShow).toHaveBeenCalledWith(
+          expect.objectContaining({
+            color: "green",
+            message: expect.stringContaining("IP를 변경했어요"),
+          }),
+        ),
+      );
+    });
+
+    it("실패하면 빨간 토스트를 띄운다", async () => {
+      vi.spyOn(ipc.auth, "rotateIp").mockRejectedValue(
+        new Error("ADB 디바이스가 연결되지 않았거나 인증되지 않았습니다"),
+      );
+      await renderAccounts();
+      await userEvent.click(screen.getByRole("button", { name: "IP 변경" }));
+      await waitFor(() =>
+        expect(notifShow).toHaveBeenCalledWith(
+          expect.objectContaining({
+            color: "red",
+            message: expect.stringContaining("IP 변경 실패"),
+          }),
+        ),
+      );
+    });
+  });
+
   it("filters by platform via the segment chips", async () => {
     await renderAccounts();
     // band has 2 accounts in the mock
