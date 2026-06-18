@@ -341,7 +341,9 @@ export const ipc = {
     bootstrap: () => call<unknown>("bootstrap_runtime"),
     saveAccounts: (accounts: AuthAccount[]) =>
       call<AuthAccount[]>("save_accounts", { accounts }),
-    /** 로그인 없이 연결된 폰의 비행기모드만 토글해 IP를 회전시킨다(#247). */
-    rotateIp: () => call<void>("rotate_ip"),
+    /** 로그인 없이 연결된 폰의 비행기모드만 토글해 IP를 회전시킨다(#247).
+     * 회전 전후 IP와 변경 여부를 돌려준다 — 호출부가 토스트·알림에 표시한다. */
+    rotateIp: () =>
+      call<{ before: string; after: string; changed: boolean }>("rotate_ip"),
   },
 };

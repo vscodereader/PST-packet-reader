@@ -575,8 +575,19 @@ export function Accounts({ go }: { go: GoFn }) {
               // 비행기모드 ON/OFF·IP 회전 결과는 기존과 동일하게 로그에 남는다.
               setRotatingIp(true);
               try {
-                await ipc.auth.rotateIp();
-                toast("IP를 변경했어요 — 결과는 로그에서 확인하세요", "green");
+                const r = await ipc.auth.rotateIp();
+                const detail = `원래: ${r.before} / 바뀐 IP: ${r.after}`;
+                if (r.changed) {
+                  toast(`IP 변경됨 — ${detail}`, "green");
+                  ipc.activity
+                    .append("success", `IP 변경됨 — ${detail}`)
+                    .catch(() => {});
+                } else {
+                  toast(`IP가 그대로예요 — ${detail}`, "orange");
+                  ipc.activity
+                    .append("info", `IP 변경 안 됨 — ${detail}`)
+                    .catch(() => {});
+                }
               } catch (err) {
                 toast(
                   "IP 변경 실패: " +

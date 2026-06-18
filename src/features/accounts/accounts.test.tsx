@@ -57,8 +57,15 @@ describe("Accounts", () => {
 
   // 'IP 변경' 버튼(#247): 로그인 없이 폰 비행기모드만 토글해 IP 회전.
   describe("IP 변경 버튼 (#247)", () => {
-    it("누르면 rotate_ip를 호출하고 성공 토스트를 띄운다", async () => {
-      const spy = vi.spyOn(ipc.auth, "rotateIp").mockResolvedValue(undefined);
+    it("IP가 바뀌면 변경 토스트(원래/바뀐 IP)와 알림을 남긴다", async () => {
+      const spy = vi.spyOn(ipc.auth, "rotateIp").mockResolvedValue({
+        before: "106.101.76.219",
+        after: "106.101.73.32",
+        changed: true,
+      });
+      const append = vi
+        .spyOn(ipc.activity, "append")
+        .mockResolvedValue(undefined);
       await renderAccounts();
       await userEvent.click(screen.getByRole("button", { name: "IP 변경" }));
       expect(spy).toHaveBeenCalledTimes(1);
@@ -66,9 +73,39 @@ describe("Accounts", () => {
         expect(notifShow).toHaveBeenCalledWith(
           expect.objectContaining({
             color: "green",
-            message: expect.stringContaining("IP를 변경했어요"),
+            message: expect.stringContaining("IP 변경됨"),
           }),
         ),
+      );
+      // 게시 큐 밑 알림에도 변경 내역이 남는다(원래/바뀐 IP 포함).
+      expect(append).toHaveBeenCalledWith(
+        "success",
+        expect.stringContaining("106.101.73.32"),
+      );
+    });
+
+    it("IP가 그대로면 '그대로' 토스트와 정보 알림을 남긴다", async () => {
+      vi.spyOn(ipc.auth, "rotateIp").mockResolvedValue({
+        before: "106.101.76.219",
+        after: "106.101.76.219",
+        changed: false,
+      });
+      const append = vi
+        .spyOn(ipc.activity, "append")
+        .mockResolvedValue(undefined);
+      await renderAccounts();
+      await userEvent.click(screen.getByRole("button", { name: "IP 변경" }));
+      await waitFor(() =>
+        expect(notifShow).toHaveBeenCalledWith(
+          expect.objectContaining({
+            color: "orange",
+            message: expect.stringContaining("그대로"),
+          }),
+        ),
+      );
+      expect(append).toHaveBeenCalledWith(
+        "info",
+        expect.stringContaining("IP 변경 안 됨"),
       );
     });
 

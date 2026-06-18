@@ -62,11 +62,21 @@ pub async fn probe_adb_connection() -> Result<(), OrchestratorError> {
     .map_err(|e| OrchestratorError::CommandFailed(format!("adb probe join error: {e}")))?
 }
 
+/// 비행기모드 토글(IP 회전) 결과. 프론트가 토스트·알림에 "원래/바뀐 IP·변경 여부"를
+/// 표시하는 데 쓴다(#247 후속). before/after가 `(`로 시작하면 IP 확인 실패라 changed=false.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IpRotation {
+    pub before: String,
+    pub after: String,
+    pub changed: bool,
+}
+
 /// 비행기 모드를 켬과 끔으로 토글하여 IP 변경을 유도한다.
 /// 토글 전후의 외부 IP를 stderr로 출력해 `pnpm tauri dev` 콘솔에서 IP 회전 여부를
 /// 직접 눈으로 확인할 수 있게 한다. (Samsung One UI는 `cmd connectivity airplane-mode`로
 /// 토글해도 상단 버튼에 불이 안 들어올 수 있으나, IP가 바뀌면 라디오는 실제로 순환한 것.)
-pub async fn toggle_airplane_mode() -> Result<(), OrchestratorError> {
+pub async fn toggle_airplane_mode() -> Result<IpRotation, OrchestratorError> {
     let before = fetch_external_ip().await;
     tracing::info!("[ADB] ✈ 비행기모드 ON");
     run_adb_timed(
@@ -76,6 +86,10 @@ pub async fn toggle_airplane_mode() -> Result<(), OrchestratorError> {
             .collect(),
     )
     .await?;
+    tracing::info!(
+        "[ADB]   └ 상태 확인: 비행기모드 {}",
+        airplane_mode_state().await
+    );
     sleep(Duration::from_secs(config::ADB_AIRPLANE_ENABLE_SECS)).await;
     tracing::info!("[ADB] ✈ 비행기모드 OFF — 인터넷 복구 대기");
     run_adb_timed(
@@ -85,15 +99,20 @@ pub async fn toggle_airplane_mode() -> Result<(), OrchestratorError> {
             .collect(),
     )
     .await?;
+    tracing::info!(
+        "[ADB]   └ 상태 확인: 비행기모드 {}",
+        airplane_mode_state().await
+    );
     wait_for_internet_connection().await?;
     let after = fetch_external_ip().await;
 
     tracing::info!("[ADB] ─────────── IP 회전 결과 ───────────");
     tracing::info!("[ADB]   기존 IP: {before}");
     tracing::info!("[ADB]   바뀐 IP: {after}");
+    let changed = !before.starts_with('(') && !after.starts_with('(') && before != after;
     if before.starts_with('(') || after.starts_with('(') {
         tracing::info!("[ADB]   (IP 확인 실패 — PC 인터넷/테더링 확인)");
-    } else if before == after {
+    } else if !changed {
         tracing::info!(
             "[ADB]   ⚠ IP가 그대로 — USB 테더링이 PC 기본 경로인지 / 통신사 CGNAT인지 확인 필요"
         );
@@ -101,7 +120,11 @@ pub async fn toggle_airplane_mode() -> Result<(), OrchestratorError> {
         tracing::info!("[ADB]   ✓ IP 변경됨!");
     }
     tracing::info!("[ADB] ────────────────────────────────────");
-    Ok(())
+    Ok(IpRotation {
+        before,
+        after,
+        changed,
+    })
 }
 
 /// `adb devices` 출력에 인증된(`device`) 디바이스가 하나라도 있는지 판별한다.
@@ -122,6 +145,32 @@ fn airplane_mode_args(enable: bool) -> [&'static str; 5] {
         "airplane-mode",
         if enable { "enable" } else { "disable" },
     ]
+}
+
+/// 비행기모드 *실제* 상태를 읽어 로그용 한 줄 라벨로 돌려준다(부작용 없는 상태 조회).
+/// 토글 명령이 먹혔는지 확인용 — `settings get global airplane_mode_on`이 "1"=ON / "0"=OFF.
+/// 조회 실패는 토글 자체를 막지 않도록 "(상태 확인 실패)"로 표기한다(로그 전용).
+async fn airplane_mode_state() -> String {
+    match run_adb_timed(
+        ["shell", "settings", "get", "global", "airplane_mode_on"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    )
+    .await
+    {
+        Ok(out) => airplane_state_label(out.trim()).to_string(),
+        Err(_) => "(상태 확인 실패)".to_string(),
+    }
+}
+
+/// `airplane_mode_on` 원시 출력("1"/"0")을 사람이 읽을 라벨로 변환한다(순수 함수).
+fn airplane_state_label(raw: &str) -> &'static str {
+    match raw {
+        "1" => "ON(켜짐)",
+        "0" => "OFF(꺼짐)",
+        _ => "(알 수 없음)",
+    }
 }
 
 /// 표준 adb CLI를 실행하고 stdout을 반환한다. 실행 실패/비-0 종료는 에러로 변환한다.
@@ -218,7 +267,18 @@ fn internet_probe_command() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{airplane_mode_args, has_authorized_device, internet_probe_command};
+    use super::{
+        airplane_mode_args, airplane_state_label, has_authorized_device, internet_probe_command,
+    };
+
+    #[test]
+    fn airplane_state_label_maps_raw_setting() {
+        assert_eq!(airplane_state_label("1"), "ON(켜짐)");
+        assert_eq!(airplane_state_label("0"), "OFF(꺼짐)");
+        // settings get은 끝에 개행이 붙으므로 호출부에서 trim 후 넘긴다.
+        assert_eq!(airplane_state_label("1\n".trim()), "ON(켜짐)");
+        assert_eq!(airplane_state_label("null"), "(알 수 없음)");
+    }
 
     #[test]
     fn airplane_mode_args_use_cli_shell_form() {
