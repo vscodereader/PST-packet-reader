@@ -46,7 +46,8 @@ fn resolve_cookie_header(account_id: &str) -> Result<String, ArticleListError> {
         Ok(None) => return Err(no_cookies_error(account_id, None)),
         Err(e) => return Err(no_cookies_error(account_id, Some(e.to_string()))),
     };
-    cookie_header_from_storage_state(&cookie_value).ok_or_else(|| no_cookies_error(account_id, None))
+    cookie_header_from_storage_state(&cookie_value)
+        .ok_or_else(|| no_cookies_error(account_id, None))
 }
 
 /// `account_id`의 세션 쿠키로 카페 게시글 목록을 정렬 기준·페이지에 따라 조회한다.
