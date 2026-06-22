@@ -736,21 +736,24 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   // the top-N (`commentCount`) of that list become the targets at publish time.
   const isListTarget =
     commentTargetMode === "latest" || commentTargetMode === "popular";
-  const urlTarget =
-    commentTargetMode === "url" ? parseCafeArticleUrl(doc.commentUrl) : null;
-  // 종목토론방(forum) "특정 게시글" 댓글 대상. url이 `stock.naver.com/.../discussion/{id}`
-  // 형이면 종목코드+글ID가 URL에서 다 나오므로 종목 선택이 필요 없다. 카페 url 대상과
-  // 별개로 평가해(둘 중 하나만 매칭), forum 계정이 종목 선택 없이 그 글에 바로 댓글을 단다.
-  const forumUrlTarget =
-    mode === "comment" && commentTargetMode === "url"
-      ? parseForumArticleUrl(doc.commentUrl)
-      : null;
-  // 밴드(band) "특정 게시글" 댓글 대상. url이 band.us/band/{bandNo}/post/{postNo} 형이면
-  // bandNo+postNo가 URL에 다 있어 '밴드 선택'이 필요 없다(create_comment에 그대로 쓴다).
-  const bandUrlTarget =
-    mode === "comment" && commentTargetMode === "url"
-      ? parseBandPostUrl(doc.commentUrl)
-      : null;
+  // 특정 게시글(url) 댓글의 대상 링크들. 여러 링크를 넣으면 각 링크의 글마다 댓글이 달린다.
+  // 단일 commentUrl(기존)도 길이 1로 펴 하위호환한다. 각 링크를 플랫폼별 파서에 통과시켜,
+  // 매칭되는 플랫폼의 대상 목록에 들어간다(카페/종토방/밴드 글이 섞여 있어도 각자 잡힌다).
+  const isUrlComment = mode === "comment" && commentTargetMode === "url";
+  const commentUrls = doc.commentUrls?.length
+    ? doc.commentUrls
+    : doc.commentUrl
+      ? [doc.commentUrl]
+      : [];
+  const urlTargets = isUrlComment
+    ? commentUrls.map((u) => parseCafeArticleUrl(u)).filter((t) => t !== null)
+    : [];
+  const forumUrlTargets = isUrlComment
+    ? commentUrls.map((u) => parseForumArticleUrl(u)).filter((t) => t !== null)
+    : [];
+  const bandUrlTargets = isUrlComment
+    ? commentUrls.map((u) => parseBandPostUrl(u)).filter((t) => t !== null)
+    : [];
   const toggle = (id: string) => {
     // 게시 불가 계정(로그인 실패 계열)은 선택에 넣지 않는다 — 방어선(클릭은 disabled로
     // 이미 막히지만, 어떤 경로로도 실패 계정이 selected에 들어오지 못하게 한다).
@@ -797,19 +800,22 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     const a = accounts.find((x) => x.id === aid);
     if (!a) return;
     if (a.platform === "forum") {
-      if (forumUrlTarget) {
-        // "특정 게시글" 댓글: URL이 곧 대상이라 종목 선택이 필요 없다 — 계정마다 잡 1개.
-        // code는 URL에서 뽑은 종목코드(토큰 치환·라벨용), commentUrl은 댓글 달 글 URL.
-        jobs.push({
-          key: aid,
-          platform: "forum",
-          loginId: a.loginId,
-          targetName: `종목토론방 글 #${forumUrlTarget.postId}`,
-          code: forumUrlTarget.code,
-          commentUrl: forumUrlTarget.url,
-          board: "댓글",
-          status: a.status,
-        });
+      if (forumUrlTargets.length > 0) {
+        // "특정 게시글" 댓글: URL이 곧 대상이라 종목 선택이 필요 없다 — 링크(대상)마다 잡 1개.
+        // 여러 링크면 각 링크의 글에 모두 댓글이 달린다. code는 URL에서 뽑은 종목코드(토큰
+        // 치환·라벨용), commentUrl은 댓글 달 글 URL.
+        forumUrlTargets.forEach((t, i) =>
+          jobs.push({
+            key: `${aid}-u${i}`,
+            platform: "forum",
+            loginId: a.loginId,
+            targetName: `종목토론방 글 #${t.postId}`,
+            code: t.code,
+            commentUrl: t.url,
+            board: "댓글",
+            status: a.status,
+          }),
+        );
       } else {
         stockCodes.forEach((code) =>
           jobs.push({
@@ -827,18 +833,21 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         );
       }
     } else if (a.platform === "naver") {
-      if (mode === "comment" && commentTargetMode === "url") {
-        // url 댓글 대상은 카페 게시판이 필요 없다(특정 글이 곧 대상) — 계정마다 잡 1개.
-        jobs.push({
-          key: aid,
-          platform: "naver",
-          loginId: a.loginId,
-          targetName: urlTarget
-            ? `게시글 #${urlTarget.articleId}`
-            : "URL 미설정",
-          board: "댓글",
-          status: a.status,
-        });
+      if (isUrlComment) {
+        // url 댓글 대상은 카페 게시판이 필요 없다(특정 글이 곧 대상) — 링크(글)마다 잡 1개.
+        // 여러 카페 글 링크면 각 글에 모두 댓글이 달린다. cafeId+articleId를 잡에 동결한다.
+        urlTargets.forEach((t, i) =>
+          jobs.push({
+            key: `${aid}-u${i}`,
+            platform: "naver",
+            loginId: a.loginId,
+            targetName: `게시글 #${t.articleId}`,
+            cafeId: t.cafeId,
+            articleId: t.articleId,
+            board: "댓글",
+            status: a.status,
+          }),
+        );
       } else {
         // 글/글+댓글, 그리고 댓글(최신/인기)은 선택한 게시판마다(계정×게시판) 잡을
         // 만든다(밴드 미러). 댓글(최신/인기)은 그 카페의 글 목록을 읽을 대상이 된다.
@@ -866,18 +875,21 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         });
       }
     } else if (a.platform === "band") {
-      if (bandUrlTarget) {
-        // "특정 게시글" 댓글: URL이 곧 대상(글)이라 '밴드 선택'이 필요 없다 — 계정마다 잡 1개.
-        // link에 글 URL(band_no+post_no 포함)을 동결해 워커가 그 글에 바로 댓글을 단다.
-        jobs.push({
-          key: aid,
-          platform: "band",
-          loginId: a.loginId,
-          targetName: `밴드 글 #${bandUrlTarget.postNo}`,
-          bandLink: bandUrlTarget.url,
-          board: "댓글",
-          status: a.status,
-        });
+      if (bandUrlTargets.length > 0) {
+        // "특정 게시글" 댓글: URL이 곧 대상(글)이라 '밴드 선택'이 필요 없다 — 링크(글)마다 잡 1개.
+        // 여러 밴드 글 링크면 각 글에 모두 댓글이 달린다. link에 글 URL(band_no+post_no 포함)을
+        // 동결해 워커가 그 글에 바로 댓글을 단다.
+        bandUrlTargets.forEach((t, i) =>
+          jobs.push({
+            key: `${aid}-u${i}`,
+            platform: "band",
+            loginId: a.loginId,
+            targetName: `밴드 글 #${t.postNo}`,
+            bandLink: t.url,
+            board: "댓글",
+            status: a.status,
+          }),
+        );
       } else {
         // 선택한 각 밴드마다 잡 1개(계정 × 밴드). 라벨은 조회된 실제 밴드명. 댓글 전용 모드면
         // 대상(최신글/인기글 + 개수)을, 그 외엔 "전체글"을 board 라벨로 둔다.
@@ -910,7 +922,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const targetsOk =
     !selPlatforms.includes("forum") ||
     stockCodes.length > 0 ||
-    forumUrlTarget !== null;
+    forumUrlTargets.length > 0;
   // Comment-only mode needs comments and a resolved target. `url`은 특정 글 하나로
   // 풀리고, latest/popular는 그 목록을 읽을 카페(게시판)가 필요하므로 선택한 게시판이
   // 1개 이상이면 준비된 것으로 본다(게시 시점 워커가 상위 N을 추출).
@@ -922,10 +934,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     selPlatforms.includes("band") &&
     selectedBands.length > 0 &&
     isListTarget;
-  // url 모드의 "대상 해석됨"은 카페 글(urlTarget) 또는 종목토론방 글(forumUrlTarget) 중
-  // 하나만 풀려도 충분하다 — 사용자가 붙여넣은 URL이 어느 플랫폼 글인지에 따라 한쪽이 매칭된다.
+  // url 모드의 "대상 해석됨"은 카페·종목토론방·밴드 글 중 하나라도 풀린 링크가 있으면 충분하다
+  // — 사용자가 넣은 링크가 어느 플랫폼 글인지에 따라 해당 목록에 잡힌다(여러 링크/혼합 허용).
   const urlTargetResolved =
-    urlTarget !== null || forumUrlTarget !== null || bandUrlTarget !== null;
+    urlTargets.length > 0 ||
+    forumUrlTargets.length > 0 ||
+    bandUrlTargets.length > 0;
   const commentReady =
     mode !== "comment" ||
     (comments.length > 0 &&
@@ -943,7 +957,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   // 밴드 "특정 게시글" 댓글은 URL이 곧 대상이라 '밴드 선택'을 면제한다(forum 종목 면제와 동일).
   const bandReady =
     !selPlatforms.includes("band") ||
-    bandUrlTarget !== null ||
+    bandUrlTargets.length > 0 ||
     selectedBands.length > 0;
   const canPublish =
     usableSelected.length > 0 &&
@@ -978,12 +992,10 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const commentSpecFor = (j: PublishJob): CommentTargetSpec | undefined => {
     if (mode !== "comment" && mode !== "both") return undefined;
     if (commentTargetMode === "url") {
-      if (!urlTarget) return undefined;
-      return {
-        mode: "url",
-        cafeId: urlTarget.cafeId,
-        articleId: urlTarget.articleId,
-      };
+      // 링크(글)마다 잡 1개라, 그 잡에 동결된 cafeId/articleId를 그대로 쓴다(여러 링크면
+      // 잡마다 다른 글). 둘이 없으면(비정상) 대상 미설정으로 둔다.
+      if (j.cafeId == null || j.articleId == null) return undefined;
+      return { mode: "url", cafeId: j.cafeId, articleId: j.articleId };
     }
     const cafeId = j.cafeId;
     if (cafeId == null) return undefined;
@@ -995,7 +1007,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   // (최신/인기) 대상이다. cafeId/articleId는 밴드에서 쓰지 않으므로 비운다.
   const bandCommentSpecFor = (): CommentTargetSpec | undefined => {
     if (mode !== "comment") return undefined;
-    if (bandUrlTarget) return { mode: "url" };
+    if (bandUrlTargets.length > 0) return { mode: "url" };
     const m = commentTargetMode === "popular" ? "popular" : "latest";
     return { mode: m, count: commentCount };
   };
@@ -1036,7 +1048,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     const bandUrlUnsupported =
       mode === "comment" &&
       commentTargetMode === "url" &&
-      bandUrlTarget === null;
+      bandUrlTargets.length === 0;
     const band: BandTarget[] = bandUrlUnsupported
       ? []
       : jobs

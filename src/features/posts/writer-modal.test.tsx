@@ -257,11 +257,13 @@ describe("WriterModal", () => {
     // 댓글 작성 모드로 전환하면 댓글 대상(CommentComposer) 컨트롤이 노출된다.
     await user.click(screen.getByRole("button", { name: "댓글 작성" }));
 
-    // "특정 게시글"(url) 대상 → URL 입력칸이 나타난다.
+    // "특정 게시글"(url) 대상 → URL 입력칸(기본 3개)이 나타난다.
     await user.click(
       await screen.findByRole("button", { name: "특정 게시글" }),
     );
-    const urlInput = await screen.findByPlaceholderText(/종목토론방 글/);
+    const urlInputs = await screen.findAllByPlaceholderText(/글 URL/);
+    expect(urlInputs).toHaveLength(3);
+    const urlInput = urlInputs[0]!;
     await user.type(
       urlInput,
       "https://stock.naver.com/domestic/stock/005930/discussion/421063210",
@@ -279,6 +281,52 @@ describe("WriterModal", () => {
     expect(
       screen.getByRole("button", { name: /변형 생성/ }),
     ).toBeInTheDocument();
+  });
+
+  it("특정 게시글 링크는 '링크 추가'로 칸을 늘리고 여러 링크를 저장한다", async () => {
+    const user = userEvent.setup();
+    const onSaveDraft = vi.fn();
+    renderWriter({ onSaveDraft });
+    await screen.findByPlaceholderText("제목을 입력하세요");
+
+    await user.click(screen.getByRole("button", { name: "댓글 작성" }));
+    await user.click(
+      await screen.findByRole("button", { name: "특정 게시글" }),
+    );
+
+    // 기본 3칸 + '링크 추가'로 4칸이 된다(글+댓글의 '댓글 추가'와 동일 UX).
+    let urlInputs = await screen.findAllByPlaceholderText(/글 URL/);
+    expect(urlInputs).toHaveLength(3);
+    await user.click(screen.getByRole("button", { name: /링크 추가/ }));
+    urlInputs = await screen.findAllByPlaceholderText(/글 URL/);
+    expect(urlInputs).toHaveLength(4);
+
+    // 서로 다른 링크 2개를 넣고 댓글도 채운 뒤 임시저장하면, 빈 칸은 버려지고
+    // 채운 링크만 commentUrls에 담긴다(첫 링크는 하위호환 commentUrl에도 채워진다).
+    await user.type(
+      urlInputs[0]!,
+      "https://cafe.naver.com/ca-fe/cafes/31732304/articles/9",
+    );
+    await user.type(urlInputs[1]!, "https://www.band.us/band/103043410/post/2");
+    await user.type(
+      screen.getAllByPlaceholderText("자연스러운 댓글을 입력하세요")[0]!,
+      "좋은 글이네요",
+    );
+    await user.click(screen.getByRole("button", { name: "임시저장" }));
+    await user.click(await screen.findByText("임시저장하기"));
+
+    expect(onSaveDraft).toHaveBeenCalledTimes(1);
+    const saved = onSaveDraft.mock.calls[0]![0] as {
+      commentUrls?: string[];
+      commentUrl?: string;
+    };
+    expect(saved.commentUrls).toEqual([
+      "https://cafe.naver.com/ca-fe/cafes/31732304/articles/9",
+      "https://www.band.us/band/103043410/post/2",
+    ]);
+    expect(saved.commentUrl).toBe(
+      "https://cafe.naver.com/ca-fe/cafes/31732304/articles/9",
+    );
   });
 
   it("triggers image-add and rejects a non-text body drop", async () => {

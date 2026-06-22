@@ -405,30 +405,30 @@ async fn band_comment_on_post_inner(
     let key = client.fetch_secret_key(&cookie_header).await?;
 
     // 단일 대상(그 글 하나)에 댓글 풀에서 1개를 분배해 단다(목록 댓글과 같은 규칙).
-    let post_nos = vec![post_no];
     let mut rng = mulberry32(seed_from_clock());
-    let contents = distribute_comments(post_nos.len(), comments, &mut rng);
+    let contents = distribute_comments(1, comments, &mut rng);
+    let content = contents.first().map(String::as_str).unwrap_or("").trim();
 
-    let mut commented_count = 0usize;
-    let mut attempted = 0usize;
-    for (post_no, content) in post_nos.iter().zip(contents.iter()) {
-        if content.trim().is_empty() {
-            continue;
-        }
-        if attempted > 0 {
-            sleep(BAND_COMMENT_DELAY).await;
-        }
-        attempted += 1;
-        match client
-            .create_comment(&band_no, *post_no, content, &key, &cookie_header)
+    // 댓글 풀이 비면(내용 없음) 달 게 없다 — 0/1로 둔다(빈 풀은 실패 사유가 아니다).
+    if content.is_empty() {
+        let band_name = client
+            .get_band_name(&band_no, &key, &cookie_header)
             .await
-        {
-            Ok(()) => commented_count += 1,
-            Err(error) => tracing::warn!(
-                "[BAND] 댓글 게시 실패 — 계정 {account_id}, post_no {post_no} ({error})"
-            ),
-        }
+            .ok()
+            .flatten();
+        return Ok(BandCommentOutcome {
+            target_count: 1,
+            commented_count: 0,
+            band_name,
+        });
     }
+
+    // 특정 글은 best-effort가 아니라 명시적 대상이라, 댓글 실패(글 없음·삭제·차단 등)는 그
+    // 에러를 그대로 전파한다 — 완료 로그가 친절 사유(메인) + 기술 trace(자세히)로 나눠 "어디서
+    // 왜 실패했는지"를 남긴다(#199). 목록(최신/인기) 댓글의 0/N 소프트 집계와 의도적으로 다르다.
+    client
+        .create_comment(&band_no, post_no, content, &key, &cookie_header)
+        .await?;
 
     let band_name = client
         .get_band_name(&band_no, &key, &cookie_header)
@@ -437,8 +437,8 @@ async fn band_comment_on_post_inner(
         .flatten();
 
     Ok(BandCommentOutcome {
-        target_count: post_nos.len(),
-        commented_count,
+        target_count: 1,
+        commented_count: 1,
         band_name,
     })
 }

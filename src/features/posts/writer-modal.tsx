@@ -76,8 +76,8 @@ function CommentComposer({
   onOwnPost,
   target,
   setTarget,
-  url,
-  setUrl,
+  urls,
+  setUrls,
   count,
   setCount,
 }: {
@@ -86,8 +86,8 @@ function CommentComposer({
   onOwnPost: boolean;
   target: CommentTarget;
   setTarget: (v: CommentTarget) => void;
-  url: string;
-  setUrl: (v: string) => void;
+  urls: string[];
+  setUrls: (v: string[]) => void;
   count: number;
   setCount: (n: number) => void;
 }) {
@@ -137,13 +137,56 @@ function CommentComposer({
             ))}
           </Group>
           {target === "url" ? (
-            <TextInput
-              mb={18}
-              value={url}
-              onChange={(e) => setUrl(e.currentTarget.value)}
-              placeholder="종목토론방 글 https://stock.naver.com/domestic/stock/005930/discussion/…  또는 카페 글 URL"
-              styles={{ input: { fontFamily: "monospace" } }}
-            />
+            // 특정 게시글: 여러 링크를 넣으면 각 링크의 글마다 댓글이 달린다(글+댓글의 '댓글
+            // 추가'와 동일 UX). 기본 3칸을 깔고 '링크 추가'로 더 넣거나 x로 지운다.
+            <Box mb={18}>
+              <Stack gap={8}>
+                {urls.map((u, i) => (
+                  <Group key={i} gap={8} align="center" wrap="nowrap">
+                    <Text fz={12} fw={700} c="dimmed" w={22} ta="center">
+                      {i + 1}
+                    </Text>
+                    <TextInput
+                      style={{ flex: 1 }}
+                      value={u}
+                      onChange={(e) =>
+                        setUrls(
+                          urls.map((x, idx) =>
+                            idx === i ? e.currentTarget.value : x,
+                          ),
+                        )
+                      }
+                      placeholder="종목토론방·카페·밴드 글 URL (예: https://stock.naver.com/domestic/stock/005930/discussion/…)"
+                      styles={{ input: { fontFamily: "monospace" } }}
+                    />
+                    <ActionIcon
+                      variant="subtle"
+                      color="gray"
+                      title="삭제"
+                      onClick={() =>
+                        setUrls(
+                          urls.length === 1
+                            ? [""]
+                            : urls.filter((_, idx) => idx !== i),
+                        )
+                      }
+                    >
+                      <Icon.x size={16} />
+                    </ActionIcon>
+                  </Group>
+                ))}
+              </Stack>
+              <Button
+                variant="subtle"
+                size="compact-sm"
+                ml={30}
+                mt={8}
+                leftSection={<Icon.plus size={15} />}
+                onClick={() => setUrls([...urls, ""])}
+              >
+                링크 추가
+              </Button>
+            </Box>
           ) : (
             <Group
               gap={10}
@@ -308,7 +351,15 @@ function WriterModalInner({
   const [cTarget, setCTarget] = useState<CommentTarget>(
     doc?.commentTarget ?? "latest",
   );
-  const [cUrl, setCUrl] = useState(doc?.commentUrl ?? "");
+  // 특정 게시글 댓글 대상 링크들. 기존 단일 commentUrl도 받아 길이 1로 펴고(하위호환),
+  // 새 문서는 기본 3칸을 깐다(요구: 링크 입력칸 3개 + 링크 추가 버튼).
+  const [cUrls, setCUrls] = useState<string[]>(
+    doc?.commentUrls?.length
+      ? [...doc.commentUrls]
+      : doc?.commentUrl
+        ? [doc.commentUrl, "", ""]
+        : ["", "", ""],
+  );
   const [cCount, setCCount] = useState(doc?.commentCount ?? 3);
   const [dirty, setDirty] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
@@ -404,6 +455,8 @@ function WriterModalInner({
       mode === "comment"
         ? filledComments.join("").replace(/\s/g, "").length
         : bodyText.replace(/\s/g, "").length;
+    // 빈 링크는 버리고(공백 제거), 단일 commentUrl은 하위호환으로 첫 링크를 채운다.
+    const filledUrls = cUrls.map((u) => u.trim()).filter(Boolean);
     return {
       id: doc?.id ?? newId,
       title: title.trim() || "제목 없음",
@@ -411,7 +464,8 @@ function WriterModalInner({
       body: bodyHtml,
       comments: filledComments,
       commentTarget: cTarget,
-      commentUrl: cUrl,
+      commentUrl: filledUrls[0] ?? "",
+      commentUrls: filledUrls,
       commentCount: cCount,
       status,
       words,
@@ -430,6 +484,15 @@ function WriterModalInner({
     setMode(d.kind);
     setTitle(d.title);
     setComments(d.comments?.length ? [...d.comments] : ["", ""]);
+    // 특정 게시글 대상·링크들도 복원해 다중 링크 초안이 그대로 다시 열리게 한다.
+    if (d.commentTarget) setCTarget(d.commentTarget);
+    setCUrls(
+      d.commentUrls?.length
+        ? [...d.commentUrls]
+        : d.commentUrl
+          ? [d.commentUrl, "", ""]
+          : ["", "", ""],
+    );
     seeded.current = false;
     if (bodyRef.current) {
       bodyRef.current.innerHTML =
@@ -747,9 +810,9 @@ function WriterModalInner({
                   setCTarget(v);
                   setDirty(true);
                 }}
-                url={cUrl}
-                setUrl={(v) => {
-                  setCUrl(v);
+                urls={cUrls}
+                setUrls={(v) => {
+                  setCUrls(v);
                   setDirty(true);
                 }}
                 count={cCount}

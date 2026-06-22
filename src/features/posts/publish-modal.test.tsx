@@ -543,6 +543,63 @@ describe("PublishModal", () => {
     ]);
   });
 
+  it("여러 링크(commentUrls)를 넣으면 각 링크의 글마다 댓글 대상이 만들어진다(카페 다중 url)", async () => {
+    // 특정 게시글 댓글에 카페 글 링크 2개 → plan.naver에 글마다 대상 1개(총 2개), 각자
+    // 자신의 articleId로 동결된다(각 링크의 글에 모두 댓글이 달리도록).
+    const commentDoc: LibraryPost = {
+      id: "lmu",
+      title: "다중 링크 댓글",
+      kind: "comment",
+      updated: "방금 전",
+      words: 20,
+      status: "ready",
+      excerpt: "요약",
+      commentTarget: "url",
+      commentUrls: [
+        "https://cafe.naver.com/ca-fe/cafes/31732304/articles/9",
+        "https://cafe.naver.com/ca-fe/cafes/31732304/articles/15",
+      ],
+      comments: ["댓글1"],
+    };
+    renderPublish({ doc: commentDoc });
+    await userEvent.click(await screen.findByText("invest_king7")); // 기본 forum 해제
+    await userEvent.click(screen.getByText("money_lab")); // naver(cafe) 계정
+    // 두 링크가 곧 대상이라 게시판 선택 없이 게시 버튼이 활성화된다(잡 2개).
+    const publishBtn = await screen.findByRole(
+      "button",
+      { name: /^게시 \(2\)/ },
+      { timeout: 3000 },
+    );
+    expect(publishBtn).toBeEnabled();
+
+    await userEvent.click(await screen.findByText("예약 게시"));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^예약 \(2\)/ }),
+    );
+    const call = ipcBackend.mock.calls.find(
+      (c) => c[0] === "add_queue_scheduled",
+    );
+    expect(call).toBeDefined();
+    const plan = (call?.[1] as { item: { plan: { naver: unknown[] } } }).item
+      .plan;
+    expect(plan.naver).toHaveLength(2);
+    // 링크별로 다른 articleId(9, 15)가 각 대상에 동결돼야 한다.
+    const specs = (
+      plan.naver as { commentTarget?: { articleId?: number } }[]
+    ).map((t) => t.commentTarget?.articleId);
+    expect(specs).toEqual(expect.arrayContaining([9, 15]));
+    expect(plan.naver).toEqual([
+      expect.objectContaining({
+        accountId: "money_lab",
+        commentTarget: { mode: "url", cafeId: 31732304, articleId: 9 },
+      }),
+      expect.objectContaining({
+        accountId: "money_lab",
+        commentTarget: { mode: "url", cafeId: 31732304, articleId: 15 },
+      }),
+    ]);
+  });
+
   it("includes a latest comment spec (cafeId + count) in a both-mode scheduled plan", async () => {
     const bothDoc: LibraryPost = {
       id: "lbs",

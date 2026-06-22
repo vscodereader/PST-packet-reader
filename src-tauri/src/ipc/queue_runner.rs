@@ -18,8 +18,8 @@ use super::activity::{record, ActivityItem, ActivityType};
 use super::log_batches::{BatchItem, BatchItemStatus, LogBatch, PostedContent, MAX_LOG_BATCHES};
 use super::posts::{CommentTarget, ModeValue};
 use super::queue::{
-    apply_cancel_now, apply_yield_now, item_priority, LoginTarget, PublishPlan, QueueNowItem,
-    QueueState,
+    apply_cancel_now, apply_yield_now, item_priority, CommentTargetSpec, LoginTarget, PublishPlan,
+    QueueNowItem, QueueState,
 };
 use crate::auth::outcome::LoginResolution;
 use crate::auth::OrchestratorError;
@@ -59,6 +59,10 @@ struct RunnerInner {
     /// 자원이 겹치지 않아 여러 아이템을 동시에 돌리는데, 이 수를 FORUM_ITEM_PARALLEL_CAP로
     /// 제한해 자원 고갈을 막는다. 카페·밴드·로그인은 이 카운터를 쓰지 않고 기존대로 순차다.
     active_forum: usize,
+    /// 지금 동시에 돌고 있는 "특정 게시글" 댓글 전용 아이템 수. 이런 아이템은 게시 시점에
+    /// 저장 쿠키만 쓰고(재로그인·IP 회전 없음) 카페·밴드=HTTP, 종토방=계정별 전용 Chrome이라
+    /// 자원이 겹치지 않아 동시에 돌려도 안전하다. COMMENT_ITEM_PARALLEL_CAP로 동시 수를 제한한다.
+    active_comment: usize,
 }
 
 /// 워커 종료(정상/패닉) 시 `is_running`을 반드시 해제해, 패닉 한 번에 큐가 영구히
@@ -218,6 +222,43 @@ async fn worker_loop<R: Runtime>(app: AppHandle<R>, runner: NowQueueRunner) {
             }
         };
 
+        // "특정 게시글" 댓글 전용 아이템: 게시 시점에 저장 쿠키만 쓰고(재로그인·IP 회전 없음)
+        // 카페·밴드=HTTP, 종토방=계정별 전용 Chrome이라 자원이 겹치지 않는다. 종토방 레인과
+        // 똑같이, 여기서 기다리지 않고 곧장 다음 아이템을 집어 댓글 아이템들이 동시에 돈다.
+        // 동시 수는 COMMENT_ITEM_PARALLEL_CAP로 제한한다. (종토방 전용 url 댓글도 이 레인으로
+        // 와 forum 레인보다 먼저 잡히므로, 종토방 술어보다 앞서 검사한다.)
+        if is_url_comment_only_item(&job) {
+            let claimed = {
+                let Ok(mut inner) = runner.inner.lock() else {
+                    return;
+                };
+                if inner.active_comment < COMMENT_ITEM_PARALLEL_CAP {
+                    inner.active_comment += 1;
+                    true
+                } else {
+                    false
+                }
+            };
+            if !claimed {
+                // 동시 한도 도달 — 슬롯이 빌 때까지 잠깐 대기 후 같은 아이템을 다시 집는다.
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                continue;
+            }
+            now_store.mutate(|items| mark_running(items, &job.id));
+            let app_bg = app.clone();
+            let runner_bg = runner.clone();
+            tauri::async_runtime::spawn(async move {
+                finish_item(&app_bg, &job).await;
+                if let Ok(mut inner) = runner_bg.inner.lock() {
+                    inner.active_comment = inner.active_comment.saturating_sub(1);
+                }
+                // 남은 대기 아이템을 이어서 처리하도록 워커를 깨운다(이미 돌고 있으면 무시).
+                start_if_idle(&runner_bg, app_bg);
+            });
+            // 기다리지 않고 곧장 다음 아이템을 집는다 → 댓글 아이템들이 동시에 진행된다.
+            continue;
+        }
+
         // 종목토론방 전용 아이템(#240): 카페(9222 공유)·밴드(HTTP)와 자원이 겹치지 않고 계정마다
         // 전용 헤드리스 Chrome을 쓰므로, 여러 아이템을 동시에 돌려도 안전하다. 우선순위 픽(#231)이
         // 그대로라 종토방이 카페·밴드보다 먼저 집히고(대기 중 밴드·카페보다 앞서 실행), 여기서
@@ -292,6 +333,10 @@ async fn finish_item<R: Runtime>(app: &AppHandle<R>, job: &QueueNowItem) {
 /// (run_forum_targets), 너무 많은 아이템을 동시에 돌리면 자원이 고갈된다.
 const FORUM_ITEM_PARALLEL_CAP: usize = 4;
 
+/// "특정 게시글" 댓글 전용 아이템 동시 실행 상한. 각 아이템은 저장 쿠키로 HTTP(카페·밴드)
+/// 또는 계정별 전용 Chrome(종토방)로 댓글을 달아 자원이 겹치지 않으므로 동시에 돌린다.
+const COMMENT_ITEM_PARALLEL_CAP: usize = 6;
+
 /// 이 아이템이 **종목토론방 전용**인지 — forum 타깃만 있고 카페(naver)·밴드 게시가 없으면 true.
 /// 이런 아이템은 전용 헤드리스 Chrome으로 게시해 카페(9222)·밴드(HTTP)와 자원이 겹치지 않아,
 /// 여러 아이템을 동시에 돌려도 안전하다(#240). 로그인 동봉 여부는 무관하다 — 게시 시 저장된
@@ -300,6 +345,31 @@ fn is_forum_only_item(item: &QueueNowItem) -> bool {
     item.plan
         .as_ref()
         .is_some_and(|p| !p.forum.is_empty() && p.naver.is_empty() && p.band.is_empty())
+}
+
+/// 이 plan이 **"특정 게시글"(url) 댓글 전용**인지 — 댓글 모드이고, 실린 모든 대상이 url 댓글
+/// 대상(카페=commentTarget.mode Url, 종토방=comment_url 채워짐, 밴드=commentTarget.mode Url)일
+/// 때 true. 이런 아이템은 새 글을 쓰지 않고(카페·밴드=HTTP, 종토방=계정별 전용 Chrome) 게시
+/// 시점에 저장 쿠키만 쓰므로(재로그인·IP 회전 없음, 아래 그룹 루프에서 스킵) 자원이 겹치지
+/// 않아 여러 아이템을 동시에 돌려도 안전하다. 대상이 하나도 없으면 false.
+fn is_url_comment_only_plan(plan: &PublishPlan) -> bool {
+    if !matches!(plan.kind, ModeValue::Comment) {
+        return false;
+    }
+    if plan.naver.is_empty() && plan.forum.is_empty() && plan.band.is_empty() {
+        return false;
+    }
+    let is_url_spec =
+        |t: &Option<CommentTargetSpec>| matches!(t, Some(s) if matches!(s.mode, CommentTarget::Url));
+    let naver_ok = plan.naver.iter().all(|t| is_url_spec(&t.comment_target));
+    let forum_ok = plan.forum.iter().all(|t| !t.comment_url.trim().is_empty());
+    let band_ok = plan.band.iter().all(|t| is_url_spec(&t.comment_target));
+    naver_ok && forum_ok && band_ok
+}
+
+/// 아이템이 "특정 게시글" 댓글 전용인지(위 plan 술어를 아이템에 적용).
+fn is_url_comment_only_item(item: &QueueNowItem) -> bool {
+    item.plan.as_ref().is_some_and(is_url_comment_only_plan)
 }
 
 /// 큐에 해당 id의 아이템이 아직 있는지(협조적 취소 확인용). cancel_queue_now가
@@ -389,7 +459,11 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
         // 게시는 매번 그 쿠키 파일을 디스크에서 새로 읽으므로 1차 로그인분으로 충분하고, 2차
         // 로그인은 같은 파일을 덮어쓸 뿐 불필요하다. 카페가 섞인 그룹은 10004(IP check failure)
         // 때문에 기존대로 회전+로그인+IP검증을 유지한다. 실패하면 그룹 타깃 전부 합성 실패로 남긴다.
-        let prep = if forum_only_group(plan, group) {
+        // "특정 게시글" 댓글 전용 아이템도 종토방처럼 게시 시점 재로그인을 생략하고 저장
+        // 쿠키(cookies/{loginId}.json)를 그대로 쓴다 — 이 아이템들은 병렬 레인에서 동시에
+        // 도는데, 재로그인은 폰 IP 회전(airplane 토글)을 공유해 동시 실행 시 충돌하기 때문이다.
+        // 카페·밴드 댓글은 HTTP라 선택 로그인 때 저장한 쿠키로 충분하다(종토방과 동일 원칙).
+        let prep = if forum_only_group(plan, group) || is_url_comment_only_plan(plan) {
             Ok(())
         } else {
             prepare_group_login(app, group).await
@@ -2930,6 +3004,93 @@ mod tests {
     }
 
     // --- 종토방 아이템 동시 실행 분류(#240) ---
+
+    #[test]
+    fn is_url_comment_only_item_true_for_url_comment_targets() {
+        use crate::ipc::queue::{CommentTargetSpec, ForumTarget};
+        let url_spec = || {
+            Some(CommentTargetSpec {
+                mode: CommentTarget::Url,
+                count: None,
+                cafe_id: Some(123),
+                article_id: Some(9),
+            })
+        };
+        // 카페 url 댓글만 → 동시 실행 경로(true).
+        let mut cafe = plan(ModeValue::Comment, vec![naver_target("u")]);
+        cafe.naver[0].comment_target = url_spec();
+        assert!(is_url_comment_only_item(&now_item(
+            "c",
+            QueueState::Waiting,
+            Some(cafe)
+        )));
+
+        // 종토방 url 댓글만(comment_url 채움) → true.
+        let mut forum = plan(ModeValue::Comment, vec![]);
+        forum.forum = vec![ForumTarget {
+            account_id: "u".into(),
+            name: "글 #1".into(),
+            code: "005930".into(),
+            comment_url: "https://stock.naver.com/domestic/stock/005930/discussion/1".into(),
+        }];
+        assert!(is_url_comment_only_item(&now_item(
+            "f",
+            QueueState::Waiting,
+            Some(forum)
+        )));
+
+        // 밴드 url 댓글만 → true. 카페·종토방·밴드 url이 섞여도 모두 url이면 true.
+        let mut band = plan(ModeValue::Comment, vec![]);
+        band.band = vec![BandTarget {
+            account_id: "u".into(),
+            name: "밴드 글 #2".into(),
+            link: "https://www.band.us/band/1/post/2".into(),
+            comment_target: Some(CommentTargetSpec {
+                mode: CommentTarget::Url,
+                count: None,
+                cafe_id: None,
+                article_id: None,
+            }),
+        }];
+        assert!(is_url_comment_only_item(&now_item(
+            "b",
+            QueueState::Waiting,
+            Some(band)
+        )));
+
+        // 최신글 댓글(mode=Latest)은 url 전용이 아니다 → false.
+        let mut latest = plan(ModeValue::Comment, vec![naver_target("u")]);
+        latest.naver[0].comment_target = Some(CommentTargetSpec {
+            mode: CommentTarget::Latest,
+            count: Some(3),
+            cafe_id: Some(123),
+            article_id: None,
+        });
+        assert!(!is_url_comment_only_item(&now_item(
+            "l",
+            QueueState::Waiting,
+            Some(latest)
+        )));
+
+        // 글 게시(Post) 모드, comment_url 없는 forum, plan 없음 → 모두 false.
+        let mut post = plan(ModeValue::Post, vec![naver_target("u")]);
+        post.naver[0].comment_target = url_spec(); // 모드가 Comment가 아니면 무조건 false
+        assert!(!is_url_comment_only_item(&now_item(
+            "p",
+            QueueState::Waiting,
+            Some(post)
+        )));
+        assert!(!is_url_comment_only_item(&now_item(
+            "rf",
+            QueueState::Waiting,
+            Some(forum_plan()) // 종토방 새 글(comment_url 없음)
+        )));
+        assert!(!is_url_comment_only_item(&now_item(
+            "x",
+            QueueState::Waiting,
+            None
+        )));
+    }
 
     #[test]
     fn is_forum_only_item_true_only_for_forum_targets() {
