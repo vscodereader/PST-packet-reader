@@ -795,23 +795,46 @@ async fn collect_comment_targets(
 fn plan_to_forum_requests(plan: &PublishPlan) -> Vec<ForumPublishRequest> {
     use std::collections::BTreeMap;
 
-    let mut by_account: BTreeMap<String, Vec<DiscussionStock>> = BTreeMap::new();
-    for f in &plan.forum {
-        by_account
-            .entry(f.account_id.clone())
-            .or_default()
-            .push(DiscussionStock {
-                name: f.name.clone(),
-                code: f.code.clone(),
-                link: String::new(),
-            });
-    }
-
     let run_post = runs_post(plan);
     let run_comment = runs_comment(plan);
     let comment = plan.comments.first().cloned().unwrap_or_default();
 
-    by_account
+    // "특정 게시글" 댓글(comment_url 지정) 대상은 종목별 랜덤 글이 아니라 그 글 하나에만
+    // 댓글을 단다. 계정 묶음 없이 대상 1건 = 요청 1건으로 만들고(글 1개 단위 댓글), 강제로
+    // 댓글 전용(run_post=false)으로 둔다. comment_url 없는 일반 대상은 기존처럼 계정별로
+    // 종목을 묶어 한 요청에 싣는다(per-종목 동작 무변경).
+    let mut url_reqs: Vec<ForumPublishRequest> = Vec::new();
+    let mut by_account: BTreeMap<String, Vec<DiscussionStock>> = BTreeMap::new();
+    for f in &plan.forum {
+        let url = f.comment_url.trim();
+        let stock = DiscussionStock {
+            name: f.name.clone(),
+            code: f.code.clone(),
+            link: String::new(),
+        };
+        if url.is_empty() {
+            by_account
+                .entry(f.account_id.clone())
+                .or_default()
+                .push(stock);
+        } else {
+            url_reqs.push(ForumPublishRequest {
+                host: "127.0.0.1".to_owned(),
+                port: 0,
+                account_id: f.account_id.clone(),
+                run_post: false,
+                run_comment: true,
+                title: plan.title.clone(),
+                body: plan.body_text.clone(),
+                comment: comment.clone(),
+                stocks: vec![stock],
+                link_override: plan.link_override.clone(),
+                comment_url: Some(url.to_owned()),
+            });
+        }
+    }
+
+    let regular = by_account
         .into_iter()
         .map(|(account_id, stocks)| ForumPublishRequest {
             host: "127.0.0.1".to_owned(),
@@ -824,8 +847,10 @@ fn plan_to_forum_requests(plan: &PublishPlan) -> Vec<ForumPublishRequest> {
             comment: comment.clone(),
             stocks,
             link_override: plan.link_override.clone(),
-        })
-        .collect()
+            comment_url: None,
+        });
+
+    url_reqs.into_iter().chain(regular).collect()
 }
 
 /// 게시 그룹의 "계정 패밀리". 같은 패밀리는 같은 로그인 쿠키를 공유한다 — 네이버 카페와
@@ -3111,6 +3136,7 @@ mod tests {
             account_id: "u0".into(),
             name: "삼성전자".into(),
             code: "005930".into(),
+            comment_url: String::new(),
         }];
         assert_eq!(estimate_total(&p), 2); // 글 1 + 종목 1
                                            // 밴드 대상 수도 더한다(kind와 무관하게 항상 1 대상 = 1).
@@ -3137,6 +3163,7 @@ mod tests {
             account_id: account.into(),
             name: name.into(),
             code: code.into(),
+            comment_url: String::new(),
         }
     }
 
@@ -3388,11 +3415,13 @@ mod tests {
                 account_id: "u0".into(),
                 name: "삼성전자".into(),
                 code: "005930".into(),
+                comment_url: String::new(),
             },
             ForumTarget {
                 account_id: "u0".into(),
                 name: "카카오".into(),
                 code: "035720".into(),
+                comment_url: String::new(),
             },
         ];
         let items = forum_skeleton_items(&plan_to_forum_requests(&p));
@@ -3458,16 +3487,19 @@ mod tests {
                 account_id: "u0".into(),
                 name: "삼성전자".into(),
                 code: "005930".into(),
+                comment_url: String::new(),
             },
             ForumTarget {
                 account_id: "u0".into(),
                 name: "SK하이닉스".into(),
                 code: "000660".into(),
+                comment_url: String::new(),
             },
             ForumTarget {
                 account_id: "u1".into(),
                 name: "에코프로".into(),
                 code: "086520".into(),
+                comment_url: String::new(),
             },
         ];
         let reqs = plan_to_forum_requests(&p);
@@ -3478,6 +3510,52 @@ mod tests {
         assert_eq!(u0.comment, "댓글1");
         assert!(u0.run_post);
         assert!(!u0.run_comment); // Post 모드
+    }
+
+    #[test]
+    fn forum_url_comment_target_makes_a_single_url_request_skipping_stock_grouping() {
+        use crate::ipc::queue::ForumTarget;
+        // "특정 게시글" 댓글: comment_url이 채워진 forum 대상은 종목 묶음이 아니라 그 글 URL
+        // 하나에만 댓글을 다는 요청으로 풀려야 한다(댓글 전용, run_post=false). code(035720)는
+        // URL에서 온 값으로 토큰 치환·라벨에 쓰인다(랜덤 글/종목 선택 없음).
+        let url =
+            "https://stock.naver.com/domestic/stock/035720/discussion/421063210?chip=all";
+        let mut p = plan(ModeValue::Comment, vec![]);
+        p.comments = vec!["좋은 글이네요".into()];
+        p.forum = vec![ForumTarget {
+            account_id: "u0".into(),
+            name: "종목토론방 글 #421063210".into(),
+            code: "035720".into(),
+            comment_url: url.into(),
+        }];
+        let reqs = plan_to_forum_requests(&p);
+        assert_eq!(reqs.len(), 1);
+        let r = &reqs[0];
+        assert_eq!(r.account_id, "u0");
+        assert_eq!(r.comment_url.as_deref(), Some(url)); // 그 글 URL로 직접 댓글
+        assert!(r.run_comment);
+        assert!(!r.run_post); // 특정 글 댓글은 댓글 전용으로 강제
+        assert_eq!(r.stocks.len(), 1);
+        assert_eq!(r.stocks[0].code, "035720"); // URL의 종목코드
+        assert_eq!(r.comment, "좋은 글이네요");
+    }
+
+    #[test]
+    fn forum_plain_targets_keep_empty_comment_url_after_split() {
+        use crate::ipc::queue::ForumTarget;
+        // comment_url이 빈 일반 forum 대상은 기존처럼 계정별 per-종목 요청으로 묶이고,
+        // comment_url은 None이어야 한다(랜덤/per-종목 동작 무변경).
+        let mut p = plan(ModeValue::Post, vec![]);
+        p.forum = vec![ForumTarget {
+            account_id: "u0".into(),
+            name: "삼성전자".into(),
+            code: "005930".into(),
+            comment_url: String::new(),
+        }];
+        let reqs = plan_to_forum_requests(&p);
+        assert_eq!(reqs.len(), 1);
+        assert!(reqs[0].comment_url.is_none());
+        assert_eq!(reqs[0].stocks.len(), 1);
     }
 
     #[test]

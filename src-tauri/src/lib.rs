@@ -62,6 +62,7 @@ fn run_naver_discussion(
         submit_after_fill: submit_after_fill.unwrap_or(false),
         stock: None,
         account_id: None,
+        comment_url: None,
     })
     .map_err(|error| error.to_string())
 }

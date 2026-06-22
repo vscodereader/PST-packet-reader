@@ -85,6 +85,11 @@ pub struct ForumTarget {
     pub account_id: String,
     pub name: String,
     pub code: String,
+    /// "특정 게시글" 댓글 대상의 종목토론방 글 URL. 비우면 기존 동작(종목 단위 게시/랜덤
+    /// 댓글). 채워지면 워커가 이 URL의 글에 직접 댓글을 단다(댓글 전용). 과거 plan과
+    /// 호환되도록 기본값(빈 문자열)을 허용한다.
+    #[serde(default)]
+    pub comment_url: String,
 }
 
 /// 밴드(band.us) 게시 대상 1건. `account_id`는 band 로그인 쿠키 키(= loginId) 규약을
@@ -749,6 +754,7 @@ mod tests {
                 account_id: "user01".into(),
                 name: "삼성전자".into(),
                 code: "005930".into(),
+                comment_url: String::new(),
             }],
             band: vec![BandTarget {
                 account_id: "user01".into(),
@@ -894,6 +900,7 @@ mod tests {
             account_id: "u".into(),
             name: "삼성전자".into(),
             code: "005930".into(),
+            comment_url: String::new(),
         }];
         p
     }

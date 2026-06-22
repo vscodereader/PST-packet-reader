@@ -261,9 +261,14 @@ describe("WriterModal", () => {
     await user.click(
       await screen.findByRole("button", { name: "특정 게시글" }),
     );
-    const urlInput = await screen.findByPlaceholderText(/finance\.naver\.com/);
-    await user.type(urlInput, "https://finance.naver.com/item/board_read");
-    expect(urlInput).toHaveValue("https://finance.naver.com/item/board_read");
+    const urlInput = await screen.findByPlaceholderText(/종목토론방 글/);
+    await user.type(
+      urlInput,
+      "https://stock.naver.com/domestic/stock/005930/discussion/421063210",
+    );
+    expect(urlInput).toHaveValue(
+      "https://stock.naver.com/domestic/stock/005930/discussion/421063210",
+    );
 
     // "인기글" 대상 → 대상당 댓글 개수 버튼이 나타나고, 개수를 바꾼다.
     await user.click(screen.getByRole("button", { name: "인기글" }));

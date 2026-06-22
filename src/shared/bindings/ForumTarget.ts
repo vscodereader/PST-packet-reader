@@ -3,4 +3,4 @@
 /**
  * 종목토론방 게시 대상 1건 (`ForumPublishRequest`의 stock 재료).
  */
-export type ForumTarget = { accountId: string, name: string, code: string, };
+export type ForumTarget = { accountId: string, name: string, code: string, commentUrl: string, };

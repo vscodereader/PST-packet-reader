@@ -448,6 +448,55 @@ describe("PublishModal", () => {
     ]);
   });
 
+  it("forum '특정 게시글' 댓글: 종목 선택 없이 게시 버튼이 활성화되고 plan.forum에 글 URL이 동결된다", async () => {
+    // 종목토론방 글 URL은 code(035720)가 URL 안에 있어 종목 선택이 필요 없다. 기본 stockCodes는
+    // 005930이지만, url 댓글 잡은 그 선택을 무시하고 URL의 035720을 대상으로 삼아야 한다 —
+    // code가 005930이 아니라 035720으로 동결되는 것으로 "URL이 곧 대상"임을 증명한다.
+    const forumUrl =
+      "https://stock.naver.com/domestic/stock/035720/discussion/421063210?chip=all";
+    const commentDoc: LibraryPost = {
+      id: "lfu",
+      title: "종토방 URL 댓글",
+      kind: "comment",
+      updated: "방금 전",
+      words: 20,
+      status: "ready",
+      excerpt: "요약",
+      commentTarget: "url",
+      commentUrl: forumUrl,
+      comments: ["댓글1"],
+    };
+    renderPublish({ doc: commentDoc });
+    // 기본 forum 계정이 선택돼 있다. 종목을 따로 고르지 않아도 게시 버튼이 활성화된다(잡 1건).
+    // (이전엔 카페 URL 파서로만 대상을 풀어, 종토방 URL은 대상 미해석 → 버튼 비활성이었다.)
+    const publishBtn = await screen.findByRole(
+      "button",
+      { name: /^게시 \(1\)/ },
+      { timeout: 3000 },
+    );
+    expect(publishBtn).toBeEnabled();
+
+    await userEvent.click(await screen.findByText("예약 게시"));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^예약 \(1\)/ }),
+    );
+    const call = ipcBackend.mock.calls.find(
+      (c) => c[0] === "add_queue_scheduled",
+    );
+    expect(call).toBeDefined();
+    const plan = (
+      call?.[1] as { item: { plan: { forum: unknown[]; naver: unknown[] } } }
+    ).item.plan;
+    expect(plan.naver).toEqual([]);
+    expect(plan.forum).toEqual([
+      expect.objectContaining({
+        accountId: "invest_king7",
+        code: "035720",
+        commentUrl: forumUrl,
+      }),
+    ]);
+  });
+
   it("includes a latest comment spec (cafeId + count) in a both-mode scheduled plan", async () => {
     const bothDoc: LibraryPost = {
       id: "lbs",

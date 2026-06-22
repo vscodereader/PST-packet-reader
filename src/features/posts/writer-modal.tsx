@@ -141,7 +141,7 @@ function CommentComposer({
               mb={18}
               value={url}
               onChange={(e) => setUrl(e.currentTarget.value)}
-              placeholder="https://finance.naver.com/item/board_read…"
+              placeholder="종목토론방 글 https://stock.naver.com/domestic/stock/005930/discussion/…  또는 카페 글 URL"
               styles={{ input: { fontFamily: "monospace" } }}
             />
           ) : (
