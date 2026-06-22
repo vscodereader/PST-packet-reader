@@ -191,9 +191,26 @@ pub fn run_naver_discussion_macro(
             }
         }
         AutomationTarget::Comment => {
-            let selected_url = chrome.current_url()?;
-            packet_client.ensure_profile_intro_setup(&selected_url)?;
-            chrome.open_random_discussion_post(&packet_client)?;
+            // "특정 게시글" 댓글: 사용자가 넣은 글 URL로 직접 이동해 그 글에 댓글을 단다.
+            // URL이 없으면 기존 동작(선택 종목토론방의 랜덤 글)을 그대로 유지한다.
+            let comment_url = request
+                .comment_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|url| !url.is_empty());
+            match comment_url {
+                Some(url) => {
+                    chrome.navigate(url)?;
+                    chrome.wait_for_ready_state(Duration::from_secs(30))?;
+                    sleep(Duration::from_secs(2));
+                    packet_client.ensure_profile_intro_setup(url)?;
+                }
+                None => {
+                    let selected_url = chrome.current_url()?;
+                    packet_client.ensure_profile_intro_setup(&selected_url)?;
+                    chrome.open_random_discussion_post(&packet_client)?;
+                }
+            }
             if request.submit_after_fill {
                 chrome.submit_comment_and_refresh(&packet_client, body)?;
                 (false, true)

@@ -62,6 +62,44 @@ export function parseCafeArticleUrl(
   return null;
 }
 
+/** A resolved 종목토론방(forum) comment target parsed from a discussion post URL —
+ * the item `code`, the `postId`, and the canonical `url` to navigate to. */
+export interface ForumArticleTarget {
+  code: string;
+  postId: string;
+  url: string;
+}
+
+/**
+ * Parse a 네이버 종목토론방 discussion **post** URL into its item code + post id.
+ *
+ * The real input is what a user copies from a forum post page:
+ * `https://stock.naver.com/domestic/stock/005930/discussion/421063210?chip=all`
+ * (also `worldstock/{stock|index}` and `domestic/index`, e.g. `…/index/KOSPI/…`).
+ * The backend posts the comment via the packet API, which derives the discussion
+ * target from this exact path shape (`/{stock|index}/{code}/discussion/{id}`), so
+ * we accept only this form and re-emit a canonical `…?chip=all` url to navigate.
+ *
+ * Returns `null` for a room URL without a post id, a cafe URL, or empty input —
+ * the caller blocks publishing so a comment never lands on the wrong (or random)
+ * post.
+ */
+export function parseForumArticleUrl(
+  url: string | undefined,
+): ForumArticleTarget | null {
+  if (!url) return null;
+  // /{domestic|worldstock}/{stock|index}/{code}/discussion/{postId}
+  const m = url.match(
+    /\/(?:domestic|worldstock)\/(?:stock|index)\/([^/?#]+)\/discussion\/(\d+)/,
+  );
+  if (!m) return null;
+  const code = m[1];
+  const postId = m[2];
+  if (!code || !postId) return null;
+  const base = url.slice(0, m.index! + m[0].length);
+  return { code, postId, url: `${base}?chip=all` };
+}
+
 /**
  * Take the top-N entries of a latest/popular article list, preserving the
  * backend's order. Graceful fallback: when the list has fewer than N (or N <= 0)

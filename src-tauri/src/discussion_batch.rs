@@ -85,6 +85,10 @@ pub struct ForumPublishRequest {
     /// 과거 요청과 호환되도록 기본값(빈 문자열)을 허용한다.
     #[serde(default)]
     pub link_override: String,
+    /// "특정 게시글" 댓글 대상의 종목토론방 글 URL. 지정되면 댓글은 랜덤 글이 아니라
+    /// 이 URL의 글에 달린다(run_comment=true 전용). None이면 기존 per-종목 동작.
+    #[serde(default)]
+    pub comment_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +235,8 @@ fn run_one_forum_stock<R: Runtime>(
             submit_after_fill: true,
             stock: Some(stock.clone()),
             account_id: Some(request.account_id.clone()),
+            // "특정 게시글" 댓글이면 그 글 URL을 그대로 넘겨 랜덤 글 대신 이 글에 댓글을 단다.
+            comment_url: request.comment_url.clone(),
         })
         .map(|report| {
             if request.run_comment {
@@ -423,6 +429,7 @@ pub fn run_discussion_batch<R: Runtime>(
                 submit_after_fill: true,
                 stock: Some(stock.clone()),
                 account_id: request.account_id.clone(),
+                comment_url: None,
             }) {
                 Ok(report) => {
                     tracing::info!("[POST] {who}  \"{stock_name}\" 종목토론방 글 성공 ✅");
@@ -454,6 +461,7 @@ pub fn run_discussion_batch<R: Runtime>(
                 submit_after_fill: true,
                 stock: Some(stock),
                 account_id: request.account_id.clone(),
+                comment_url: None,
             }) {
                 Ok(report) => {
                     tracing::info!("[POST] {who}  \"{stock_name}\" 종목토론방 댓글 성공 ✅");

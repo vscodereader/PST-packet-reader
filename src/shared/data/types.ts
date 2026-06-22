@@ -120,6 +120,9 @@ export interface PublishJob {
    *  게시판 URL에서 직접 뽑는다. boardType은 게시 시점 백엔드가 해결한다. */
   cafeId?: number;
   menuId?: number;
+  /** forum(종목토론방) 전용: "특정 게시글" 댓글 대상의 글 URL(잡 생성 시 동결). 채워지면
+   *  워커가 이 URL의 글에 직접 댓글을 단다(종목 선택·랜덤 글 없이). 그 외 forum 잡은 비운다. */
+  commentUrl?: string;
   board: string;
   status: AccountStatus;
 }

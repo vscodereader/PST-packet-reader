@@ -15,6 +15,11 @@ pub struct NaverDiscussionRequest {
     // None이면 기존처럼 Chrome에 이미 로그인된 세션의 쿠키를 사용합니다.
     #[serde(default)]
     pub account_id: Option<String>,
+    // 댓글(Comment) 대상이 "특정 게시글"일 때, 그 글의 종목토론방 URL. 지정되면 댓글은
+    // 랜덤 글을 고르지 않고 이 URL로 직접 이동해 그 글에 달린다. None/빈값이면 기존처럼
+    // 선택 종목토론방의 랜덤 글에 댓글을 단다(하위호환).
+    #[serde(default)]
+    pub comment_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

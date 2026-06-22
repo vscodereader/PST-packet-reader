@@ -6,6 +6,7 @@ import {
   commentSummary,
   commentsAllOk,
   parseCafeArticleUrl,
+  parseForumArticleUrl,
   topNArticles,
 } from "./comment-jobs";
 
@@ -55,6 +56,71 @@ describe("parseCafeArticleUrl", () => {
     ).toBeNull();
     expect(parseCafeArticleUrl("")).toBeNull();
     expect(parseCafeArticleUrl(undefined)).toBeNull();
+  });
+});
+
+describe("parseForumArticleUrl", () => {
+  it("parses a domestic stock 종목토론방 post URL", () => {
+    expect(
+      parseForumArticleUrl(
+        "https://stock.naver.com/domestic/stock/005930/discussion/421063210?chip=all",
+      ),
+    ).toEqual({
+      code: "005930",
+      postId: "421063210",
+      url: "https://stock.naver.com/domestic/stock/005930/discussion/421063210?chip=all",
+    });
+  });
+
+  it("parses without a query string and re-canonicalizes the url", () => {
+    expect(
+      parseForumArticleUrl(
+        "https://stock.naver.com/domestic/stock/005930/discussion/421063210",
+      ),
+    ).toEqual({
+      code: "005930",
+      postId: "421063210",
+      url: "https://stock.naver.com/domestic/stock/005930/discussion/421063210?chip=all",
+    });
+  });
+
+  it("parses a domestic index (e.g. KOSPI) discussion post", () => {
+    expect(
+      parseForumArticleUrl(
+        "https://stock.naver.com/domestic/index/KOSPI/discussion/123?chip=all",
+      ),
+    ).toEqual({
+      code: "KOSPI",
+      postId: "123",
+      url: "https://stock.naver.com/domestic/index/KOSPI/discussion/123?chip=all",
+    });
+  });
+
+  it("parses a worldstock discussion post", () => {
+    expect(
+      parseForumArticleUrl(
+        "https://stock.naver.com/worldstock/stock/AAPL.O/discussion/777",
+      ),
+    ).toEqual({
+      code: "AAPL.O",
+      postId: "777",
+      url: "https://stock.naver.com/worldstock/stock/AAPL.O/discussion/777?chip=all",
+    });
+  });
+
+  it("returns null for a room URL (no post id), cafe URL, or empty input", () => {
+    expect(
+      parseForumArticleUrl(
+        "https://stock.naver.com/domestic/stock/005930/discussion?chip=all",
+      ),
+    ).toBeNull();
+    expect(
+      parseForumArticleUrl(
+        "https://cafe.naver.com/ca-fe/cafes/31732304/articles/9",
+      ),
+    ).toBeNull();
+    expect(parseForumArticleUrl("")).toBeNull();
+    expect(parseForumArticleUrl(undefined)).toBeNull();
   });
 });
 

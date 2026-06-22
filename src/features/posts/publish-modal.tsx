@@ -49,7 +49,7 @@ import { DateTimePicker } from "@/shared/ui/date-time-picker";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo, PlatformPill } from "@/shared/ui/platform-logo";
 
-import { parseCafeArticleUrl } from "./comment-jobs";
+import { parseCafeArticleUrl, parseForumArticleUrl } from "./comment-jobs";
 import { PreviewModal } from "./preview-modal";
 import {
   clampCommentCount,
@@ -734,6 +734,13 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     commentTargetMode === "latest" || commentTargetMode === "popular";
   const urlTarget =
     commentTargetMode === "url" ? parseCafeArticleUrl(doc.commentUrl) : null;
+  // 종목토론방(forum) "특정 게시글" 댓글 대상. url이 `stock.naver.com/.../discussion/{id}`
+  // 형이면 종목코드+글ID가 URL에서 다 나오므로 종목 선택이 필요 없다. 카페 url 대상과
+  // 별개로 평가해(둘 중 하나만 매칭), forum 계정이 종목 선택 없이 그 글에 바로 댓글을 단다.
+  const forumUrlTarget =
+    mode === "comment" && commentTargetMode === "url"
+      ? parseForumArticleUrl(doc.commentUrl)
+      : null;
   const toggle = (id: string) => {
     // 게시 불가 계정(로그인 실패 계열)은 선택에 넣지 않는다 — 방어선(클릭은 disabled로
     // 이미 막히지만, 어떤 경로로도 실패 계정이 selected에 들어오지 못하게 한다).
@@ -780,20 +787,35 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     const a = accounts.find((x) => x.id === aid);
     if (!a) return;
     if (a.platform === "forum") {
-      stockCodes.forEach((code) =>
+      if (forumUrlTarget) {
+        // "특정 게시글" 댓글: URL이 곧 대상이라 종목 선택이 필요 없다 — 계정마다 잡 1개.
+        // code는 URL에서 뽑은 종목코드(토큰 치환·라벨용), commentUrl은 댓글 달 글 URL.
         jobs.push({
-          key: aid + "-" + code,
+          key: aid,
           platform: "forum",
           loginId: a.loginId,
-          targetName:
-            stockNames[code] ??
-            stocks.find((x) => x.code === code)?.name ??
-            code,
-          code,
-          board: "종목토론방",
+          targetName: `종목토론방 글 #${forumUrlTarget.postId}`,
+          code: forumUrlTarget.code,
+          commentUrl: forumUrlTarget.url,
+          board: "댓글",
           status: a.status,
-        }),
-      );
+        });
+      } else {
+        stockCodes.forEach((code) =>
+          jobs.push({
+            key: aid + "-" + code,
+            platform: "forum",
+            loginId: a.loginId,
+            targetName:
+              stockNames[code] ??
+              stocks.find((x) => x.code === code)?.name ??
+              code,
+            code,
+            board: "종목토론방",
+            status: a.status,
+          }),
+        );
+      }
     } else if (a.platform === "naver") {
       if (mode === "comment" && commentTargetMode === "url") {
         // url 댓글 대상은 카페 게시판이 필요 없다(특정 글이 곧 대상) — 계정마다 잡 1개.
@@ -858,7 +880,13 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       });
     }
   });
-  const targetsOk = !selPlatforms.includes("forum") || stockCodes.length > 0;
+  // forum은 보통 종목(stockCodes)을 1개 이상 골라야 한다. 단 "특정 게시글" 댓글이면 URL이
+  // 곧 대상(종목코드까지 URL에 있음)이라 종목 선택을 면제한다 — 종목 미선택으로 게시가
+  // 막히지 않게 한다.
+  const targetsOk =
+    !selPlatforms.includes("forum") ||
+    stockCodes.length > 0 ||
+    forumUrlTarget !== null;
   // Comment-only mode needs comments and a resolved target. `url`은 특정 글 하나로
   // 풀리고, latest/popular는 그 목록을 읽을 카페(게시판)가 필요하므로 선택한 게시판이
   // 1개 이상이면 준비된 것으로 본다(게시 시점 워커가 상위 N을 추출).
@@ -870,10 +898,13 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     selPlatforms.includes("band") &&
     selectedBands.length > 0 &&
     isListTarget;
+  // url 모드의 "대상 해석됨"은 카페 글(urlTarget) 또는 종목토론방 글(forumUrlTarget) 중
+  // 하나만 풀려도 충분하다 — 사용자가 붙여넣은 URL이 어느 플랫폼 글인지에 따라 한쪽이 매칭된다.
+  const urlTargetResolved = urlTarget !== null || forumUrlTarget !== null;
   const commentReady =
     mode !== "comment" ||
     (comments.length > 0 &&
-      ((isListTarget ? listTargetReady : urlTarget !== null) ||
+      ((isListTarget ? listTargetReady : urlTargetResolved) ||
         bandOnlyCommentReady));
   // 네이버 카페가 선택됐으면 게시할 게시판을 1개 이상 골라야 한다(밴드와 동일). url 댓글
   // 대상은 게시판이 필요 없어 면제한다. 게시판 미선택이면 게시를 막아 조용한 누락을 막는다.
@@ -964,6 +995,9 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         accountId: j.loginId,
         name: j.targetName,
         code: j.code ?? "",
+        // "특정 게시글" 댓글 잡이면 그 글 URL을 동결해 워커가 랜덤 글이 아니라 이 글에
+        // 댓글을 달게 한다. 일반 종목 게시 잡은 빈 문자열(기존 per-종목 동작).
+        commentUrl: j.commentUrl ?? "",
       }));
     const bandSpec = bandCommentSpecFor();
     // 밴드는 url(특정 글) 댓글을 지원하지 않으므로, url 모드일 때 plan에 밴드 대상을
