@@ -497,6 +497,52 @@ describe("PublishModal", () => {
     ]);
   });
 
+  it("band '특정 게시글' 댓글: 밴드 선택 없이 게시 버튼이 활성화되고 plan.band에 글 URL+url 스펙이 동결된다", async () => {
+    const bandUrl = "https://www.band.us/band/103043410/post/57";
+    const commentDoc: LibraryPost = {
+      id: "lbu",
+      title: "밴드 URL 댓글",
+      kind: "comment",
+      updated: "방금 전",
+      words: 20,
+      status: "ready",
+      excerpt: "요약",
+      commentTarget: "url",
+      commentUrl: bandUrl,
+      comments: ["댓글1"],
+    };
+    renderPublish({ doc: commentDoc });
+    await userEvent.click(await screen.findByText("invest_king7")); // 기본 forum 해제
+    await userEvent.click(screen.getByText("value_invest")); // band 계정 선택
+    // '밴드 선택'(멤버십 추가) 없이도 URL이 곧 대상이라 게시 버튼이 활성화된다.
+    const publishBtn = await screen.findByRole(
+      "button",
+      { name: /^게시 \(1\)/ },
+      { timeout: 3000 },
+    );
+    expect(publishBtn).toBeEnabled();
+
+    await userEvent.click(await screen.findByText("예약 게시"));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^예약 \(1\)/ }),
+    );
+    const call = ipcBackend.mock.calls.find(
+      (c) => c[0] === "add_queue_scheduled",
+    );
+    expect(call).toBeDefined();
+    const plan = (
+      call?.[1] as { item: { plan: { band: unknown[]; forum: unknown[] } } }
+    ).item.plan;
+    expect(plan.forum).toEqual([]);
+    expect(plan.band).toEqual([
+      expect.objectContaining({
+        accountId: "value_invest",
+        link: bandUrl,
+        commentTarget: { mode: "url" },
+      }),
+    ]);
+  });
+
   it("includes a latest comment spec (cafeId + count) in a both-mode scheduled plan", async () => {
     const bothDoc: LibraryPost = {
       id: "lbs",

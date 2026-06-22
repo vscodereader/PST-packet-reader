@@ -5,6 +5,7 @@ import type { CommentPublishOutcome } from "@/shared/bindings/CommentPublishOutc
 import {
   commentSummary,
   commentsAllOk,
+  parseBandPostUrl,
   parseCafeArticleUrl,
   parseForumArticleUrl,
   topNArticles,
@@ -121,6 +122,40 @@ describe("parseForumArticleUrl", () => {
     ).toBeNull();
     expect(parseForumArticleUrl("")).toBeNull();
     expect(parseForumArticleUrl(undefined)).toBeNull();
+  });
+});
+
+describe("parseBandPostUrl", () => {
+  it("parses a band post URL (with www) into bandNo/postNo", () => {
+    expect(
+      parseBandPostUrl("https://www.band.us/band/103043410/post/2"),
+    ).toEqual({
+      bandNo: "103043410",
+      postNo: "2",
+      url: "https://www.band.us/band/103043410/post/2",
+    });
+  });
+
+  it("parses without scheme and ignores trailing query/path", () => {
+    expect(parseBandPostUrl("band.us/band/103043410/post/57?ref=feed")).toEqual(
+      {
+        bandNo: "103043410",
+        postNo: "57",
+        url: "https://www.band.us/band/103043410/post/57",
+      },
+    );
+  });
+
+  it("returns null for a band home link (no /post/), a forum url, or empty", () => {
+    // 밴드 홈 링크는 특정 글이 아니므로 대상이 될 수 없다(조용한 오대상 방지).
+    expect(parseBandPostUrl("https://band.us/band/103043410")).toBeNull();
+    expect(
+      parseBandPostUrl(
+        "https://stock.naver.com/domestic/stock/005930/discussion/1",
+      ),
+    ).toBeNull();
+    expect(parseBandPostUrl("")).toBeNull();
+    expect(parseBandPostUrl(undefined)).toBeNull();
   });
 });
 

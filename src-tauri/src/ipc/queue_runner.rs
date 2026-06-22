@@ -25,7 +25,8 @@ use crate::auth::outcome::LoginResolution;
 use crate::auth::OrchestratorError;
 use crate::band_post::error::{BandPostError, BandPostErrorKind};
 use crate::band_post::{
-    band_comment, band_publish, BandCommentOutcome, BandFeedSort, BandPublishOutcome,
+    band_comment, band_comment_on_post, band_publish, BandCommentOutcome, BandFeedSort,
+    BandPublishOutcome,
 };
 use crate::discussion_batch::{run_forum_publish, ForumPublishRequest, ForumPublishResult};
 use crate::naver_automation::types::DiscussionStock;
@@ -1511,9 +1512,17 @@ async fn run_band_targets<R: Runtime>(
             it.msg = "게시 중…".to_owned();
         }
         write_live_phase(app, id, &base_items, &live, base_done, total);
-        let result = if comment_only {
-            // 대상 spec에서 정렬·개수를 꺼낸다. 밴드는 url 미지원이라 latest로 편다.
-            // spec이 없으면(비정상) 최신글 1개 기본 — 어떤 경우에도 새 글은 쓰지 않는다.
+        let is_url_comment =
+            matches!(&t.comment_target, Some(spec) if matches!(spec.mode, CommentTarget::Url));
+        let result = if comment_only && is_url_comment {
+            // "특정 게시글" 댓글: link가 글 URL(band_no+post_no 포함)이라 피드 조회 없이 그
+            // 글 하나에 직접 댓글을 단다(카페·종토방 url 댓글의 밴드판).
+            band_comment_on_post(&t.account_id, &t.link, comments)
+                .await
+                .map(BandJobResult::Commented)
+        } else if comment_only {
+            // 대상 spec에서 정렬·개수를 꺼낸다(최신/인기 글목록). spec이 없으면(비정상)
+            // 최신글 1개 기본 — 어떤 경우에도 새 글은 쓰지 않는다.
             let (sort, count) = match &t.comment_target {
                 Some(spec) => (
                     if matches!(spec.mode, CommentTarget::Popular) {

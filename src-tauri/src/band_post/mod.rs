@@ -25,7 +25,7 @@ use tokio::time::sleep;
 use client::BandHttpClient;
 use cookies::load_band_cookie_header;
 use error::BandPostError;
-use link::band_no_from_link;
+use link::{band_no_from_link, post_no_from_link};
 // 카페 comment-only와 동일한 댓글 분배(셔플 후 1개씩 라운드로빈)를 재사용한다.
 use crate::naver_cafe::distribute::{distribute_comments, mulberry32, seed_from_clock};
 
@@ -335,6 +335,101 @@ async fn band_comment_inner(
     }
 
     // 결과 라벨용 실제 밴드명(조회 실패해도 게시는 성공이므로 best-effort).
+    let band_name = client
+        .get_band_name(&band_no, &key, &cookie_header)
+        .await
+        .ok()
+        .flatten();
+
+    Ok(BandCommentOutcome {
+        target_count: post_nos.len(),
+        commented_count,
+        band_name,
+    })
+}
+
+/// "특정 게시글" 댓글: 밴드 글 URL(`band.us/band/{band_no}/post/{post_no}`)의 그 글 하나에
+/// 댓글을 단다. 피드(최신/인기) 조회 없이 URL의 `post_no`에 바로 `create_comment`로 달아,
+/// 카페·종목토론방 url 댓글을 밴드에 미러한다. 목록 댓글과 같은 분배·베스트에포트 규칙을
+/// 단일 대상에 적용한다(필요한 band_no·post_no가 URL에 다 있어 추가 패킷이 필요 없다).
+pub async fn band_comment_on_post(
+    account_id: &str,
+    post_url: &str,
+    comments: &[String],
+) -> Result<BandCommentOutcome, BandPostError> {
+    match band_comment_on_post_inner(account_id, post_url, comments).await {
+        Ok(outcome) => {
+            if outcome.commented_count > 0 {
+                tracing::info!(
+                    "{}",
+                    comment_success_log(
+                        account_id,
+                        outcome.band_name.as_deref(),
+                        outcome.target_count,
+                        outcome.commented_count,
+                    )
+                );
+            } else {
+                tracing::warn!(
+                    "{}",
+                    comment_failure_log(account_id, outcome.band_name.as_deref(), outcome.target_count)
+                );
+            }
+            Ok(outcome)
+        }
+        Err(e) => {
+            tracing::warn!("[BAND] ❌ 특정 글 댓글 실패 — 계정 {account_id} ({e})");
+            Err(e)
+        }
+    }
+}
+
+async fn band_comment_on_post_inner(
+    account_id: &str,
+    post_url: &str,
+    comments: &[String],
+) -> Result<BandCommentOutcome, BandPostError> {
+    let band_no = band_no_from_link(post_url)
+        .ok_or_else(|| BandPostError::invalid_link(post_url.to_string()))?;
+    let post_no = post_no_from_link(post_url)
+        .ok_or_else(|| BandPostError::invalid_link(post_url.to_string()))?;
+
+    let cookie_header = load_band_cookie_header(account_id)
+        .map_err(|e| BandPostError::transport(e.to_string()))?
+        .ok_or_else(BandPostError::no_session)?;
+
+    let client = BandHttpClient::new();
+    tracing::info!(
+        "[BAND] 특정 글 댓글 시작 — 계정 {account_id}, band_no {band_no}, post_no {post_no}"
+    );
+    let key = client.fetch_secret_key(&cookie_header).await?;
+
+    // 단일 대상(그 글 하나)에 댓글 풀에서 1개를 분배해 단다(목록 댓글과 같은 규칙).
+    let post_nos = vec![post_no];
+    let mut rng = mulberry32(seed_from_clock());
+    let contents = distribute_comments(post_nos.len(), comments, &mut rng);
+
+    let mut commented_count = 0usize;
+    let mut attempted = 0usize;
+    for (post_no, content) in post_nos.iter().zip(contents.iter()) {
+        if content.trim().is_empty() {
+            continue;
+        }
+        if attempted > 0 {
+            sleep(BAND_COMMENT_DELAY).await;
+        }
+        attempted += 1;
+        match client
+            .create_comment(&band_no, *post_no, content, &key, &cookie_header)
+            .await
+        {
+            Ok(()) => commented_count += 1,
+            Err(error) => tracing::warn!(
+                "[BAND] 댓글 게시 실패 — 계정 {account_id}, post_no {post_no} ({error})"
+            ),
+        }
+    }
+
     let band_name = client
         .get_band_name(&band_no, &key, &cookie_header)
         .await
