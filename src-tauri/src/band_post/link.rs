@@ -32,9 +32,42 @@ pub fn band_no_from_link(link: &str) -> Option<String> {
     }
 }
 
+/// 밴드 **게시물** 링크에서 `post_no`(글 번호)를 추출한다.
+///
+/// "특정 게시글" 댓글 대상은 `band.us/band/{band_no}/post/{post_no}` 형태이며,
+/// `create_comment(band_no, post_no, …)`에 그대로 쓸 수 있다. `/post/{digits}`가 없으면
+/// (밴드 홈 링크 등) `None` — 특정 글이 아니므로 호출부가 댓글을 막는다.
+pub fn post_no_from_link(link: &str) -> Option<u64> {
+    let trimmed = link.trim();
+    let marker = "/post/";
+    let start = trimmed.find(marker)? + marker.len();
+    let rest = &trimmed[start..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse::<u64>().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracts_post_no_from_post_url() {
+        assert_eq!(
+            post_no_from_link("https://www.band.us/band/103043410/post/57"),
+            Some(57)
+        );
+        assert_eq!(
+            post_no_from_link("band.us/band/103043410/post/2?ref=feed"),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn post_no_is_none_without_post_segment() {
+        // 밴드 홈 링크는 특정 글이 아니므로 post_no가 없다.
+        assert_eq!(post_no_from_link("https://band.us/band/103043410"), None);
+        assert_eq!(post_no_from_link("103043410"), None);
+    }
 
     #[test]
     fn extracts_from_full_https_url() {

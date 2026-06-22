@@ -49,7 +49,11 @@ import { DateTimePicker } from "@/shared/ui/date-time-picker";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo, PlatformPill } from "@/shared/ui/platform-logo";
 
-import { parseCafeArticleUrl, parseForumArticleUrl } from "./comment-jobs";
+import {
+  parseBandPostUrl,
+  parseCafeArticleUrl,
+  parseForumArticleUrl,
+} from "./comment-jobs";
 import { PreviewModal } from "./preview-modal";
 import {
   clampCommentCount,
@@ -741,6 +745,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     mode === "comment" && commentTargetMode === "url"
       ? parseForumArticleUrl(doc.commentUrl)
       : null;
+  // 밴드(band) "특정 게시글" 댓글 대상. url이 band.us/band/{bandNo}/post/{postNo} 형이면
+  // bandNo+postNo가 URL에 다 있어 '밴드 선택'이 필요 없다(create_comment에 그대로 쓴다).
+  const bandUrlTarget =
+    mode === "comment" && commentTargetMode === "url"
+      ? parseBandPostUrl(doc.commentUrl)
+      : null;
   const toggle = (id: string) => {
     // 게시 불가 계정(로그인 실패 계열)은 선택에 넣지 않는다 — 방어선(클릭은 disabled로
     // 이미 막히지만, 어떤 경로로도 실패 계정이 selected에 들어오지 못하게 한다).
@@ -856,28 +866,42 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         });
       }
     } else if (a.platform === "band") {
-      // 선택한 각 밴드마다 잡 1개(계정 × 밴드). 라벨은 조회된 실제 밴드명. 댓글 전용 모드면
-      // 대상(최신글/인기글 + 개수)을, 그 외엔 "전체글"을 board 라벨로 둔다.
-      const bandBoard =
-        mode === "comment"
-          ? commentTargetMode === "popular"
-            ? `인기글 ${commentCount}건`
-            : `최신글 ${commentCount}건`
-          : "전체글";
-      selectedBands.forEach((no) => {
-        const b = resolvedBands.find((x) => x.bandNo === no);
-        if (!b) return;
+      if (bandUrlTarget) {
+        // "특정 게시글" 댓글: URL이 곧 대상(글)이라 '밴드 선택'이 필요 없다 — 계정마다 잡 1개.
+        // link에 글 URL(band_no+post_no 포함)을 동결해 워커가 그 글에 바로 댓글을 단다.
         jobs.push({
-          key: `${aid}-${no}`,
+          key: aid,
           platform: "band",
           loginId: a.loginId,
-          targetName: b.name,
-          // 가입 링크를 잡에 동결한다(밴드명이 같은 다른 밴드와의 오조회 방지).
-          bandLink: b.link,
-          board: bandBoard,
+          targetName: `밴드 글 #${bandUrlTarget.postNo}`,
+          bandLink: bandUrlTarget.url,
+          board: "댓글",
           status: a.status,
         });
-      });
+      } else {
+        // 선택한 각 밴드마다 잡 1개(계정 × 밴드). 라벨은 조회된 실제 밴드명. 댓글 전용 모드면
+        // 대상(최신글/인기글 + 개수)을, 그 외엔 "전체글"을 board 라벨로 둔다.
+        const bandBoard =
+          mode === "comment"
+            ? commentTargetMode === "popular"
+              ? `인기글 ${commentCount}건`
+              : `최신글 ${commentCount}건`
+            : "전체글";
+        selectedBands.forEach((no) => {
+          const b = resolvedBands.find((x) => x.bandNo === no);
+          if (!b) return;
+          jobs.push({
+            key: `${aid}-${no}`,
+            platform: "band",
+            loginId: a.loginId,
+            targetName: b.name,
+            // 가입 링크를 잡에 동결한다(밴드명이 같은 다른 밴드와의 오조회 방지).
+            bandLink: b.link,
+            board: bandBoard,
+            status: a.status,
+          });
+        });
+      }
     }
   });
   // forum은 보통 종목(stockCodes)을 1개 이상 골라야 한다. 단 "특정 게시글" 댓글이면 URL이
@@ -900,7 +924,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     isListTarget;
   // url 모드의 "대상 해석됨"은 카페 글(urlTarget) 또는 종목토론방 글(forumUrlTarget) 중
   // 하나만 풀려도 충분하다 — 사용자가 붙여넣은 URL이 어느 플랫폼 글인지에 따라 한쪽이 매칭된다.
-  const urlTargetResolved = urlTarget !== null || forumUrlTarget !== null;
+  const urlTargetResolved =
+    urlTarget !== null || forumUrlTarget !== null || bandUrlTarget !== null;
   const commentReady =
     mode !== "comment" ||
     (comments.length > 0 &&
@@ -915,7 +940,11 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   // 밴드가 선택됐으면 게시할 밴드를 1개 이상 골라야 게시 가능(사수 요구 흐름).
   // 예약(schedule)도 이제 밴드를 plan에 싣으므로 면제하지 않는다 — 즉시·예약 공통으로
   // 밴드 플랫폼이 선택됐다면 최소 1개의 밴드를 골라야 게시할 수 있다.
-  const bandReady = !selPlatforms.includes("band") || selectedBands.length > 0;
+  // 밴드 "특정 게시글" 댓글은 URL이 곧 대상이라 '밴드 선택'을 면제한다(forum 종목 면제와 동일).
+  const bandReady =
+    !selPlatforms.includes("band") ||
+    bandUrlTarget !== null ||
+    selectedBands.length > 0;
   const canPublish =
     usableSelected.length > 0 &&
     targetsOk &&
@@ -961,11 +990,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     return { mode: commentTargetMode, count: commentCount, cafeId };
   };
 
-  // 밴드 댓글 전용(comment) 모드의 동결 대상. 밴드는 기존 글(최신/인기)에만 댓글을 달고
-  // url 댓글은 지원하지 않아 url이면 latest로 편다(백엔드 run_band_targets도 동일 폴백).
-  // cafeId/articleId는 밴드에서 쓰지 않으므로 비운다(백엔드는 mode/count만 본다).
+  // 밴드 댓글 전용(comment) 모드의 동결 대상. "특정 게시글"(band 글 URL)이면 mode=url로
+  // 동결해 워커가 그 글에 직접 댓글을 달게 한다(post_no는 link에 있음). 그 외엔 기존 글
+  // (최신/인기) 대상이다. cafeId/articleId는 밴드에서 쓰지 않으므로 비운다.
   const bandCommentSpecFor = (): CommentTargetSpec | undefined => {
     if (mode !== "comment") return undefined;
+    if (bandUrlTarget) return { mode: "url" };
     const m = commentTargetMode === "popular" ? "popular" : "latest";
     return { mode: m, count: commentCount };
   };
@@ -1000,11 +1030,13 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         commentUrl: j.commentUrl ?? "",
       }));
     const bandSpec = bandCommentSpecFor();
-    // 밴드는 url(특정 글) 댓글을 지원하지 않으므로, url 모드일 때 plan에 밴드 대상을
-    // 싣지 않는다(안 그러면 bandCommentSpecFor가 latest로 접혀 엉뚱한 최신글에 댓글이
-    // 달린다 — 워커도 이 대상을 받지 못하니 시도조차 안 한다). 카페 url 대상은 그대로 실린다.
+    // url 모드인데 붙여넣은 URL이 밴드 글 URL이 아니면(카페·종토방 글) 밴드 대상을 plan에
+    // 싣지 않는다 — 안 그러면 엉뚱한 최신글에 댓글이 달린다. 밴드 글 URL이면(bandUrlTarget)
+    // 그 글에 직접 댓글을 달 수 있으므로 정상적으로 싣는다(forum/카페 url 대상도 그대로).
     const bandUrlUnsupported =
-      mode === "comment" && commentTargetMode === "url";
+      mode === "comment" &&
+      commentTargetMode === "url" &&
+      bandUrlTarget === null;
     const band: BandTarget[] = bandUrlUnsupported
       ? []
       : jobs

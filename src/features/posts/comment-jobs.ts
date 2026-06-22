@@ -100,6 +100,40 @@ export function parseForumArticleUrl(
   return { code, postId, url: `${base}?chip=all` };
 }
 
+/** A resolved 밴드(band) comment target parsed from a band **post** URL — the
+ * `bandNo`, the `postNo`, and a canonical `url`. */
+export interface BandPostTarget {
+  bandNo: string;
+  postNo: string;
+  url: string;
+}
+
+/**
+ * Parse a 밴드 게시물 URL into its `bandNo`/`postNo`.
+ *
+ * The input is what a user copies from a band post: `band.us/band/{bandNo}/post/
+ * {postNo}` (with or without `www`/scheme/query). The backend comments via
+ * `create_comment(band_no, post_no, …)`, and both ids live in this URL — so no
+ * packet capture is needed, only this parse. A band **home** link (no `/post/`)
+ * is not a specific post and returns `null`, so the caller blocks publishing
+ * rather than commenting on the wrong (or a feed) post.
+ */
+export function parseBandPostUrl(
+  url: string | undefined,
+): BandPostTarget | null {
+  if (!url) return null;
+  const m = url.match(/band\.us\/band\/(\d+)\/post\/(\d+)/);
+  if (!m) return null;
+  const bandNo = m[1];
+  const postNo = m[2];
+  if (!bandNo || !postNo) return null;
+  return {
+    bandNo,
+    postNo,
+    url: `https://www.band.us/band/${bandNo}/post/${postNo}`,
+  };
+}
+
 /**
  * Take the top-N entries of a latest/popular article list, preserving the
  * backend's order. Graceful fallback: when the list has fewer than N (or N <= 0)
