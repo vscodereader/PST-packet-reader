@@ -504,6 +504,34 @@ mod tests {
             .expect("댓글 성공이어야 함");
     }
 
+    #[tokio::test]
+    async fn create_comment_on_missing_post_surfaces_error() {
+        // 삭제·없는 글에 댓글을 달면 밴드가 result_code!=1로 거절한다. 이 에러가 표면화돼야
+        // band_comment_on_post가 `?`로 전파하고, 완료 로그가 사유+trace를 남긴다(특정 게시글
+        // 댓글 실패 사유 노출). 댓글 0건을 성공으로 묻지 않는다.
+        let api = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/v2\.3\.0/create_comment"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"result_code":1001,"result_data":{"message":"삭제되었거나 존재하지 않는 게시글입니다."}}"#,
+            ))
+            .mount(&api)
+            .await;
+
+        let client = BandHttpClient::with_base_urls(api.uri(), "http://unused");
+        let err = client
+            .create_comment("103043410", 999, "댓글", &test_key(), FAKE_COOKIE)
+            .await
+            .expect_err("없는 글 댓글은 실패여야 함");
+        match err.kind {
+            BandPostErrorKind::Api(api_err) => {
+                assert_eq!(api_err.result_code, Some(1001));
+                assert_eq!(api_err.message, "삭제되었거나 존재하지 않는 게시글입니다.");
+            }
+            other => panic!("Api 오류여야 함: {other:?}"),
+        }
+    }
+
     #[test]
     fn redact_secret_key_hides_value_keeps_context() {
         let text =
