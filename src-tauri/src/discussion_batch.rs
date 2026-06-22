@@ -180,6 +180,18 @@ where
     results
 }
 
+/// 댓글 전용 결과의 '게시내용' 링크를 고른다. "특정 게시글" 댓글이면 그 글 URL(공백 제거
+/// 후 비어있지 않을 때)을 쓰고, 아니면 매크로가 돌려준 글 URL(랜덤 글 댓글은 None)로
+/// 떨어진다. 알림 '게시내용'에서 댓글 옆에 단 글의 링크를 보여주는 데 쓴다.
+fn comment_detail_url(comment_url: &Option<String>, report_post_url: Option<String>) -> Option<String> {
+    comment_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(ToOwned::to_owned)
+        .or(report_post_url)
+}
+
 // 한 종목에 글/댓글을 게시하는 함수입니다(kind에 따라 엔진 함수를 고릅니다).
 fn run_one_forum_stock<R: Runtime>(
     request: &ForumPublishRequest,
@@ -240,12 +252,14 @@ fn run_one_forum_stock<R: Runtime>(
         })
         .map(|report| {
             if request.run_comment {
-                // 댓글 전용: 게시한 글은 없고 댓글 내용을 보존한다.
+                // 댓글 전용: 게시한 글은 없고 댓글 내용을 보존한다. "특정 게시글" 댓글이면
+                // 그 글 URL을 url에 실어, 알림 '게시내용'에서 댓글만이 아니라 단 글의 링크도
+                // 보이게 한다(랜덤 글 댓글은 대상 URL이 없어 기존대로 None).
                 PostedContent {
                     title: String::new(),
                     body: String::new(),
                     comment: Some(comment.to_owned()),
-                    url: report.post_url,
+                    url: comment_detail_url(&request.comment_url, report.post_url),
                 }
             } else {
                 PostedContent {
@@ -759,6 +773,27 @@ fn pseudo_index(len: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comment_detail_url_prefers_specific_post_url_then_falls_back() {
+        let url = "https://stock.naver.com/domestic/stock/035720/discussion/421063210?chip=all";
+        // "특정 게시글" 댓글: 그 글 URL이 '게시내용' 링크가 된다(댓글만 보이지 않게).
+        assert_eq!(
+            comment_detail_url(&Some(url.to_owned()), None).as_deref(),
+            Some(url)
+        );
+        // 공백뿐인 comment_url은 무시하고 매크로가 돌려준 글 URL로 떨어진다.
+        assert_eq!(
+            comment_detail_url(&Some("   ".to_owned()), Some("p".to_owned())).as_deref(),
+            Some("p")
+        );
+        // 랜덤 글 댓글(대상 URL 없음, post_url도 None)은 링크가 없다(기존 동작).
+        assert_eq!(comment_detail_url(&None, None), None);
+        assert_eq!(
+            comment_detail_url(&None, Some("p".to_owned())).as_deref(),
+            Some("p")
+        );
+    }
 
     #[test]
     fn parses_template_csv_without_header_values() {
