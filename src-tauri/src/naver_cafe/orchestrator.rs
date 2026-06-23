@@ -529,9 +529,10 @@ pub async fn run_post_jobs(jobs: &[PostJob]) -> Vec<JobReport> {
 }
 
 /// 같은 계정이 여러 게시판에 글을 연속으로 올릴 때, 네이버의 연속등록 차단("게시글을
-/// 연속으로 등록할 수 없습니다…")으로 두 번째 이후가 거부되는 것을 피하려고 글 사이에 두는
-/// 기본 간격. 댓글 경로의 [`COMMENT_JOB_DELAY`]와 같은 취지·같은 값(4초)이다.
-const POST_JOB_DELAY: Duration = Duration::from_millis(4000);
+/// 연속으로 등록할 수 없습니다…", errorCode 20004)으로 두 번째 이후가 거부되는 것을 피하려고
+/// 글 사이에 두는 기본 간격. 댓글 경로의 [`COMMENT_JOB_DELAY`](4초)와 같은 취지지만, 글
+/// 연속등록 쿨다운이 댓글보다 길어 4초로는 부족해 11초로 둔다.
+const POST_JOB_DELAY: Duration = Duration::from_millis(11000);
 
 /// [`run_post_jobs`]와 같지만 글 1건을 끝낼 때마다 `on_each(누적_완료수)`를 호출해 진행률을
 /// 보고한다 — 게시 큐 워커가 진행률을 0/N→1/N→…로 1건 단위로 갱신하는 데 쓴다(배치 완료만
