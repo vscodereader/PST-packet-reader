@@ -29,7 +29,7 @@ jobs:
           echo "::error::release must be dispatched from master/main (got ${{ github.ref }})"
           exit 1
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: pnpm/action-setup@v6
 
