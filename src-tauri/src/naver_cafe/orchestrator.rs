@@ -528,29 +528,11 @@ pub async fn run_post_jobs(jobs: &[PostJob]) -> Vec<JobReport> {
     run_post_jobs_with_progress(jobs, |_| {}).await
 }
 
-/// 같은 계정이 여러 게시판에 글을 연속으로 올릴 때, 네이버의 연속등록 차단("게시글을
-/// 연속으로 등록할 수 없습니다…", errorCode 20004)으로 두 번째 이후가 거부되는 것을 피하려고
-/// 글 사이에 두는 기본 간격. 댓글 경로의 [`COMMENT_JOB_DELAY`](4초)와 같은 취지지만, 글
-/// 연속등록 쿨다운이 댓글보다 길어 4초로는 부족해 11초로 둔다.
-const POST_JOB_DELAY: Duration = Duration::from_millis(11000);
-
 /// [`run_post_jobs`]와 같지만 글 1건을 끝낼 때마다 `on_each(누적_완료수)`를 호출해 진행률을
 /// 보고한다 — 게시 큐 워커가 진행률을 0/N→1/N→…로 1건 단위로 갱신하는 데 쓴다(배치 완료만
-/// 반영해 0/N에서 곧장 사라지지 않게). 같은 계정의 여러 게시판 글은 [`POST_JOB_DELAY`]만큼
-/// 간격을 두고 올려, 두 번째 이후가 연속등록 차단으로 누락되지 않게 한다.
+/// 반영해 0/N에서 곧장 사라지지 않게).
 pub async fn run_post_jobs_with_progress<F: FnMut(usize)>(
     jobs: &[PostJob],
-    on_each: F,
-) -> Vec<JobReport> {
-    run_post_jobs_with_delay(jobs, POST_JOB_DELAY, on_each).await
-}
-
-/// [`run_post_jobs_with_progress`]의 본체. 글 사이 간격을 인자로 받아 테스트에서 0으로 둘 수
-/// 있다(댓글 러너 [`run_comment_jobs_with_delay`]와 동일 구조). 첫 글은 즉시, 두 번째부터
-/// `delay`만큼 기다린 뒤 올린다 — 연속등록 차단(도배 방지) 회피.
-async fn run_post_jobs_with_delay<F: FnMut(usize)>(
-    jobs: &[PostJob],
-    delay: Duration,
     mut on_each: F,
 ) -> Vec<JobReport> {
     let orchestrator = CafeOrchestrator::new();
@@ -558,10 +540,6 @@ async fn run_post_jobs_with_delay<F: FnMut(usize)>(
     let total = jobs.len();
     let mut reports = Vec::with_capacity(total);
     for (index, job) in jobs.iter().enumerate() {
-        // 첫 글은 바로, 두 번째 글부터 연속등록 차단 회피용 간격을 둔다(댓글 러너와 동일).
-        if index > 0 && !delay.is_zero() {
-            sleep(delay).await;
-        }
         // 각 글 등록의 시도/성공/실패를 tracing으로 남겨, 게시 실패 시 네이버 오류
         // 코드/사유를 로그에서 확인할 수 있게 한다(댓글 경로와 대칭). 쿠키 값·본문은
         // 절대 로그에 포함하지 않는다.
@@ -1053,8 +1031,7 @@ mod tests {
             sample_job_for_account("no-such-account-2", "31732304"),
         ];
 
-        // 지연 0으로 둬 테스트가 글 간 간격을 기다리지 않게 한다(여러 건이어도 즉시 보고).
-        let reports = run_post_jobs_with_delay(&jobs, Duration::ZERO, |_| {}).await;
+        let reports = run_post_jobs(&jobs).await;
 
         assert_eq!(reports.len(), 2, "작업 수만큼 보고가 나와야 함");
         for report in &reports {
@@ -1065,41 +1042,6 @@ mod tests {
                 "쿠키 없음 코드여야 함"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn run_post_jobs_spaces_consecutive_posts_by_the_delay() {
-        // 같은 계정이 여러 게시판에 글을 올릴 때 연속등록 차단을 피해 글 사이에 간격을 둔다.
-        // 쿠키 없는 계정이라 네트워크 없이 즉시 실패하므로, 측정 시간은 글 간 간격뿐이다.
-        // 첫 글은 즉시, 두 번째부터 간격 → 3건이면 간격 2번(최소 2*delay)을 기다린다.
-        let jobs = vec![
-            sample_job_for_account("no-such-1", "31732304"),
-            sample_job_for_account("no-such-2", "31732304"),
-            sample_job_for_account("no-such-3", "31732304"),
-        ];
-        let delay = Duration::from_millis(40);
-        let start = std::time::Instant::now();
-        let reports = run_post_jobs_with_delay(&jobs, delay, |_| {}).await;
-        let elapsed = start.elapsed();
-
-        assert_eq!(reports.len(), 3, "건너뛰어도 작업 수만큼 보고가 나와야 함");
-        assert!(
-            elapsed >= delay * 2,
-            "글 사이에 간격이 있어야 함(3건=간격 2번): {elapsed:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn run_post_jobs_single_job_does_not_wait() {
-        // 글이 1건이면 간격을 두지 않는다(첫 글은 즉시).
-        let jobs = vec![sample_job_for_account("no-such-1", "31732304")];
-        let start = std::time::Instant::now();
-        let reports = run_post_jobs_with_delay(&jobs, Duration::from_secs(60), |_| {}).await;
-        assert_eq!(reports.len(), 1);
-        assert!(
-            start.elapsed() < Duration::from_secs(1),
-            "단일 글은 간격 없이 즉시 처리"
-        );
     }
 
     fn sample_job_for_account(account_id: &str, cafe: &str) -> PostJob {
