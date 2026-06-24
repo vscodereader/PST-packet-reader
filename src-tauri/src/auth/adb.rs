@@ -76,7 +76,18 @@ pub(crate) struct IpRotation {
 /// 토글 전후의 외부 IP를 stderr로 출력해 `pnpm tauri dev` 콘솔에서 IP 회전 여부를
 /// 직접 눈으로 확인할 수 있게 한다. (Samsung One UI는 `cmd connectivity airplane-mode`로
 /// 토글해도 상단 버튼에 불이 안 들어올 수 있으나, IP가 바뀌면 라디오는 실제로 순환한 것.)
-pub async fn toggle_airplane_mode() -> Result<IpRotation, OrchestratorError> {
+/// 비행기모드 토글(IP 회전)의 ON 대기 방식. 호출 맥락에 따라 다르다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpRotationMode {
+    /// "IP 변경" 버튼: 라디오가 실제로 끊겼다 재등록해 IP가 바뀌도록 고정 hold(3초)를 둔다.
+    /// 설정 플래그만 즉시 1이 되어선 라디오가 안 끊겨 IP가 그대로이기 때문(필수).
+    EnsureIpChange,
+    /// 로그인: 비행기모드 ON/OFF가 ADB로 확정되면 즉시 다음으로 넘어간다(빠름, 사수 지시).
+    /// 라디오 드롭을 보장하지 않으므로 로그인 중엔 IP가 바뀌지 않을 수 있다(IP 변경은 버튼 담당).
+    FastConfirm,
+}
+
+pub async fn toggle_airplane_mode(mode: IpRotationMode) -> Result<IpRotation, OrchestratorError> {
     let before = fetch_external_ip().await;
     tracing::info!("[ADB] ✈ 비행기모드 ON");
     run_adb_timed(
@@ -86,11 +97,17 @@ pub async fn toggle_airplane_mode() -> Result<IpRotation, OrchestratorError> {
             .collect(),
     )
     .await?;
-    tracing::info!(
-        "[ADB]   └ 상태 확인: 비행기모드 {}",
-        airplane_mode_state().await
-    );
-    sleep(Duration::from_secs(config::ADB_AIRPLANE_ENABLE_SECS)).await;
+    // ON 대기: 버튼은 라디오가 실제로 끊기도록 고정 3초 hold, 로그인은 ADB로 ON 확정 즉시 진행.
+    match mode {
+        IpRotationMode::EnsureIpChange => {
+            tracing::info!(
+                "[ADB]   └ 상태 확인: 비행기모드 {}",
+                airplane_mode_state().await
+            );
+            sleep(Duration::from_secs(config::ADB_AIRPLANE_ENABLE_SECS)).await;
+        }
+        IpRotationMode::FastConfirm => wait_for_airplane_state(true).await,
+    }
     tracing::info!("[ADB] ✈ 비행기모드 OFF — 인터넷 복구 대기");
     run_adb_timed(
         airplane_mode_args(false)
@@ -99,10 +116,16 @@ pub async fn toggle_airplane_mode() -> Result<IpRotation, OrchestratorError> {
             .collect(),
     )
     .await?;
-    tracing::info!(
-        "[ADB]   └ 상태 확인: 비행기모드 {}",
-        airplane_mode_state().await
-    );
+    // OFF 대기: 버튼은 상태만 로깅, 로그인은 ADB로 OFF 확정 즉시 진행.
+    match mode {
+        IpRotationMode::EnsureIpChange => {
+            tracing::info!(
+                "[ADB]   └ 상태 확인: 비행기모드 {}",
+                airplane_mode_state().await
+            );
+        }
+        IpRotationMode::FastConfirm => wait_for_airplane_state(false).await,
+    }
     wait_for_internet_connection().await?;
     let after = fetch_external_ip().await;
 
@@ -170,6 +193,52 @@ fn airplane_state_label(raw: &str) -> &'static str {
         "1" => "ON(켜짐)",
         "0" => "OFF(꺼짐)",
         _ => "(알 수 없음)",
+    }
+}
+
+/// 비행기모드 실제 상태(ON=true/OFF=false)를 ADB로 읽는다. 조회 실패·예상 밖 출력은 None.
+async fn airplane_mode_on() -> Option<bool> {
+    match run_adb_timed(
+        ["shell", "settings", "get", "global", "airplane_mode_on"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    )
+    .await
+    {
+        Ok(out) => parse_airplane_on(out.trim()),
+        Err(_) => None,
+    }
+}
+
+/// `airplane_mode_on` 원시 출력("1"/"0")을 bool로 해석한다(순수 함수).
+fn parse_airplane_on(raw: &str) -> Option<bool> {
+    match raw {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// 비행기모드가 목표 상태(`target_on`)로 바뀔 때까지 ADB로 폴링하고, 확정되면 즉시 반환한다
+/// (FastConfirm 전용 — 고정 대기 없이 빠르게). 상태를 확인 못 해도 상한(CONFIRM_TIMEOUT)을
+/// 넘으면 그대로 진행한다(토글 명령은 이미 실행됨).
+async fn wait_for_airplane_state(target_on: bool) {
+    let raw = if target_on { "1" } else { "0" };
+    let deadline = Instant::now() + Duration::from_secs(config::ADB_AIRPLANE_CONFIRM_TIMEOUT_SECS);
+    loop {
+        if airplane_mode_on().await == Some(target_on) {
+            tracing::info!("[ADB]   └ 상태 확인: 비행기모드 {}", airplane_state_label(raw));
+            return;
+        }
+        if Instant::now() >= deadline {
+            tracing::info!(
+                "[ADB]   └ ⚠ 비행기모드 {} 확정 실패(상한 초과) — 그대로 진행",
+                airplane_state_label(raw)
+            );
+            return;
+        }
+        sleep(Duration::from_millis(config::ADB_AIRPLANE_CONFIRM_POLL_MS)).await;
     }
 }
 
@@ -269,7 +338,17 @@ fn internet_probe_command() -> String {
 mod tests {
     use super::{
         airplane_mode_args, airplane_state_label, has_authorized_device, internet_probe_command,
+        parse_airplane_on,
     };
+
+    #[test]
+    fn parse_airplane_on_maps_raw_to_bool() {
+        // FastConfirm(로그인)이 토글 확정을 판정하는 근거.
+        assert_eq!(parse_airplane_on("1"), Some(true));
+        assert_eq!(parse_airplane_on("0"), Some(false));
+        assert_eq!(parse_airplane_on("null"), None);
+        assert_eq!(parse_airplane_on(""), None);
+    }
 
     #[test]
     fn airplane_state_label_maps_raw_setting() {
