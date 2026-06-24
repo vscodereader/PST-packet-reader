@@ -19,6 +19,7 @@ import { notifications } from "@mantine/notifications";
 import { useEffect, useState } from "react";
 
 import type { BandTarget } from "@/shared/bindings/BandTarget";
+import type { BlogTarget } from "@/shared/bindings/BlogTarget";
 import type { CommentTargetSpec } from "@/shared/bindings/CommentTargetSpec";
 import type { ForumTarget } from "@/shared/bindings/ForumTarget";
 import type { LoginTarget } from "@/shared/bindings/LoginTarget";
@@ -59,6 +60,7 @@ import {
   clampCommentCount,
   distributeStocksEvenly,
   htmlToText,
+  parseBlogPostLink,
   parseCafeBoardLink,
 } from "./publish-helpers";
 import { StockCrawlModal } from "./stock-crawl-modal";
@@ -81,6 +83,19 @@ interface ResolvedCafe {
 /** 게시 대상 목록에서 카페 항목의 고유 키(cafeId+menuId). */
 function cafeKey(cafeId: number, menuId: number): string {
   return `${cafeId}-${menuId}`;
+}
+
+/** 붙여넣은 블로그 글 링크 하나 → 파싱된 블로그 글 식별자(#271). 블로그는 댓글 전용이라
+ *  그 글 하나가 곧 대상이다. blogId는 문자열(예: "press02"), logNo는 숫자 문자열. */
+interface ResolvedBlog {
+  blogId: string;
+  logNo: string;
+  link: string;
+}
+
+/** 게시 대상 목록에서 블로그 글 항목의 고유 키(blogId+logNo). */
+function blogKey(blogId: string, logNo: string): string {
+  return `${blogId}/${logNo}`;
 }
 
 /** 저장된 밴드 링크 하나 → 조회된 실제 밴드명. 게시 대상 목록(드롭다운)을 이룬다. */
@@ -180,6 +195,13 @@ function DestinationPicker({
   onSaveCafeLink,
   onSelectCafe,
   onRemoveCafe,
+  blogLink,
+  setBlogLink,
+  resolvedBlogs,
+  selectedBlogs,
+  onSaveBlogLink,
+  onSelectBlog,
+  onRemoveBlog,
 }: {
   selPlatforms: PlatformId[];
   stockCodes: string[];
@@ -202,6 +224,13 @@ function DestinationPicker({
   onSaveCafeLink: () => void;
   onSelectCafe: (key: string) => void;
   onRemoveCafe: (key: string) => void;
+  blogLink: string;
+  setBlogLink: (v: string) => void;
+  resolvedBlogs: ResolvedBlog[];
+  selectedBlogs: string[];
+  onSaveBlogLink: () => void;
+  onSelectBlog: (key: string) => void;
+  onRemoveBlog: (key: string) => void;
 }) {
   const card = {
     border: "1px solid var(--mantine-color-gray-2)",
@@ -352,6 +381,89 @@ function DestinationPicker({
             ) : (
               <Text fz={12} c="orange.7">
                 게시할 게시판을 선택하세요.
+              </Text>
+            )}
+          </Stack>
+        </Box>
+      )}
+      {selPlatforms.includes("blog") && (
+        <Box style={card}>
+          <Group gap={9} px={11} py={9} style={head}>
+            <PlatformLogo id="blog" size={22} />
+            <Text fz={13} fw={700}>
+              네이버블로그
+            </Text>
+          </Group>
+          <Stack gap={8} p={10}>
+            {/* 블로그는 댓글 전용이라 게시판이 아니라 댓글을 달 **글 링크**를 붙여넣는다(#271).
+                링크에서 blogId(문자열)+logNo를 파싱해 대상으로 추가한다. */}
+            <Group gap={8} align="flex-end" wrap="nowrap">
+              <TextInput
+                style={{ flex: 1 }}
+                label="글 링크"
+                placeholder="https://blog.naver.com/press02/224311392458"
+                value={blogLink}
+                onChange={(e) => setBlogLink(e.currentTarget.value)}
+                leftSection={<Icon.link size={14} />}
+                aria-label="블로그 글 링크"
+              />
+              <Button
+                variant="light"
+                color="blog"
+                onClick={onSaveBlogLink}
+                disabled={!blogLink.trim()}
+              >
+                추가
+              </Button>
+            </Group>
+            <Select
+              placeholder={
+                resolvedBlogs.length
+                  ? "게시할 블로그 글 선택"
+                  : "글 링크를 추가하면 여기 표시됩니다"
+              }
+              data={resolvedBlogs.map((b) => ({
+                value: blogKey(b.blogId, b.logNo),
+                label: `${b.blogId} · 글 ${b.logNo}`,
+              }))}
+              value={null}
+              disabled={resolvedBlogs.length === 0}
+              onChange={(k) => {
+                if (k) onSelectBlog(k);
+              }}
+            />
+            {selectedBlogs.length > 0 ? (
+              <Group gap={6}>
+                {selectedBlogs.map((k) => {
+                  const b = resolvedBlogs.find(
+                    (x) => blogKey(x.blogId, x.logNo) === k,
+                  );
+                  const label = b ? `${b.blogId} · 글 ${b.logNo}` : k;
+                  return (
+                    <Badge
+                      key={k}
+                      color="blog"
+                      variant="light"
+                      rightSection={
+                        <ActionIcon
+                          size={14}
+                          variant="transparent"
+                          color="blog"
+                          aria-label={`${label} 제거`}
+                          onClick={() => onRemoveBlog(k)}
+                        >
+                          <Icon.x size={10} />
+                        </ActionIcon>
+                      }
+                    >
+                      {label}
+                    </Badge>
+                  );
+                })}
+              </Group>
+            ) : (
+              <Text fz={12} c="orange.7">
+                게시할 블로그 글을 선택하세요.
               </Text>
             )}
           </Stack>
@@ -671,6 +783,11 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [resolvedCafes, setResolvedCafes] = useState<ResolvedCafe[]>([]);
   const [selectedCafes, setSelectedCafes] = useState<string[]>([]);
   const [cafeLink, setCafeLink] = useState("");
+  // 블로그(#271): 댓글 전용이라 댓글 달 글 링크를 추가하면 blogId+logNo를 파싱해 resolvedBlogs에
+  // 누적하고, selectedBlogs(키 blogId/logNo)에서 게시할 글을 다중 선택한다(카페 미러).
+  const [resolvedBlogs, setResolvedBlogs] = useState<ResolvedBlog[]>([]);
+  const [selectedBlogs, setSelectedBlogs] = useState<string[]>([]);
+  const [blogLink, setBlogLink] = useState("");
   const [when, setWhen] = useState<"now" | "schedule">("now");
   const [date, setDate] = useState(() => nowParts().date);
   const [time, setTime] = useState(() => nowParts().time);
@@ -725,6 +842,32 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     setSelectedCafes((s) => (s.includes(key) ? s : [...s, key]));
   const removeCafe = (key: string) =>
     setSelectedCafes((s) => s.filter((x) => x !== key));
+
+  // 블로그 글 링크 추가: 링크에서 blogId+logNo를 파싱해 resolvedBlogs에 누적한다(중복 제거).
+  // 파싱 실패(글이 아닌 링크 등)면 추가하지 않고 안내한다(카페 미러).
+  const saveBlogLink = () => {
+    const link = blogLink.trim();
+    if (!link) return;
+    const parsed = parseBlogPostLink(link);
+    if (!parsed) {
+      notifications.show({
+        message:
+          "블로그 글 URL을 인식하지 못했어요. 댓글을 달 블로그 글로 들어가 그 주소를 붙여넣어 주세요.",
+        color: "red",
+      });
+      return;
+    }
+    setBlogLink("");
+    setResolvedBlogs((prev) =>
+      prev.some((b) => b.blogId === parsed.blogId && b.logNo === parsed.logNo)
+        ? prev
+        : [...prev, { blogId: parsed.blogId, logNo: parsed.logNo, link }],
+    );
+  };
+  const selectBlog = (key: string) =>
+    setSelectedBlogs((s) => (s.includes(key) ? s : [...s, key]));
+  const removeBlog = (key: string) =>
+    setSelectedBlogs((s) => s.filter((x) => x !== key));
 
   if (!doc) {
     return <Modal opened={false} onClose={onClose} />;
@@ -784,6 +927,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     { value: "all", label: "전체" },
     { value: "forum", label: "종목토론방" },
     { value: "naver", label: "네이버 카페" },
+    { value: "blog", label: "네이버블로그" },
     { value: "band", label: "밴드" },
   ];
   const visibleAccts = accounts.filter(
@@ -928,6 +1072,23 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
           });
         });
       }
+    } else if (a.platform === "blog") {
+      // 블로그는 댓글 전용(#271) — 선택한 각 블로그 글마다 잡 1개(계정 × 글). blogId+logNo를
+      // 잡에 동결해 워커가 그 글에 댓글을 단다(댓글 본문은 writer comments).
+      selectedBlogs.forEach((k) => {
+        const b = resolvedBlogs.find((x) => blogKey(x.blogId, x.logNo) === k);
+        if (!b) return;
+        jobs.push({
+          key: `${aid}-${k}`,
+          platform: "blog",
+          loginId: a.loginId,
+          targetName: `${b.blogId} · 글 ${b.logNo}`,
+          blogId: b.blogId,
+          logNo: b.logNo,
+          board: "댓글",
+          status: a.status,
+        });
+      });
     }
   });
   // forum은 보통 종목(stockCodes)을 1개 이상 골라야 한다. 단 "특정 게시글" 댓글이면 URL이
@@ -948,6 +1109,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     selPlatforms.includes("band") &&
     selectedBands.length > 0 &&
     isListTarget;
+  // 블로그(#271)는 댓글 전용이라 commentTargetMode와 무관하게 선택한 블로그 글이 1개 이상이면
+  // 댓글 대상이 준비된 것으로 본다(네이버 list/url 대상이 없어도 블로그만으로 충분).
+  const blogOnlyCommentReady =
+    selectedNaver.length === 0 &&
+    selPlatforms.includes("blog") &&
+    selectedBlogs.length > 0;
   // url 모드의 "대상 해석됨"은 카페·종목토론방·밴드 글 중 하나라도 풀린 링크가 있으면 충분하다
   // — 사용자가 넣은 링크가 어느 플랫폼 글인지에 따라 해당 목록에 잡힌다(여러 링크/혼합 허용).
   const urlTargetResolved =
@@ -958,7 +1125,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     mode !== "comment" ||
     (comments.length > 0 &&
       ((isListTarget ? listTargetReady : urlTargetResolved) ||
-        bandOnlyCommentReady));
+        bandOnlyCommentReady ||
+        blogOnlyCommentReady));
   // 네이버 카페가 선택됐으면 게시할 게시판을 1개 이상 골라야 한다(밴드와 동일). url 댓글
   // 대상은 게시판이 필요 없어 면제한다. 게시판 미선택이면 게시를 막아 조용한 누락을 막는다.
   const naverReady =
@@ -973,12 +1141,16 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     !selPlatforms.includes("band") ||
     bandUrlTargets.length > 0 ||
     selectedBands.length > 0;
+  // 블로그(#271)가 선택됐으면 게시할 블로그 글을 1개 이상 골라야 게시 가능(카페 게시판 미러).
+  // 글을 추가하고 선택해야 게시할 수 있다 — 미선택이면 게시를 막아 조용한 누락을 방지한다.
+  const blogReady = !selPlatforms.includes("blog") || selectedBlogs.length > 0;
   const canPublish =
     usableSelected.length > 0 &&
     targetsOk &&
     commentReady &&
     naverReady &&
     bandReady &&
+    blogReady &&
     jobs.length > 0;
 
   // 종목토론방(forum) 계정들의 로그인 ID(중복 제거, 선택 순서 유지). "나눠서 게시"의 분배 단위.
@@ -1110,6 +1282,17 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
             // band_publish로 가 리더 승인제 밴드에서 1003이 난다).
             ...(bandSpec ? { commentTarget: bandSpec } : {}),
           }));
+    // 블로그(#271): 댓글 전용 — 잡에 동결된 blogId+logNo로 그 글에 댓글을 단다. 카페와 같은
+    // 네이버 쿠키를 재사용하므로 별도 로그인이 필요 없다(백엔드가 저장 쿠키를 그대로 쓴다).
+    const blog: BlogTarget[] = jobs
+      .filter((j) => j.platform === "blog")
+      .map((j) => ({
+        accountId: j.loginId,
+        name: j.targetName,
+        blogId: j.blogId ?? "",
+        logNo: j.logNo ?? "",
+        link: `https://blog.naver.com/${j.blogId ?? ""}/${j.logNo ?? ""}`,
+      }));
     // 게시 대상 계정마다 로그인 스펙을 동봉한다(#225). 워커가 게시 직전에 계정 단위로
     // [IP 회전 → 로그인 → 게시]를 원자 실행해 "로그인 IP == 게시 IP"를 맞춘다 — 그래야
     // 네이버 카페 10004(IP check failure)를 피한다. force/useAdb는 기존 선택 로그인과 동일.
@@ -1137,6 +1320,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       naver,
       forum,
       band,
+      blog,
       login: [...loginByAccount.values()],
     };
   };
@@ -1418,6 +1602,13 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
               onSaveCafeLink={saveCafeLink}
               onSelectCafe={selectCafe}
               onRemoveCafe={removeCafe}
+              blogLink={blogLink}
+              setBlogLink={setBlogLink}
+              resolvedBlogs={resolvedBlogs}
+              selectedBlogs={selectedBlogs}
+              onSaveBlogLink={saveBlogLink}
+              onSelectBlog={selectBlog}
+              onRemoveBlog={removeBlog}
             />
           </>
         )}
@@ -1603,6 +1794,11 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         {!naverReady && (
           <Text fz={12} c="orange.7">
             게시판 링크를 추가하고 게시할 게시판을 선택해야 게시할 수 있어요
+          </Text>
+        )}
+        {naverReady && !blogReady && (
+          <Text fz={12} c="orange.7">
+            블로그 링크를 추가하고 게시할 블로그 글을 선택해야 게시할 수 있어요
           </Text>
         )}
         <Box style={{ flex: 1 }} />

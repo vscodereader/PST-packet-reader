@@ -48,6 +48,7 @@ export function buildLoginNowItem(
       naver: [],
       forum: [],
       band: [],
+      blog: [],
       login,
     },
   };

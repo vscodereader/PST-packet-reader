@@ -100,6 +100,66 @@ export function parseCafeBoardLink(
   return null;
 }
 
+/** 네이버 블로그 글 링크에서 파싱한 댓글 대상 — 블로그 식별자(문자열)와 글 번호(문자열). */
+export interface BlogPostTarget {
+  blogId: string;
+  logNo: string;
+}
+
+/**
+ * 네이버 블로그 **글** URL에서 `blogId`(문자열)와 `logNo`(숫자 문자열)를 뽑는다(#271).
+ *
+ * 블로그는 댓글 전용이라 카페 게시판처럼 게시판 목록이 아니라 **그 글 하나**가 곧 대상이다.
+ * `blogId`는 숫자가 아니라 문자열(예: "press02", "cho41004")이다 — 블루프린트의 숫자 가정 버그를
+ * 바로잡는다. 다음 형태를 모두 지원한다:
+ *   - `https://blog.naver.com/{blogId}/{logNo}`
+ *   - `https://blog.naver.com/PostView.naver?blogId={blogId}&logNo={logNo}`
+ *   - 위가 `iframe_url`/encoded로 한 번 더 감싸진 형태(점진적 decodeURIComponent로 풀어 매칭).
+ * 인식 못 하면 `null` — 호출부가 추가를 거부한다.
+ */
+export function parseBlogPostLink(
+  url: string | undefined,
+): BlogPostTarget | null {
+  if (!url) return null;
+
+  const candidates: string[] = [url];
+  let cur = url;
+  for (let i = 0; i < 3; i++) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(cur);
+    } catch {
+      break;
+    }
+    if (decoded === cur) break;
+    candidates.push(decoded);
+    cur = decoded;
+  }
+
+  const valid = (blogId: string, logNo: string): BlogPostTarget | null =>
+    blogId && /^\d+$/.test(logNo) ? { blogId, logNo } : null;
+
+  for (const c of candidates) {
+    // 쿼리 형: blogId=... & logNo=... (blogId는 문자열, logNo는 숫자).
+    const qBlog = c.match(/[?&]blogId=([^&#/]+)/i);
+    const qLog = c.match(/[?&]logNo=(\d+)/i);
+    if (qBlog && qLog) {
+      const t = valid(qBlog[1]!, qLog[1]!);
+      if (t) return t;
+    }
+    // 경로 형: blog.naver.com/{blogId}/{logNo}. blogId는 영숫자/._- 허용, logNo는 숫자.
+    const path = c.match(
+      /blog\.naver\.com\/([A-Za-z0-9][A-Za-z0-9._-]*)\/(\d+)/i,
+    );
+    if (path) {
+      const t = valid(path[1]!, path[2]!);
+      if (t) return t;
+    }
+  }
+
+  return null;
+}
+
 /** 붙여넣은 URL 처리. 종목 시세 링크(6자리 코드)는 시세 줄로 바꾸고, 그 외 링크/내용은
  * 붙여넣은 원문 그대로 둔다 — URL이 본문에 남아야 게시 글에서 링크가 보인다. 예전엔
  * 일반 링크를 "[host에서 가져온 내용]" 가짜 문구로 바꿔 URL이 통째로 유실됐다. */

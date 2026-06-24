@@ -11,6 +11,7 @@ import type { PlatformId } from "@/shared/data/types";
 const INITIAL: Record<PlatformId, string> = {
   forum: "토",
   naver: "N",
+  blog: "블",
   band: "B",
   instagram: "I",
   threads: "@",
@@ -20,6 +21,8 @@ const INITIAL: Record<PlatformId, string> = {
 const LOGO: Partial<Record<PlatformId, string>> = {
   forum: naverLogo,
   naver: navercafeLogo,
+  // 블로그(#271)도 네이버 서비스라 네이버 로고 자산을 재사용한다.
+  blog: naverLogo,
   band: bandLogo,
   instagram: instagramLogo,
   threads: threadsLogo,

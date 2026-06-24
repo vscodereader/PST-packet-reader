@@ -23,6 +23,8 @@ pub mod band_auth;
 // band.us 가입·글쓰기·댓글(순수 HTTP, md 서명). band_auth 로그인 쿠키를 소비한다.
 pub mod band_post;
 pub mod naver_cafe;
+// 네이버 블로그 댓글 게시(#271). 카페 저장 쿠키를 재사용하는 댓글 전용 모듈(별도 로그인 없음).
+pub mod naver_blog;
 // 네이버 증권 토론방 패킷 게시 엔진.
 pub mod discussion_batch;
 mod forum_stocks;

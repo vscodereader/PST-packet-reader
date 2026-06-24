@@ -15,7 +15,13 @@ export interface GoOpts {
 /** Navigate to a top-level view, optionally carrying view-specific options. */
 export type GoFn = (view: ViewId, opts?: GoOpts) => void;
 
-export type PlatformId = "forum" | "naver" | "band" | "instagram" | "threads";
+export type PlatformId =
+  | "forum"
+  | "naver"
+  | "blog"
+  | "band"
+  | "instagram"
+  | "threads";
 
 export interface Platform {
   id: PlatformId;
@@ -132,6 +138,10 @@ export interface PublishJob {
   /** forum(종목토론방) 전용: "특정 게시글" 댓글 대상의 글 URL(잡 생성 시 동결). 채워지면
    *  워커가 이 URL의 글에 직접 댓글을 단다(종목 선택·랜덤 글 없이). 그 외 forum 잡은 비운다. */
   commentUrl?: string;
+  /** blog(네이버블로그) 전용(#271): 댓글 달 글의 blogId(문자열)+logNo(숫자 문자열, 잡 생성 시
+   *  동결). 블로그는 댓글 전용이라 이 한 글이 곧 대상이다. */
+  blogId?: string;
+  logNo?: string;
   board: string;
   status: AccountStatus;
 }

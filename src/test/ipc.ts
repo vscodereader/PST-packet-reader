@@ -923,6 +923,14 @@ export function setQueueNow(items: QueueNowItem[]): void {
   state.queueNow = clone(items);
 }
 
+/**
+ * Override the in-memory accounts (e.g. to add a 네이버블로그 account for a
+ * blog-specific publish test, #271). Cleared by {@link resetIpc}.
+ */
+export function setAccounts(accounts: Account[]): void {
+  state.accounts = clone(accounts);
+}
+
 /** Re-seed the in-memory backend to the pristine dataset. Call in `beforeEach`. */
 export function resetIpc(): void {
   state = {

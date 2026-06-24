@@ -14,10 +14,11 @@ import {
 } from "./config";
 
 describe("platform config", () => {
-  it("defines the five platforms", () => {
+  it("defines the six platforms", () => {
     expect(PLATFORMS.map((p) => p.id)).toEqual([
       "forum",
       "naver",
+      "blog",
       "band",
       "instagram",
       "threads",

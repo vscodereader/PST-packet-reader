@@ -4,4 +4,4 @@
  * Mirrors the TS `PlatformId` literal union. `lowercase` keeps the JSON wire
  * form identical to the existing frontend values (`"forum"`, `"naver"`, …).
  */
-export type PlatformId = "forum" | "naver" | "band" | "instagram" | "threads";
+export type PlatformId = "forum" | "naver" | "blog" | "band" | "instagram" | "threads";

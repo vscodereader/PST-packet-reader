@@ -19,6 +19,8 @@ use crate::store::JsonStore;
 pub enum PlatformId {
     Forum,
     Naver,
+    /// 네이버 블로그(#271). 카페와 같은 네이버 쿠키를 재사용하는 댓글 전용 플랫폼.
+    Blog,
     Band,
     Instagram,
     Threads,
@@ -285,6 +287,11 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&PlatformId::Forum).unwrap(),
             "\"forum\""
+        );
+        // 블로그(#271)는 lowercase 와이어 형태가 "blog".
+        assert_eq!(
+            serde_json::to_string(&PlatformId::Blog).unwrap(),
+            "\"blog\""
         );
         // 기존 3개 값은 camelCase 전환 후에도 단일 단어라 와이어 형태 불변(하위호환).
         assert_eq!(
