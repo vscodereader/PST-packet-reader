@@ -1603,6 +1603,66 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       );
   };
 
+  // "나눠서 즉시 게시"(계정 1개당 큐 1개): 분배된 jobs를 loginId로 묶어 계정마다 별도 now
+  // 아이템을 적재한다. dispatchPublish(1큐에 전 계정)와 달리 1큐=1계정이라, 워커가 계정별로
+  // 독립 실행하고 종목만 균등 분배된다. 디스패치 외 로직은 dispatchPublish "now" 분기와 동일.
+  const dispatchSplitNow = (jobs: PublishJob[]) => {
+    const order = [...new Set(jobs.map((j) => j.loginId))];
+    const groups = order.map((login) =>
+      jobs.filter((j) => j.loginId === login),
+    );
+    const locsFor = (gjobs: PublishJob[]): QueueLocation[] => {
+      const seen = new Set<string>();
+      const locs: QueueLocation[] = [];
+      gjobs.forEach((j) => {
+        const key = `${j.platform}|${j.targetName}|${j.code ?? ""}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        locs.push({
+          p: j.platform,
+          name: j.targetName,
+          ...(j.code ? { code: j.code } : {}),
+        });
+      });
+      return locs;
+    };
+    setFlow("running");
+    void persistCredentials(jobs)
+      .then(() =>
+        Promise.all(
+          groups.map((gjobs) =>
+            ipc.queue.addNow({
+              id: newNowId(),
+              title: doc.title,
+              kind: doc.kind,
+              state: "waiting",
+              locs: locsFor(gjobs),
+              items: [],
+              plan: buildPlanFromJobs(gjobs),
+            }),
+          ),
+        ),
+      )
+      .then(() =>
+        setFlow(
+          jobs.map((j) => ({
+            ...j,
+            ok: true,
+            msg: `${action} 즉시 처리 대기열에 추가됨`,
+          })),
+        ),
+      )
+      .catch(() =>
+        setFlow(
+          jobs.map((j) => ({
+            ...j,
+            ok: false,
+            msg: "대기열 추가 실패 — 잠시 후 다시 시도하세요",
+          })),
+        ),
+      );
+  };
+
   const kd = KIND[mode] ?? { t: mode, c: "gray" };
   const allText = [doc.title, doc.body ?? "", ...(doc.comments ?? [])].join(
     " ",
@@ -1930,7 +1990,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
             fullWidth
             disabled={!canDistribute}
             leftSection={<Icon.send size={16} />}
-            onClick={() => dispatchPublish(distributeForumJobs(jobs), "now")}
+            onClick={() => dispatchSplitNow(distributeForumJobs(jobs))}
           >
             나눠서 즉시 게시하기
             {canDistribute
