@@ -57,3 +57,6 @@ src-tauri/.omc/
 
 # Claude Code 병렬 작업용 임시 worktree (커밋·린트 대상 아님)
 .claude/worktrees/
+
+# husky 로컬 생성 디렉토리(워크트리에선 심볼릭링크) — 추적 안 함
+.husky/_
