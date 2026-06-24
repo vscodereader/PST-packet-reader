@@ -14,7 +14,7 @@ use crate::naver_automation::{AutomationError, CdpClient};
 const LOGIN_URL: &str = "https://nid.naver.com/nidlogin.login?mode=form&url=https://www.naver.com/";
 // headless: 캡차가 보이면 곧장 headed로 승격해야 하므로 짧게 기다린다(#14: 40→20초).
 const HEADLESS_TIMEOUT: Duration = Duration::from_secs(20);
-// headed: 캡차 외의 추가 인증/오류는 즉시 실패시키므로(본인인증 자동 처리 코드가 없어 #267-13에서
+// headed: 캡차 외의 추가 인증/오류는 즉시 실패시키므로(#267-13에서
 // 캡챠 외 전부 칼같이 실패), 여기서는 pending(네비게이션 정리) 여유만 짧게 둔다. 캡차는 아래
 // CAPTCHA_GRACE로 따로 기다린다(기존 180초 사람 대기 제거 → 체감 속도 #14).
 const HEADED_PENDING_TIMEOUT: Duration = Duration::from_secs(12);
@@ -112,7 +112,7 @@ enum LoopDecision {
     PromoteChallenge(ChallengeKind),
     /// headed에서 캡차를 만남 — 즉시 포기하지 않고 CAPTCHA_GRACE(10초)까지 자동 통과를 기다린다.
     WaitCaptcha,
-    /// 캡차가 아닌 추가 인증(본인인증 OTP·새 기기 인증)을 만남 — 자동 처리 코드가 없어 즉시
+    /// 캡차가 아닌 추가 인증(본인인증 OTP·새 기기 인증)을 만남 — 캡차 외라 즉시
     /// 실패시킨다(#267-13: 캡챠 외 전부 칼같이 실패). 사람 대기(180초)를 적용하지 않는다.
     FailUnsupportedChallenge(ChallengeKind),
     ConfirmedBad,
@@ -129,7 +129,7 @@ enum LoopDecision {
 /// 핵심: BadCredentials/Blocked는 **2회 연속**일 때만 확정한다. 클릭 직후 잠깐 떴다
 /// 사라지는 `#err_common`이나 네비게이션 과도기에 폼이 사라진 상태를 영구 실패로 latch하지
 /// 않기 위함이다. Success/Pending/캡차 대기는 음성 누적을 초기화한다. 캡차를 제외한 추가
-/// 인증(본인인증/기기인증)은 자동 처리 코드가 없어 즉시 실패로 옮긴다(#267-13).
+/// 인증(본인인증/기기인증)은 즉시 실패로 옮긴다(#267-13).
 fn decide_loop_step(
     last_negative: Option<Signal>,
     signal: Signal,
@@ -151,7 +151,7 @@ fn decide_loop_step(
                 LoopDecision::PromoteChallenge(ChallengeKind::Captcha)
             }
         }
-        // 본인인증(OTP)·새 기기 인증(Device)은 자동 처리 코드가 없어 캡차 외 전부 즉시 실패시킨다
+        // 본인인증(OTP)·새 기기 인증(Device)은 캡차 외 전부 즉시 실패시킨다
         // (#267-13). headed의 사람 대기(180초)도, headless 승격도 하지 않는다.
         Signal::Challenge(kind) => LoopDecision::FailUnsupportedChallenge(kind),
         Signal::BadCredentials => {
@@ -161,7 +161,7 @@ fn decide_loop_step(
                 LoopDecision::KeepWaiting(Some(Signal::BadCredentials))
             }
         }
-        // 차단 휴리스틱도 headed에서 사람을 기다리지 않고(본인인증 미지원), headed/headless 모두
+        // 차단 휴리스틱도 headed에서 사람을 기다리지 않고, headed/headless 모두
         // 2회 연속 latch로 빠르게 확정한다(#267-13: 칼같은 실패). 과도기 깜빡임만 거른다.
         Signal::Blocked => {
             if last_negative == Some(Signal::Blocked) {
@@ -334,11 +334,11 @@ fn run_inner(
                 }
                 last_negative = None;
             }
-            // 캡차가 아닌 추가 인증(본인인증 OTP/새 기기 인증) — 자동 처리 코드가 없어 즉시
+            // 캡차가 아닌 추가 인증(본인인증 OTP/새 기기 인증) — 캡차 외라 즉시
             // 실패시킨다(#267-13: 캡챠 외 전부 칼같이 실패). 사람 대기를 적용하지 않는다.
             LoopDecision::FailUnsupportedChallenge(kind) => {
                 return Ok(LoginOutcome::Error(format!(
-                    "{} 화면이 떠 자동 로그인을 중단했습니다(자동 처리 미지원 — 캡차 외 즉시 실패).",
+                    "{} 화면이 떠 자동 로그인을 중단했습니다(캡차 외 즉시 실패).",
                     challenge_kind_label(kind)
                 )));
             }
@@ -908,7 +908,7 @@ mod tests {
 
     #[test]
     fn loop_non_captcha_challenge_fails_fast_in_both_modes() {
-        // 본인인증(OTP)·새 기기 인증(Device)은 자동 처리 코드가 없어 캡차 외 전부 즉시 실패(#267-13).
+        // 본인인증(OTP)·새 기기 인증(Device)은 캡차 외 전부 즉시 실패(#267-13).
         for wait_for_human in [false, true] {
             assert_eq!(
                 decide_loop_step(None, Signal::Challenge(ChallengeKind::Otp), wait_for_human),
