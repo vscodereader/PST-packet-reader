@@ -82,9 +82,11 @@ pub enum IpRotationMode {
     /// "IP 변경" 버튼: 라디오가 실제로 끊겼다 재등록해 IP가 바뀌도록 고정 hold(3초)를 둔다.
     /// 설정 플래그만 즉시 1이 되어선 라디오가 안 끊겨 IP가 그대로이기 때문(필수).
     EnsureIpChange,
-    /// 로그인: 비행기모드 ON/OFF가 ADB로 확정되면 즉시 다음으로 넘어간다(빠름, 사수 지시).
-    /// 라디오 드롭을 보장하지 않으므로 로그인 중엔 IP가 바뀌지 않을 수 있다(IP 변경은 버튼 담당).
-    FastConfirm,
+    /// 로그인: 고정 대기 없이 **실제 상태**로 진행한다 — ON 후 폰 인터넷이 실제로 끊긴 걸
+    /// 확인할 때까지 기다렸다가 OFF하고, 그 뒤 외부 IP가 `before`와 달라질 때까지 api로 폴링해
+    /// **IP가 바뀐 순간 즉시** 다음으로 넘어간다. 라디오 드롭·IP 변경을 실제로 확인하므로
+    /// 로그인 중에도 IP가 바뀐다(임의의 고정 3초 없음).
+    WaitForIpChange,
 }
 
 pub async fn toggle_airplane_mode(mode: IpRotationMode) -> Result<IpRotation, OrchestratorError> {
@@ -97,7 +99,8 @@ pub async fn toggle_airplane_mode(mode: IpRotationMode) -> Result<IpRotation, Or
             .collect(),
     )
     .await?;
-    // ON 대기: 버튼은 라디오가 실제로 끊기도록 고정 3초 hold, 로그인은 ADB로 ON 확정 즉시 진행.
+    // ON 동안 라디오가 실제로 끊기게 한다: 버튼은 고정 3초 hold, 로그인은 폰 인터넷이 실제로
+    // 끊긴 걸 확인할 때까지(고정 대기 없음).
     match mode {
         IpRotationMode::EnsureIpChange => {
             tracing::info!(
@@ -106,7 +109,7 @@ pub async fn toggle_airplane_mode(mode: IpRotationMode) -> Result<IpRotation, Or
             );
             sleep(Duration::from_secs(config::ADB_AIRPLANE_ENABLE_SECS)).await;
         }
-        IpRotationMode::FastConfirm => wait_for_airplane_state(true).await,
+        IpRotationMode::WaitForIpChange => wait_until_phone_offline().await,
     }
     tracing::info!("[ADB] ✈ 비행기모드 OFF — 인터넷 복구 대기");
     run_adb_timed(
@@ -116,18 +119,22 @@ pub async fn toggle_airplane_mode(mode: IpRotationMode) -> Result<IpRotation, Or
             .collect(),
     )
     .await?;
-    // OFF 대기: 버튼은 상태만 로깅, 로그인은 ADB로 OFF 확정 즉시 진행.
-    match mode {
+    // OFF 후: 버튼은 인터넷 복구 후 IP를 1회 읽고, 로그인은 인터넷 복구 후 IP가 실제로 바뀔
+    // 때까지 api로 폴링해 바뀌면 즉시 진행한다.
+    let after = match mode {
         IpRotationMode::EnsureIpChange => {
             tracing::info!(
                 "[ADB]   └ 상태 확인: 비행기모드 {}",
                 airplane_mode_state().await
             );
+            wait_for_internet_connection().await?;
+            fetch_external_ip().await
         }
-        IpRotationMode::FastConfirm => wait_for_airplane_state(false).await,
-    }
-    wait_for_internet_connection().await?;
-    let after = fetch_external_ip().await;
+        IpRotationMode::WaitForIpChange => {
+            wait_for_internet_connection().await?;
+            wait_for_ip_change(&before).await
+        }
+    };
 
     tracing::info!("[ADB] ─────────── IP 회전 결과 ───────────");
     tracing::info!("[ADB]   기존 IP: {before}");
@@ -196,50 +203,50 @@ fn airplane_state_label(raw: &str) -> &'static str {
     }
 }
 
-/// 비행기모드 실제 상태(ON=true/OFF=false)를 ADB로 읽는다. 조회 실패·예상 밖 출력은 None.
-async fn airplane_mode_on() -> Option<bool> {
-    match run_adb_timed(
-        ["shell", "settings", "get", "global", "airplane_mode_on"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    )
-    .await
-    {
-        Ok(out) => parse_airplane_on(out.trim()),
-        Err(_) => None,
-    }
-}
-
-/// `airplane_mode_on` 원시 출력("1"/"0")을 bool로 해석한다(순수 함수).
-fn parse_airplane_on(raw: &str) -> Option<bool> {
-    match raw {
-        "1" => Some(true),
-        "0" => Some(false),
-        _ => None,
-    }
-}
-
-/// 비행기모드가 목표 상태(`target_on`)로 바뀔 때까지 ADB로 폴링하고, 확정되면 즉시 반환한다
-/// (FastConfirm 전용 — 고정 대기 없이 빠르게). 상태를 확인 못 해도 상한(CONFIRM_TIMEOUT)을
-/// 넘으면 그대로 진행한다(토글 명령은 이미 실행됨).
-async fn wait_for_airplane_state(target_on: bool) {
-    let raw = if target_on { "1" } else { "0" };
-    let deadline = Instant::now() + Duration::from_secs(config::ADB_AIRPLANE_CONFIRM_TIMEOUT_SECS);
+/// 비행기모드 ON 후, 폰 인터넷이 **실제로 끊길 때까지**(라디오 드롭) ADB ping 프로브로 폴링하고
+/// 끊긴 걸 확인하면 즉시 반환한다(WaitForIpChange 전용 — 고정 대기 없음). 설정 플래그가 아니라
+/// 실제 연결 상태를 보므로, 라디오가 끊겨 IP가 바뀔 토대를 보장한다. 끝내 못 끊으면(WiFi 유지 등)
+/// 상한(ADB_INTERNET_TIMEOUT_SECS)을 넘겨 그대로 진행한다.
+async fn wait_until_phone_offline() {
+    let deadline = Instant::now() + Duration::from_secs(config::ADB_INTERNET_TIMEOUT_SECS);
     loop {
-        if airplane_mode_on().await == Some(target_on) {
-            tracing::info!("[ADB]   └ 상태 확인: 비행기모드 {}", airplane_state_label(raw));
+        // 프로브 실패(인터넷 끊김) = 라디오가 끊긴 것. 조회 에러는 아직 온라인으로 보고 계속 기다린다.
+        if !has_internet_connection().await.unwrap_or(true) {
+            tracing::info!("[ADB]   └ 라디오 끊김 확인(폰 인터넷 차단) — OFF로 진행");
             return;
         }
         if Instant::now() >= deadline {
-            tracing::info!(
-                "[ADB]   └ ⚠ 비행기모드 {} 확정 실패(상한 초과) — 그대로 진행",
-                airplane_state_label(raw)
-            );
+            tracing::info!("[ADB]   └ ⚠ 라디오 끊김 미확인(상한 초과) — 그대로 진행");
             return;
         }
-        sleep(Duration::from_millis(config::ADB_AIRPLANE_CONFIRM_POLL_MS)).await;
+        sleep(Duration::from_millis(config::ADB_INTERNET_POLL_INTERVAL_MS)).await;
     }
+}
+
+/// 외부 IP가 `before`와 **실제로 달라질 때까지** api.ipify.org를 폴링하고, 바뀌면 즉시 그 IP를
+/// 반환한다(WaitForIpChange 전용). 비정상 응답("(확인 실패)" 등)은 아직 안 바뀐 것으로 보고
+/// 재시도한다. 상한(ADB_INTERNET_TIMEOUT_SECS)을 넘으면 마지막으로 읽은 값을 반환한다(같으면
+/// 호출부가 "그대로"로 로깅 — 보통 CGNAT/테더링 경로 문제).
+async fn wait_for_ip_change(before: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(config::ADB_INTERNET_TIMEOUT_SECS);
+    loop {
+        let ip = fetch_external_ip().await;
+        if is_valid_changed_ip(before, &ip) {
+            tracing::info!("[ADB]   └ IP 변경 확인({ip}) — 즉시 진행");
+            return ip;
+        }
+        if Instant::now() >= deadline {
+            // 상한 초과 — 안 바뀐 마지막 IP를 반환(호출부가 "그대로"로 로깅).
+            return ip;
+        }
+        sleep(Duration::from_millis(config::ADB_INTERNET_POLL_INTERVAL_MS)).await;
+    }
+}
+
+/// `candidate`가 `before`와 다른 '유효한' 외부 IP인지(순수 함수). "(확인 실패)"처럼 괄호로
+/// 시작하는 비정상 응답이나 빈 값, before와 같은 값은 false.
+fn is_valid_changed_ip(before: &str, candidate: &str) -> bool {
+    !candidate.is_empty() && !candidate.starts_with('(') && candidate != before
 }
 
 /// 표준 adb CLI를 실행하고 stdout을 반환한다. 실행 실패/비-0 종료는 에러로 변환한다.
@@ -338,16 +345,18 @@ fn internet_probe_command() -> String {
 mod tests {
     use super::{
         airplane_mode_args, airplane_state_label, has_authorized_device, internet_probe_command,
-        parse_airplane_on,
+        is_valid_changed_ip,
     };
 
     #[test]
-    fn parse_airplane_on_maps_raw_to_bool() {
-        // FastConfirm(로그인)이 토글 확정을 판정하는 근거.
-        assert_eq!(parse_airplane_on("1"), Some(true));
-        assert_eq!(parse_airplane_on("0"), Some(false));
-        assert_eq!(parse_airplane_on("null"), None);
-        assert_eq!(parse_airplane_on(""), None);
+    fn is_valid_changed_ip_detects_real_change() {
+        // WaitForIpChange(로그인)이 'IP가 실제로 바뀜'을 판정하는 근거.
+        assert!(is_valid_changed_ip("1.1.1.1", "2.2.2.2")); // 유효 + 다름 → 바뀜
+        assert!(!is_valid_changed_ip("1.1.1.1", "1.1.1.1")); // 같음 → 아직
+        assert!(!is_valid_changed_ip("1.1.1.1", "(확인 실패)")); // 비정상 응답 → 아직
+        assert!(!is_valid_changed_ip("1.1.1.1", "")); // 빈 값 → 아직
+        // before가 비정상이었어도, 유효 IP를 새로 받으면 바뀐 것으로 본다.
+        assert!(is_valid_changed_ip("(확인 실패)", "3.3.3.3"));
     }
 
     #[test]
