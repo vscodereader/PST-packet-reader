@@ -106,6 +106,55 @@ pub struct ForumPublishResult {
     /// 종목별 실제 게시 내용(제목/본문/댓글/URL). 게시 성공 시에만 채운다.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub posted: Option<PostedContent>,
+    /// 차단 계정(로그인/권한 오류)으로 앞선 글이 실패해 시도하지 않고 건너뛴 결과면 true(#267-9).
+    /// `ok=false`이지만 실제 실패(X)가 아니라 "건너뜀(skip)"으로 구분 표시한다.
+    #[serde(default)]
+    pub skipped: bool,
+}
+
+/// 게시 실패 메시지가 "계정 차단(로그인/권한 만료)"을 뜻하는지 판별한다(#267-9, 순수 함수).
+/// 이런 실패는 같은 계정의 남은 글도 전부 실패할 것이므로, 첫 글에서 감지되면 나머지를
+/// 건너뛴다. "요청이 너무 많습니다"(HTTP 429, 일시적 과다요청)는 차단이 아니므로 제외한다 —
+/// 잠시 후 풀릴 수 있어 건너뛰면 안 된다.
+pub fn is_blocking_failure(message: &str) -> bool {
+    let m = message;
+    // 429(요청 과다)는 일시적이라 건너뛰지 않는다(사수 지침: 요청 과다 제외).
+    if m.contains("429") || m.contains("요청이 너무 많") || m.contains("요청 과다") {
+        return false;
+    }
+    // HTTP 401/403(권한 없음/로그인 만료) — 메시지에 박힌 상태코드로 본다.
+    if blocking_http_status(m) {
+        return true;
+    }
+    // 내부 코드/한국어 안내로 드러나는 로그인·권한·쿠키·세션 만료 계열.
+    const BLOCKING_MARKERS: [&str; 9] = [
+        "SESSION_INVALID",
+        "NO_COOKIES",
+        "LOGIN_FAILED",
+        "로그인이 만료",
+        "로그인 정보가 없",
+        "권한이 없",
+        "쿠키를 찾지 못",
+        "로그인이 필요",
+        "다시 로그인",
+    ];
+    BLOCKING_MARKERS.iter().any(|marker| m.contains(marker))
+}
+
+/// 메시지에 박힌 HTTP 상태코드가 401/403(차단 계열)인지 본다(순수 함수, #267-9).
+/// queue_runner의 parse_http_status와 같은 "status 토큰 뒤 첫 3자리" 규칙을 따른다.
+fn blocking_http_status(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    let Some(idx) = lower.find("status") else {
+        return false;
+    };
+    let after = &message[idx + "status".len()..];
+    let digits: String = after
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    matches!(digits.parse::<u16>(), Ok(401) | Ok(403))
 }
 
 // 선택한 종목들에 글/댓글을 게시하고 종목별 성공/실패 결과를 돌려주는 함수입니다.
@@ -129,8 +178,41 @@ where
     let total = request.stocks.len();
     let mut results = Vec::with_capacity(total);
 
+    // 로그용 계정 식별자(마스킹)와 작업 종류. PW는 넣지 않는다.
+    let who = crate::auth::mask_id(&request.account_id);
+    let kind = match (request.run_post, request.run_comment) {
+        (true, true) => "글+댓글",
+        (false, true) => "댓글",
+        _ => "글",
+    };
+    // 차단 계정(로그인/권한 오류)으로 첫 글이 실패하면, 같은 계정의 남은 글은 전부 실패할
+    // 것이므로 시도하지 않고 건너뛴다(#267-9). 한 번 켜지면 이후 모든 종목을 skip 처리한다.
+    let mut blocked = false;
+
     for (index, stock) in request.stocks.iter().enumerate() {
         on_start(index);
+
+        // 앞선 글이 차단/로그인 오류로 실패한 뒤라면, 실제 게시 시도도 60초 대기도 없이 건너뛴다.
+        if blocked {
+            tracing::info!(
+                "[POST] {who}  \"{}\" 종목토론방 {kind} 건너뜀 ⏭ (앞선 글 로그인/권한 실패로 skip)",
+                stock.name
+            );
+            results.push(ForumPublishResult {
+                code: stock.code.clone(),
+                name: stock.name.clone(),
+                ok: false,
+                message: "앞선 글이 로그인/권한 오류로 실패해 건너뜀".to_owned(),
+                trace: None,
+                posted: None,
+                skipped: true,
+            });
+            if let Some(last) = results.last() {
+                on_result(index, last);
+            }
+            continue;
+        }
+
         let outcome = run_one_forum_stock(&request, stock, title, body, comment, &app);
         // 실패면 사용자용 메시지(message)와 캡처된 스택(trace)을 분리해 들고 간다(#199).
         // 성공 시 작성된 글 URL을 메시지에 함께 실어, 완료 로그에서 올라간 글을 확인할 수 있게 한다.
@@ -139,14 +221,7 @@ where
             Err(error) => (false, error.message().to_owned(), Some(error.trace()), None),
         };
 
-        // 작업 결과를 pstmacro.log에 기록(가독성·상세화). 동작 무변경, 로그 줄만 추가.
-        // 계정 ID는 마스킹하고 PW는 넣지 않는다.
-        let who = crate::auth::mask_id(&request.account_id);
-        let kind = match (request.run_post, request.run_comment) {
-            (true, true) => "글+댓글",
-            (false, true) => "댓글",
-            _ => "글",
-        };
+        // 작업 결과를 pstmacro.log에 기록(가독성·상세화).
         if ok {
             tracing::info!("[POST] {who}  \"{}\" 종목토론방 {kind} 성공 ✅", stock.name);
         } else {
@@ -156,6 +231,12 @@ where
             );
         }
 
+        // 이번 실패가 계정 차단(로그인/권한 만료)이면, 다음 회차부터 남은 글을 건너뛴다(#267-9).
+        // "요청 과다"(429)는 일시적이라 차단으로 보지 않는다(is_blocking_failure에서 제외).
+        if !ok && is_blocking_failure(&message) {
+            blocked = true;
+        }
+
         results.push(ForumPublishResult {
             code: stock.code.clone(),
             name: stock.name.clone(),
@@ -163,6 +244,7 @@ where
             message,
             trace,
             posted,
+            skipped: false,
         });
         // 종목 1건 완료를 호출부에 통지한다(#219). 큐 워커는 여기서 진행률·라이브 상태를
         // 60초 대기 전에 갱신해, 종토방 작업이 0/N에 멈춰 보이지 않게 한다.
@@ -170,8 +252,9 @@ where
             on_result(index, last);
         }
 
-        // 마지막 종목이 아니면 다음 게시 전 1분 대기(타이머 이벤트 emit).
-        if index + 1 < total {
+        // 마지막 종목이 아니고, 차단으로 남은 글을 건너뛸 게 아닐 때만 다음 게시 전 1분 대기.
+        // 차단되면 곧장 다음 루프에서 skip하므로 60초를 낭비하지 않는다(#267-9 시간 절약).
+        if index + 1 < total && !blocked {
             let _ = app.emit("batch-wait-start", serde_json::json!({ "seconds": 60u64 }));
             sleep(Duration::from_secs(60));
         }
@@ -183,7 +266,10 @@ where
 /// 댓글 전용 결과의 '게시내용' 링크를 고른다. "특정 게시글" 댓글이면 그 글 URL(공백 제거
 /// 후 비어있지 않을 때)을 쓰고, 아니면 매크로가 돌려준 글 URL(랜덤 글 댓글은 None)로
 /// 떨어진다. 알림 '게시내용'에서 댓글 옆에 단 글의 링크를 보여주는 데 쓴다.
-fn comment_detail_url(comment_url: &Option<String>, report_post_url: Option<String>) -> Option<String> {
+fn comment_detail_url(
+    comment_url: &Option<String>,
+    report_post_url: Option<String>,
+) -> Option<String> {
     comment_url
         .as_deref()
         .map(str::trim)
@@ -824,6 +910,34 @@ mod tests {
         let error = validate_texts(&values, &PickMode::Single, "제목").unwrap_err();
 
         assert!(error.contains("정확히 1개"));
+    }
+
+    #[test]
+    fn blocking_failure_detects_login_permission_but_not_rate_limit() {
+        // #267-9: 로그인/권한/세션 만료·쿠키 없음 계열은 차단으로 본다(같은 계정 남은 글 skip).
+        assert!(is_blocking_failure(
+            "글쓰기 form 패킷 HTTP 실패: HTTP status 403 Forbidden for url (https://x)"
+        ));
+        assert!(is_blocking_failure("HTTP status 401 Unauthorized"));
+        assert!(is_blocking_failure("SESSION_INVALID: contentJson…"));
+        assert!(is_blocking_failure(
+            "Chrome에서 네이버 로그인 쿠키를 찾지 못했습니다"
+        ));
+        assert!(is_blocking_failure(
+            "로그인이 만료되었습니다. 다시 로그인해 주세요"
+        ));
+        // 요청 과다(429)는 일시적이라 차단이 아니다 — 건너뛰면 안 된다(사수 지침: 요청 과다 제외).
+        assert!(!is_blocking_failure(
+            "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요"
+        ));
+        assert!(!is_blocking_failure("HTTP status 429 Too Many Requests"));
+        // 일반 게시 실패(서버 오류/본문 구성 오류 등)는 차단이 아니다 — 다음 글은 정상 시도.
+        assert!(!is_blocking_failure(
+            "HTTP status 500 Internal Server Error"
+        ));
+        assert!(!is_blocking_failure(
+            "글 내용을 구성하는 중 문제가 발생했습니다"
+        ));
     }
 
     #[test]

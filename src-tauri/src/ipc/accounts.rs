@@ -35,6 +35,10 @@ pub enum PlatformId {
 pub enum AccountStatus {
     New,
     Active,
+    /// 글 게시에 성공한 뒤의 "대기" 상태(#267-3). 노란 배지로 표시하고, 게시 선택 목록에서는
+    /// 숨겨 같은 계정으로 연속 게시되지 않게 한다. 사용자가 상태 배지를 클릭하면 다시 `Active`로
+    /// 돌아가 정상 게시에 쓸 수 있다(프론트 STATUS_ACCOUNT_CYCLE).
+    Waiting,
     BadCredentials,
     Challenge,
     Blocked,

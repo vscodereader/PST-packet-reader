@@ -359,8 +359,7 @@ fn is_url_comment_only_plan(plan: &PublishPlan) -> bool {
     if plan.naver.is_empty() && plan.forum.is_empty() && plan.band.is_empty() {
         return false;
     }
-    let is_url_spec =
-        |t: &Option<CommentTargetSpec>| matches!(t, Some(s) if matches!(s.mode, CommentTarget::Url));
+    let is_url_spec = |t: &Option<CommentTargetSpec>| matches!(t, Some(s) if matches!(s.mode, CommentTarget::Url));
     let naver_ok = plan.naver.iter().all(|t| is_url_spec(&t.comment_target));
     let forum_ok = plan.forum.iter().all(|t| !t.comment_url.trim().is_empty());
     let band_ok = plan.band.iter().all(|t| is_url_spec(&t.comment_target));
@@ -687,6 +686,13 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
         );
     }
 
+    // 글 게시에 성공한 계정은 "대기"(노란색)로 전환한다(#267-3) — 같은 계정으로 연속 게시되지
+    // 않게 게시 선택 목록에서 숨기기 위함. 댓글만 성공한 경우는 제외하려고 글을 포함한 플랜
+    // (runs_post)일 때만 적용한다. 사용자가 계정 화면에서 상태 배지를 누르면 다시 Active로 돌아간다.
+    if runs_post(plan) {
+        apply_waiting_for_successful_posts(app, &all_posts, &all_forum, &all_band);
+    }
+
     // 완료 로그(LogBatch)/activity: 누적된 카페 글·댓글·토론방·밴드 결과 + 댓글 조회 실패를
     // 알림에 남긴다. 실행한 작업이 하나도 없으면(빈 plan) 빈 배치는 만들지 않는다.
     flush_completion_log(
@@ -699,6 +705,56 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
         &all_fetch_failures,
     );
     ItemOutcome::Completed
+}
+
+/// 글 게시에 성공한 계정(loginId)을 모아 계정 상태를 "대기"(Waiting)로 바꾼다(#267-3). 카페 글·
+/// 종토방 글·밴드 글의 **성공**만 본다(실패·skip 제외). 호출부는 글을 포함한 플랜(runs_post)일
+/// 때만 부른다 — 댓글만 성공한 경우는 대기로 바꾸지 않는다. account_id가 곧 loginId(쿠키 키)라
+/// `apply_status_by_login_id`로 같은 loginId 모든 행을 함께 갱신한다(로그인 상태 갱신과 동일 규약).
+fn apply_waiting_for_successful_posts<R: Runtime>(
+    app: &AppHandle<R>,
+    posts: &[JobReport],
+    forum: &[ForumOutcome],
+    band: &[BandOutcome],
+) {
+    use crate::ipc::accounts::{apply_status_by_login_id, Account};
+    let ids = successful_post_login_ids(posts, forum, band);
+    if ids.is_empty() {
+        return;
+    }
+    app.state::<JsonStore<Account>>().mutate(|list| {
+        ids.iter().fold(list, |acc, id| {
+            apply_status_by_login_id(
+                acc,
+                id,
+                AccountStatus::Waiting,
+                Some(
+                    "글 게시 완료 — 대기 상태입니다. 상태를 눌러 다시 활성으로 바꿀 수 있어요."
+                        .to_owned(),
+                ),
+            )
+        })
+    });
+}
+
+/// 글 게시에 성공한 계정(loginId) 집합(#267-3, 순수). 카페 글(success)·종토방 글(ok && !skip)·
+/// 밴드 글(Ok)의 성공만 모은다. 댓글 결과는 보지 않는다 — "글" 성공만 대기로 전환하기 위함.
+fn successful_post_login_ids(
+    posts: &[JobReport],
+    forum: &[ForumOutcome],
+    band: &[BandOutcome],
+) -> std::collections::BTreeSet<String> {
+    let mut ids = std::collections::BTreeSet::new();
+    for r in posts.iter().filter(|r| r.success) {
+        ids.insert(r.account_id.clone());
+    }
+    for o in forum.iter().filter(|o| o.result.ok && !o.result.skipped) {
+        ids.insert(o.account_id.clone());
+    }
+    for o in band.iter().filter(|o| o.result.is_ok()) {
+        ids.insert(o.account_id.clone());
+    }
+    ids
 }
 
 /// 누적 결과로 완료 로그(LogBatch)/activity를 남긴다. 정상 종료 시 **전체 plan**으로, 우선순위
@@ -1233,6 +1289,7 @@ fn synth_forum_failures(
                 message: failure_reason(&skip.code, None),
                 trace: Some(format!("{}\n{}", skip.code, skip.trace_body())),
                 posted: None,
+                skipped: false,
             },
         })
         .collect()
@@ -1484,6 +1541,7 @@ async fn run_forum_targets<R: Runtime>(
                                     trace: Some(message.clone()),
                                     message,
                                     posted: None,
+                                    skipped: false,
                                 }
                             })
                             .collect();
@@ -1515,6 +1573,7 @@ async fn run_forum_targets<R: Runtime>(
                             trace: Some(message.clone()),
                             message,
                             posted: None,
+                            skipped: false,
                         }
                     })
                     .collect(),
@@ -2214,18 +2273,23 @@ fn forum_result_to_item(account_id: &str, result: &ForumPublishResult) -> BatchI
         code: Some(result.code.clone()),
         board: None,
         login_id: account_id.to_owned(),
-        status: status_of(result.ok),
+        // 차단 계정으로 건너뛴 글(#267-9)은 X(실패)가 아니라 "건너뜀(Skip)"으로 구분한다.
+        status: if result.skipped {
+            BatchItemStatus::Skip
+        } else {
+            status_of(result.ok)
+        },
         // 성공은 엔진 문구("게시 완료"+URL). 실패는 비개발자용 한국어 사유로 변환해 "왜
-        // 실패했는지"를 한눈에 보이게 한다(#243: 카페 failure_reason과 동일 철학). 원문 기술
-        // 메시지·백트레이스는 trace(자세히 보기)로 분리해 메인 라인엔 개발 용어가 안 새게 한다.
-        msg: if result.ok {
+        // 실패했는지"를 한눈에 보이게 한다(#243: 카페 failure_reason과 동일 철학). 건너뜀은
+        // run_forum_publish가 만든 안내문("앞선 글이 …건너뜀")을 그대로 보여준다.
+        msg: if result.skipped || result.ok {
             result.message.clone()
         } else {
             forum_failure_reason(&result.message)
         },
-        // 실패 시 친절 사유로 가려진 원본 기술 메시지를 자세히 보기 맨 위에 보존한다(#243). 성공은
-        // 그대로(None). AutomationError::trace()는 위치+백트레이스만 담아 message가 빠지므로 합친다.
-        trace: if result.ok {
+        // 실패 시 친절 사유로 가려진 원본 기술 메시지를 자세히 보기 맨 위에 보존한다(#243). 성공·
+        // 건너뜀은 그대로(없음). AutomationError::trace()는 위치+백트레이스만 담아 message가 빠지므로 합친다.
+        trace: if result.skipped || result.ok {
             result.trace.clone()
         } else {
             Some(match &result.trace {
@@ -2516,7 +2580,14 @@ fn write_live_phase<R: Runtime>(
 ) {
     let resolved = live
         .iter()
-        .filter(|i| matches!(i.status, BatchItemStatus::Success | BatchItemStatus::Fail))
+        // Skip(차단으로 건너뜀, #267-9)도 더는 시도하지 않으므로 "확정"으로 세어, 건너뛴 글
+        // 때문에 진행률이 100%에 못 미치고 멈춰 보이지 않게 한다.
+        .filter(|i| {
+            matches!(
+                i.status,
+                BatchItemStatus::Success | BatchItemStatus::Fail | BatchItemStatus::Skip
+            )
+        })
         .count() as u32;
     let mut items = base_items.to_vec();
     items.extend(live.iter().cloned());
@@ -2859,6 +2930,7 @@ mod tests {
                 message: "게시 완료".into(),
                 trace: None,
                 posted: None,
+                skipped: false,
             },
         }
     }
@@ -2873,6 +2945,7 @@ mod tests {
                 message: "엔진 오류".into(),
                 trace: Some(trace.into()),
                 posted: None,
+                skipped: false,
             },
         }
     }
@@ -3688,8 +3761,7 @@ mod tests {
         // "특정 게시글" 댓글: comment_url이 채워진 forum 대상은 종목 묶음이 아니라 그 글 URL
         // 하나에만 댓글을 다는 요청으로 풀려야 한다(댓글 전용, run_post=false). code(035720)는
         // URL에서 온 값으로 토큰 치환·라벨에 쓰인다(랜덤 글/종목 선택 없음).
-        let url =
-            "https://stock.naver.com/domestic/stock/035720/discussion/421063210?chip=all";
+        let url = "https://stock.naver.com/domestic/stock/035720/discussion/421063210?chip=all";
         let mut p = plan(ModeValue::Comment, vec![]);
         p.comments = vec!["좋은 글이네요".into()];
         p.forum = vec![ForumTarget {
@@ -4223,6 +4295,36 @@ mod tests {
     }
 
     #[test]
+    fn forum_result_to_item_marks_skipped_as_skip_status() {
+        // #267-9: 차단으로 건너뛴 글은 Fail(X)이 아니라 Skip("건너뜀")으로 표시한다.
+        let result = ForumPublishResult {
+            code: "005930".into(),
+            name: "삼성전자".into(),
+            ok: false,
+            message: "앞선 글이 로그인/권한 오류로 실패해 건너뜀".into(),
+            trace: None,
+            posted: None,
+            skipped: true,
+        };
+        let item = forum_result_to_item("u0", &result);
+        assert_eq!(item.status, BatchItemStatus::Skip);
+        assert_eq!(item.msg, "앞선 글이 로그인/권한 오류로 실패해 건너뜀");
+        assert_eq!(item.trace, None);
+    }
+
+    #[test]
+    fn waiting_login_ids_collect_only_successful_posts() {
+        // #267-3: 글 게시 성공 계정만 대기 대상(실패·skip 제외).
+        let forum = vec![
+            forum_ok("acc_a", "삼성전자", "005930"),
+            forum_fail("acc_b", "SK하이닉스", "000660", "trace"),
+        ];
+        let ids = successful_post_login_ids(&[], &forum, &[]);
+        assert!(ids.contains("acc_a"), "성공 계정은 대기 대상");
+        assert!(!ids.contains("acc_b"), "실패 계정은 제외");
+    }
+
+    #[test]
     fn forum_failure_reason_maps_http_status_to_korean() {
         // packet_client가 만드는 "… 패킷 HTTP 실패: HTTP status 403 …"를 비개발자용 사유로(#243).
         let msg = "글쓰기 form 패킷 HTTP 실패: HTTP status 403 Forbidden for url (https://m.stock.naver.com/x)";
@@ -4264,6 +4366,7 @@ mod tests {
                 .into(),
             trace: Some("at foo.rs:1\n\nframe0".into()),
             posted: None,
+            skipped: false,
         };
         let item = forum_result_to_item("u0", &result);
         assert_eq!(item.status, BatchItemStatus::Fail);
@@ -4284,6 +4387,7 @@ mod tests {
             message: "   ".into(),
             trace: None,
             posted: None,
+            skipped: false,
         };
         let item = forum_result_to_item("u0", &result);
         assert_eq!(item.msg, "종목토론방 게시에 실패했습니다");

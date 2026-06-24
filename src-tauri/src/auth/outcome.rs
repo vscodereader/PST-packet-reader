@@ -62,6 +62,10 @@ impl LoginResolution {
 pub(crate) fn guide(status: &AccountStatus) -> &'static str {
     match status {
         AccountStatus::Active => "정상적으로 로그인되었습니다.",
+        // 글 게시 성공 후의 대기 상태(#267-3). 로그인 경로에서는 거의 나오지 않지만 exhaustive.
+        AccountStatus::Waiting => {
+            "글 게시 완료 후 대기 중입니다. 상태를 눌러 다시 활성으로 바꿀 수 있습니다."
+        }
         AccountStatus::BadCredentials => {
             "아이디 또는 비밀번호가 올바르지 않습니다. 계정 정보를 확인하세요."
         }
@@ -139,7 +143,9 @@ pub(crate) fn resolve_non_ok(outcome: LoginOutcome, trace: Option<String>) -> Lo
 pub(crate) fn status_activity_type(status: &AccountStatus) -> ActivityType {
     match status {
         AccountStatus::Active => ActivityType::Success,
-        AccountStatus::Challenge | AccountStatus::New => ActivityType::Info,
+        AccountStatus::Challenge | AccountStatus::New | AccountStatus::Waiting => {
+            ActivityType::Info
+        }
         AccountStatus::BadCredentials | AccountStatus::Blocked | AccountStatus::Error => {
             ActivityType::Error
         }
@@ -150,6 +156,7 @@ pub(crate) fn status_activity_type(status: &AccountStatus) -> ActivityType {
 pub(crate) fn activity_message(login_id: &str, status: &AccountStatus, detail: &str) -> String {
     let label = match status {
         AccountStatus::Active => "로그인 성공",
+        AccountStatus::Waiting => "게시 완료(대기)",
         AccountStatus::BadCredentials => "로그인 실패(비밀번호 오류)",
         AccountStatus::Challenge => "추가 인증 필요",
         AccountStatus::Blocked => "접근 차단",
