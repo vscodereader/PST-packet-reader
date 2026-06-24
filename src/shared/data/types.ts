@@ -139,9 +139,14 @@ export interface PublishJob {
    *  워커가 이 URL의 글에 직접 댓글을 단다(종목 선택·랜덤 글 없이). 그 외 forum 잡은 비운다. */
   commentUrl?: string;
   /** blog(네이버블로그) 전용(#271): 댓글 달 글의 blogId(문자열)+logNo(숫자 문자열, 잡 생성 시
-   *  동결). 블로그는 댓글 전용이라 이 한 글이 곧 대상이다. */
+   *  동결). 블로그는 댓글 전용이라 이 한 글이 곧 대상이다. "최신 N개" 모드(#279)면 logNo는
+   *  비고 blogCount(+categoryNo)가 채워져, 워커가 그 블로그의 최신 글 상위 N개에 댓글을 단다. */
   blogId?: string;
   logNo?: string;
+  /** blog "최신 N개" 모드(#279): 댓글을 달 최신 글 개수. 채워지면 logNo 없이 블로그 자체가 대상. */
+  blogCount?: number;
+  /** blog "최신 N개" 모드(#279): 글 목록을 좁힐 카테고리 번호(있으면). 없으면 전체. */
+  categoryNo?: number;
   board: string;
   status: AccountStatus;
 }

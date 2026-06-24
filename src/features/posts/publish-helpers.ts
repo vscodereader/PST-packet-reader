@@ -160,6 +160,72 @@ export function parseBlogPostLink(
   return null;
 }
 
+/** 네이버 블로그 **홈/임의** 링크에서 파싱한 "최신 N개" 댓글 대상(#279) — 블로그 식별자와
+ *  (있으면) 카테고리 번호. 특정 글(logNo)이 아니라 블로그 자체가 대상이다. */
+export interface BlogLinkTarget {
+  blogId: string;
+  /** 글 목록을 좁힐 카테고리 번호(있으면). 없으면 전체(백엔드에서 0으로 본다). */
+  categoryNo?: number;
+}
+
+/**
+ * 네이버 블로그 **홈/임의** URL에서 `blogId`(문자열)와 (있으면) `categoryNo`를 뽑는다(#279).
+ *
+ * "최신 N개 글에 댓글" 모드는 특정 글(logNo)이 아니라 블로그 자체가 대상이라, logNo 없이
+ * blogId만 있으면 충분하다([`parseBlogPostLink`]는 logNo가 필수라 홈 링크엔 못 쓴다). 다음을
+ * 모두 지원한다:
+ *   - `https://blog.naver.com/{blogId}`            (블로그 홈)
+ *   - `https://blog.naver.com/{blogId}/{logNo}`    (글 — blogId만 취한다)
+ *   - `https://blog.naver.com/{blogId}?categoryNo=7`
+ *   - `https://blog.naver.com/PostList.naver?blogId={blogId}&categoryNo=7`
+ *   - 위가 encoded로 한 번 더 감싸진 형태(점진적 decodeURIComponent로 풀어 매칭).
+ * 인식 못 하면 `null` — 호출부가 추가를 거부한다.
+ */
+export function parseBlogLink(url: string | undefined): BlogLinkTarget | null {
+  if (!url) return null;
+
+  const candidates: string[] = [url];
+  let cur = url;
+  for (let i = 0; i < 3; i++) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(cur);
+    } catch {
+      break;
+    }
+    if (decoded === cur) break;
+    candidates.push(decoded);
+    cur = decoded;
+  }
+
+  const categoryOf = (s: string): number | undefined => {
+    const m = s.match(/[?&]categoryNo=(\d+)/i);
+    if (!m) return undefined;
+    const n = Number(m[1]);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  };
+  // blogId만 따로 모아 categoryNo가 있는 후보를 우선 골라 카테고리를 보존한다.
+  const make = (blogId: string, s: string): BlogLinkTarget => {
+    const categoryNo = categoryOf(s);
+    return categoryNo !== undefined ? { blogId, categoryNo } : { blogId };
+  };
+
+  // 쿼리 형(blogId=...)을 경로 형보다 우선한다 — 링크가 한 번 더 감싸졌을 때(예: `/x?u=…`)
+  // 바깥 경로(`/x`)를 blogId로 오인하지 않도록 모든 후보에서 먼저 쿼리 형을 찾는다.
+  for (const c of candidates) {
+    const qBlog = c.match(/[?&]blogId=([^&#/]+)/i);
+    if (qBlog?.[1]) return make(qBlog[1], c);
+  }
+  for (const c of candidates) {
+    // 경로 형: blog.naver.com/{blogId}(/...)?. blogId는 영숫자/._- 허용. 예약 경로(PostList 등)는
+    // 위 쿼리 형에서 처리되므로 여기선 일반 blogId만 잡는다(`.naver` 접미는 제외).
+    const path = c.match(/blog\.naver\.com\/([A-Za-z0-9][A-Za-z0-9._-]*)/i);
+    if (path?.[1] && !/\.naver$/i.test(path[1])) return make(path[1], c);
+  }
+
+  return null;
+}
+
 /** 붙여넣은 URL 처리. 종목 시세 링크(6자리 코드)는 시세 줄로 바꾸고, 그 외 링크/내용은
  * 붙여넣은 원문 그대로 둔다 — URL이 본문에 남아야 게시 글에서 링크가 보인다. 예전엔
  * 일반 링크를 "[host에서 가져온 내용]" 가짜 문구로 바꿔 URL이 통째로 유실됐다. */
