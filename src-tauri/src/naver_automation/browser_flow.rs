@@ -105,7 +105,8 @@ impl CdpClient {
                 })()
                 "#,
             )? {
-                sleep(Duration::from_secs(2));
+                // "등록 안함" 클릭이 반영될 짧은 여유. 로그인 체감 속도(#14)를 위해 1초로 줄인다.
+                sleep(Duration::from_secs(1));
                 return Ok(true);
             }
 
