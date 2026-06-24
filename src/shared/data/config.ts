@@ -99,6 +99,10 @@ export const STATUS_ACCOUNT: Record<string, { t: string; c: string }> = {
   active: { t: "활성", c: "green" },
   // 글 게시 성공 후 대기(#267-3). 노란색 배지. 클릭하면 다시 활성으로 돌아간다(StatusBadge).
   waiting: { t: "대기", c: "yellow" },
+  // 로그인 캡차 보류(#267 후속). 사람이 직접 풀면 회복 가능 — 보라색 배지로 실패 계열과 구분한다.
+  onHold: { t: "보류", c: "grape" },
+  // 게시 대기시간 초과·네이버 서버 오류(HTTP 500)로 글 실패(#286 후속). 일시적 문제라 청록 배지.
+  timedOut: { t: "대기초과", c: "cyan" },
   badCredentials: { t: "비번오류", c: "orange" },
   challenge: { t: "인증필요", c: "yellow" },
   blocked: { t: "차단", c: "red" },
@@ -108,6 +112,8 @@ export const STATUS_ACCOUNT_ORDER = [
   "new",
   "active",
   "waiting",
+  "onHold",
+  "timedOut",
   "badCredentials",
   "challenge",
   "blocked",
@@ -127,6 +133,10 @@ export const STATUS_GUIDE: Record<string, string> = {
   active: "정상적으로 로그인되었습니다.",
   waiting:
     "글 게시 완료 후 대기 상태입니다. 배지를 클릭하면 다시 활성으로 바꿔 게시에 쓸 수 있어요.",
+  onHold:
+    "보안문자(캡차)가 떠 로그인이 보류되었습니다. 이 계정만 골라 다시 로그인하면 캡차를 직접 풀 수 있어요(10초 대기).",
+  timedOut:
+    "페이지 대기시간 초과 또는 네이버 서버 오류(HTTP 500)로 게시가 실패했습니다. 잠시 후 다시 시도하세요.",
   badCredentials:
     "아이디 또는 비밀번호가 올바르지 않습니다. 계정 정보를 확인하세요.",
   challenge:

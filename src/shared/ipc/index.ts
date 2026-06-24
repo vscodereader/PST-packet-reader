@@ -161,6 +161,8 @@ export const ipc = {
     listNow: () => call<QueueNowItem[]>("list_queue_now"),
     listScheduled: () => call<QueueScheduledItem[]>("list_queue_scheduled"),
     cancelNow: (id: string) => call<QueueNowItem[]>("cancel_queue_now", { id }),
+    // 종료(완료/실패) 아이템을 모두 큐에서 치운다(#1, "완료 항목 지우기").
+    clearDoneNow: () => call<QueueNowItem[]>("clear_done_queue_now"),
     cancelScheduled: (id: string) =>
       call<QueueScheduledItem[]>("cancel_queue_scheduled", { id }),
     /**

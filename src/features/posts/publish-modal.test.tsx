@@ -163,6 +163,49 @@ describe("PublishModal", () => {
     expect(go).toHaveBeenCalledWith("queue");
   });
 
+  it("게시(숫자) 후 '계속작성'은 모달을 유지하고 방금 게시한 계정이 목록에서 빠진다(#4/#5)", async () => {
+    // 기본 선택 계정(a1, invest_king7)으로 즉시 게시한다.
+    const onClose = vi.fn();
+    renderPublish({ onClose });
+    // 게시 전에는 계정 체크박스 목록에 invest_king7이 보인다.
+    expect(await screen.findByText("invest_king7")).toBeInTheDocument();
+    await pickStock();
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^게시 \(\d+\)/ }),
+    );
+    // 결과 패널(계속 작성/게시큐 보기)이 뜬다.
+    const keep = await screen.findByRole(
+      "button",
+      { name: "계속 작성" },
+      { timeout: 3000 },
+    );
+    // '계속작성'은 게시설정창을 닫지 않는다(#5) — onClose는 호출되지 않는다.
+    await userEvent.click(keep);
+    expect(onClose).not.toHaveBeenCalled();
+    // 게시설정창은 그대로 유지된다.
+    expect(await screen.findByText("게시 설정")).toBeInTheDocument();
+    // 그리고 방금 게시한 계정(invest_king7)은 새로고침된 계정 목록에서 빠진다(#4).
+    await waitFor(() =>
+      expect(screen.queryByText("invest_king7")).not.toBeInTheDocument(),
+    );
+    // 선택 개수도 0개가 된다(방금 쓴 계정만 선택돼 있었으므로).
+    expect(await screen.findByText("0개")).toBeInTheDocument();
+  });
+
+  it("게시(숫자) 직후 결과 패널이 떠 있는 동안에도 선택은 게시 계정에서 풀린다(#4)", async () => {
+    renderPublish();
+    expect(await screen.findByText("1개")).toBeInTheDocument();
+    await pickStock();
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^게시 \(\d+\)/ }),
+    );
+    // 결과 패널이 뜨면 큐 적재가 끝난 것 — 그 즉시 선택이 비워진다(0개).
+    expect(
+      await screen.findByText("계속 작성", undefined, { timeout: 3000 }),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("0개")).toBeInTheDocument());
+  });
+
   it("offers a retry control when enqueuing fails", async () => {
     // 큐 적재(add_queue_now)가 거부되면 결과 행을 실패로 두고 재시도 버튼을 보여준다.
     const real = ipcBackend.getMockImplementation()!;

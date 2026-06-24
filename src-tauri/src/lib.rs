@@ -653,6 +653,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         queue::list_queue_now,
         queue::list_queue_scheduled,
         queue::cancel_queue_now,
+        queue::clear_done_queue_now,
         queue::cancel_queue_scheduled,
         queue::add_queue_now,
         queue::add_queue_scheduled,

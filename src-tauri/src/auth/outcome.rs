@@ -66,6 +66,16 @@ pub(crate) fn guide(status: &AccountStatus) -> &'static str {
         AccountStatus::Waiting => {
             "글 게시 완료 후 대기 중입니다. 상태를 눌러 다시 활성으로 바꿀 수 있습니다."
         }
+        // 캡차 보류(#267 후속). 보류된 계정만 골라 다시 선택 로그인하면 캡차 10초 대기 뒤
+        // 자동/수동으로 풀어 활성으로 되돌릴 수 있다.
+        AccountStatus::OnHold => {
+            "보안문자(캡차)가 떠 로그인이 보류되었습니다. 이 계정만 골라 다시 로그인하면 캡차를 직접 풀 수 있습니다."
+        }
+        // 대기초과(#286 후속): 페이지 대기시간 초과·네이버 서버 오류(HTTP 500) 등 일시적 문제로
+        // 게시가 실패한 상태. 로그인 경로에서는 나오지 않지만 exhaustive 매치를 위해 둔다.
+        AccountStatus::TimedOut => {
+            "페이지 대기시간 초과 또는 네이버 서버 오류로 게시가 실패했습니다. 잠시 후 다시 시도하세요."
+        }
         AccountStatus::BadCredentials => {
             "아이디 또는 비밀번호가 올바르지 않습니다. 계정 정보를 확인하세요."
         }
@@ -92,6 +102,8 @@ pub(crate) fn outcome_to_status(outcome: &LoginOutcome) -> AccountStatus {
         LoginOutcome::Blocked | LoginOutcome::Protected | LoginOutcome::Locked => {
             AccountStatus::Blocked
         }
+        // 캡차 미해결은 사람이 직접 풀면 회복 가능하므로 별도 "보류"(OnHold)로 둔다(#267 후속).
+        LoginOutcome::CaptchaUnsolved => AccountStatus::OnHold,
         LoginOutcome::Error(_) => AccountStatus::Error,
     }
 }
@@ -146,6 +158,10 @@ pub(crate) fn status_activity_type(status: &AccountStatus) -> ActivityType {
         AccountStatus::Challenge | AccountStatus::New | AccountStatus::Waiting => {
             ActivityType::Info
         }
+        // 보류(캡차 미해결)는 실패가 아니라 사용자 조치 대기 — Info로 둔다(#267 후속).
+        AccountStatus::OnHold => ActivityType::Info,
+        // 대기초과(서버/타이밍 일시 문제, #286 후속)도 재시도 대상이라 Info로 둔다.
+        AccountStatus::TimedOut => ActivityType::Info,
         AccountStatus::BadCredentials | AccountStatus::Blocked | AccountStatus::Error => {
             ActivityType::Error
         }
@@ -157,6 +173,8 @@ pub(crate) fn activity_message(login_id: &str, status: &AccountStatus, detail: &
     let label = match status {
         AccountStatus::Active => "로그인 성공",
         AccountStatus::Waiting => "게시 완료(대기)",
+        AccountStatus::OnHold => "캡차 보류",
+        AccountStatus::TimedOut => "대기초과",
         AccountStatus::BadCredentials => "로그인 실패(비밀번호 오류)",
         AccountStatus::Challenge => "추가 인증 필요",
         AccountStatus::Blocked => "접근 차단",
@@ -272,6 +290,32 @@ mod tests {
         );
         assert_eq!(r.status, AccountStatus::Challenge);
         assert!(r.message.contains("OTP"));
+    }
+
+    #[test]
+    fn captcha_unsolved_maps_to_on_hold() {
+        // 캡차 미해결은 일반 Error가 아니라 보류(OnHold)로 매핑된다(#267 후속).
+        assert_eq!(
+            outcome_to_status(&LoginOutcome::CaptchaUnsolved),
+            AccountStatus::OnHold
+        );
+    }
+
+    #[test]
+    fn resolve_non_ok_captcha_unsolved_is_on_hold_and_recoverable_guidance() {
+        let r = resolve_non_ok(LoginOutcome::CaptchaUnsolved, None);
+        assert_eq!(r.status, AccountStatus::OnHold);
+        assert!(r.message.contains("캡차") || r.message.contains("보안문자"));
+        assert!(!r.succeeded);
+    }
+
+    #[test]
+    fn on_hold_activity_type_is_info_not_error() {
+        // 보류는 실패가 아니라 사용자 조치 대기이므로 Info로 분류한다.
+        assert_eq!(
+            status_activity_type(&AccountStatus::OnHold),
+            ActivityType::Info
+        );
     }
 
     #[test]

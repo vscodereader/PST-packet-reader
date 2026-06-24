@@ -35,6 +35,8 @@ fn status_str(s: &AccountStatus) -> &'static str {
         New => "new",
         Active => "active",
         Waiting => "waiting",
+        OnHold => "onHold",
+        TimedOut => "timedOut",
         BadCredentials => "badCredentials",
         Challenge => "challenge",
         Blocked => "blocked",
@@ -618,6 +620,8 @@ mod tests {
         assert_eq!(status_str(&AccountStatus::BadCredentials), "badCredentials");
         assert_eq!(status_str(&AccountStatus::Challenge), "challenge");
         assert_eq!(status_str(&AccountStatus::Blocked), "blocked");
+        assert_eq!(status_str(&AccountStatus::OnHold), "onHold");
+        assert_eq!(status_str(&AccountStatus::TimedOut), "timedOut");
         assert_eq!(status_str(&AccountStatus::Error), "error");
     }
 
