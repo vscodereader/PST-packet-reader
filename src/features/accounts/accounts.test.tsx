@@ -171,9 +171,14 @@ describe("Accounts", () => {
     // 배지는 상태 라벨 텍스트로 찾는다(title은 이제 상태별 안내 문구로 동적).
     expect(within(row).getByText("활성")).toBeInTheDocument();
     await userEvent.click(within(row).getByText("활성"));
-    // 수동 순환은 사용자 의미 상태(new→active→blocked)만 돈다 — active 다음은 차단.
+    // 수동 순환(new→active→waiting→blocked): 활성 다음은 대기(#267-3 활성 배지 클릭→대기).
     await waitFor(() =>
-      expect(within(row).getByText("차단")).toBeInTheDocument(),
+      expect(within(row).getByText("대기")).toBeInTheDocument(),
+    );
+    // 대기 배지를 누르면 곧장 활성으로 되돌린다(#267-3 재활성).
+    await userEvent.click(within(row).getByText("대기"));
+    await waitFor(() =>
+      expect(within(row).getByText("활성")).toBeInTheDocument(),
     );
   });
 

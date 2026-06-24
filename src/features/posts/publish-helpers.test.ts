@@ -69,6 +69,16 @@ describe("htmlToText", () => {
     expect(htmlToText("a<br>b<br/>c")).toBe("a\nb\nc");
   });
 
+  it("inserts a newline between a bare first line and following <div> lines (#267-1)", () => {
+    // contentEditable에서 엔터를 치면 첫 줄은 평문, 다음 줄부터 <div>로 감싸인다. 닫는 태그만
+    // \n으로 바꾸면 줄 사이가 아니라 끝에만 붙어 "하...미치겠네"로 달라붙던 버그의 회귀 테스트.
+    expect(htmlToText("하...<div>미치겠네</div>")).toBe("하...\n미치겠네");
+    // 줄 뒤에 토큰/링크가 와도 줄바꿈이 유지된다(토큰은 백엔드에서 실제 링크로 치환됨).
+    expect(htmlToText("본문<div>#{링크}</div>")).toBe("본문\n#{링크}");
+    // 전부 <div>로 감싸인 형태도 동일하게 한 번씩만 줄바꿈.
+    expect(htmlToText("<div>첫</div><div>둘</div>")).toBe("첫\n둘");
+  });
+
   it("preserves <img> as a placeholder instead of dropping it", () => {
     // The regression: a chart/image-only body would otherwise flatten to "".
     expect(htmlToText('<img src="chart.png" alt="삼성전자 차트">')).toBe(

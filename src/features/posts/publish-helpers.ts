@@ -149,8 +149,14 @@ export function htmlToText(html: string): string {
   return (
     html
       .replace(/<br\s*\/?>/gi, "\n")
-      .replace(/<\/(p|div|li|h[1-6])>/gi, "\n")
       .replace(/<img\b[^>]*>/gi, imgPlaceholder)
+      // 블록 요소 경계를 줄바꿈으로 바꾼다(#267-1 재수정). contentEditable에서 엔터를 치면 첫
+      // 줄은 평문, 다음 줄부터 <div>로 감싸여 "하...<div>미치겠네</div>" 형태가 나온다. 닫는 태그만
+      // \n으로 바꾸면 줄 **사이**가 아니라 끝에만 \n이 붙어 "하...미치겠네"로 달라붙는다. 그래서
+      // **여는** 블록 태그를 \n으로 바꾸고 닫는 태그는 제거해, 줄과 줄 사이에 정확히 한 번
+      // 줄바꿈이 들어가게 한다(<div>하...</div><div>미치겠네</div> 형태도 동일하게 처리).
+      .replace(/<\/(?:p|div|li|h[1-6])>/gi, "")
+      .replace(/<(?:p|div|li|h[1-6])\b[^>]*>/gi, "\n")
       .replace(
         /<a\b[^>]*\bhref\s*=\s*["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi,
         anchorToText,
