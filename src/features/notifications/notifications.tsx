@@ -55,6 +55,8 @@ export function SubLog({ item }: { item: BatchItem }) {
   const ok = item.status === "success";
   const fail = item.status === "fail";
   const waiting = item.status === "waiting";
+  // 차단 계정으로 건너뛴 글(#267-9). X(실패)가 아니라 회색 "건너뜀"으로 구분 표시한다.
+  const skip = item.status === "skip";
   const color = statusColor(item.status);
   return (
     <Box
@@ -74,6 +76,8 @@ export function SubLog({ item }: { item: BatchItem }) {
             <Icon.x size={13} />
           ) : waiting ? (
             <Icon.clock size={13} />
+          ) : skip ? (
+            <Icon.arrowRight size={13} />
           ) : (
             <Loader size={13} color={color} />
           )}
@@ -483,6 +487,10 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
     g.rows.push(row);
   });
   groups.sort((a, b) => (dayOrder[a.day] ?? 9) - (dayOrder[b.day] ?? 9));
+  // 각 날짜 그룹 안의 행을 발생 시각 순서(오래된 일 → 최근 일)로 정렬한다(#267-6). 기존엔
+  // 백엔드가 준 순서(배치 후 시스템 등)를 그대로 둬 기준이 모호했는데, 일이 일어난 순서대로
+  // 보이게 한다. 그룹(날짜)은 위에서 오늘→어제→이전 순으로 이미 정렬돼 있다.
+  groups.forEach((g) => g.rows.sort((a, b) => a.at - b.at));
 
   const okCount = logBatches.filter((b) => batchStatus(b) === "success").length;
   const failCount = logBatches.filter((b) =>
