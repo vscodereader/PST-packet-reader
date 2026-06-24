@@ -16,7 +16,7 @@ use tauri::{AppHandle, Runtime};
 use crate::auth::outcome::LoginResolution;
 use crate::auth::{
     app_data_root, assert_adb_device, config, paths_for_root, toggle_airplane_mode, Account,
-    OrchestratorError,
+    IpRotationMode, OrchestratorError,
 };
 
 use cookies::{account_band_cookie_status, BandCookieStatus};
@@ -61,7 +61,8 @@ pub(crate) async fn process_band_account<R: Runtime>(
 
     if use_adb {
         assert_adb_device().await?;
-        toggle_airplane_mode().await?;
+        // 밴드 로그인도 ADB 확정 즉시 진행(빠름). IP 실제 변경은 'IP 변경' 버튼이 담당한다.
+        toggle_airplane_mode(IpRotationMode::FastConfirm).await?;
         // IP가 바뀐 뒤 네트워크가 안정될 시간을 주고 나서 Chrome을 띄운다(네이버 미러).
         tracing::info!(
             "[BAND] IP 변경 확인 — {}초 안정화 대기 후 Chrome 실행",

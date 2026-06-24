@@ -445,7 +445,8 @@ async fn band_resolve_name(account_id: String, band_link: String) -> Result<Stri
 #[tauri::command]
 async fn rotate_ip() -> Result<auth::IpRotation, String> {
     auth::assert_adb_device().await.map_err(|e| e.to_string())?;
-    auth::toggle_airplane_mode()
+    // 'IP 변경' 버튼: 라디오가 실제로 끊겨 IP가 확실히 바뀌도록 고정 3초 hold를 쓴다.
+    auth::toggle_airplane_mode(auth::IpRotationMode::EnsureIpChange)
         .await
         .map_err(|e| e.to_string())
 }
