@@ -92,8 +92,12 @@ export function batchStatus(
   )
     return "running";
   const fails = b.items.filter((i) => i.status === "fail").length;
-  if (fails === 0) return "success";
-  if (fails === b.items.length) return "fail";
+  // 차단으로 건너뛴 글(skip, #267-9)은 게시되지 않은 것이라 성공이 아니다. 실패와 합쳐,
+  // 전부 실패/건너뜀이면 "fail", 일부만 성공이면 "partial"로 본다(전부 skip+fail이 성공으로
+  // 오판되지 않게). skip이 없으면 기존 동작과 동일하다.
+  const skips = b.items.filter((i) => i.status === "skip").length;
+  if (fails === 0 && skips === 0) return "success";
+  if (fails + skips === b.items.length) return "fail";
   return "partial";
 }
 

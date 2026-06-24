@@ -208,6 +208,11 @@ function StatusBadge({
   // 클릭 순환은 사용자 의미 상태(STATUS_ACCOUNT_CYCLE)만 돈다. 현재 값이 cycle 밖(로그인
   // 워커가 자동 설정한 badCredentials/challenge/error)이면 첫 값으로 보낸다.
   const cycle = () => {
+    // 대기(글 게시 성공 후, #267-3)는 클릭하면 곧장 활성으로 되돌린다 — 다시 게시에 쓸 수 있게.
+    if (value === "waiting") {
+      onChange("active");
+      return;
+    }
     const i = STATUS_ACCOUNT_CYCLE.indexOf(value);
     const next =
       i === -1

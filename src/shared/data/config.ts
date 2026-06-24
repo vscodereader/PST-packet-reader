@@ -87,6 +87,8 @@ export const BOARDS: Record<string, string[]> = {
 export const STATUS_ACCOUNT: Record<string, { t: string; c: string }> = {
   new: { t: "사용전", c: "gray" },
   active: { t: "활성", c: "green" },
+  // 글 게시 성공 후 대기(#267-3). 노란색 배지. 클릭하면 다시 활성으로 돌아간다(StatusBadge).
+  waiting: { t: "대기", c: "yellow" },
   badCredentials: { t: "비번오류", c: "orange" },
   challenge: { t: "인증필요", c: "yellow" },
   blocked: { t: "차단", c: "red" },
@@ -95,6 +97,7 @@ export const STATUS_ACCOUNT: Record<string, { t: string; c: string }> = {
 export const STATUS_ACCOUNT_ORDER = [
   "new",
   "active",
+  "waiting",
   "badCredentials",
   "challenge",
   "blocked",
@@ -109,6 +112,8 @@ export const STATUS_ACCOUNT_CYCLE = ["new", "active", "blocked"];
 // tooltip에 보여, 사용자가 다음에 무엇을 해야 할지 알 수 있게 한다.
 export const STATUS_GUIDE: Record<string, string> = {
   active: "정상적으로 로그인되었습니다.",
+  waiting:
+    "글 게시 완료 후 대기 상태입니다. 배지를 클릭하면 다시 활성으로 바꿔 게시에 쓸 수 있어요.",
   badCredentials:
     "아이디 또는 비밀번호가 올바르지 않습니다. 계정 정보를 확인하세요.",
   challenge:
