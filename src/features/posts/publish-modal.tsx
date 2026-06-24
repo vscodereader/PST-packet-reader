@@ -57,6 +57,7 @@ import {
 import { PreviewModal } from "./preview-modal";
 import {
   clampCommentCount,
+  distributeStocksEvenly,
   htmlToText,
   parseCafeBoardLink,
 } from "./publish-helpers";
@@ -621,7 +622,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [stocks, setStocks] = useState<Stock[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
-  const [stockCodes, setStockCodes] = useState<string[]>(["005930"]);
+  // 기본 선택 종목 없음(#267-11: 삼성전자 기본 선택 해제). 사용자가 직접 골라야 한다.
+  const [stockCodes, setStockCodes] = useState<string[]>([]);
   // 라이브 검색으로 고른 종목의 이름(시드 목록에 없을 수 있어 onConfirm에서 받아둠).
   const [stockNames, setStockNames] = useState<Record<string, string>>({});
   const [stockModal, setStockModal] = useState(false);
@@ -759,6 +761,10 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     // 이미 막히지만, 어떤 경로로도 실패 계정이 selected에 들어오지 못하게 한다).
     const acc = accounts.find((x) => x.id === id);
     if (acc && !isPostable(acc.status)) return;
+    // 계정 선택을 바꾸면 이전 계정 기준으로 고른 종목을 비운다(#267-2). A에서 고른 종목이
+    // B로 전환(A 해제 + B 체크)했을 때 그대로 남지 않고 공백으로 시작하게 한다.
+    setStockCodes([]);
+    setStockNames({});
     setSelected((s) =>
       s.includes(id) ? s.filter((x) => x !== id) : [...s, id],
     );
@@ -781,19 +787,27 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     { value: "band", label: "밴드" },
   ];
   const visibleAccts = accounts.filter(
-    (a) => acctFilter === "all" || a.platform === acctFilter,
+    (a) =>
+      // 글 게시 성공 계정(대기, #267-3)은 게시 선택 목록에서 숨긴다. 계정 화면에서 상태 배지를
+      // 눌러 다시 활성으로 바꾸면 게시 가능 상태가 되어 자동으로 다시 보인다.
+      a.status !== "waiting" &&
+      (acctFilter === "all" || a.platform === acctFilter),
   );
   const visUsable = visibleAccts
     .filter((a) => isPostable(a.status))
     .map((a) => a.id);
   const allVisibleOn =
     visUsable.length > 0 && visUsable.every((id) => selected.includes(id));
-  const selectAllVisible = () =>
+  const selectAllVisible = () => {
+    // 계정 선택 변경 → 이전 계정 기준 종목 비움(#267-2, toggle과 동일 규칙).
+    setStockCodes([]);
+    setStockNames({});
     setSelected((s) =>
       allVisibleOn
         ? s.filter((id) => !visUsable.includes(id))
         : [...new Set([...s, ...visUsable])],
     );
+  };
 
   const jobs: PublishJob[] = [];
   usableSelected.forEach((aid) => {
@@ -967,6 +981,38 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     bandReady &&
     jobs.length > 0;
 
+  // 종목토론방(forum) 계정들의 로그인 ID(중복 제거, 선택 순서 유지). "나눠서 게시"의 분배 단위.
+  const forumLoginIds = [
+    ...new Set(
+      jobs
+        .filter((j) => j.platform === "forum" && j.code && !j.commentUrl)
+        .map((j) => j.loginId),
+    ),
+  ];
+  // "나눠서 게시" 활성 조건(#267-5): forum 계정 2개 이상 + 선택 종목 2개 이상 + 종목수 ≥ 계정수.
+  // (계정 1개에 여러 종목 / 여러 계정에 1종목 / 계정수 > 종목수면 비활성 — 균등 분배가 불가하거나
+  //  분배 의미가 없는 경우.)
+  const canDistribute =
+    canPublish &&
+    forumLoginIds.length > 1 &&
+    stockCodes.length > 1 &&
+    stockCodes.length >= forumLoginIds.length;
+
+  // 선택 종목을 forum 계정별로 균등 분배해(#267-5), 각 계정이 자기 몫의 종목 잡만 갖도록 정상
+  // jobs에서 forum 종목 잡을 필터링한다. forum 외(카페/밴드)·forum "특정글 댓글" 잡은 그대로 둔다.
+  const distributeForumJobs = (allJobs: PublishJob[]): PublishJob[] => {
+    const buckets = distributeStocksEvenly(stockCodes, forumLoginIds.length);
+    const allowedByLogin = new Map<string, Set<string>>();
+    forumLoginIds.forEach((loginId, i) =>
+      allowedByLogin.set(loginId, new Set(buckets[i] ?? [])),
+    );
+    return allJobs.filter((j) => {
+      const isForumStock = j.platform === "forum" && !!j.code && !j.commentUrl;
+      if (!isForumStock) return true;
+      return allowedByLogin.get(j.loginId)?.has(j.code as string) ?? false;
+    });
+  };
+
   const action =
     mode === "comment" ? "댓글" : mode === "both" ? "글+댓글" : "글";
 
@@ -1015,7 +1061,9 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   // 게시 plan(동결 실행 페이로드): 즉시·예약 게시가 공유한다. 본문은 모달이 이미
   // 평문화한 값을 박제하고, 엔진이 있는 naver/forum/band 대상을 모두 싣는다. naver의
   // cafe/menuId는 잡에 동결된(게시판 링크 파싱) 값이고, band 링크는 잡에서 가져온다.
-  const buildPlan = (): PublishPlan => {
+  // jobs를 인자로 받아 plan을 만든다(#267-5: 분배 게시는 분배된 jobs로 호출). 정상 게시는
+  // 화면의 jobs(비분배)를 그대로 넘긴다.
+  const buildPlanFromJobs = (jobs: PublishJob[]): PublishPlan => {
     const naver: NaverTarget[] = jobs
       .filter((j) => j.platform === "naver")
       .map((j) => {
@@ -1096,7 +1144,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   // 게시 대상 계정의 자격증명(id/pw)을 accounts.json에 저장한다(#225). 선택 로그인을
   // 없앴으므로, 백엔드가 게시 직전 로그인하려면 자격증명이 미리 저장돼 있어야 한다(기존
   // runLogin이 로그인 전에 하던 일을 게시 흐름으로 옮긴 것). pw 없는 계정은 건너뛴다.
-  const persistCredentials = async () => {
+  const persistCredentials = async (jobs: PublishJob[]) => {
     const seen = new Set<string>();
     const creds = jobs
       .map((j) => accounts.find((a) => a.loginId === j.loginId))
@@ -1110,7 +1158,9 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     await ipc.auth.saveAccounts(creds);
   };
 
-  const doPublish = () => {
+  // jobs와 when을 인자로 받아 즉시/예약 큐에 적재한다(#267-5). 정상 게시는 dispatchPublish(jobs,
+  // when)으로, "나눠서 게시"는 분배된 jobs로 호출한다 — 디스패치 로직은 완전히 동일하게 재사용한다.
+  const dispatchPublish = (jobs: PublishJob[], when: "now" | "schedule") => {
     // 게시 위치(표시용 locs)는 즉시·예약 공통이다. 같은 플랫폼·대상·코드는 한 번만 싣는다.
     const seen = new Set<string>();
     const locs: QueueLocation[] = [];
@@ -1137,10 +1187,10 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         locs,
         // 대상별 라이브 상태는 워커가 채운다(적재 시점엔 빈 배열).
         items: [],
-        plan: buildPlan(),
+        plan: buildPlanFromJobs(jobs),
       };
       setFlow("running");
-      void persistCredentials()
+      void persistCredentials(jobs)
         .then(() => ipc.queue.addNow(item))
         .then(() =>
           setFlow(
@@ -1174,11 +1224,11 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       at: toEpochMs(date, time),
       missed: false,
       locs,
-      plan: buildPlan(),
+      plan: buildPlanFromJobs(jobs),
     };
     // Defense-in-depth: the backend rejects a past time even though the picker
     // already prevents it. 예약도 게시 시점에 백엔드가 로그인하므로 자격증명을 먼저 저장한다.
-    void persistCredentials()
+    void persistCredentials(jobs)
       .then(() => ipc.queue.addScheduled(item, toEpochMs(date, time)))
       .then(() =>
         setFlow(
@@ -1496,6 +1546,43 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
             />
           </Box>
         )}
+
+        {/* 나눠서 게시(#267-5): 여러 계정 + 여러 종목을 균등 분배해 계정별로 서로 다른 종목을
+            게시한다. 예약은 위 '예약 게시' 시점(날짜/시간)을 그대로 사용한다. */}
+        <Stack gap={8} mt={14}>
+          <Button
+            variant="light"
+            fullWidth
+            disabled={!canDistribute}
+            leftSection={<Icon.send size={16} />}
+            onClick={() => dispatchPublish(distributeForumJobs(jobs), "now")}
+          >
+            나눠서 즉시 게시하기
+            {canDistribute
+              ? ` (${forumLoginIds.length}계정 · ${stockCodes.length}종목)`
+              : ""}
+          </Button>
+          <Button
+            variant="light"
+            color="grape"
+            fullWidth
+            disabled={!canDistribute}
+            leftSection={<Icon.calendar size={16} />}
+            onClick={() =>
+              dispatchPublish(distributeForumJobs(jobs), "schedule")
+            }
+          >
+            나눠서 게시 예약하기
+          </Button>
+          {!canDistribute &&
+            forumLoginIds.length > 1 &&
+            stockCodes.length > 0 && (
+              <Text fz={11} c="dimmed">
+                나눠서 게시는 계정 2개 이상 + 종목 2개 이상이고, 종목 수가 계정
+                수 이상일 때 켜집니다.
+              </Text>
+            )}
+        </Stack>
       </Box>
 
       {/* footer */}
@@ -1537,7 +1624,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
               <Icon.send size={17} />
             )
           }
-          onClick={doPublish}
+          onClick={() => dispatchPublish(jobs, when)}
         >
           {when === "schedule"
             ? `예약 (${jobs.length})`

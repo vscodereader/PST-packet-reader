@@ -46,10 +46,12 @@ describe("label tables", () => {
     );
   });
 
-  it("STATUS_ACCOUNT covers the five login outcomes plus 'new'", () => {
+  it("STATUS_ACCOUNT covers the login outcomes plus 'new' and 'waiting'", () => {
     expect(Object.keys(STATUS_ACCOUNT).sort()).toEqual(
       [
         "active",
+        // 글 게시 성공 후 대기 상태(#267-3).
+        "waiting",
         "badCredentials",
         "blocked",
         "challenge",

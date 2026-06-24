@@ -13,6 +13,8 @@ vi.mock("@/shared/ipc", () => ({
       list: (...a: unknown[]) => listMock(...a),
       search: (...a: unknown[]) => searchMock(...a),
     },
+    // #267-8: 종목 선택 모달이 마운트 시 1시간 내 게시 성공 종목을 조회한다(빈 목록으로 모킹).
+    logBatches: { list: () => Promise.resolve([]) },
   },
 }));
 

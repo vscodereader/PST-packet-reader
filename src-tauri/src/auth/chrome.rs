@@ -13,7 +13,8 @@ use super::{config, error::OrchestratorError};
 
 const PORT_FILE: &str = "DevToolsActivePort";
 const PORT_WAIT: Duration = Duration::from_secs(20);
-const PORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+// 디버그 포트(DevToolsActivePort) 파일을 더 촘촘히 폴링해 Chrome 기동 인지 지연을 줄인다(#14).
+const PORT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// 실행 중인 Chrome 핸들. Drop 시 프로세스 종료 + 임시 프로필 삭제.
 pub(crate) struct ChromeHandle {

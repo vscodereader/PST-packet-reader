@@ -100,7 +100,8 @@ pub fn compute(
                     }
                 }
                 BatchItemStatus::Fail => resolved += 1,
-                BatchItemStatus::Running | BatchItemStatus::Waiting => {}
+                // Skip(차단으로 건너뜀, #267-9)은 실제 시도가 아니라 성공률·완료수에서 제외한다.
+                BatchItemStatus::Running | BatchItemStatus::Waiting | BatchItemStatus::Skip => {}
             }
         }
     }

@@ -932,6 +932,7 @@ mod tests {
                 message: "게시 완료".into(),
                 trace: None,
                 posted: None,
+                skipped: false,
             },
             ForumPublishResult {
                 code: "000660".into(),
@@ -940,6 +941,7 @@ mod tests {
                 message: "로그인 만료".into(),
                 trace: Some("stack backtrace:\n  0: forum::login_check".into()),
                 posted: None,
+                skipped: false,
             },
         ];
         let b = build_publish_batch(
@@ -976,6 +978,7 @@ mod tests {
             message: "게시 완료".into(),
             trace: None,
             posted: None,
+            skipped: false,
         }];
         let b = build_publish_batch(
             "제목",

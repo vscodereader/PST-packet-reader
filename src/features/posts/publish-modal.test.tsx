@@ -56,6 +56,20 @@ async function addNaverCafe(cafeId: number, menuId = 1) {
   await pickOption(0, `카페 ${cafeId} · 게시판 ${menuId}`);
 }
 
+// 기본 종목 선택이 사라져(#267-11) forum 계정으로 게시하려면 종목을 직접 골라야 한다. 종목 선택은
+// 계정 토글로 비워지므로(#267-2) 계정 선택을 모두 끝낸 뒤 호출한다 — 기본 forum 계정(a1)을 게시
+// 가능하게 만들어, 이전 기본 종목 005930에 의존하던 테스트 상태를 그대로 복원한다.
+async function pickStock(query = "005930", name = "삼성전자") {
+  await userEvent.click(
+    await screen.findByRole("button", { name: /종목 선택/ }),
+  );
+  const search = await screen.findByPlaceholderText("종목명 또는 코드 검색");
+  await userEvent.clear(search);
+  await userEvent.type(search, query);
+  await userEvent.click(await screen.findByText(name));
+  await userEvent.click(await screen.findByRole("button", { name: /적용/ }));
+}
+
 /**
  * 즉시 게시("지금 바로")는 백엔드 게시를 직접 호출하지 않고, 게시 큐의 즉시 처리
  * 대기열에 아이템 하나를 적재한다(add_queue_now, #198). 그 아이템에 동결된 plan을
@@ -122,6 +136,7 @@ describe("PublishModal", () => {
 
   it("enqueues the publish and shows the queued confirmation", async () => {
     renderPublish();
+    await pickStock();
     await userEvent.click(
       await screen.findByRole("button", { name: /^게시 \(\d+\)/ }),
     );
@@ -135,6 +150,7 @@ describe("PublishModal", () => {
 
   it("routes to the publish queue after an immediate publish", async () => {
     const { go } = renderPublish();
+    await pickStock();
     await userEvent.click(
       await screen.findByRole("button", { name: /^게시 \(\d+\)/ }),
     );
@@ -158,6 +174,7 @@ describe("PublishModal", () => {
     );
     try {
       renderPublish();
+      await pickStock();
       await userEvent.click(
         await screen.findByRole("button", { name: /^게시 \(\d+\)/ }),
       );
@@ -328,14 +345,17 @@ describe("PublishModal", () => {
       await screen.findByText("KODEX SK하이닉스단일종목레버리지"),
     );
     await userEvent.click(await screen.findByRole("button", { name: /적용/ }));
-    // onConfirm으로 받은 이름이 칩에 그대로 표시된다(코드가 아니라 이름).
+    // onConfirm으로 받은 이름이 칩에 그대로 표시된다(코드가 아니라 이름). 기본 종목이 없어
+    // (#267-11) 이 종목이 유일하면 변수 미리보기 예시에도 같은 이름이 떠 2곳에서 매칭되므로
+    // findAllByText로 "한 곳 이상"을 확인한다.
     expect(
-      await screen.findByText("KODEX SK하이닉스단일종목레버리지"),
-    ).toBeInTheDocument();
+      (await screen.findAllByText("KODEX SK하이닉스단일종목레버리지")).length,
+    ).toBeGreaterThan(0);
   });
 
   it("removes a selected stock chip", async () => {
     renderPublish();
+    await pickStock();
     // "삼성전자" shows in the chip and in the variable-preview example;
     // the chip (first in DOM) carries the remove button.
     const chip = (await screen.findAllByText("삼성전자"))[0]!.closest("div")!;
@@ -355,6 +375,7 @@ describe("PublishModal", () => {
 
   it("adds the post to the scheduled queue when 예약 is confirmed", async () => {
     renderPublish();
+    await pickStock();
     await userEvent.click(await screen.findByText("예약 게시"));
     await userEvent.click(
       await screen.findByRole("button", { name: /^예약 \(\d+\)/ }),
@@ -660,6 +681,7 @@ describe("PublishModal", () => {
     await pickOption(1, "데일밴드");
     await screen.findByLabelText("데일밴드 제거"); // 칩 등장 확인
 
+    await pickStock(); // 기본 forum(a1)에 종목 부여 → forum 잡 1건 복원(#267-11)
     // forum + naver + band = 3곳.
     await screen.findByRole(
       "button",
@@ -711,6 +733,7 @@ describe("PublishModal", () => {
     renderPublish({ doc: commentDoc });
     // 밴드 계정 선택 + 링크 저장 + 게시할 밴드 선택.
     await userEvent.click(await screen.findByText("value_invest"));
+    await pickStock(); // 기본 forum(a1)에 종목 부여(#267-11)
     const linkInput = screen.getByLabelText("밴드 링크");
     const saveBtn = screen.getByRole("button", { name: "저장" });
     await userEvent.type(linkInput, "https://band.us/band/103043410");
@@ -754,6 +777,7 @@ describe("PublishModal", () => {
     // 카페 url 대상(money_lab) + 밴드(value_invest)를 함께 선택한다.
     await userEvent.click(await screen.findByText("money_lab"));
     await userEvent.click(await screen.findByText("value_invest"));
+    await pickStock(); // 기본 forum(a1)에 종목 부여(#267-11)
     const linkInput = screen.getByLabelText("밴드 링크");
     const saveBtn = screen.getByRole("button", { name: "저장" });
     await userEvent.type(linkInput, "https://band.us/band/103043410");
@@ -1102,6 +1126,7 @@ describe("PublishModal", () => {
     await userEvent.click(screen.getByText("value_invest")); // a7 band
     // 카페는 게시판 링크로 추가한다(naver Select=콤보박스 0).
     await addNaverCafe(11111111);
+    await pickStock(); // 기본 forum(a1)에 종목 부여 → forum 잡 1건(#267-11)
     // forum (a1) = 1 job; the naver job lands once the cafe is added → 2.
     // (밴드 계정은 선택됐지만 게시할 밴드 미선택 → 밴드 잡 0건.)
     await screen.findByRole(
@@ -1153,6 +1178,7 @@ describe("PublishModal", () => {
 
     // 게시 → 선택한 각 밴드가 동결돼 plan.band에 적재된다(워커가 band_publish로 게시하고
     // 결과를 알림에 기록한다 — 즉시 게시도 큐를 타므로 프론트는 직접 호출하지 않는다, #198).
+    await pickStock(); // 기본 forum(a1)에 종목 부여 → 게시 가능(#267-11). 계정 토글 모두 끝낸 뒤 호출.
     const publishBtn = await screen.findByRole("button", {
       name: /^게시 \(\d+\)/,
     });
@@ -1191,6 +1217,7 @@ describe("PublishModal", () => {
     await pickOption(0, "데일밴드");
     await screen.findByLabelText("데일밴드 제거");
 
+    await pickStock(); // 기본 forum(a1)에 종목 부여 → 게시 가능(#267-11). 계정 토글 모두 끝낸 뒤 호출.
     const publishBtn = await screen.findByRole("button", {
       name: /^게시 \(\d+\)/,
     });
@@ -1229,6 +1256,7 @@ describe("PublishModal", () => {
     await pickOption(0, "데일밴드");
     await screen.findByLabelText("데일밴드 제거");
 
+    await pickStock(); // 기본 forum(a1)에 종목 부여 → 게시 가능(#267-11). 계정 토글 모두 끝낸 뒤 호출.
     const publishBtn = await screen.findByRole("button", {
       name: /^게시 \(\d+\)/,
     });
@@ -1265,6 +1293,7 @@ describe("PublishModal", () => {
     await pickOption(0, "데일밴드");
     await screen.findByLabelText("데일밴드 제거");
 
+    await pickStock(); // 기본 forum(a1)에 종목 부여 → 게시 가능(#267-11). 계정 토글 모두 끝낸 뒤 호출.
     const publishBtn = await screen.findByRole("button", {
       name: /^게시 \(\d+\)/,
     });
@@ -1325,6 +1354,7 @@ describe("PublishModal", () => {
     expect(await screen.findAllByLabelText("데일밴드 제거")).toHaveLength(2);
 
     // 게시 → 서로 다른 두 밴드 링크(동결)가 각각 plan.band에 실린다(동명이라도 별개 밴드).
+    await pickStock(); // 기본 forum(a1)에 종목 부여 → 게시 가능(#267-11). 계정 토글 모두 끝낸 뒤 호출.
     const publishBtn = await screen.findByRole("button", {
       name: /^게시 \(\d+\)/,
     });
@@ -1359,6 +1389,7 @@ describe("PublishModal", () => {
     await pickOption(0, "데일밴드");
     await screen.findByLabelText("데일밴드 제거");
 
+    await pickStock(); // 기본 forum(a1)에 종목 부여 → 게시 가능(#267-11). 계정 토글 모두 끝낸 뒤 호출.
     const publishBtn = await screen.findByRole("button", {
       name: /^게시 \(\d+\)/,
     });

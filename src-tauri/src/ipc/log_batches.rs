@@ -22,6 +22,9 @@ pub enum BatchItemStatus {
     Fail,
     Running,
     Waiting,
+    /// 차단 계정으로 첫 글이 로그인/권한 오류로 실패하면, 같은 계정의 남은 글은 시도하지 않고
+    /// 이 상태로 건너뛴다(#267-9). X(실패)와 구분해 "건너뜀"으로 표시한다.
+    Skip,
 }
 
 /// Single-variant enum → ts-rs emits the `"running"` string-literal type the

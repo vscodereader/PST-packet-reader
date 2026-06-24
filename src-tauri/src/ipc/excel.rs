@@ -33,6 +33,7 @@ fn status_str(s: &AccountStatus) -> &'static str {
     match s {
         New => "new",
         Active => "active",
+        Waiting => "waiting",
         BadCredentials => "badCredentials",
         Challenge => "challenge",
         Blocked => "blocked",
@@ -304,6 +305,7 @@ fn item_status_str(s: &BatchItemStatus) -> &'static str {
         Fail => "실패",
         Running => "처리중",
         Waiting => "대기",
+        Skip => "건너뜀",
     }
 }
 

@@ -106,6 +106,19 @@ fn merge_hot(stocks: &mut [ForumStock], hot: &HashSet<String>) {
     }
 }
 
+/// 이름에 "ETN" 또는 "레버리지"가 들어간 종목인지(선택 목록에서 숨길 대상, #267-7).
+/// "ETN"은 대소문자 무시("etn"/"ETN" 모두), "레버리지"는 한글 고정으로 본다(순수 함수).
+fn is_hidden_stock(stock: &ForumStock) -> bool {
+    stock.name.to_uppercase().contains("ETN") || stock.name.contains("레버리지")
+}
+
+/// ETN·레버리지 종목을 페이지에서 제거한다(#267-7). 토론/카테고리/검색 모든 경로가 공통으로
+/// 호출해, 사용자가 어느 탭을 보든 이 종목들이 보이지 않게 한다. total_count는 네이버 원본
+/// 집계라 그대로 둔다(소수의 숨김으로 카운트가 어긋나도 표시상 무해).
+fn drop_hidden_stocks(page: &mut ForumStockPage) {
+    page.stocks.retain(|s| !is_hidden_stock(s));
+}
+
 /// 카테고리 한 페이지 조회(토론은 자체 🔥, 그 외는 itemCodes 병합).
 ///
 /// 클라이언트를 주입받아 wiremock으로 테스트 가능하다. 커맨드는 `::new()`를 넘긴다.
@@ -116,18 +129,21 @@ async fn fetch_list_with(
     market: StockMarket,
     page: u32,
 ) -> Result<ForumStockPage, String> {
-    match category {
+    let mut result = match category {
         // 토론은 시장 분리가 없어 market을 무시한다(네이버 API 한계).
-        ForumStockCategory::Discussion => client.fetch_discussion_page(exchange, page).await,
+        ForumStockCategory::Discussion => client.fetch_discussion_page(exchange, page).await?,
         _ => {
             let mut result = client
                 .fetch_category_page(category, exchange, market, page)
                 .await?;
             let hot = client.fetch_hot_codes().await;
             merge_hot(&mut result.stocks, &hot);
-            Ok(result)
+            result
         }
-    }
+    };
+    // ETN·레버리지 종목 숨김(#267-7) — 모든 카테고리 공통.
+    drop_hidden_stocks(&mut result);
+    Ok(result)
 }
 
 /// 검색어 포함 국내 종목 한 페이지(🔥 병합). 클라이언트 주입형.
@@ -137,7 +153,10 @@ async fn fetch_search_with(
     page: u32,
 ) -> Result<ForumStockPage, String> {
     let hot = client.fetch_hot_codes().await;
-    client.fetch_search_page(query, page, &hot).await
+    let mut result = client.fetch_search_page(query, page, &hot).await?;
+    // ETN·레버리지 종목 숨김(#267-7) — 검색 결과도 동일.
+    drop_hidden_stocks(&mut result);
+    Ok(result)
 }
 
 /// IPC: 카테고리 목록.
@@ -238,6 +257,47 @@ mod tests {
         assert!(!stocks[1].is_hot_discussion);
     }
 
+    #[test]
+    fn hides_etn_and_leverage_stocks() {
+        // #267-7: 이름에 ETN(대소문자 무시) 또는 레버리지가 들어가면 숨긴다. 일반 종목은 유지.
+        let stock = |code: &str, name: &str| ForumStock {
+            code: code.into(),
+            name: name.into(),
+            exchange: "KOSPI".into(),
+            price: String::new(),
+            change_rate: String::new(),
+            change_type: "even".into(),
+            is_hot_discussion: false,
+        };
+        assert!(is_hidden_stock(&stock("122630", "KODEX 레버리지")));
+        assert!(is_hidden_stock(&stock(
+            "530031",
+            "삼성 레버리지 WTI원유 선물 ETN"
+        )));
+        assert!(is_hidden_stock(&stock("500001", "TRUE 코스피 etn"))); // 소문자도 거른다
+        assert!(!is_hidden_stock(&stock("000660", "SK하이닉스")));
+        assert!(!is_hidden_stock(&stock("005930", "삼성전자")));
+
+        let mut page = ForumStockPage {
+            stocks: vec![
+                stock("005930", "삼성전자"),
+                stock("122630", "KODEX 레버리지"),
+                stock("500001", "TRUE 코스피 ETN"),
+                stock("000660", "SK하이닉스"),
+            ],
+            total_count: 4,
+            page: 1,
+            has_next: false,
+        };
+        drop_hidden_stocks(&mut page);
+        let codes: Vec<&str> = page.stocks.iter().map(|s| s.code.as_str()).collect();
+        assert_eq!(
+            codes,
+            vec!["005930", "000660"],
+            "ETN·레버리지만 제거되어야 한다"
+        );
+    }
+
     // ------------------------------------------------------------------
     // 오케스트레이션(클라이언트 주입) — wiremock
     // ------------------------------------------------------------------
@@ -255,12 +315,12 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string(LIST_FIXTURE))
             .mount(&server)
             .await;
-        // 🔥 집합에 KODEX(122630)만 포함.
+        // 🔥 집합에 SK하이닉스(000660) 포함. (KODEX 레버리지(122630)는 #267-7로 숨겨지므로 제외)
         Mock::given(method("GET"))
             .and(path("/front-api/discussion/rankings/itemCodes"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_string(r#"{"isSuccess":true,"result":{"itemCodes":["122630"]}}"#),
+                    .set_body_string(r#"{"isSuccess":true,"result":{"itemCodes":["000660"]}}"#),
             )
             .mount(&server)
             .await;
@@ -276,10 +336,16 @@ mod tests {
         .await
         .unwrap();
 
-        let kodex = page.stocks.iter().find(|s| s.code == "122630").unwrap();
         let sk = page.stocks.iter().find(|s| s.code == "000660").unwrap();
-        assert!(kodex.is_hot_discussion, "🔥 집합의 KODEX는 표시되어야 한다");
-        assert!(!sk.is_hot_discussion, "집합 밖 SK하이닉스는 표시 안 됨");
+        assert!(
+            sk.is_hot_discussion,
+            "🔥 집합의 SK하이닉스는 표시되어야 한다"
+        );
+        // KODEX 레버리지(122630)는 ETN/레버리지 숨김 정책으로 목록에서 빠진다(#267-7).
+        assert!(
+            page.stocks.iter().all(|s| s.code != "122630"),
+            "레버리지 종목은 선택 목록에서 숨겨져야 한다"
+        );
     }
 
     #[tokio::test]

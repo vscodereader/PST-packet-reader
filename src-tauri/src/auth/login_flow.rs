@@ -5,19 +5,31 @@
 //! keydown을 후킹해 암호화 페이로드를 만들기 때문에 값만 꽂으면 암호화가 깨진다.
 
 use std::thread::sleep;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
 use crate::naver_automation::{AutomationError, CdpClient};
 
 const LOGIN_URL: &str = "https://nid.naver.com/nidlogin.login?mode=form&url=https://www.naver.com/";
-// headless: 챌린지가 보이면 곧장 headed로 승격해야 하므로 짧게 기다린다.
-const HEADLESS_TIMEOUT: Duration = Duration::from_secs(40);
-// headed: 사용자가 캡차/2차 인증을 직접 푸는 동안(사수 요구: 창 띄우고 시간 지나면
-// 타임아웃) 성공 또는 타임아웃까지 기다린다.
-const HEADED_TIMEOUT: Duration = Duration::from_secs(180);
-const POLL_INTERVAL: Duration = Duration::from_secs(2);
+// headless: 캡차가 보이면 곧장 headed로 승격해야 하므로 짧게 기다린다(#14: 40→20초).
+const HEADLESS_TIMEOUT: Duration = Duration::from_secs(20);
+// headed: 캡차 외의 추가 인증/오류는 즉시 실패시키므로(본인인증 자동 처리 코드가 없어 #267-13에서
+// 캡챠 외 전부 칼같이 실패), 여기서는 pending(네비게이션 정리) 여유만 짧게 둔다. 캡차는 아래
+// CAPTCHA_GRACE로 따로 기다린다(기존 180초 사람 대기 제거 → 체감 속도 #14).
+const HEADED_PENDING_TIMEOUT: Duration = Duration::from_secs(12);
+// 캡차가 떠도 스텔스/키 품질로 자동 통과될 수 있어 잠깐 기다린다(사수 요구 #267-13: 10초).
+// 이 시간 안에 로그인되지 않으면 취소한다.
+const CAPTCHA_GRACE: Duration = Duration::from_secs(10);
+// 폴링 간격. 로그인 체감 속도(#14)를 위해 2초→400ms로 좁힌다. 음성 신호 2회 latch도 이만큼
+// 빨라져 비번오류/차단 확정이 ~0.8초로 떨어진다(칼같은 실패처리, #267-13).
+const POLL_INTERVAL: Duration = Duration::from_millis(400);
+// 아이디/비밀번호 입력 사이·클릭 직전의 사람 같은 멈춤(행동 기반 봇탐지 완화). 2초는 과해서
+// 0.8초로 줄이되(#14) 0으로는 만들지 않는다(타이밍 지문 유지 — 흐름은 그대로, 시간만 단축).
+const FIELD_PAUSE: Duration = Duration::from_millis(800);
+// 로그인 버튼 클릭 직후 네비게이션이 정리될 settle. 폴링 간격(400ms)보다 길게 둬, 클릭 직후
+// 깜빡이는 #err_common/과도기 폼 소멸을 실패로 latch하지 않게 한다.
+const CLICK_SETTLE: Duration = Duration::from_millis(800);
 
 // 봇탐지(ncaptcha/wtm) 완화용 스텔스 스크립트. 페이지 스크립트보다 먼저 모든 새 문서에서
 // 실행되어 CDP 제어 흔적인 `navigator.webdriver` 를 일반 크롬과 동일한 값으로 맞춘다.
@@ -96,7 +108,13 @@ pub(crate) enum Signal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoopDecision {
     Success,
+    /// headless에서 캡차를 만남 — headed로 승격해 사람/스텔스가 풀 기회를 준다(캡차 한정).
     PromoteChallenge(ChallengeKind),
+    /// headed에서 캡차를 만남 — 즉시 포기하지 않고 CAPTCHA_GRACE(10초)까지 자동 통과를 기다린다.
+    WaitCaptcha,
+    /// 캡차가 아닌 추가 인증(본인인증 OTP·새 기기 인증)을 만남 — 자동 처리 코드가 없어 즉시
+    /// 실패시킨다(#267-13: 캡챠 외 전부 칼같이 실패). 사람 대기(180초)를 적용하지 않는다.
+    FailUnsupportedChallenge(ChallengeKind),
     ConfirmedBad,
     ConfirmedBlocked,
     /// 보호조치 확정 — 즉시 실패(`LoginOutcome::Protected`)로 옮긴다.
@@ -110,7 +128,8 @@ enum LoopDecision {
 ///
 /// 핵심: BadCredentials/Blocked는 **2회 연속**일 때만 확정한다. 클릭 직후 잠깐 떴다
 /// 사라지는 `#err_common`이나 네비게이션 과도기에 폼이 사라진 상태를 영구 실패로 latch하지
-/// 않기 위함이다. Success/Pending/headed-Challenge는 음성 누적을 초기화한다.
+/// 않기 위함이다. Success/Pending/캡차 대기는 음성 누적을 초기화한다. 캡차를 제외한 추가
+/// 인증(본인인증/기기인증)은 자동 처리 코드가 없어 즉시 실패로 옮긴다(#267-13).
 fn decide_loop_step(
     last_negative: Option<Signal>,
     signal: Signal,
@@ -123,13 +142,18 @@ fn decide_loop_step(
         Signal::Protected => LoopDecision::ConfirmedProtected,
         // 잠금도 본문 텍스트로 명확히 판별되므로 보호조치와 동일하게 즉시 확정한다(#243).
         Signal::Locked => LoopDecision::ConfirmedLocked,
-        Signal::Challenge(kind) => {
+        // 캡차만 예외: headed면 자동 통과를 CAPTCHA_GRACE(10초)까지 기다리고, headless면 headed로
+        // 승격해 풀 기회를 준다(#267-13: 캡챠 대기시간 10초).
+        Signal::Challenge(ChallengeKind::Captcha) => {
             if wait_for_human {
-                LoopDecision::KeepWaiting(None)
+                LoopDecision::WaitCaptcha
             } else {
-                LoopDecision::PromoteChallenge(kind)
+                LoopDecision::PromoteChallenge(ChallengeKind::Captcha)
             }
         }
+        // 본인인증(OTP)·새 기기 인증(Device)은 자동 처리 코드가 없어 캡차 외 전부 즉시 실패시킨다
+        // (#267-13). headed의 사람 대기(180초)도, headless 승격도 하지 않는다.
+        Signal::Challenge(kind) => LoopDecision::FailUnsupportedChallenge(kind),
         Signal::BadCredentials => {
             if last_negative == Some(Signal::BadCredentials) {
                 LoopDecision::ConfirmedBad
@@ -137,10 +161,10 @@ fn decide_loop_step(
                 LoopDecision::KeepWaiting(Some(Signal::BadCredentials))
             }
         }
+        // 차단 휴리스틱도 headed에서 사람을 기다리지 않고(본인인증 미지원), headed/headless 모두
+        // 2회 연속 latch로 빠르게 확정한다(#267-13: 칼같은 실패). 과도기 깜빡임만 거른다.
         Signal::Blocked => {
-            if wait_for_human {
-                LoopDecision::KeepWaiting(last_negative)
-            } else if last_negative == Some(Signal::Blocked) {
+            if last_negative == Some(Signal::Blocked) {
                 LoopDecision::ConfirmedBlocked
             } else {
                 LoopDecision::KeepWaiting(Some(Signal::Blocked))
@@ -254,7 +278,7 @@ fn run_inner(
                 .to_owned(),
         ));
     }
-    sleep(Duration::from_secs(2));
+    sleep(FIELD_PAUSE);
     if !type_into(client, "#pw", pw)? {
         return Ok(LoginOutcome::Error(
             "로그인 폼 자동 입력에 실패했습니다(비밀번호 칸이 비어 로그인을 중단). 잠시 후 다시 시도하세요."
@@ -262,26 +286,28 @@ fn run_inner(
         ));
     }
 
-    // 비밀번호 입력 후 2초 기다렸다가 로그인 버튼을 누른다(사람처럼 천천히).
-    sleep(Duration::from_secs(2));
+    // 비밀번호 입력 후 사람처럼 잠깐 멈췄다가 로그인 버튼을 누른다(2초→0.8초, #14).
+    sleep(FIELD_PAUSE);
     // 로그인 버튼을 사람처럼 좌표 마우스 클릭(JS .click() 대신 진짜 mouse 이벤트). 좌표를 못
     // 구하면 .click()으로 폴백한다.
     click_login_button(client)?;
 
     let timeout = if wait_for_human {
-        HEADED_TIMEOUT
+        HEADED_PENDING_TIMEOUT
     } else {
         HEADLESS_TIMEOUT
     };
     // 클릭 직후 네비게이션이 정리될 시간을 준다. 이 settle 없이 곧장 읽으면, 클릭 직후
     // 잠깐 렌더된 #err_common이나 네비게이션 중간에 폼이 사라진 과도기 상태를 — 실제로는
     // 성공 중인 로그인인데도 — 실패로 latch한다.
-    sleep(POLL_INTERVAL);
+    sleep(CLICK_SETTLE);
 
     // 음성 신호(BadCredentials/Blocked)는 한 번 보였다고 바로 확정하지 않고, 2회 연속
     // 폴링에서 지속될 때만 확정한다(과도기 깜빡임 latch 방지).
     let mut last_negative: Option<Signal> = None;
     let deadline = Instant::now() + timeout;
+    // 캡차를 처음 본 시점 + CAPTCHA_GRACE. 캡차가 떴을 때만 설정되고, 이 시각을 넘으면 취소한다.
+    let mut captcha_deadline: Option<Instant> = None;
     loop {
         // 인증 성공 직후 뜨는 "새 기기 등록" 페이지면 "등록 안함"을 눌러 마무리한다
         // (설계 5단계: browser_flow의 기존 로직 재사용). 없으면 무시한다.
@@ -296,6 +322,26 @@ fn run_inner(
             LoopDecision::PromoteChallenge(kind) => {
                 return Ok(LoginOutcome::ChallengeRequired { kind });
             }
+            // headed 캡차: 즉시 포기하지 않고 CAPTCHA_GRACE(10초)까지 자동 통과를 기다린다.
+            // 10초가 지나도 로그인되지 않으면 취소(실패)한다(#267-13). 캡차가 떠 있는 동안은
+            // 음성 신호 누적을 비워, 캡차 페이지를 비번오류/차단으로 오확정하지 않게 한다.
+            LoopDecision::WaitCaptcha => {
+                let cd = *captcha_deadline.get_or_insert_with(|| Instant::now() + CAPTCHA_GRACE);
+                if Instant::now() >= cd {
+                    return Ok(LoginOutcome::Error(
+                        "캡차가 10초 안에 해결되지 않아 로그인을 취소했습니다.".to_owned(),
+                    ));
+                }
+                last_negative = None;
+            }
+            // 캡차가 아닌 추가 인증(본인인증 OTP/새 기기 인증) — 자동 처리 코드가 없어 즉시
+            // 실패시킨다(#267-13: 캡챠 외 전부 칼같이 실패). 사람 대기를 적용하지 않는다.
+            LoopDecision::FailUnsupportedChallenge(kind) => {
+                return Ok(LoginOutcome::Error(format!(
+                    "{} 화면이 떠 자동 로그인을 중단했습니다(자동 처리 미지원 — 캡차 외 즉시 실패).",
+                    challenge_kind_label(kind)
+                )));
+            }
             LoopDecision::ConfirmedBad => return Ok(LoginOutcome::BadCredentials),
             LoopDecision::ConfirmedBlocked => return Ok(LoginOutcome::Blocked),
             LoopDecision::ConfirmedProtected => return Ok(LoginOutcome::Protected),
@@ -304,13 +350,23 @@ fn run_inner(
         }
 
         if Instant::now() >= deadline {
-            // headed에서 시간 내 인증을 끝내지 못한 경우를 포함한다(사수 요구: 타임아웃).
+            // 시간 내 결과가 확정되지 않은 경우(네비게이션 정체 등). 캡차는 위 WaitCaptcha에서
+            // 10초로 따로 끊으므로, 여기 도달은 주로 pending 정체다.
             let url = client.current_url().unwrap_or_default();
             return Ok(LoginOutcome::Error(format!(
-                "로그인 시간이 초과되었습니다(캡차/2차 인증 미완료). 마지막 페이지: {url}"
+                "로그인 시간이 초과되었습니다. 마지막 페이지: {url}"
             )));
         }
         sleep(POLL_INTERVAL);
+    }
+}
+
+// 챌린지 종류를 사용자 메시지용 한 줄 라벨로 바꾼다(로그인 실패 사유 표시용, 순수 함수).
+fn challenge_kind_label(kind: ChallengeKind) -> &'static str {
+    match kind {
+        ChallengeKind::Captcha => "캡차(보안문자)",
+        ChallengeKind::Otp => "본인인증(2차 인증)",
+        ChallengeKind::Device => "새 기기 인증",
     }
 }
 
@@ -320,7 +376,8 @@ fn run_inner(
 // stderr로 출력해 콘솔에서 "폼이 완전히 로딩됐는지"를 확인할 수 있게 한다.
 fn wait_for_login_form(client: &mut CdpClient) -> bool {
     tracing::info!("[LOGIN] 로그인 폼 로딩 대기 중...");
-    let deadline = Instant::now() + Duration::from_secs(15);
+    // 폼은 보통 3~5초 내 준비된다. 비관적 15초→10초로 줄여 체감 속도를 높인다(#14, 흐름은 유지).
+    let deadline = Instant::now() + Duration::from_secs(10);
     let ready_expr = "(()=>{\
         if(document.readyState!=='complete')return false;\
         const ok=el=>!!(el&&el.offsetParent!==null&&!el.disabled);\
@@ -337,7 +394,7 @@ fn wait_for_login_form(client: &mut CdpClient) -> bool {
             return true;
         }
         if Instant::now() >= deadline {
-            tracing::info!("[LOGIN] ✗ 로그인 폼 로딩 시간 초과(15초)");
+            tracing::info!("[LOGIN] ✗ 로그인 폼 로딩 시간 초과(10초)");
             return false;
         }
         sleep(Duration::from_millis(250));
@@ -415,31 +472,6 @@ fn key_info(ch: char) -> KeyInfo {
     }
 }
 
-// 글자 사이 사람 같은 타이핑 지연 범위(ms). ncaptcha/wtm은 정적 지문 외에 키 입력 타이밍도
-// 본다. 단, "한 글자에 8초" 같은 비현실적 지연은 오히려 이상하므로 사람 평균 타속 범위로 고정한다.
-const TYPE_DELAY_MIN_MS: u64 = 60;
-const TYPE_DELAY_MAX_MS: u64 = 180;
-
-// 시드+인덱스로 [MIN, MAX] 범위의 타이핑 지연(ms)을 정하는 순수 함수(splitmix64 혼합).
-// 비결정 API(rand/시계)를 타이핑 루프에서 직접 쓰지 않아 단위 테스트가 가능하고, 범위를
-// clamp하므로 절대 초 단위 지연이 나오지 않는다.
-fn type_delay_ms(seed: u64, index: usize) -> u64 {
-    let mut x = seed ^ (index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    x ^= x >> 31;
-    TYPE_DELAY_MIN_MS + (x % (TYPE_DELAY_MAX_MS - TYPE_DELAY_MIN_MS + 1))
-}
-
-// 타이핑 지연 시드(타이핑 호출마다 한 번 — 실행마다 패턴이 달라지게). 순수 함수 type_delay_ms와
-// 분리해, 테스트는 고정 시드로 검증한다.
-fn jitter_seed() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
-}
-
 // evaluate가 돌려준 `[x, y]`(returnByValue) 배열을 좌표로 파싱한다(없으면 None).
 fn parse_xy(value: &Value) -> Option<(f64, f64)> {
     let arr = value.as_array()?;
@@ -508,12 +540,11 @@ fn click_login_button(client: &mut CdpClient) -> Result<(), AutomationError> {
 }
 
 // 선택자를 마우스로 클릭해 포커스한 뒤 한 글자씩 실제 키 이벤트로 입력한다(keydown 후킹 암호화
-// 대응). 글자 사이엔 사람 같은 랜덤 지연을 둔다. 입력 후 필드 값 길이를 확인해, 비어 있으면
+// 대응). 글자 사이 인위적 지연 없이 빠르게 연타한다(#267 후속). 입력 후 필드 값 길이를 확인해, 비어 있으면
 // (타이밍/렌더 문제로 헛친 경우) 최대 3회 재시도한다. 채워졌으면 `Ok(true)`, 3회 후에도 비어
 // 있으면 `Ok(false)`를 반환해 호출자가 판단하게 한다.
 fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<bool, AutomationError> {
     let expected = text.chars().count();
-    let seed = jitter_seed();
 
     for _ in 0..3 {
         // 기존 값 비우기(재시도 시 중복 입력 방지). 셀렉터는 고정 안전 문자열(#id/#pw).
@@ -531,7 +562,7 @@ fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<bool,
             client.evaluate(&focus)?;
         }
 
-        for (i, ch) in text.chars().enumerate() {
+        for ch in text.chars() {
             let s = ch.to_string();
             let k = key_info(ch);
             // 실제 브라우저와 동일하게 code·windowsVirtualKeyCode·nativeVirtualKeyCode를 채운다.
@@ -564,8 +595,9 @@ fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<bool,
                     "modifiers": modifiers,
                 }),
             )?;
-            // 글자 사이 사람 같은 지연(60~180ms). 기계처럼 0ms 연타하면 행동 기반 봇탐지에 걸린다.
-            sleep(Duration::from_millis(type_delay_ms(seed, i)));
+            // 글자 사이 인위적 지연을 두지 않는다(#267 후속 요청: 타이핑 지연 제거 → 빠른 입력).
+            // 키 다운/업은 CDP가 순서대로 동기 처리하고, code·keyCode를 채워 네이버 keydown 암호화
+            // 훅이 정상 동작하므로(합성 입력 탐지 회피의 핵심), 지연 없이 연타해도 값이 들어간다.
         }
 
         let got = client
@@ -819,15 +851,18 @@ mod tests {
     }
 
     #[test]
-    fn loop_blocked_confirms_only_in_headless_over_two_polls() {
-        assert_eq!(
-            decide_loop_step(None, Signal::Blocked, false),
-            LoopDecision::KeepWaiting(Some(Signal::Blocked))
-        );
-        assert_eq!(
-            decide_loop_step(Some(Signal::Blocked), Signal::Blocked, false),
-            LoopDecision::ConfirmedBlocked
-        );
+    fn loop_blocked_confirms_over_two_polls_in_both_modes() {
+        // #267-13: 차단은 headed에서도 사람을 기다리지 않고 2회 연속 latch로 빠르게 확정한다.
+        for wait_for_human in [false, true] {
+            assert_eq!(
+                decide_loop_step(None, Signal::Blocked, wait_for_human),
+                LoopDecision::KeepWaiting(Some(Signal::Blocked))
+            );
+            assert_eq!(
+                decide_loop_step(Some(Signal::Blocked), Signal::Blocked, wait_for_human),
+                LoopDecision::ConfirmedBlocked
+            );
+        }
     }
 
     #[test]
@@ -859,24 +894,35 @@ mod tests {
     }
 
     #[test]
-    fn loop_blocked_in_headed_keeps_waiting_for_user() {
-        // headed에서는 기기등록/인증 중간 페이지를 차단으로 단정하지 않는다.
+    fn loop_captcha_waits_in_headed_promotes_in_headless() {
+        // 캡차만 예외: headed면 자동 통과를 기다리고(WaitCaptcha), headless면 headed로 승격(#267-13).
         assert_eq!(
-            decide_loop_step(None, Signal::Blocked, true),
-            LoopDecision::KeepWaiting(None)
+            decide_loop_step(None, Signal::Challenge(ChallengeKind::Captcha), true),
+            LoopDecision::WaitCaptcha
         );
-    }
-
-    #[test]
-    fn loop_challenge_promotes_in_headless_but_waits_in_headed() {
         assert_eq!(
             decide_loop_step(None, Signal::Challenge(ChallengeKind::Captcha), false),
             LoopDecision::PromoteChallenge(ChallengeKind::Captcha)
         );
-        assert_eq!(
-            decide_loop_step(None, Signal::Challenge(ChallengeKind::Otp), true),
-            LoopDecision::KeepWaiting(None)
-        );
+    }
+
+    #[test]
+    fn loop_non_captcha_challenge_fails_fast_in_both_modes() {
+        // 본인인증(OTP)·새 기기 인증(Device)은 자동 처리 코드가 없어 캡차 외 전부 즉시 실패(#267-13).
+        for wait_for_human in [false, true] {
+            assert_eq!(
+                decide_loop_step(None, Signal::Challenge(ChallengeKind::Otp), wait_for_human),
+                LoopDecision::FailUnsupportedChallenge(ChallengeKind::Otp)
+            );
+            assert_eq!(
+                decide_loop_step(
+                    None,
+                    Signal::Challenge(ChallengeKind::Device),
+                    wait_for_human
+                ),
+                LoopDecision::FailUnsupportedChallenge(ChallengeKind::Device)
+            );
+        }
     }
 
     // --- key_info: 합성 키 이벤트가 실제 브라우저 keyCode와 일치하는지 ---
@@ -934,47 +980,6 @@ mod tests {
         assert_eq!(k.vk, 0);
         assert_eq!(k.code, "");
         assert!(!k.shift);
-    }
-
-    // --- type_delay_ms: 사람 같은 타이핑 지연(초 단위 절대 금지, 범위 clamp) ---
-
-    #[test]
-    fn type_delay_always_within_human_range() {
-        // 어떤 시드·인덱스든 60~180ms 범위를 벗어나지 않는다(8초 같은 값이 절대 안 나온다).
-        for seed in [0u64, 1, 42, 9_999, u64::MAX, 0x1234_5678_9ABC_DEF0] {
-            for index in 0..64 {
-                let d = type_delay_ms(seed, index);
-                assert!(
-                    (TYPE_DELAY_MIN_MS..=TYPE_DELAY_MAX_MS).contains(&d),
-                    "seed={seed} index={index} d={d} 범위 밖"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn type_delay_varies_by_index_and_seed() {
-        // 모든 글자가 같은 간격이면 기계적 → 인덱스에 따라 값이 달라져야 한다.
-        let by_index: Vec<u64> = (0..16).map(|i| type_delay_ms(7, i)).collect();
-        assert!(
-            by_index
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len()
-                > 1,
-            "인덱스에 따라 지연이 전혀 안 변함"
-        );
-        // 시드가 다르면 패턴도 달라져야 한다(실행마다 다른 리듬).
-        assert_ne!(
-            (0..8).map(|i| type_delay_ms(1, i)).collect::<Vec<_>>(),
-            (0..8).map(|i| type_delay_ms(2, i)).collect::<Vec<_>>(),
-        );
-    }
-
-    #[test]
-    fn type_delay_is_deterministic_for_same_input() {
-        // 순수 함수 — 같은 (시드,인덱스)는 항상 같은 값(테스트 가능성).
-        assert_eq!(type_delay_ms(123, 4), type_delay_ms(123, 4));
     }
 
     #[test]

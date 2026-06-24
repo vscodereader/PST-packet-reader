@@ -67,6 +67,30 @@ function StockCrawlModalInner({
   // code → name for selected items, accumulated as the user picks rows, so
   // confirm can return the name even after the query/category changes.
   const [names, setNames] = useState<Record<string, string>>({});
+  // 최근 1시간 안에 **게시 성공**한 종목토론방 종목 코드 집합(#267-8). 완료 로그(LogBatch)에서
+  // forum + status=success + code를, 배치 시각(at)이 1시간 이내인 것만 모은다. 실패/건너뜀은 제외.
+  const [postedWithin1h, setPostedWithin1h] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    void ipc.logBatches
+      .list()
+      .then((batches) => {
+        const cutoff = Date.now() - 60 * 60 * 1000;
+        const codes = new Set<string>();
+        for (const b of batches) {
+          if (b.at < cutoff) continue;
+          for (const it of b.items) {
+            if (it.platform === "forum" && it.status === "success" && it.code) {
+              codes.add(it.code);
+            }
+          }
+        }
+        setPostedWithin1h(codes);
+      })
+      .catch(() => {
+        /* 로그 조회 실패는 무시 — 마크만 안 보일 뿐 종목 선택은 정상 동작. */
+      });
+  }, []);
 
   // Load page 1 of the current tab/exchange, or search when a query is typed.
   // Debounced so typing doesn't spam the backend.
@@ -187,20 +211,26 @@ function StockCrawlModalInner({
         </Button>
       </Group>
 
-      {/* 시장 구분 — 카테고리 탭 아래, 네이버와 동일하게 전체/코스피/코스닥. */}
-      <Group gap={6} mb={8} wrap="wrap">
-        {MARKETS.map((m) => (
-          <Button
-            key={m.key}
-            size="xs"
-            variant={effectiveMarket === m.key ? "filled" : "default"}
-            color="forum"
-            disabled={searching || (marketDisabled && m.key !== "all")}
-            onClick={() => setMarket(m.key)}
-          >
-            {m.label}
-          </Button>
-        ))}
+      {/* 시장 구분 — 카테고리 탭 아래, 네이버와 동일하게 전체/코스피/코스닥. 오른쪽에 최근
+          1시간 내 게시 성공 종목 수(#267-8: "1시간 : n개")를 함께 보여준다. */}
+      <Group gap={6} mb={8} wrap="nowrap" justify="space-between">
+        <Group gap={6} wrap="wrap">
+          {MARKETS.map((m) => (
+            <Button
+              key={m.key}
+              size="xs"
+              variant={effectiveMarket === m.key ? "filled" : "default"}
+              color="forum"
+              disabled={searching || (marketDisabled && m.key !== "all")}
+              onClick={() => setMarket(m.key)}
+            >
+              {m.label}
+            </Button>
+          ))}
+        </Group>
+        <Text fz={11.5} fw={700} c="teal.6" style={{ whiteSpace: "nowrap" }}>
+          1시간 : {postedWithin1h.size}개
+        </Text>
       </Group>
 
       <Box
@@ -247,6 +277,12 @@ function StockCrawlModalInner({
                   <Text fz={10.5} fw={700} c="dimmed" ff="monospace">
                     {s.code}
                   </Text>
+                  {/* 최근 1시간 내 게시 성공 종목 표시(#267-8). 종목코드와 같은 글씨 크기(10.5). */}
+                  {postedWithin1h.has(s.code) && (
+                    <Text fz={10.5} fw={700} c="teal.6">
+                      1시간
+                    </Text>
+                  )}
                 </Group>
               </Box>
               <Text fz={13} fw={600}>
