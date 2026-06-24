@@ -178,7 +178,9 @@ export interface QueueNowItem {
   id: string;
   title: string;
   kind: ModeValue;
-  state: "running" | "waiting";
+  // "done": 실행이 끝난(완료/실패/도중 차단) 종료 상태 — 큐에서 바로 지우지 않고 결과를
+  // 카드로 남겨 사용자가 알림 없이 확인하게 한다(#1, Rust QueueState::Done과 일치).
+  state: "running" | "waiting" | "done";
   batchId?: string;
   progress?: [number, number];
   locs: QueueLocation[];
