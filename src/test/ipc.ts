@@ -871,6 +871,8 @@ interface IpcState {
   activity: ActivityItem[];
   cafes: Cafe[];
   autostart: boolean;
+  /** now 큐 "최대 작동가능 작업 수"(#284). 0 = 무제한. */
+  concurrencyLimit: number;
 }
 
 let state: IpcState;
@@ -941,6 +943,7 @@ export function resetIpc(): void {
     activity: clone(SEED_ACTIVITY),
     cafes: clone(SEED_CAFES),
     autostart: false,
+    concurrencyLimit: 0,
   };
   loginJobIds = [];
   bandLoginJobIds = [];
@@ -1197,6 +1200,11 @@ export const invoke = vi.fn(
       case "set_autostart":
         state.autostart = args!.enabled as boolean;
         return state.autostart;
+      case "get_now_concurrency_limit":
+        return state.concurrencyLimit;
+      case "set_now_concurrency_limit":
+        state.concurrencyLimit = args!.limit as number;
+        return undefined;
 
       // --- accounts (stateful) ----------------------------------------------
       case "list_accounts":

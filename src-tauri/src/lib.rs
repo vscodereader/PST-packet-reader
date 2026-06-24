@@ -698,6 +698,8 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         import_posts_xlsx,
         get_autostart_enabled,
         set_autostart,
+        get_now_concurrency_limit,
+        set_now_concurrency_limit,
     ])
 }
 
@@ -745,6 +747,11 @@ pub fn manage_stores<R: Runtime>(app: &AppHandle<R>, dir: &Path) -> std::io::Res
         dir.join("bands.json"),
         bands::seed(),
     ));
+    // now 큐 "최대 작동가능 작업 수" 설정(#284). 단일 원소 컬렉션(무제한=0)으로 영속화한다.
+    app.manage(JsonStore::load_or_seed(
+        dir.join("concurrency.json"),
+        ipc::queue_runner::seed_concurrency(),
+    ));
     // 게시 큐 실행 워커 상태(promote 시 기동, 이슈 #144).
     app.manage(ipc::queue_runner::NowQueueRunner::default());
     Ok(())
@@ -778,6 +785,26 @@ fn set_autostart<R: Runtime>(app: AppHandle<R>, enabled: bool) -> Result<bool, S
         manager.disable().map_err(|e| e.to_string())?;
     }
     manager.is_enabled().map_err(|e| e.to_string())
+}
+
+/// now 큐 "최대 작동가능 작업 수" 설정을 돌려준다(#284). 0 = 무제한. 단일 원소
+/// 스토어의 첫 값(없으면 무제한 0)을 읽는다.
+#[tauri::command]
+fn get_now_concurrency_limit(
+    store: tauri::State<'_, JsonStore<ipc::queue_runner::ConcurrencyConfig>>,
+) -> u32 {
+    store.snapshot().first().map(|c| c.limit).unwrap_or(0)
+}
+
+/// now 큐 "최대 작동가능 작업 수"를 영속화한다(#284). 0(또는 빈 입력=프론트가 0으로 변환) =
+/// 무제한, N = 동시 작업을 N개로 제한. 워커는 claim 시점마다 이 값을 다시 읽으므로, 낮춰도
+/// 이미 돌고 있는 작업은 멈추지 않고 새 claim만 active < limit까지 기다린다.
+#[tauri::command]
+fn set_now_concurrency_limit(
+    store: tauri::State<'_, JsonStore<ipc::queue_runner::ConcurrencyConfig>>,
+    limit: u32,
+) {
+    store.mutate(|_| vec![ipc::queue_runner::ConcurrencyConfig { limit }]);
 }
 
 /// 메인 창을 보이게 하고 포커스한다(트레이 "창 열기"·아이콘 클릭에서 호출).

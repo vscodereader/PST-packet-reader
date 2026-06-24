@@ -56,12 +56,12 @@ pub struct NowQueueRunner {
 struct RunnerInner {
     is_running: bool,
     /// 지금 동시에 돌고 있는 종목토론방 전용 아이템 수(#240). 종토방은 카페(9222)·밴드와
-    /// 자원이 겹치지 않아 여러 아이템을 동시에 돌리는데, 이 수를 FORUM_ITEM_PARALLEL_CAP로
+    /// 자원이 겹치지 않아 여러 아이템을 동시에 돌리는데, 사용자 설정 한도(#284, 0=무제한)로
     /// 제한해 자원 고갈을 막는다. 카페·밴드·로그인은 이 카운터를 쓰지 않고 기존대로 순차다.
     active_forum: usize,
     /// 지금 동시에 돌고 있는 "특정 게시글" 댓글 전용 아이템 수. 이런 아이템은 게시 시점에
     /// 저장 쿠키만 쓰고(재로그인·IP 회전 없음) 카페·밴드=HTTP, 종토방=계정별 전용 Chrome이라
-    /// 자원이 겹치지 않아 동시에 돌려도 안전하다. COMMENT_ITEM_PARALLEL_CAP로 동시 수를 제한한다.
+    /// 자원이 겹치지 않아 동시에 돌려도 안전하다. 사용자 설정 한도(#284, 0=무제한)로 동시 수를 제한한다.
     active_comment: usize,
 }
 
@@ -239,14 +239,17 @@ async fn worker_loop<R: Runtime>(app: AppHandle<R>, runner: NowQueueRunner) {
         // "특정 게시글" 댓글 전용 아이템: 게시 시점에 저장 쿠키만 쓰고(재로그인·IP 회전 없음)
         // 카페·밴드=HTTP, 종토방=계정별 전용 Chrome이라 자원이 겹치지 않는다. 종토방 레인과
         // 똑같이, 여기서 기다리지 않고 곧장 다음 아이템을 집어 댓글 아이템들이 동시에 돈다.
-        // 동시 수는 COMMENT_ITEM_PARALLEL_CAP로 제한한다. (종토방 전용 url 댓글도 이 레인으로
+        // 동시 수는 사용자 설정 한도(#284, 0=무제한)로 제한한다. (종토방 전용 url 댓글도 이 레인으로
         // 와 forum 레인보다 먼저 잡히므로, 종토방 술어보다 앞서 검사한다.)
         if is_url_comment_only_item(&job) {
+            // 한도는 claim 시점에 동적으로 읽는다(#284) — 사용자가 낮춰도 이미 돌고 있는
+            // 작업(active에 이미 반영)은 멈추지 않고 새 claim만 active < limit까지 기다린다.
+            let limit = read_concurrency_limit(&app);
             let claimed = {
                 let Ok(mut inner) = runner.inner.lock() else {
                     return;
                 };
-                if inner.active_comment < COMMENT_ITEM_PARALLEL_CAP {
+                if may_claim(inner.active_comment, limit) {
                     inner.active_comment += 1;
                     true
                 } else {
@@ -277,13 +280,16 @@ async fn worker_loop<R: Runtime>(app: AppHandle<R>, runner: NowQueueRunner) {
         // 전용 헤드리스 Chrome을 쓰므로, 여러 아이템을 동시에 돌려도 안전하다. 우선순위 픽(#231)이
         // 그대로라 종토방이 카페·밴드보다 먼저 집히고(대기 중 밴드·카페보다 앞서 실행), 여기서
         // 기다리지 않고 곧장 다음 아이템을 집어 종토방 아이템들이 동시에 돈다. 동시 수는
-        // FORUM_ITEM_PARALLEL_CAP로 제한한다.
+        // 사용자 설정 한도(#284, 0=무제한)로 제한한다.
         if is_forum_only_item(&job) {
+            // 한도는 claim 시점에 동적으로 읽는다(#284) — 종토방·댓글 레인에 같은 사용자 한도를
+            // 적용한다. 낮춰도 이미 돌고 있는 작업은 멈추지 않고 새 claim만 active < limit까지 대기.
+            let limit = read_concurrency_limit(&app);
             let claimed = {
                 let Ok(mut inner) = runner.inner.lock() else {
                     return;
                 };
-                if inner.active_forum < FORUM_ITEM_PARALLEL_CAP {
+                if may_claim(inner.active_forum, limit) {
                     inner.active_forum += 1;
                     true
                 } else {
@@ -343,13 +349,40 @@ async fn finish_item<R: Runtime>(app: &AppHandle<R>, job: &QueueNowItem) {
     }
 }
 
-/// 종토방 아이템 동시 실행 한도(#240). 각 아이템은 계정마다 또 전용 Chrome을 띄우므로
-/// (run_forum_targets), 너무 많은 아이템을 동시에 돌리면 자원이 고갈된다.
-const FORUM_ITEM_PARALLEL_CAP: usize = 4;
+/// now 큐의 "최대 작동가능 작업 수"(#284) 사용자 설정. 0 = 무제한(기본값). N = 동시에 돌리는
+/// 작업(종토방·"특정 게시글" 댓글 레인 공통)을 N개로 제한한다. 단일 원소 컬렉션으로 디스크에
+/// 영속화한다(`JsonStore<ConcurrencyConfig>`) — 다른 도메인 스토어처럼 타입으로 키잉되므로
+/// 기존 스토어와 충돌하지 않는다.
+/// 기본값(`Default`)은 `limit: 0` = 무제한 — u32의 기본값 0이 그대로 "사용자가 숫자를 넣기
+/// 전까지 상한 없이 돈다"는 의미라 파생(derive)으로 충분하다.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub struct ConcurrencyConfig {
+    /// 동시 작업 상한. 0이면 무제한. 워커는 claim 시점마다 이 값을 동적으로 읽으므로,
+    /// 한도를 **낮춰도** 이미 돌고 있는 작업은 멈추지 않고 새 claim만 active < limit까지 기다린다.
+    pub limit: u32,
+}
 
-/// "특정 게시글" 댓글 전용 아이템 동시 실행 상한. 각 아이템은 저장 쿠키로 HTTP(카페·밴드)
-/// 또는 계정별 전용 Chrome(종토방)로 댓글을 달아 자원이 겹치지 않으므로 동시에 돌린다.
-const COMMENT_ITEM_PARALLEL_CAP: usize = 6;
+/// now 큐 동시 작업 한도 스토어의 seed(#284). 단일 원소(무제한=0)로 시작한다.
+pub fn seed_concurrency() -> Vec<ConcurrencyConfig> {
+    vec![ConcurrencyConfig::default()]
+}
+
+/// 새 작업을 claim해도 되는지 판정한다(#284, 순수). `limit==0`이면 무제한이라 항상 허용,
+/// 아니면 현재 동시 작업 수(`active`)가 `limit` 미만일 때만 허용한다. 워커가 claim 시점에
+/// 호출하므로, 한도를 낮춰도 이미 돌고 있는 작업(=active에 이미 반영)은 멈추지 않고 새 claim만 막힌다.
+fn may_claim(active: usize, limit: u32) -> bool {
+    limit == 0 || active < limit as usize
+}
+
+/// 영속화된 now 큐 동시 작업 한도를 읽는다(#284). 워커가 매 claim마다 호출하므로, 사용자가
+/// 저장한 새 한도가 곧바로 반영된다. 단일 원소 스토어의 첫 값(없으면 무제한 0)을 돌려준다.
+fn read_concurrency_limit<R: Runtime>(app: &AppHandle<R>) -> u32 {
+    app.state::<JsonStore<ConcurrencyConfig>>()
+        .snapshot()
+        .first()
+        .map(|c| c.limit)
+        .unwrap_or(0)
+}
 
 /// 이 아이템이 **종목토론방 전용**인지 — forum 타깃만 있고 카페(naver)·밴드 게시가 없으면 true.
 /// 이런 아이템은 전용 헤드리스 Chrome으로 게시해 카페(9222)·밴드(HTTP)와 자원이 겹치지 않아,
@@ -3364,6 +3397,40 @@ mod tests {
     fn pick_next_waiting_none_when_empty_or_all_running() {
         assert!(pick_next_waiting(&[]).is_none());
         assert!(pick_next_waiting(&[now_item("r", QueueState::Running, None)]).is_none());
+    }
+
+    // --- may_claim: now 큐 동시 작업 한도(#284) ---------------------------------
+
+    #[test]
+    fn may_claim_limit_zero_is_unlimited() {
+        // 0 = 무제한: active가 아무리 커도 항상 claim 허용.
+        assert!(may_claim(0, 0));
+        assert!(may_claim(5, 0));
+        assert!(may_claim(1000, 0));
+    }
+
+    #[test]
+    fn may_claim_caps_at_limit() {
+        // limit=5: active가 5 미만이면 허용, 5 이상이면 차단.
+        assert!(may_claim(0, 5));
+        assert!(may_claim(4, 5));
+        assert!(!may_claim(5, 5));
+        assert!(!may_claim(6, 5));
+    }
+
+    #[test]
+    fn may_claim_running_tasks_unaffected_by_lowered_limit() {
+        // 이미 active=5인데 사용자가 한도를 3으로 낮춰도, may_claim은 claim(신규 시작)만
+        // 막는다 — 돌고 있는 5개는 active 카운터에 이미 반영돼 멈추지 않고, 새 claim만 차단된다.
+        assert!(!may_claim(5, 3));
+        // active가 다시 한도 미만으로 내려오면 새 claim이 재개된다.
+        assert!(may_claim(2, 3));
+    }
+
+    #[test]
+    fn concurrency_config_default_is_unlimited() {
+        assert_eq!(ConcurrencyConfig::default().limit, 0);
+        assert_eq!(seed_concurrency().first().map(|c| c.limit), Some(0));
     }
 
     fn login_only_plan() -> PublishPlan {

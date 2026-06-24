@@ -197,6 +197,16 @@ export const ipc = {
      */
     reorderNow: (orderedIds: string[]) =>
       call<QueueNowItem[]>("reorder_queue_now", { orderedIds }),
+    /**
+     * 현재 "최대 작동가능 작업 수"(now 큐 동시 작업 상한)를 읽는다(#284). 0 = 무제한.
+     */
+    getConcurrencyLimit: () => call<number>("get_now_concurrency_limit", {}),
+    /**
+     * "최대 작동가능 작업 수"를 저장한다(#284). 0 = 무제한, N = 동시 작업을 N개로 제한.
+     * 워커는 claim 시점마다 다시 읽으므로 낮춰도 이미 돌고 있는 작업은 멈추지 않는다.
+     */
+    setConcurrencyLimit: (limit: number) =>
+      call<void>("set_now_concurrency_limit", { limit }),
   },
   stocks: {
     list: () => call<Stock[]>("list_stocks"),
