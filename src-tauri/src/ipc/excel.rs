@@ -22,6 +22,7 @@ fn platform_str(p: &PlatformId) -> &'static str {
     match p {
         Forum => "forum",
         Naver => "naver",
+        Blog => "blog",
         Band => "band",
         Instagram => "instagram",
         Threads => "threads",
@@ -45,6 +46,7 @@ fn parse_platform(s: &str) -> Option<PlatformId> {
     match s.trim().to_lowercase().as_str() {
         "forum" => Some(PlatformId::Forum),
         "naver" => Some(PlatformId::Naver),
+        "blog" => Some(PlatformId::Blog),
         "band" => Some(PlatformId::Band),
         "instagram" => Some(PlatformId::Instagram),
         "threads" => Some(PlatformId::Threads),
@@ -603,6 +605,7 @@ mod tests {
     fn platform_str_all_arms() {
         assert_eq!(platform_str(&PlatformId::Forum), "forum");
         assert_eq!(platform_str(&PlatformId::Naver), "naver");
+        assert_eq!(platform_str(&PlatformId::Blog), "blog");
         assert_eq!(platform_str(&PlatformId::Band), "band");
         assert_eq!(platform_str(&PlatformId::Instagram), "instagram");
         assert_eq!(platform_str(&PlatformId::Threads), "threads");
@@ -641,6 +644,7 @@ mod tests {
     fn parse_platform_all_values() {
         assert_eq!(parse_platform("forum"), Some(PlatformId::Forum));
         assert_eq!(parse_platform("naver"), Some(PlatformId::Naver));
+        assert_eq!(parse_platform("blog"), Some(PlatformId::Blog));
         assert_eq!(parse_platform("band"), Some(PlatformId::Band));
         assert_eq!(parse_platform("instagram"), Some(PlatformId::Instagram));
         assert_eq!(parse_platform("threads"), Some(PlatformId::Threads));

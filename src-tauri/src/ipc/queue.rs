@@ -112,6 +112,25 @@ pub struct BandTarget {
     pub comment_target: Option<CommentTargetSpec>,
 }
 
+/// 네이버 블로그 댓글 게시 대상 1건(#271). 블로그는 **댓글 전용**이라 카페와 같은 네이버
+/// 저장 쿠키를 재사용한다(별도 로그인 없음). `account_id`는 로그인 쿠키 키(= loginId) 규약을
+/// 따른다. `blog_id`는 문자열 식별자(예: "press02"), `log_no`는 숫자 글 id 문자열(예:
+/// "224311392458"). `name`은 완료 로그/큐 표시용(예: blogId), `link`는 원본 글 URL이다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
+#[serde(rename_all = "camelCase")]
+pub struct BlogTarget {
+    pub account_id: String,
+    /// 표시 이름(예약 시점 동결). 완료 로그/큐 표시에 blogId 등을 보여준다.
+    pub name: String,
+    /// 블로그 식별자(문자열). 예: "press02", "cho41004".
+    pub blog_id: String,
+    /// 글 번호(숫자 문자열). 예: "224311392458".
+    pub log_no: String,
+    /// 원본 글 URL(`https://blog.naver.com/{blogId}/{logNo}`). 완료 로그의 "올라간 글 열기"용.
+    pub link: String,
+}
+
 /// 로그인 배치의 계정 1건. `account_id`는 로그인 쿠키 키(= loginId) 규약을 따른다.
 /// `platform`이 `Band`면 band.us 로그인(`process_band_account`), 그 외(naver/forum 등)는
 /// 네이버 로그인(`process_account`)으로 처리된다(프론트 `runLogin`의 naver/band 분기 미러).
@@ -148,6 +167,10 @@ pub struct PublishPlan {
     pub forum: Vec<ForumTarget>,
     #[serde(default)]
     pub band: Vec<BandTarget>,
+    /// 네이버 블로그 댓글 대상(#271). 카페와 같은 네이버 쿠키를 재사용하는 댓글 전용 대상.
+    /// 기존 plan과 호환되도록 기본값(빈 Vec)을 허용한다.
+    #[serde(default)]
+    pub blog: Vec<BlogTarget>,
     /// 로그인 전용 아이템의 계정 목록. 게시 아이템에는 없다(직렬화 생략 → 기존 plan과 호환).
     /// 워커(`execute_item`)는 이 필드가 채워진 아이템을 게시 대신 계정별 로그인으로 처리한다
     /// (배치 1개 = 아이템 1개, 진행률 분모 = 계정 수). 일원화: 로그인도 now 큐로 흐른다(#210).
@@ -762,6 +785,13 @@ mod tests {
                 link: "https://band.us/band/12345678".into(),
                 comment_target: None,
             }],
+            blog: vec![BlogTarget {
+                account_id: "user01".into(),
+                name: "press02".into(),
+                blog_id: "press02".into(),
+                log_no: "224311392458".into(),
+                link: "https://blog.naver.com/press02/224311392458".into(),
+            }],
             login: None,
         }
     }
@@ -878,6 +908,7 @@ mod tests {
             naver: vec![],
             forum: vec![],
             band: vec![],
+            blog: vec![],
             login: None,
         }
     }

@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
 import type { LibraryPost, PublishPlan } from "@/shared/data/types";
-import { invoke as ipcBackend, resetIpc } from "@/test/ipc";
+import { invoke as ipcBackend, resetIpc, setAccounts } from "@/test/ipc";
 import { pickOption } from "@/test/select";
 
 import { PublishModal } from "./publish-modal";
@@ -1434,5 +1434,104 @@ describe("PublishModal", () => {
     } finally {
       ipcBackend.mockImplementation(real);
     }
+  });
+
+  // --- 네이버블로그(#271): 댓글 전용, 카페 글링크 미러 ---
+
+  const blogCommentDoc: LibraryPost = {
+    id: "lbg",
+    title: "블로그 댓글 글",
+    kind: "comment",
+    updated: "방금 전",
+    words: 20,
+    status: "ready",
+    excerpt: "요약",
+    commentTarget: "latest",
+    comments: ["좋은 글이네요"],
+  };
+
+  /** 블로그 계정 하나만 둔 fixture로 교체하고, 그 계정을 선택한다. */
+  async function selectBlogAccount() {
+    setAccounts([
+      {
+        id: "ab",
+        platform: "blog",
+        loginId: "blog_writer",
+        pw: "blog#writer1",
+        status: "active",
+        last: "1시간 전",
+        tags: [],
+      },
+    ]);
+    renderPublish({ doc: blogCommentDoc });
+    // 모달은 게시 가능 계정이 하나면 그 계정을 기본 선택한다.
+    await screen.findByText("blog_writer");
+  }
+
+  it("blog gating: 글을 추가·선택하지 않으면 게시가 막히고 안내가 뜬다", async () => {
+    await selectBlogAccount();
+    // 블로그 섹션이 보인다(글 링크 입력).
+    await screen.findByLabelText("블로그 글 링크");
+    // 글을 고르기 전에는 게시 버튼이 비활성이고 안내 문구가 뜬다.
+    expect(
+      await screen.findByText(
+        "블로그 링크를 추가하고 게시할 블로그 글을 선택해야 게시할 수 있어요",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("blog: 글 링크를 추가·선택하면 게시가 활성화되고 plan.blog가 동결된다(blogId는 문자열)", async () => {
+    await selectBlogAccount();
+    const input = await screen.findByLabelText("블로그 글 링크");
+    await userEvent.type(input, "https://blog.naver.com/press02/224311392458");
+    await userEvent.click(screen.getByRole("button", { name: "추가" }));
+    // 드롭다운에서 추가된 글을 고른다.
+    await pickOption(0, "press02 · 글 224311392458");
+    await screen.findByLabelText("press02 · 글 224311392458 제거");
+
+    const publishBtn = await screen.findByRole(
+      "button",
+      { name: /^게시 \(1\)/ },
+      { timeout: 3000 },
+    );
+    expect(publishBtn).toBeEnabled();
+    await userEvent.click(publishBtn);
+
+    const plan = enqueuedPlan();
+    expect(plan.naver).toEqual([]);
+    expect(plan.blog).toEqual([
+      expect.objectContaining({
+        accountId: "blog_writer",
+        blogId: "press02",
+        logNo: "224311392458",
+        link: "https://blog.naver.com/press02/224311392458",
+      }),
+    ]);
+  });
+
+  it("blog: 여러 글을 추가·선택하면 각 글마다 plan.blog 대상이 만들어진다", async () => {
+    await selectBlogAccount();
+    const input = await screen.findByLabelText("블로그 글 링크");
+    const addBtn = screen.getByRole("button", { name: "추가" });
+    await userEvent.type(input, "https://blog.naver.com/press02/100");
+    await userEvent.click(addBtn);
+    await pickOption(0, "press02 · 글 100");
+    await userEvent.type(input, "https://blog.naver.com/cho41004/200");
+    await userEvent.click(addBtn);
+    await pickOption(0, "cho41004 · 글 200");
+    await screen.findByLabelText("press02 · 글 100 제거");
+    await screen.findByLabelText("cho41004 · 글 200 제거");
+
+    const publishBtn = await screen.findByRole(
+      "button",
+      { name: /^게시 \(2\)/ },
+      { timeout: 3000 },
+    );
+    expect(publishBtn).toBeEnabled();
+    await userEvent.click(publishBtn);
+
+    const plan = enqueuedPlan();
+    expect(plan.blog).toHaveLength(2);
+    expect(plan.blog.map((b) => b.logNo).sort()).toEqual(["100", "200"]);
   });
 });

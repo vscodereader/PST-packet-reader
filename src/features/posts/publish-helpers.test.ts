@@ -5,6 +5,7 @@ import {
   crawlToText,
   distributeStocksEvenly,
   htmlToText,
+  parseBlogPostLink,
   parseCafeBoardLink,
   unreadyNaverAccountIds,
 } from "./publish-helpers";
@@ -210,6 +211,48 @@ describe("parseCafeBoardLink", () => {
     expect(
       parseCafeBoardLink("https://cafe.naver.com/x?subclubid=88&menuid=1"),
     ).toBeNull();
+  });
+});
+
+describe("parseBlogPostLink", () => {
+  it("parses the path form blog.naver.com/{blogId}/{logNo} (blogId is a string)", () => {
+    expect(
+      parseBlogPostLink("https://blog.naver.com/press02/224311392458"),
+    ).toEqual({ blogId: "press02", logNo: "224311392458" });
+    // blogId가 숫자처럼 보여도 문자열로 보존한다.
+    expect(parseBlogPostLink("https://blog.naver.com/cho41004/100")).toEqual({
+      blogId: "cho41004",
+      logNo: "100",
+    });
+  });
+
+  it("parses the PostView.naver query form", () => {
+    expect(
+      parseBlogPostLink(
+        "https://blog.naver.com/PostView.naver?blogId=press02&logNo=224311392458",
+      ),
+    ).toEqual({ blogId: "press02", logNo: "224311392458" });
+  });
+
+  it("decodes URL-encoded iframe/encoded forms", () => {
+    const url =
+      "https://blog.naver.com/x?u=%2FPostView.naver%3FblogId%3Dpress02%26logNo%3D999";
+    expect(parseBlogPostLink(url)).toEqual({
+      blogId: "press02",
+      logNo: "999",
+    });
+  });
+
+  it("returns null when logNo is missing or non-numeric", () => {
+    expect(parseBlogPostLink("https://blog.naver.com/press02")).toBeNull();
+    expect(
+      parseBlogPostLink("https://blog.naver.com/PostView.naver?blogId=press02"),
+    ).toBeNull();
+  });
+
+  it("returns null for empty/undefined input", () => {
+    expect(parseBlogPostLink(undefined)).toBeNull();
+    expect(parseBlogPostLink("")).toBeNull();
   });
 });
 

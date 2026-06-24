@@ -28,6 +28,20 @@ const naver: MantineColorsTuple = [
   "#008a39",
 ];
 
+// 네이버 블로그(#271) 액센트 — 카페(naver 그린)와 구분되는 청록(teal) 계열.
+const blog: MantineColorsTuple = [
+  "#e6fcf5",
+  "#c3fae8",
+  "#96f2d7",
+  "#63e6be",
+  "#38d9a9",
+  "#20c997",
+  "#12b886",
+  "#0ca678",
+  "#099268",
+  "#087f5b",
+];
+
 const band: MantineColorsTuple = [
   "#e7f7ee",
   "#cfeede",
@@ -48,13 +62,14 @@ export const theme = createTheme({
   fontFamily:
     "Pretendard, -apple-system, BlinkMacSystemFont, system-ui, 'Segoe UI', Roboto, sans-serif",
   defaultRadius: "sm",
-  colors: { forum, naver, band },
+  colors: { forum, naver, blog, band },
 });
 
 // Maps a platform id to its Mantine theme color name.
 export const PLATFORM_COLOR: Record<string, string> = {
   forum: "forum",
   naver: "naver",
+  blog: "blog",
   band: "band",
   instagram: "pink",
   threads: "dark",

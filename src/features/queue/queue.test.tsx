@@ -100,6 +100,7 @@ describe("Queue", () => {
       naver: [],
       forum: [],
       band: [],
+      blog: [],
     };
     const items: QueueNowItem[] = [
       {

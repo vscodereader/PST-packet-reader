@@ -26,6 +26,14 @@ export const PLATFORMS: Platform[] = [
     targetLabel: "카페",
   },
   {
+    id: "blog",
+    name: "네이버블로그",
+    short: "블로그",
+    color: "blog",
+    soon: false,
+    targetLabel: "블로그",
+  },
+  {
     id: "band",
     name: "밴드",
     short: "밴드",
@@ -81,6 +89,8 @@ export const KIND_ICON: Record<string, string> = {
 export const BOARDS: Record<string, string[]> = {
   forum: ["종목토론방"],
   naver: ["자유게시판", "종목분석", "질문/답변", "공지사항", "정보 공유"],
+  // 블로그(#271)는 댓글 전용이라 별도 게시판 개념이 없다 — 표시용 단일 항목만 둔다.
+  blog: ["댓글"],
   band: ["전체글", "공지", "사진첩", "일정"],
 };
 
