@@ -73,8 +73,8 @@ pub(crate) async fn process_account<R: Runtime>(
 
     if use_adb {
         assert_adb_device().await?;
-        // 로그인: ADB로 토글 확정 즉시 진행(빠름). IP 실제 변경은 'IP 변경' 버튼이 담당한다.
-        toggle_airplane_mode(IpRotationMode::FastConfirm).await?;
+        // 로그인: 폰 인터넷 끊김 + IP 실제 변경을 확인하며 진행 → 로그인도 새 IP로 수행.
+        toggle_airplane_mode(IpRotationMode::WaitForIpChange).await?;
         // IP가 바뀐 뒤 네트워크가 안정될 시간을 주고 나서 Chrome을 띄운다(사수 권고).
         // 직전 계정의 Chrome은 직전 login() 반환 시 ChromeHandle Drop에서 kill+wait로
         // 이미 완전히 종료되며, 그 사실이 "[CHROME] ✓ ... 완전 종료 확인" 로그로 남는다.
