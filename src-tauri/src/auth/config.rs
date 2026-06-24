@@ -94,9 +94,10 @@ fn chrome_candidates() -> Vec<String> {
 /// 끊겼다 붙을 새가 없어 IP가 그대로 유지될 수 있어, 넉넉히 3초를 둔다(사수 피드백).
 pub const ADB_AIRPLANE_ENABLE_SECS: u64 = 3;
 /// IP 회전(비행기모드 토글) 후 네트워크가 안정될 때까지 기다렸다가 Chrome을 띄운다(초).
-/// `wait_for_internet_connection`이 이미 ping으로 연결 복구를 확인한 뒤라, 이 추가 안정화는
-/// DNS/라우팅이 자리잡을 짧은 여유면 충분하다. 로그인 체감 속도(#14)를 위해 1초로 줄인다.
-pub const ADB_SETTLE_AFTER_ROTATE_SECS: u64 = 1;
+/// ping으로 연결이 붙은 직후엔 DNS/라우팅·TLS 세션이 아직 자리잡지 않아, 너무 짧으면
+/// "연결이 제대로 되지 않은 상태"로 로그인을 시도해 캡차가 100% 뜬다(사수 진단). 넉넉히
+/// 3초를 둔다 — IP '폴링' 간격(아래 100ms)과는 별개의 안정화 대기다.
+pub const ADB_SETTLE_AFTER_ROTATE_SECS: u64 = 3;
 /// IP(외부망) 변경/복구를 확인하는 리트라이 간격(ms). 사수 지침(#267-4): 비행기모드 토글 뒤
 /// IP가 바뀌었는지 빠르게 폴링하도록 100ms로 둔다(기존 1000ms → 로그인 대기 단축).
 pub const ADB_INTERNET_POLL_INTERVAL_MS: u64 = 100;
