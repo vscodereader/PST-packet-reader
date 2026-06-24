@@ -167,7 +167,11 @@ impl Default for BlogPostListClient {
 /// JSONP/가드 접두가 붙는 경우를 대비해 첫 `{`부터 파싱한다. `resultCode`가 "S"가 아니어도
 /// `postList`만 있으면 그대로 읽는다(에러는 호출부의 HTTP/None 처리에 맡긴다).
 fn parse_post_list(body: &str) -> Option<(Vec<BlogPost>, u32)> {
-    let json: serde_json::Value = serde_json::from_str(json_slice(body)).ok()?;
+    // 네이버 응답의 `pagingHtml` 등에는 JSON 표준상 무효인 `\'`(백슬래시+작은따옴표) 이스케이프가
+    // 섞여 온다. 브라우저/jQuery는 느슨해 통과하지만 serde_json은 엄격해 거부하므로(→ "응답 형식
+    // 변경"), 우리가 쓰는 logNo/totalCount엔 영향 없는 `\'`를 `'`로 정리한 뒤 파싱한다.
+    let cleaned = json_slice(body).replace("\\'", "'");
+    let json: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
     let total_count = json
         .get("totalCount")
         .and_then(parse_count_field)
@@ -260,6 +264,15 @@ mod tests {
         let (posts, total) = parse_post_list(&body).expect("파싱 성공해야 함");
         assert_eq!(total, 54, "totalCount(문자열)를 숫자로 읽어야 함");
         assert_eq!(posts.len(), 2);
+        assert_eq!(posts[0].log_no, "224320957761");
+    }
+
+    #[test]
+    fn parse_post_list_tolerates_invalid_backslash_quote_escape() {
+        // 실측 회귀(#280 후속): 네이버 pagingHtml에 JSON 무효 escape `\'`가 섞여 와도 파싱돼야 한다.
+        let body = r#"{"totalCount":"3","postList":[{"logNo":"224320957761","title":"%EA%B8%80"}],"pagingHtml":"<div class=\'blog2_paginate\'><strong class=\'blind\'>페이지</strong></div>"}"#;
+        let (posts, total) = parse_post_list(body).expect("무효 escape가 있어도 파싱 성공해야 함");
+        assert_eq!(total, 3);
         assert_eq!(posts[0].log_no, "224320957761");
     }
 
