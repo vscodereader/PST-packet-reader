@@ -21,13 +21,14 @@ const HEADED_PENDING_TIMEOUT: Duration = Duration::from_secs(12);
 // 캡차가 떠도 스텔스/키 품질로 자동 통과될 수 있어 잠깐 기다린다(사수 요구 #267-13: 10초).
 // 이 시간 안에 로그인되지 않으면 취소한다.
 const CAPTCHA_GRACE: Duration = Duration::from_secs(10);
-// 폴링 간격. 로그인 체감 속도(#14)를 위해 2초→400ms로 좁힌다. 음성 신호 2회 latch도 이만큼
-// 빨라져 비번오류/차단 확정이 ~0.8초로 떨어진다(칼같은 실패처리, #267-13).
-const POLL_INTERVAL: Duration = Duration::from_millis(400);
-// 아이디/비밀번호 입력 사이·클릭 직전의 사람 같은 멈춤(행동 기반 봇탐지 완화). 2초는 과해서
-// 0.8초로 줄이되(#14) 0으로는 만들지 않는다(타이밍 지문 유지 — 흐름은 그대로, 시간만 단축).
-const FIELD_PAUSE: Duration = Duration::from_millis(800);
-// 로그인 버튼 클릭 직후 네비게이션이 정리될 settle. 폴링 간격(400ms)보다 길게 둬, 클릭 직후
+// 결과 폴링 간격. 고정 대기가 아니라 결과 DOM이 자리잡는 즉시 다음으로 넘어가기 위해 촘촘히
+// 본다(사수 지시: 고정 400ms 금지 → 100ms로 DOM 반응성 확보). 음성 신호 2회 latch도 이만큼
+// 빨라져 비번오류/차단 확정이 ~0.2초로 떨어진다.
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
+// 아이디/비밀번호 입력 사이·클릭 직전의 사람 같은 멈춤(행동 기반 봇탐지 완화). 사수 지시로
+// 0.8초→100ms로 줄이되 0으로는 만들지 않는다(타이밍 지문 유지 — 흐름은 그대로, 시간만 단축).
+const FIELD_PAUSE: Duration = Duration::from_millis(100);
+// 로그인 버튼 클릭 직후 네비게이션이 정리될 settle. 폴링 간격(100ms)보다 길게 둬, 클릭 직후
 // 깜빡이는 #err_common/과도기 폼 소멸을 실패로 latch하지 않게 한다.
 const CLICK_SETTLE: Duration = Duration::from_millis(800);
 // pending(성공·캡차·명시 오류가 아닌 중간 상태)이 이만큼 지속되면 취소한다(#267-13 후속).
@@ -402,7 +403,9 @@ fn challenge_kind_label(kind: ChallengeKind) -> &'static str {
 // stderr로 출력해 콘솔에서 "폼이 완전히 로딩됐는지"를 확인할 수 있게 한다.
 fn wait_for_login_form(client: &mut CdpClient) -> bool {
     tracing::info!("[LOGIN] 로그인 폼 로딩 대기 중...");
-    // 폼은 보통 3~5초 내 준비된다. 비관적 15초→10초로 줄여 체감 속도를 높인다(#14, 흐름은 유지).
+    // 고정 대기가 아니라 폼 DOM(#id/#pw + 로그인 버튼 + 페이지 스크립트)이 자리잡는 즉시 진행한다
+    // (사수 지시: 돔 붙을 때까지 대기 → 되면 바로 다음). 아래 100ms로 촘촘히 폴링해 준비 즉시
+    // 빠져나간다. 상한(10초)은 Chrome이 끝내 폼을 못 띄울 때 무한 대기를 막는 안전장치다.
     let deadline = Instant::now() + Duration::from_secs(10);
     let ready_expr = "(()=>{\
         if(document.readyState!=='complete')return false;\
@@ -423,7 +426,7 @@ fn wait_for_login_form(client: &mut CdpClient) -> bool {
             tracing::info!("[LOGIN] ✗ 로그인 폼 로딩 시간 초과(10초)");
             return false;
         }
-        sleep(Duration::from_millis(250));
+        sleep(Duration::from_millis(100));
     }
 }
 
