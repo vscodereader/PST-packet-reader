@@ -4,9 +4,11 @@
 
 pub mod comment_client;
 pub mod error;
+pub mod post_list;
 
 pub use comment_client::{BlogCommentClient, BlogCommentResult};
 pub use error::BlogError;
+pub use post_list::{BlogPost, BlogPostList, BlogPostListClient};
 
 /// 저장된 네이버 쿠키로 블로그 글에 댓글 1건을 등록한다(계정 단위 진입점, 큐 워커용).
 ///
@@ -26,6 +28,27 @@ pub async fn create_blog_comment_for_account(
     let client = BlogCommentClient::new();
     client
         .create_comment(blog_id, log_no, contents, Some(&cookie_header))
+        .await
+}
+
+/// 저장된 네이버 쿠키로 한 블로그의 최신 글 `count`개를 조회한다(#279, "최신 N개" 모드).
+///
+/// `account_id`(= loginId)의 저장 쿠키를 댓글 경로와 동일하게 읽어 [`BlogPostListClient`]에
+/// 넘긴다. `category_no`는 카테고리(전체=0). 모은 글(최신 우선)과 카테고리 전체 글 수를
+/// 돌려줘, 호출부가 "글이 모자라면 그만큼 실패로 남기는" 처리를 할 수 있게 한다.
+///
+/// # 쿠키 보안
+/// 계정 쿠키는 내부에서만 사용되며 반환 오류/로그에 절대 노출되지 않는다.
+pub async fn fetch_latest_blog_posts_for_account(
+    account_id: &str,
+    blog_id: &str,
+    category_no: u32,
+    count: usize,
+) -> Result<BlogPostList, BlogError> {
+    let cookie_header = resolve_cookie_header(account_id)?;
+    let client = BlogPostListClient::new();
+    client
+        .fetch_latest_posts(blog_id, category_no, count, Some(&cookie_header))
         .await
 }
 

@@ -125,10 +125,21 @@ pub struct BlogTarget {
     pub name: String,
     /// 블로그 식별자(문자열). 예: "press02", "cho41004".
     pub blog_id: String,
-    /// 글 번호(숫자 문자열). 예: "224311392458".
+    /// 글 번호(숫자 문자열). 예: "224311392458". "최신 N개" 모드(`count`가 Some)에서는 비어 있을 수 있다.
     pub log_no: String,
     /// 원본 글 URL(`https://blog.naver.com/{blogId}/{logNo}`). 완료 로그의 "올라간 글 열기"용.
     pub link: String,
+    /// "최신 N개" 모드(#279): 채워지면 `blog_id` 블로그의 최신 글 상위 N개에 댓글을 단다(이때
+    /// `log_no`는 빈 문자열일 수 있다). None이면 기존 동작 — `log_no`가 가리키는 특정 글 1개에만
+    /// 댓글을 단다(URL 모드). 과거 plan과 호환되도록 기본값(None)을 허용한다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub count: Option<u32>,
+    /// "최신 N개" 모드의 카테고리 번호(글 목록 조회용). 링크에서 못 뽑으면 0(전체). URL 모드에서는
+    /// 쓰지 않는다. 과거 plan과 호환되도록 기본값(None)을 허용한다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub category_no: Option<u32>,
 }
 
 /// 로그인 배치의 계정 1건. `account_id`는 로그인 쿠키 키(= loginId) 규약을 따른다.
@@ -791,6 +802,8 @@ mod tests {
                 blog_id: "press02".into(),
                 log_no: "224311392458".into(),
                 link: "https://blog.naver.com/press02/224311392458".into(),
+                count: None,
+                category_no: None,
             }],
             login: None,
         }

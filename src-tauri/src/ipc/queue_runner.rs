@@ -1819,31 +1819,122 @@ async fn run_blog_targets<R: Runtime>(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let mut live = blog_skeleton_items(&targets);
+    // "최신 N개" 모드(count=Some) 대상은 실행 시점에 글 목록을 조회해 글마다 댓글 대상 1건으로
+    // 펼친다(카페 collect_comment_targets 미러). URL 모드(count=None)는 그 글 1건이 곧 대상이다.
+    // 글이 모자라면(전체 글 수 < N) 있는 만큼만 댓글을 달고, 부족분만큼 "글이 없습니다" 실패를
+    // 즉시 만든다(대기/재시도 없이). 조회 자체가 실패하면 그 대상은 댓글을 못 달므로 실패로 남긴다.
+    let mut work: Vec<BlogWorkItem> = Vec::new();
+    for t in &targets {
+        match t.count {
+            None => work.push(BlogWorkItem::Comment(BlogCommentJob {
+                account_id: t.account_id.clone(),
+                name: t.name.clone(),
+                link: t.link.clone(),
+                blog_id: t.blog_id.clone(),
+                log_no: t.log_no.clone(),
+            })),
+            Some(n) => {
+                let want = (n.max(1)) as usize;
+                let category_no = t.category_no.unwrap_or(0);
+                match crate::naver_blog::fetch_latest_blog_posts_for_account(
+                    &t.account_id,
+                    &t.blog_id,
+                    category_no,
+                    want,
+                )
+                .await
+                {
+                    Ok(list) => {
+                        for post in &list.posts {
+                            work.push(BlogWorkItem::Comment(BlogCommentJob {
+                                account_id: t.account_id.clone(),
+                                name: t.name.clone(),
+                                link: format!(
+                                    "https://blog.naver.com/{}/{}",
+                                    t.blog_id, post.log_no
+                                ),
+                                blog_id: t.blog_id.clone(),
+                                log_no: post.log_no.clone(),
+                            }));
+                        }
+                        // 글이 모자라면(있는 글 < N) 부족분만큼 즉시 실패로 남긴다("글이 없습니다").
+                        // 클라이언트가 이미 N·totalCount까지만 모으므로, 실제로 댓글을 달 수 있는
+                        // 글 수는 곧 모은 글 수다.
+                        let available = list.posts.len() as u32;
+                        let shortfall = n.max(1).saturating_sub(available);
+                        for _ in 0..shortfall {
+                            work.push(BlogWorkItem::Shortfall {
+                                account_id: t.account_id.clone(),
+                                name: t.name.clone(),
+                                link: t.link.clone(),
+                            });
+                        }
+                    }
+                    // 글 목록 조회 실패 → 이 대상은 댓글을 못 단다. 조용히 누락하지 않고 실패로 남긴다.
+                    Err(error) => work.push(BlogWorkItem::FetchFailure {
+                        account_id: t.account_id.clone(),
+                        name: t.name.clone(),
+                        link: t.link.clone(),
+                        error,
+                    }),
+                }
+            }
+        }
+    }
+
+    let mut live = blog_work_skeleton_items(&work);
     write_live_phase(app, id, &base_items, &live, base_done, total);
     let mut outcomes = Vec::new();
-    for (i, t) in targets.iter().enumerate() {
-        if !item_present(app, id) {
-            break;
-        }
-        if let Some(it) = live.get_mut(i) {
-            it.status = BatchItemStatus::Running;
-            it.msg = "댓글 게시 중…".to_owned();
-        }
-        write_live_phase(app, id, &base_items, &live, base_done, total);
-        let result = crate::naver_blog::create_blog_comment_for_account(
-            &t.account_id,
-            &t.blog_id,
-            &t.log_no,
-            &contents,
-        )
-        .await;
-        let outcome = BlogOutcome {
-            account_id: t.account_id.clone(),
-            name: t.name.clone(),
-            link: t.link.clone(),
-            contents: contents.clone(),
-            result,
+    for (i, w) in work.into_iter().enumerate() {
+        let outcome = match w {
+            // 조회 실패/글 부족은 네트워크 호출 없이 곧장 실패 결과로 굳힌다(대기/재시도 없음).
+            BlogWorkItem::FetchFailure {
+                account_id,
+                name,
+                link,
+                error,
+            } => BlogOutcome {
+                account_id,
+                name,
+                link,
+                contents: String::new(),
+                result: Err(error),
+            },
+            BlogWorkItem::Shortfall {
+                account_id,
+                name,
+                link,
+            } => BlogOutcome {
+                account_id,
+                name,
+                link,
+                contents: String::new(),
+                result: Err(crate::naver_blog::BlogError::new("글이 없습니다")),
+            },
+            BlogWorkItem::Comment(job) => {
+                if !item_present(app, id) {
+                    break;
+                }
+                if let Some(it) = live.get_mut(i) {
+                    it.status = BatchItemStatus::Running;
+                    it.msg = "댓글 게시 중…".to_owned();
+                }
+                write_live_phase(app, id, &base_items, &live, base_done, total);
+                let result = crate::naver_blog::create_blog_comment_for_account(
+                    &job.account_id,
+                    &job.blog_id,
+                    &job.log_no,
+                    &contents,
+                )
+                .await;
+                BlogOutcome {
+                    account_id: job.account_id,
+                    name: job.name,
+                    link: job.link,
+                    contents: contents.clone(),
+                    result,
+                }
+            }
         };
         if let Some(slot) = live.get_mut(i) {
             *slot = blog_outcome_to_item(&outcome);
@@ -1852,6 +1943,34 @@ async fn run_blog_targets<R: Runtime>(
         outcomes.push(outcome);
     }
     outcomes
+}
+
+/// `run_blog_targets`가 펼친 블로그 댓글 작업 1건. URL/최신 N개 모드를 한 목록으로 합친다(#279).
+enum BlogWorkItem {
+    /// 실제로 댓글을 달 글 1건(URL 모드의 그 글, 또는 최신 N개로 펼친 글 1개).
+    Comment(BlogCommentJob),
+    /// 글이 모자라(전체 글 < N) 댓글을 못 다는 자리 — "글이 없습니다" 실패로 남긴다.
+    Shortfall {
+        account_id: String,
+        name: String,
+        link: String,
+    },
+    /// 글 목록 조회 자체가 실패한 대상 — 그 오류(backtrace 포함)를 실패로 남긴다.
+    FetchFailure {
+        account_id: String,
+        name: String,
+        link: String,
+        error: crate::naver_blog::BlogError,
+    },
+}
+
+/// 댓글을 달 블로그 글 1건의 동결된 실행 정보.
+struct BlogCommentJob {
+    account_id: String,
+    name: String,
+    link: String,
+    blog_id: String,
+    log_no: String,
 }
 
 /// 로그인 1건의 결과를 (계정 상태, 사용자 사유, 자세히보기 trace)로 해석한다(순수). Ok면
@@ -2630,21 +2749,31 @@ fn blog_outcome_to_item(o: &BlogOutcome) -> BatchItem {
     }
 }
 
-/// 블로그 대상을 "대기 중" BatchItem으로(라이브 스켈레톤). 순서는 호출부가 넘긴 대상 목록 =
-/// `run_blog_targets` 루프 순서와 일치해, 인덱스로 그 자리만 갱신할 수 있다.
-fn blog_skeleton_items(targets: &[&crate::ipc::queue::BlogTarget]) -> Vec<BatchItem> {
-    targets
-        .iter()
-        .map(|t| BatchItem {
-            platform: PlatformId::Blog,
-            target: t.name.clone(),
-            code: None,
-            board: None,
-            login_id: t.account_id.clone(),
-            status: BatchItemStatus::Waiting,
-            msg: "대기 중".to_owned(),
-            trace: None,
-            posted: None,
+/// 펼친 블로그 댓글 작업을 "대기 중" BatchItem으로(라이브 스켈레톤, #279). 순서는 호출부가
+/// 넘긴 작업 목록 = `run_blog_targets` 루프 순서와 일치해, 인덱스로 그 자리만 갱신할 수 있다.
+fn blog_work_skeleton_items(work: &[BlogWorkItem]) -> Vec<BatchItem> {
+    work.iter()
+        .map(|w| {
+            let (name, account_id) = match w {
+                BlogWorkItem::Comment(job) => (&job.name, &job.account_id),
+                BlogWorkItem::Shortfall {
+                    name, account_id, ..
+                }
+                | BlogWorkItem::FetchFailure {
+                    name, account_id, ..
+                } => (name, account_id),
+            };
+            BatchItem {
+                platform: PlatformId::Blog,
+                target: name.clone(),
+                code: None,
+                board: None,
+                login_id: account_id.clone(),
+                status: BatchItemStatus::Waiting,
+                msg: "대기 중".to_owned(),
+                trace: None,
+                posted: None,
+            }
         })
         .collect()
 }
@@ -4812,6 +4941,25 @@ mod tests {
     }
 
     #[test]
+    fn blog_shortfall_outcome_renders_as_fail_no_posts() {
+        // "최신 N개" 모드에서 글이 모자라면(#279) 부족분은 "글이 없습니다" 실패로 즉시 남긴다.
+        let p = plan(ModeValue::Comment, vec![]);
+        let shortfall = BlogOutcome {
+            account_id: "u0".into(),
+            name: "press02".into(),
+            link: "https://blog.naver.com/press02".into(),
+            contents: String::new(),
+            result: Err(crate::naver_blog::BlogError::new("글이 없습니다")),
+        };
+        let b = build_log_batch(&p, &[], &[], &[], &[], &[shortfall], &[], 1, 0);
+        assert_eq!(b.items.len(), 1);
+        assert_eq!(b.items[0].platform, PlatformId::Blog);
+        assert_eq!(b.items[0].status, BatchItemStatus::Fail);
+        assert!(b.items[0].msg.contains("글이 없습니다"));
+        assert!(b.items[0].posted.is_none());
+    }
+
+    #[test]
     fn synth_blog_failures_cover_blog_targets_on_group_skip() {
         // 로그인/IP 실패로 그룹을 건너뛰면, 블로그 댓글 대상도 조용히 누락하지 않고 Fail로 남긴다.
         let mut p = plan(ModeValue::Comment, vec![]);
@@ -4821,6 +4969,8 @@ mod tests {
             blog_id: "press02".into(),
             log_no: "100".into(),
             link: "https://blog.naver.com/press02/100".into(),
+            count: None,
+            category_no: None,
         }];
         let skip = GroupSkip {
             code: "LOGIN_FAILED".into(),

@@ -12,4 +12,6 @@ export type BlogTarget = {
   blogId: string;
   logNo: string;
   link: string;
+  count?: number;
+  categoryNo?: number;
 };

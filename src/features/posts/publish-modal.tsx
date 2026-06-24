@@ -60,6 +60,7 @@ import {
   clampCommentCount,
   distributeStocksEvenly,
   htmlToText,
+  parseBlogLink,
   parseBlogPostLink,
   parseCafeBoardLink,
 } from "./publish-helpers";
@@ -96,6 +97,14 @@ interface ResolvedBlog {
 /** 게시 대상 목록에서 블로그 글 항목의 고유 키(blogId+logNo). */
 function blogKey(blogId: string, logNo: string): string {
   return `${blogId}/${logNo}`;
+}
+
+/** "최신 N개" 모드(#279)의 블로그 대상 — 블로그 홈 링크에서 뽑은 blogId(+카테고리). 특정 글이
+ *  아니라 블로그 자체가 대상이라 게시 시점 워커가 최신 글 상위 N개를 조회해 댓글을 단다. */
+interface BlogHomeTarget {
+  blogId: string;
+  categoryNo?: number;
+  link: string;
 }
 
 /** 저장된 밴드 링크 하나 → 조회된 실제 밴드명. 게시 대상 목록(드롭다운)을 이룬다. */
@@ -202,6 +211,14 @@ function DestinationPicker({
   onSaveBlogLink,
   onSelectBlog,
   onRemoveBlog,
+  blogMode,
+  onBlogModeChange,
+  blogCount,
+  blogHomes,
+  blogHomeLink,
+  setBlogHomeLink,
+  onSaveBlogHomeLink,
+  onRemoveBlogHome,
 }: {
   selPlatforms: PlatformId[];
   stockCodes: string[];
@@ -231,6 +248,14 @@ function DestinationPicker({
   onSaveBlogLink: () => void;
   onSelectBlog: (key: string) => void;
   onRemoveBlog: (key: string) => void;
+  blogMode: "url" | "latest";
+  onBlogModeChange: (v: "url" | "latest") => void;
+  blogCount: number;
+  blogHomes: BlogHomeTarget[];
+  blogHomeLink: string;
+  setBlogHomeLink: (v: string) => void;
+  onSaveBlogHomeLink: () => void;
+  onRemoveBlogHome: (blogId: string, categoryNo?: number) => void;
 }) {
   const card = {
     border: "1px solid var(--mantine-color-gray-2)",
@@ -395,76 +420,151 @@ function DestinationPicker({
             </Text>
           </Group>
           <Stack gap={8} p={10}>
-            {/* 블로그는 댓글 전용이라 게시판이 아니라 댓글을 달 **글 링크**를 붙여넣는다(#271).
-                링크에서 blogId(문자열)+logNo를 파싱해 대상으로 추가한다. */}
-            <Group gap={8} align="flex-end" wrap="nowrap">
-              <TextInput
-                style={{ flex: 1 }}
-                label="글 링크"
-                placeholder="https://blog.naver.com/press02/224311392458"
-                value={blogLink}
-                onChange={(e) => setBlogLink(e.currentTarget.value)}
-                leftSection={<Icon.link size={14} />}
-                aria-label="블로그 글 링크"
-              />
-              <Button
-                variant="light"
-                color="blog"
-                onClick={onSaveBlogLink}
-                disabled={!blogLink.trim()}
-              >
-                추가
-              </Button>
-            </Group>
-            <Select
-              placeholder={
-                resolvedBlogs.length
-                  ? "게시할 블로그 글 선택"
-                  : "글 링크를 추가하면 여기 표시됩니다"
-              }
-              data={resolvedBlogs.map((b) => ({
-                value: blogKey(b.blogId, b.logNo),
-                label: `${b.blogId} · 글 ${b.logNo}`,
-              }))}
-              value={null}
-              disabled={resolvedBlogs.length === 0}
-              onChange={(k) => {
-                if (k) onSelectBlog(k);
-              }}
+            {/* 블로그는 댓글 전용(#271/#279). "특정 글 URL"=각 글에 댓글, "최신 N개"=블로그의
+                최신 글 상위 N개에 댓글(카페 최신/url 토글 미러). */}
+            <SegmentedControl
+              fullWidth
+              size="xs"
+              value={blogMode}
+              onChange={(v) => onBlogModeChange(v as "url" | "latest")}
+              data={[
+                { value: "url", label: "특정 글 URL" },
+                { value: "latest", label: "최신 N개" },
+              ]}
             />
-            {selectedBlogs.length > 0 ? (
-              <Group gap={6}>
-                {selectedBlogs.map((k) => {
-                  const b = resolvedBlogs.find(
-                    (x) => blogKey(x.blogId, x.logNo) === k,
-                  );
-                  const label = b ? `${b.blogId} · 글 ${b.logNo}` : k;
-                  return (
-                    <Badge
-                      key={k}
-                      color="blog"
-                      variant="light"
-                      rightSection={
-                        <ActionIcon
-                          size={14}
-                          variant="transparent"
+            {blogMode === "latest" ? (
+              <>
+                {/* 최신 N개: 블로그 홈 링크에서 blogId(+카테고리)만 뽑아 대상으로 추가한다.
+                    개수는 댓글 템플릿(writer)에서 정한 commentCount를 그대로 쓴다. */}
+                <Group gap={8} align="flex-end" wrap="nowrap">
+                  <TextInput
+                    style={{ flex: 1 }}
+                    label="블로그 링크"
+                    placeholder="https://blog.naver.com/press02"
+                    value={blogHomeLink}
+                    onChange={(e) => setBlogHomeLink(e.currentTarget.value)}
+                    leftSection={<Icon.link size={14} />}
+                    aria-label="블로그 링크"
+                  />
+                  <Button
+                    variant="light"
+                    color="blog"
+                    onClick={onSaveBlogHomeLink}
+                    disabled={!blogHomeLink.trim()}
+                  >
+                    추가
+                  </Button>
+                </Group>
+                {blogHomes.length > 0 ? (
+                  <Group gap={6}>
+                    {blogHomes.map((b) => {
+                      const label =
+                        b.categoryNo !== undefined
+                          ? `${b.blogId} · 카테고리 ${b.categoryNo}`
+                          : b.blogId;
+                      return (
+                        <Badge
+                          key={`${b.blogId}/${b.categoryNo ?? ""}`}
                           color="blog"
-                          aria-label={`${label} 제거`}
-                          onClick={() => onRemoveBlog(k)}
+                          variant="light"
+                          rightSection={
+                            <ActionIcon
+                              size={14}
+                              variant="transparent"
+                              color="blog"
+                              aria-label={`${label} 제거`}
+                              onClick={() =>
+                                onRemoveBlogHome(b.blogId, b.categoryNo)
+                              }
+                            >
+                              <Icon.x size={10} />
+                            </ActionIcon>
+                          }
                         >
-                          <Icon.x size={10} />
-                        </ActionIcon>
-                      }
-                    >
-                      {label}
-                    </Badge>
-                  );
-                })}
-              </Group>
+                          {label}
+                        </Badge>
+                      );
+                    })}
+                  </Group>
+                ) : (
+                  <Text fz={12} c="orange.7">
+                    댓글을 달 블로그를 추가하세요(최신 {blogCount}개 글에 댓글).
+                  </Text>
+                )}
+              </>
             ) : (
-              <Text fz={12} c="orange.7">
-                게시할 블로그 글을 선택하세요.
-              </Text>
+              <>
+                {/* 특정 글 URL: 링크에서 blogId(문자열)+logNo를 파싱해 대상으로 추가한다(#271). */}
+                <Group gap={8} align="flex-end" wrap="nowrap">
+                  <TextInput
+                    style={{ flex: 1 }}
+                    label="글 링크"
+                    placeholder="https://blog.naver.com/press02/224311392458"
+                    value={blogLink}
+                    onChange={(e) => setBlogLink(e.currentTarget.value)}
+                    leftSection={<Icon.link size={14} />}
+                    aria-label="블로그 글 링크"
+                  />
+                  <Button
+                    variant="light"
+                    color="blog"
+                    onClick={onSaveBlogLink}
+                    disabled={!blogLink.trim()}
+                  >
+                    추가
+                  </Button>
+                </Group>
+                <Select
+                  placeholder={
+                    resolvedBlogs.length
+                      ? "게시할 블로그 글 선택"
+                      : "글 링크를 추가하면 여기 표시됩니다"
+                  }
+                  data={resolvedBlogs.map((b) => ({
+                    value: blogKey(b.blogId, b.logNo),
+                    label: `${b.blogId} · 글 ${b.logNo}`,
+                  }))}
+                  value={null}
+                  disabled={resolvedBlogs.length === 0}
+                  onChange={(k) => {
+                    if (k) onSelectBlog(k);
+                  }}
+                />
+                {selectedBlogs.length > 0 ? (
+                  <Group gap={6}>
+                    {selectedBlogs.map((k) => {
+                      const b = resolvedBlogs.find(
+                        (x) => blogKey(x.blogId, x.logNo) === k,
+                      );
+                      const label = b ? `${b.blogId} · 글 ${b.logNo}` : k;
+                      return (
+                        <Badge
+                          key={k}
+                          color="blog"
+                          variant="light"
+                          rightSection={
+                            <ActionIcon
+                              size={14}
+                              variant="transparent"
+                              color="blog"
+                              aria-label={`${label} 제거`}
+                              onClick={() => onRemoveBlog(k)}
+                            >
+                              <Icon.x size={10} />
+                            </ActionIcon>
+                          }
+                        >
+                          {label}
+                        </Badge>
+                      );
+                    })}
+                  </Group>
+                ) : (
+                  <Text fz={12} c="orange.7">
+                    게시할 블로그 글을 선택하세요.
+                  </Text>
+                )}
+              </>
             )}
           </Stack>
         </Box>
@@ -788,6 +888,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [resolvedBlogs, setResolvedBlogs] = useState<ResolvedBlog[]>([]);
   const [selectedBlogs, setSelectedBlogs] = useState<string[]>([]);
   const [blogLink, setBlogLink] = useState("");
+  // 블로그 댓글 대상 모드(#279): "url"=특정 글 URL(위 selectedBlogs), "latest"=블로그의 최신 N개.
+  // 카페 commentTargetMode(latest/url)의 블로그 버전이다. "최신 N개"는 블로그 홈 링크에서 blogId
+  // (+categoryNo)만 뽑아 대상으로 삼고, 게시 시점 워커가 최신 글 상위 N개를 조회해 댓글을 단다.
+  const [blogMode, setBlogMode] = useState<"url" | "latest">("url");
+  const [blogHomes, setBlogHomes] = useState<BlogHomeTarget[]>([]);
+  const [blogHomeLink, setBlogHomeLink] = useState("");
   const [when, setWhen] = useState<"now" | "schedule">("now");
   const [date, setDate] = useState(() => nowParts().date);
   const [time, setTime] = useState(() => nowParts().time);
@@ -868,6 +974,43 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     setSelectedBlogs((s) => (s.includes(key) ? s : [...s, key]));
   const removeBlog = (key: string) =>
     setSelectedBlogs((s) => s.filter((x) => x !== key));
+
+  // "최신 N개" 모드(#279): 블로그 홈 링크에서 blogId(+categoryNo)를 파싱해 blogHomes에 누적한다
+  // (중복 제거). 파싱 실패면 추가하지 않고 안내한다(특정 글 URL 흐름 미러).
+  const saveBlogHomeLink = () => {
+    const link = blogHomeLink.trim();
+    if (!link) return;
+    const parsed = parseBlogLink(link);
+    if (!parsed) {
+      notifications.show({
+        message:
+          "블로그 주소를 인식하지 못했어요. 댓글을 달 블로그 홈으로 들어가 그 주소를 붙여넣어 주세요.",
+        color: "red",
+      });
+      return;
+    }
+    setBlogHomeLink("");
+    setBlogHomes((prev) =>
+      prev.some(
+        (b) => b.blogId === parsed.blogId && b.categoryNo === parsed.categoryNo,
+      )
+        ? prev
+        : [
+            ...prev,
+            {
+              blogId: parsed.blogId,
+              ...(parsed.categoryNo !== undefined
+                ? { categoryNo: parsed.categoryNo }
+                : {}),
+              link,
+            },
+          ],
+    );
+  };
+  const removeBlogHome = (blogId: string, categoryNo?: number) =>
+    setBlogHomes((s) =>
+      s.filter((b) => !(b.blogId === blogId && b.categoryNo === categoryNo)),
+    );
 
   if (!doc) {
     return <Modal opened={false} onClose={onClose} />;
@@ -1073,22 +1216,40 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         });
       }
     } else if (a.platform === "blog") {
-      // 블로그는 댓글 전용(#271) — 선택한 각 블로그 글마다 잡 1개(계정 × 글). blogId+logNo를
-      // 잡에 동결해 워커가 그 글에 댓글을 단다(댓글 본문은 writer comments).
-      selectedBlogs.forEach((k) => {
-        const b = resolvedBlogs.find((x) => blogKey(x.blogId, x.logNo) === k);
-        if (!b) return;
-        jobs.push({
-          key: `${aid}-${k}`,
-          platform: "blog",
-          loginId: a.loginId,
-          targetName: `${b.blogId} · 글 ${b.logNo}`,
-          blogId: b.blogId,
-          logNo: b.logNo,
-          board: "댓글",
-          status: a.status,
+      // 블로그는 댓글 전용(#271). "특정 글 URL" 모드면 선택한 각 글마다 잡 1개(계정×글)로
+      // blogId+logNo를 동결한다. "최신 N개" 모드(#279)면 추가한 각 블로그(홈)마다 잡 1개로
+      // blogId(+categoryNo)+개수(blogCount)를 동결해, 워커가 그 블로그의 최신 글 상위 N개에 댓글을 단다.
+      if (blogMode === "latest") {
+        blogHomes.forEach((b, i) => {
+          jobs.push({
+            key: `${aid}-bh${i}`,
+            platform: "blog",
+            loginId: a.loginId,
+            targetName: `${b.blogId} · 최신 ${commentCount}건`,
+            blogId: b.blogId,
+            logNo: "",
+            blogCount: commentCount,
+            ...(b.categoryNo !== undefined ? { categoryNo: b.categoryNo } : {}),
+            board: "댓글",
+            status: a.status,
+          });
         });
-      });
+      } else {
+        selectedBlogs.forEach((k) => {
+          const b = resolvedBlogs.find((x) => blogKey(x.blogId, x.logNo) === k);
+          if (!b) return;
+          jobs.push({
+            key: `${aid}-${k}`,
+            platform: "blog",
+            loginId: a.loginId,
+            targetName: `${b.blogId} · 글 ${b.logNo}`,
+            blogId: b.blogId,
+            logNo: b.logNo,
+            board: "댓글",
+            status: a.status,
+          });
+        });
+      }
     }
   });
   // forum은 보통 종목(stockCodes)을 1개 이상 골라야 한다. 단 "특정 게시글" 댓글이면 URL이
@@ -1109,12 +1270,15 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     selPlatforms.includes("band") &&
     selectedBands.length > 0 &&
     isListTarget;
-  // 블로그(#271)는 댓글 전용이라 commentTargetMode와 무관하게 선택한 블로그 글이 1개 이상이면
-  // 댓글 대상이 준비된 것으로 본다(네이버 list/url 대상이 없어도 블로그만으로 충분).
+  // 블로그(#271/#279) 댓글 대상이 준비됐는지 — "특정 글 URL" 모드면 선택한 글이, "최신 N개"
+  // 모드면 추가한 블로그(홈)가 1개 이상이면 준비된 것으로 본다.
+  const blogTargetsReady =
+    blogMode === "latest" ? blogHomes.length > 0 : selectedBlogs.length > 0;
+  // 블로그는 댓글 전용이라 네이버 list/url 대상이 없어도 블로그만으로 충분하다.
   const blogOnlyCommentReady =
     selectedNaver.length === 0 &&
     selPlatforms.includes("blog") &&
-    selectedBlogs.length > 0;
+    blogTargetsReady;
   // url 모드의 "대상 해석됨"은 카페·종목토론방·밴드 글 중 하나라도 풀린 링크가 있으면 충분하다
   // — 사용자가 넣은 링크가 어느 플랫폼 글인지에 따라 해당 목록에 잡힌다(여러 링크/혼합 허용).
   const urlTargetResolved =
@@ -1143,7 +1307,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     selectedBands.length > 0;
   // 블로그(#271)가 선택됐으면 게시할 블로그 글을 1개 이상 골라야 게시 가능(카페 게시판 미러).
   // 글을 추가하고 선택해야 게시할 수 있다 — 미선택이면 게시를 막아 조용한 누락을 방지한다.
-  const blogReady = !selPlatforms.includes("blog") || selectedBlogs.length > 0;
+  const blogReady = !selPlatforms.includes("blog") || blogTargetsReady;
   const canPublish =
     usableSelected.length > 0 &&
     targetsOk &&
@@ -1286,13 +1450,25 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     // 네이버 쿠키를 재사용하므로 별도 로그인이 필요 없다(백엔드가 저장 쿠키를 그대로 쓴다).
     const blog: BlogTarget[] = jobs
       .filter((j) => j.platform === "blog")
-      .map((j) => ({
-        accountId: j.loginId,
-        name: j.targetName,
-        blogId: j.blogId ?? "",
-        logNo: j.logNo ?? "",
-        link: `https://blog.naver.com/${j.blogId ?? ""}/${j.logNo ?? ""}`,
-      }));
+      .map((j) => {
+        // "최신 N개" 모드(#279)면 count(+categoryNo)를 동결하고 logNo는 비운다 — 워커가 최신 글
+        // 상위 N개를 조회해 댓글을 단다. 링크는 글 URL 대신 블로그 홈으로 둔다(글이 아직 미정).
+        const isLatest =
+          j.blogCount != null && (j.logNo == null || j.logNo === "");
+        return {
+          accountId: j.loginId,
+          name: j.targetName,
+          blogId: j.blogId ?? "",
+          logNo: j.logNo ?? "",
+          link: isLatest
+            ? `https://blog.naver.com/${j.blogId ?? ""}`
+            : `https://blog.naver.com/${j.blogId ?? ""}/${j.logNo ?? ""}`,
+          ...(isLatest ? { count: j.blogCount } : {}),
+          ...(isLatest && j.categoryNo != null
+            ? { categoryNo: j.categoryNo }
+            : {}),
+        };
+      });
     // 게시 대상 계정마다 로그인 스펙을 동봉한다(#225). 워커가 게시 직전에 계정 단위로
     // [IP 회전 → 로그인 → 게시]를 원자 실행해 "로그인 IP == 게시 IP"를 맞춘다 — 그래야
     // 네이버 카페 10004(IP check failure)를 피한다. force/useAdb는 기존 선택 로그인과 동일.
@@ -1609,6 +1785,14 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
               onSaveBlogLink={saveBlogLink}
               onSelectBlog={selectBlog}
               onRemoveBlog={removeBlog}
+              blogMode={blogMode}
+              onBlogModeChange={setBlogMode}
+              blogCount={commentCount}
+              blogHomes={blogHomes}
+              blogHomeLink={blogHomeLink}
+              setBlogHomeLink={setBlogHomeLink}
+              onSaveBlogHomeLink={saveBlogHomeLink}
+              onRemoveBlogHome={removeBlogHome}
             />
           </>
         )}

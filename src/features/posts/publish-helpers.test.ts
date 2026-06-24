@@ -5,6 +5,7 @@ import {
   crawlToText,
   distributeStocksEvenly,
   htmlToText,
+  parseBlogLink,
   parseBlogPostLink,
   parseCafeBoardLink,
   unreadyNaverAccountIds,
@@ -253,6 +254,47 @@ describe("parseBlogPostLink", () => {
   it("returns null for empty/undefined input", () => {
     expect(parseBlogPostLink(undefined)).toBeNull();
     expect(parseBlogPostLink("")).toBeNull();
+  });
+});
+
+describe("parseBlogLink", () => {
+  it("parses the home form blog.naver.com/{blogId} without logNo", () => {
+    expect(parseBlogLink("https://blog.naver.com/press02")).toEqual({
+      blogId: "press02",
+    });
+    // blogId가 숫자처럼 보여도 문자열로 보존한다.
+    expect(parseBlogLink("https://blog.naver.com/cho41004")).toEqual({
+      blogId: "cho41004",
+    });
+  });
+
+  it("takes only the blogId from a full post link", () => {
+    expect(
+      parseBlogLink("https://blog.naver.com/press02/224311392458"),
+    ).toEqual({ blogId: "press02" });
+  });
+
+  it("extracts categoryNo when present", () => {
+    expect(
+      parseBlogLink("https://blog.naver.com/press02?categoryNo=7"),
+    ).toEqual({ blogId: "press02", categoryNo: 7 });
+    expect(
+      parseBlogLink(
+        "https://blog.naver.com/PostList.naver?blogId=press02&categoryNo=12",
+      ),
+    ).toEqual({ blogId: "press02", categoryNo: 12 });
+  });
+
+  it("decodes URL-encoded forms", () => {
+    const url =
+      "https://blog.naver.com/x?u=%2FPostList.naver%3FblogId%3Dpress02%26categoryNo%3D3";
+    expect(parseBlogLink(url)).toEqual({ blogId: "press02", categoryNo: 3 });
+  });
+
+  it("returns null for empty/undefined or non-blog input", () => {
+    expect(parseBlogLink(undefined)).toBeNull();
+    expect(parseBlogLink("")).toBeNull();
+    expect(parseBlogLink("https://cafe.naver.com/myclub")).toBeNull();
   });
 });
 
