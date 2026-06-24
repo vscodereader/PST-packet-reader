@@ -424,22 +424,29 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
       .getAutostart()
       .then(setAutostart)
       .catch(() => setAutostart(false));
-    void ipc.logBatches.list().then(setLogBatches);
-    void ipc.activity.list().then((items) =>
-      setActivity(
-        items.map((a) => ({
-          id: a.id,
-          status:
-            a.type === "error"
-              ? "fail"
-              : a.type === "success"
-                ? "success"
-                : "info",
-          title: a.text,
-          at: a.at,
-        })),
-      ),
-    );
+    // 게시 완료 로그·활동 피드는 주기적으로 다시 불러온다(#267-6 후속). 기존엔 화면 진입 시 1회만
+    // 조회해, 화면을 연 채로 게시가 끝나면 새 글이 알림에 안 떴다. 2초마다 갱신해 곧바로 뜨게 한다.
+    const refresh = () => {
+      void ipc.logBatches.list().then(setLogBatches);
+      void ipc.activity.list().then((items) =>
+        setActivity(
+          items.map((a) => ({
+            id: a.id,
+            status:
+              a.type === "error"
+                ? "fail"
+                : a.type === "success"
+                  ? "success"
+                  : "info",
+            title: a.text,
+            at: a.at,
+          })),
+        ),
+      );
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 2000);
+    return () => window.clearInterval(timer);
   }, []);
 
   const sysRows: SystemRow[] = activity;
@@ -487,10 +494,10 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
     g.rows.push(row);
   });
   groups.sort((a, b) => (dayOrder[a.day] ?? 9) - (dayOrder[b.day] ?? 9));
-  // 각 날짜 그룹 안의 행을 발생 시각 순서(오래된 일 → 최근 일)로 정렬한다(#267-6). 기존엔
-  // 백엔드가 준 순서(배치 후 시스템 등)를 그대로 둬 기준이 모호했는데, 일이 일어난 순서대로
-  // 보이게 한다. 그룹(날짜)은 위에서 오늘→어제→이전 순으로 이미 정렬돼 있다.
-  groups.forEach((g) => g.rows.sort((a, b) => a.at - b.at));
+  // 각 날짜 그룹 안의 행을 발생 시각 순서로 정렬하되, **최근 일이 맨 위**로 오게 한다(#267-6
+  // 재조정). 방금 게시 완료한 글을 곧바로 위에서 확인하고 링크를 누를 수 있어야 하기 때문이다
+  // (오름차순이면 새 글이 맨 아래로 가 안 보였다). 그룹(날짜)은 오늘→어제→이전 순.
+  groups.forEach((g) => g.rows.sort((a, b) => b.at - a.at));
 
   const okCount = logBatches.filter((b) => batchStatus(b) === "success").length;
   const failCount = logBatches.filter((b) =>

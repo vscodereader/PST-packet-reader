@@ -30,6 +30,11 @@ const FIELD_PAUSE: Duration = Duration::from_millis(800);
 // 로그인 버튼 클릭 직후 네비게이션이 정리될 settle. 폴링 간격(400ms)보다 길게 둬, 클릭 직후
 // 깜빡이는 #err_common/과도기 폼 소멸을 실패로 latch하지 않게 한다.
 const CLICK_SETTLE: Duration = Duration::from_millis(800);
+// pending(성공·캡차·명시 오류가 아닌 중간 상태)이 이만큼 지속되면 취소한다(#267-13 후속).
+// 인식하지 못한 추가 인증 화면(예: 2단계 인증)이 로그인 폼을 유지해 blocked로도 안 잡힐 때,
+// 전체 타임아웃(12초)까지 기다리지 않고 빠르게 실패시킨다. 정상 로그인은 보통 클릭 후 수 초
+// 내 성공이라 6초면 안전하다.
+const PENDING_STALL: Duration = Duration::from_secs(6);
 
 // 봇탐지(ncaptcha/wtm) 완화용 스텔스 스크립트. 페이지 스크립트보다 먼저 모든 새 문서에서
 // 실행되어 CDP 제어 흔적인 `navigator.webdriver` 를 일반 크롬과 동일한 값으로 맞춘다.
@@ -308,6 +313,9 @@ fn run_inner(
     let deadline = Instant::now() + timeout;
     // 캡차를 처음 본 시점 + CAPTCHA_GRACE. 캡차가 떴을 때만 설정되고, 이 시각을 넘으면 취소한다.
     let mut captcha_deadline: Option<Instant> = None;
+    // pending(중간 상태)이 처음 시작된 시점 + PENDING_STALL. 인식 못 한 추가 인증 화면(2단계 등)이
+    // 성공 쿠키도 안 뜨고 명시 오류/캡차도 아닌 채 머물면, 이 시각을 넘는 즉시 실패시킨다(#267-13).
+    let mut pending_deadline: Option<Instant> = None;
     loop {
         // 인증 성공 직후 뜨는 "새 기기 등록" 페이지면 "등록 안함"을 눌러 마무리한다
         // (설계 5단계: browser_flow의 기존 로직 재사용). 없으면 무시한다.
@@ -333,6 +341,7 @@ fn run_inner(
                     ));
                 }
                 last_negative = None;
+                pending_deadline = None; // 캡차는 pending이 아니므로 정체 타이머를 끈다.
             }
             // 캡차가 아닌 추가 인증(본인인증 OTP/새 기기 인증) — 캡차 외라 즉시
             // 실패시킨다(#267-13: 캡챠 외 전부 칼같이 실패). 사람 대기를 적용하지 않는다.
@@ -346,7 +355,24 @@ fn run_inner(
             LoopDecision::ConfirmedBlocked => return Ok(LoginOutcome::Blocked),
             LoopDecision::ConfirmedProtected => return Ok(LoginOutcome::Protected),
             LoopDecision::ConfirmedLocked => return Ok(LoginOutcome::Locked),
-            LoopDecision::KeepWaiting(next) => last_negative = next,
+            LoopDecision::KeepWaiting(next) => {
+                last_negative = next;
+                // next가 None이면 Pending(성공·캡차·명시오류 아님) — 인식 못 한 추가 인증 화면일
+                // 수 있다. PENDING_STALL을 넘기면 즉시 실패(크롬 종료)시킨다. next가 Some이면
+                // 비번오류/차단 latch라 곧 2회로 확정되니 정체 타이머를 끈다.
+                if next.is_none() {
+                    let pd =
+                        *pending_deadline.get_or_insert_with(|| Instant::now() + PENDING_STALL);
+                    if Instant::now() >= pd {
+                        let url = client.current_url().unwrap_or_default();
+                        return Ok(LoginOutcome::Error(format!(
+                            "로그인이 진행되지 않아 취소했습니다(캡차 외 미인식 화면 — 추가 인증 등). 마지막 페이지: {url}"
+                        )));
+                    }
+                } else {
+                    pending_deadline = None;
+                }
+            }
         }
 
         if Instant::now() >= deadline {

@@ -686,11 +686,12 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
         );
     }
 
-    // 글 게시에 성공한 계정은 "대기"(노란색)로 전환한다(#267-3) — 같은 계정으로 연속 게시되지
-    // 않게 게시 선택 목록에서 숨기기 위함. 댓글만 성공한 경우는 제외하려고 글을 포함한 플랜
-    // (runs_post)일 때만 적용한다. 사용자가 계정 화면에서 상태 배지를 누르면 다시 Active로 돌아간다.
+    // 종목토론방(forum) 글 게시에 성공한 계정만 "대기"(노란색)로 전환한다(#267-3, 사수 요청: 카페·
+    // 밴드는 제외 — forum만). 같은 계정으로 연속 게시되지 않게 게시 선택 목록에서 숨기기 위함.
+    // 댓글만 성공한 경우는 제외하려고 글을 포함한 플랜(runs_post)일 때만 적용한다. 사용자가 계정
+    // 화면에서 상태 배지를 누르면 다시 Active로 돌아간다.
     if runs_post(plan) {
-        apply_waiting_for_successful_posts(app, &all_posts, &all_forum, &all_band);
+        apply_waiting_for_successful_posts(app, &all_forum);
     }
 
     // 완료 로그(LogBatch)/activity: 누적된 카페 글·댓글·토론방·밴드 결과 + 댓글 조회 실패를
@@ -707,18 +708,13 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
     ItemOutcome::Completed
 }
 
-/// 글 게시에 성공한 계정(loginId)을 모아 계정 상태를 "대기"(Waiting)로 바꾼다(#267-3). 카페 글·
-/// 종토방 글·밴드 글의 **성공**만 본다(실패·skip 제외). 호출부는 글을 포함한 플랜(runs_post)일
-/// 때만 부른다 — 댓글만 성공한 경우는 대기로 바꾸지 않는다. account_id가 곧 loginId(쿠키 키)라
-/// `apply_status_by_login_id`로 같은 loginId 모든 행을 함께 갱신한다(로그인 상태 갱신과 동일 규약).
-fn apply_waiting_for_successful_posts<R: Runtime>(
-    app: &AppHandle<R>,
-    posts: &[JobReport],
-    forum: &[ForumOutcome],
-    band: &[BandOutcome],
-) {
+/// 종목토론방(forum) 글 게시에 성공한 계정(loginId)을 모아 계정 상태를 "대기"(Waiting)로 바꾼다
+/// (#267-3, 사수 요청: forum만 — 카페·밴드 제외). forum 글의 **성공**만 본다(실패·skip 제외).
+/// 호출부는 글을 포함한 플랜(runs_post)일 때만 부른다 — 댓글만 성공한 경우는 대기로 바꾸지 않는다.
+/// account_id가 곧 loginId(쿠키 키)라 `apply_status_by_login_id`로 같은 loginId 모든 행을 함께 갱신.
+fn apply_waiting_for_successful_posts<R: Runtime>(app: &AppHandle<R>, forum: &[ForumOutcome]) {
     use crate::ipc::accounts::{apply_status_by_login_id, Account};
-    let ids = successful_post_login_ids(posts, forum, band);
+    let ids = successful_post_login_ids(forum);
     if ids.is_empty() {
         return;
     }
@@ -737,21 +733,12 @@ fn apply_waiting_for_successful_posts<R: Runtime>(
     });
 }
 
-/// 글 게시에 성공한 계정(loginId) 집합(#267-3, 순수). 카페 글(success)·종토방 글(ok && !skip)·
-/// 밴드 글(Ok)의 성공만 모은다. 댓글 결과는 보지 않는다 — "글" 성공만 대기로 전환하기 위함.
-fn successful_post_login_ids(
-    posts: &[JobReport],
-    forum: &[ForumOutcome],
-    band: &[BandOutcome],
-) -> std::collections::BTreeSet<String> {
+/// 종목토론방(forum) 글 게시에 성공한 계정(loginId) 집합(#267-3, 순수). forum 글(ok && !skip)의
+/// 성공만 모은다 — 카페·밴드 글은 대기 대상이 아니다(사수 요청). 호출부의 runs_post 게이트가
+/// 댓글 전용 플랜을 걸러, 여기 들어온 forum 성공은 글(또는 글+댓글) 성공이다.
+fn successful_post_login_ids(forum: &[ForumOutcome]) -> std::collections::BTreeSet<String> {
     let mut ids = std::collections::BTreeSet::new();
-    for r in posts.iter().filter(|r| r.success) {
-        ids.insert(r.account_id.clone());
-    }
     for o in forum.iter().filter(|o| o.result.ok && !o.result.skipped) {
-        ids.insert(o.account_id.clone());
-    }
-    for o in band.iter().filter(|o| o.result.is_ok()) {
         ids.insert(o.account_id.clone());
     }
     ids
@@ -4319,7 +4306,7 @@ mod tests {
             forum_ok("acc_a", "삼성전자", "005930"),
             forum_fail("acc_b", "SK하이닉스", "000660", "trace"),
         ];
-        let ids = successful_post_login_ids(&[], &forum, &[]);
+        let ids = successful_post_login_ids(&forum);
         assert!(ids.contains("acc_a"), "성공 계정은 대기 대상");
         assert!(!ids.contains("acc_b"), "실패 계정은 제외");
     }
