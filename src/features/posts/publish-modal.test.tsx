@@ -1534,4 +1534,47 @@ describe("PublishModal", () => {
     expect(plan.blog).toHaveLength(2);
     expect(plan.blog.map((b) => b.logNo).sort()).toEqual(["100", "200"]);
   });
+
+  it("나눠서 즉시 게시: 계정마다 별도 큐를 적재한다(1큐=1계정)", async () => {
+    renderPublish();
+    // invest_king7(forum) 기본 선택 상태. value_pick(forum)을 추가해 forum 계정 2개로 만든다.
+    await userEvent.click(await screen.findByText("value_pick"));
+    expect(await screen.findByText("2개")).toBeInTheDocument();
+    // 종목 2개 선택(계정 선택을 끝낸 뒤 — 계정 토글이 종목 선택을 비우므로).
+    await userEvent.click(
+      await screen.findByRole("button", { name: /종목 선택/ }),
+    );
+    const search = await screen.findByPlaceholderText("종목명 또는 코드 검색");
+    await userEvent.type(search, "삼성전자");
+    await userEvent.click(await screen.findByText("삼성전자"));
+    await userEvent.clear(search);
+    await userEvent.type(search, "SK하이닉스");
+    await userEvent.click(await screen.findByText("SK하이닉스"));
+    await userEvent.click(await screen.findByRole("button", { name: /적용/ }));
+    // "나눠서 즉시 게시하기" → 계정 2개라 큐(add_queue_now)가 계정마다 1개씩 2개 적재돼야 한다.
+    await userEvent.click(
+      await screen.findByRole("button", { name: /나눠서 즉시 게시하기/ }),
+    );
+    await waitFor(() => {
+      const calls = ipcBackend.mock.calls.filter(
+        (c) => c[0] === "add_queue_now",
+      );
+      expect(calls).toHaveLength(2);
+    });
+    const plans = ipcBackend.mock.calls
+      .filter((c) => c[0] === "add_queue_now")
+      .map((c) => (c[1] as { item: { plan: PublishPlan } }).item.plan);
+    // 각 큐의 forum 대상은 정확히 1개 계정(1큐=1계정).
+    for (const p of plans) {
+      expect(new Set(p.forum.map((f) => f.accountId)).size).toBe(1);
+    }
+    // 두 큐는 서로 다른 계정이고, 종목은 안 겹치게 총 2개가 분배된다.
+    expect(plans.map((p) => p.forum[0]!.accountId).sort()).toEqual([
+      "invest_king7",
+      "value_pick",
+    ]);
+    const codes = plans.flatMap((p) => p.forum.map((f) => f.code));
+    expect(codes.length).toBe(2);
+    expect(new Set(codes).size).toBe(2);
+  });
 });
