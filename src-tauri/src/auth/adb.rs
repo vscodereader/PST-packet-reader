@@ -86,8 +86,11 @@ pub async fn toggle_airplane_mode() -> Result<IpRotation, OrchestratorError> {
             .collect(),
     )
     .await?;
-    // 고정 대기 대신 ADB로 ON이 확정될 때까지 폴링하고 즉시 다음으로 넘어간다(사수 지시).
-    wait_for_airplane_state(true).await;
+    tracing::info!(
+        "[ADB]   └ 상태 확인: 비행기모드 {}",
+        airplane_mode_state().await
+    );
+    sleep(Duration::from_secs(config::ADB_AIRPLANE_ENABLE_SECS)).await;
     tracing::info!("[ADB] ✈ 비행기모드 OFF — 인터넷 복구 대기");
     run_adb_timed(
         airplane_mode_args(false)
@@ -96,8 +99,10 @@ pub async fn toggle_airplane_mode() -> Result<IpRotation, OrchestratorError> {
             .collect(),
     )
     .await?;
-    // OFF가 확정될 때까지 폴링하고 즉시 진행한다(사수 지시).
-    wait_for_airplane_state(false).await;
+    tracing::info!(
+        "[ADB]   └ 상태 확인: 비행기모드 {}",
+        airplane_mode_state().await
+    );
     wait_for_internet_connection().await?;
     let after = fetch_external_ip().await;
 
@@ -142,10 +147,10 @@ fn airplane_mode_args(enable: bool) -> [&'static str; 5] {
     ]
 }
 
-/// 비행기모드 *실제* 상태(ON=true/OFF=false)를 ADB로 읽는다(부작용 없는 상태 조회).
-/// `settings get global airplane_mode_on`이 "1"=ON / "0"=OFF. 조회 실패·예상 밖 출력은
-/// None(확정 불가)으로 둔다.
-async fn airplane_mode_on() -> Option<bool> {
+/// 비행기모드 *실제* 상태를 읽어 로그용 한 줄 라벨로 돌려준다(부작용 없는 상태 조회).
+/// 토글 명령이 먹혔는지 확인용 — `settings get global airplane_mode_on`이 "1"=ON / "0"=OFF.
+/// 조회 실패는 토글 자체를 막지 않도록 "(상태 확인 실패)"로 표기한다(로그 전용).
+async fn airplane_mode_state() -> String {
     match run_adb_timed(
         ["shell", "settings", "get", "global", "airplane_mode_on"]
             .iter()
@@ -154,42 +159,8 @@ async fn airplane_mode_on() -> Option<bool> {
     )
     .await
     {
-        Ok(out) => parse_airplane_on(out.trim()),
-        Err(_) => None,
-    }
-}
-
-/// `airplane_mode_on` 원시 출력("1"/"0")을 bool로 해석한다(순수 함수).
-fn parse_airplane_on(raw: &str) -> Option<bool> {
-    match raw {
-        "1" => Some(true),
-        "0" => Some(false),
-        _ => None,
-    }
-}
-
-/// 비행기모드가 목표 상태(`target_on`)로 바뀔 때까지 ADB로 폴링하고, 확정되면 즉시 반환한다
-/// (고정 대기 제거 — 사수 지시). 상태를 확인 못 해도 상한(ADB_AIRPLANE_CONFIRM_TIMEOUT_SECS)을
-/// 넘으면 그대로 진행한다(토글 명령은 이미 실행됨).
-async fn wait_for_airplane_state(target_on: bool) {
-    let raw = if target_on { "1" } else { "0" };
-    let deadline = Instant::now() + Duration::from_secs(config::ADB_AIRPLANE_CONFIRM_TIMEOUT_SECS);
-    loop {
-        if airplane_mode_on().await == Some(target_on) {
-            tracing::info!(
-                "[ADB]   └ 상태 확인: 비행기모드 {}",
-                airplane_state_label(raw)
-            );
-            return;
-        }
-        if Instant::now() >= deadline {
-            tracing::info!(
-                "[ADB]   └ ⚠ 비행기모드 {} 확정 실패(상한 초과) — 그대로 진행",
-                airplane_state_label(raw)
-            );
-            return;
-        }
-        sleep(Duration::from_millis(config::ADB_AIRPLANE_CONFIRM_POLL_MS)).await;
+        Ok(out) => airplane_state_label(out.trim()).to_string(),
+        Err(_) => "(상태 확인 실패)".to_string(),
     }
 }
 
@@ -298,7 +269,6 @@ fn internet_probe_command() -> String {
 mod tests {
     use super::{
         airplane_mode_args, airplane_state_label, has_authorized_device, internet_probe_command,
-        parse_airplane_on,
     };
 
     #[test]
@@ -308,16 +278,6 @@ mod tests {
         // settings get은 끝에 개행이 붙으므로 호출부에서 trim 후 넘긴다.
         assert_eq!(airplane_state_label("1\n".trim()), "ON(켜짐)");
         assert_eq!(airplane_state_label("null"), "(알 수 없음)");
-    }
-
-    #[test]
-    fn parse_airplane_on_maps_raw_to_bool() {
-        // ADB 확정 폴링이 토글 완료를 판정하는 근거(고정 대기 대신 상태 확인).
-        assert_eq!(parse_airplane_on("1"), Some(true));
-        assert_eq!(parse_airplane_on("0"), Some(false));
-        // 확정 불가(조회 실패/예상 밖 출력)는 None → 폴링이 계속 기다린다.
-        assert_eq!(parse_airplane_on("null"), None);
-        assert_eq!(parse_airplane_on(""), None);
     }
 
     #[test]
