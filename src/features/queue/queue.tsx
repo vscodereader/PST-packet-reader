@@ -7,6 +7,7 @@ import {
   Container,
   Group,
   Loader,
+  NumberInput,
   Paper,
   Stack,
   Text,
@@ -108,6 +109,9 @@ export function Queue({ go }: { go: GoFn }) {
   // 진행 중 아이템을 클릭하면 그 자리에서 대상별 상태(items)를 펼친다(#219). 보통 실행
   // 중 아이템은 1개라 단일 id로 충분하다.
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  // "최대 작동가능 작업 수"(now 큐 동시 작업 상한, #284). 빈 문자열 = 무제한(0). 마운트 시
+  // 백엔드에서 현재 값을 읽어 채우고, 저장 시 set_now_concurrency_limit으로 영속화한다.
+  const [concurrency, setConcurrency] = useState<number | "">("");
 
   // 폴링/이벤트 콜백에서 최신 값을 읽기 위한 ref (stale closure 회피).
   const nowRef = useRef<QueueNowItem[]>(now);
@@ -128,6 +132,10 @@ export function Queue({ go }: { go: GoFn }) {
     });
     void ipc.queue.listScheduled().then((v) => {
       if (alive) setSched(v);
+    });
+    // 저장된 "최대 작동가능 작업 수"를 읽어 입력란에 채운다(0 = 무제한 → 빈 칸).
+    void ipc.queue.getConcurrencyLimit().then((v) => {
+      if (alive) setConcurrency(v > 0 ? v : "");
     });
     // 워커 진행률·상태를 주기적으로 반영. 단 드래그 중이거나 순서 영속화 대기 중에는
     // 사용자가 맞춘 로컬 순서를 덮어쓰지 않도록 폴링을 건너뛴다.
@@ -237,6 +245,29 @@ export function Queue({ go }: { go: GoFn }) {
       .catch(() => {
         notifications.show({
           message: "지난 시각으로는 예약할 수 없어요",
+          color: "red",
+        });
+      });
+  };
+
+  // "최대 작동가능 작업 수"를 저장한다(#284). 빈 칸/0 = 무제한. 워커는 claim 시점마다
+  // 다시 읽으므로 낮춰도 이미 돌고 있는 작업은 멈추지 않는다.
+  const saveConcurrency = () => {
+    const limit = concurrency === "" ? 0 : Math.max(0, Math.trunc(concurrency));
+    void ipc.queue
+      .setConcurrencyLimit(limit)
+      .then(() => {
+        notifications.show({
+          message:
+            limit === 0
+              ? "최대 작동가능 작업 수를 무제한으로 저장했어요"
+              : `최대 작동가능 작업 수를 ${limit}개로 저장했어요`,
+          color: "green",
+        });
+      })
+      .catch(() => {
+        notifications.show({
+          message: "최대 작동가능 작업 수를 저장하지 못했어요",
           color: "red",
         });
       });
@@ -493,6 +524,37 @@ export function Queue({ go }: { go: GoFn }) {
           </Paper>
         )}
       </Stack>
+
+      {/* 최대 작동가능 작업 수(now 큐 동시 작업 상한, #284). 빈 칸/0 = 무제한. 저장하면
+          즉시 set IPC로 영속화되고, 워커가 claim 시점마다 새 한도를 읽는다. */}
+      <Paper withBorder radius="md" p="md" mb={34}>
+        <Group justify="space-between" wrap="wrap" gap={12}>
+          <Box>
+            <Text fz={13} fw={700} c="gray.7">
+              최대 작동가능 작업 수
+            </Text>
+            <Text fz={12} c="dimmed" mt={2}>
+              동시에 처리할 작업 수예요. 비우거나 0이면 무제한이에요.
+            </Text>
+          </Box>
+          <Group gap={8} wrap="nowrap">
+            <NumberInput
+              w={140}
+              min={0}
+              step={1}
+              allowNegative={false}
+              allowDecimal={false}
+              placeholder="무제한"
+              value={concurrency}
+              onChange={(v) => setConcurrency(v === "" ? "" : Number(v))}
+              aria-label="최대 작동가능 작업 수"
+            />
+            <Button size="sm" onClick={saveConcurrency}>
+              저장
+            </Button>
+          </Group>
+        </Group>
+      </Paper>
 
       <Group gap={8} mb={12}>
         <Icon.calendar size={15} color="var(--mantine-color-gray-6)" />

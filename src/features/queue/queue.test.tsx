@@ -302,6 +302,54 @@ describe("Queue", () => {
     ).toBeInTheDocument();
   });
 
+  it("loads the current 최대 작동가능 작업 수 into the field (#284)", async () => {
+    // 마운트 시 get_now_concurrency_limit으로 저장값을 읽어 입력란에 채운다. 먼저 3으로
+    // 저장해 두고 새로 렌더하면, 입력란이 3을 보여줘야 한다.
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("set_now_concurrency_limit", { limit: 3 });
+    render(
+      <MantineProvider>
+        <Queue go={vi.fn()} />
+      </MantineProvider>,
+    );
+    const field = (await screen.findByLabelText(
+      "최대 작동가능 작업 수",
+    )) as HTMLInputElement;
+    await waitFor(() => expect(field.value).toBe("3"));
+  });
+
+  it("저장 calls set_now_concurrency_limit with the entered number (#284)", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await renderQueue();
+    const field = screen.getByLabelText("최대 작동가능 작업 수");
+    await userEvent.clear(field);
+    await userEvent.type(field, "5");
+    await userEvent.click(screen.getByRole("button", { name: "저장" }));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("set_now_concurrency_limit", {
+        limit: 5,
+      }),
+    );
+    // 저장 후 백엔드 값이 5로 영속화됐는지 확인.
+    expect(await invoke("get_now_concurrency_limit", {})).toBe(5);
+  });
+
+  it("저장 with an empty field saves 0 = 무제한 (#284)", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("set_now_concurrency_limit", { limit: 7 });
+    await renderQueue();
+    const field = screen.getByLabelText("최대 작동가능 작업 수");
+    await waitFor(() => expect((field as HTMLInputElement).value).toBe("7"));
+    await userEvent.clear(field);
+    await userEvent.click(screen.getByRole("button", { name: "저장" }));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("set_now_concurrency_limit", {
+        limit: 0,
+      }),
+    );
+    expect(await invoke("get_now_concurrency_limit", {})).toBe(0);
+  });
+
   it("persists the new order so it survives a reload", async () => {
     const q2 = "반도체 흐름 코멘트 10종";
     const q3 = "오늘의 특징주 정리 — 장 마감 요약";
