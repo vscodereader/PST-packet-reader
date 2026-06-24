@@ -1522,7 +1522,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     const loginByAccount = new Map<string, LoginTarget>();
     jobs.forEach((j) => {
       const platform = j.platform === "band" ? "band" : "naver";
-      const key = `${j.loginId} ${platform}`;
+      const key = `${j.loginId}::${platform}`;
       if (loginByAccount.has(key)) return;
       loginByAccount.set(key, {
         accountId: j.loginId,
