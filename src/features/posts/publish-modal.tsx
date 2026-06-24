@@ -672,6 +672,7 @@ function PublishFlow({
   time,
   count,
   onClose,
+  onKeepWriting,
   go,
 }: {
   state: null | "running" | PublishResult[];
@@ -681,6 +682,8 @@ function PublishFlow({
   time: string;
   count: number;
   onClose: () => void;
+  // '계속작성': 게시설정창을 닫지 않고 결과 패널만 닫은 뒤 계정 목록을 새로고침한다(#5).
+  onKeepWriting: () => void;
   go: GoFn;
 }) {
   if (!state) return null;
@@ -798,7 +801,7 @@ function PublishFlow({
               ))}
             </Stack>
             <Group gap={9} grow w="100%">
-              <Button size="sm" variant="default" onClick={onClose}>
+              <Button size="sm" variant="default" onClick={onKeepWriting}>
                 계속 작성
               </Button>
               <Button
@@ -905,6 +908,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [linkOverride, setLinkOverride] = useState("");
   const [showPreview, setShowPreview] = useState(false);
   const [flow, setFlow] = useState<null | "running" | PublishResult[]>(null);
+  // 이번 모달 세션에서 이미 게시(큐 적재)한 계정의 loginId(#4/#5). 게시 직후 그 자리에서
+  // 목록·선택에서 빼고, '계속작성'으로 목록을 새로고침해도 다시 나타나지 않게 한다(백엔드가
+  // 아직 '대기'로 바꾸기 전이라도). 모달을 다시 열면(remount) 비워져 정상 목록으로 돌아간다.
+  const [submittedLoginIds, setSubmittedLoginIds] = useState<Set<string>>(
+    () => new Set(),
+  );
 
   useEffect(() => {
     void ipc.accounts.list().then((a) => {
@@ -922,6 +931,41 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     });
     void ipc.stocks.list().then(setStocks);
   }, []);
+
+  // 계정 목록을 다시 불러와(새로고침) 상태를 갱신한다(#4/#5). 게시(숫자)로 큐에 적재된 뒤,
+  // 또는 '계속작성'으로 모달을 유지할 때 호출해, 백엔드가 갱신한 계정 상태(예: 게시 성공 →
+  // 대기)를 반영한다. 게시 가능하지 않게 된 계정은 selected에서도 걸러낸다(모달 진입 로직과 동일).
+  const refreshAccounts = () => {
+    void ipc.accounts.list().then((a) => {
+      setAccounts(a);
+      // 게시 가능하지 않게 됐거나(상태 변화) 이번 세션에서 이미 게시한 계정은 선택에서 뺀다.
+      const postableIds = new Set(
+        a.filter((x) => isPostable(x.status)).map((x) => x.id),
+      );
+      setSelected((s) =>
+        s.filter((id) => {
+          if (!postableIds.has(id)) return false;
+          const acc = a.find((x) => x.id === id);
+          return !acc || !submittedLoginIds.has(acc.loginId);
+        }),
+      );
+    });
+  };
+
+  // 게시(숫자)를 누른 그 자리에서 방금 게시한 계정을 체크박스 목록에서 즉시 사라지게 한다(#4).
+  // 그 loginId를 submittedLoginIds에 기록해 visibleAccts에서 숨기고(목록에서 즉시 제거),
+  // selected에서도 뺀다. 기록은 새로고침(refreshAccounts)에도 유지돼, 백엔드가 아직 '대기'로
+  // 바꾸기 전이라도 방금 쓴 계정이 다시 나타나지 않는다(모달을 다시 열면 remount로 비워진다).
+  const removeSubmittedAccounts = (jobs: PublishJob[]) => {
+    const submitted = new Set(jobs.map((j) => j.loginId));
+    setSubmittedLoginIds((prev) => new Set([...prev, ...submitted]));
+    setSelected((s) =>
+      s.filter((id) => {
+        const a = accounts.find((x) => x.id === id);
+        return !a || !submitted.has(a.loginId);
+      }),
+    );
+  };
 
   // 게시판 링크 저장: 링크에서 cafeId+menuId를 파싱해 resolvedCafes에 추가한다
   // (같은 cafeId+menuId는 중복 제거). 파싱 실패(카페 홈 링크 등)면 추가하지 않고 안내한다.
@@ -1078,6 +1122,9 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       // 글 게시 성공 계정(대기, #267-3)은 게시 선택 목록에서 숨긴다. 계정 화면에서 상태 배지를
       // 눌러 다시 활성으로 바꾸면 게시 가능 상태가 되어 자동으로 다시 보인다.
       a.status !== "waiting" &&
+      // 이번 세션에서 방금 게시(큐 적재)한 계정은 그 자리에서 숨긴다(#4) — 백엔드가 '대기'로
+      // 바꾸기 전이라도 목록에서 즉시 빠진다. 모달을 다시 열면(remount) 다시 보인다.
+      !submittedLoginIds.has(a.loginId) &&
       (acctFilter === "all" || a.platform === acctFilter),
   );
   const visUsable = visibleAccts
@@ -1552,15 +1599,17 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       setFlow("running");
       void persistCredentials(jobs)
         .then(() => ipc.queue.addNow(item))
-        .then(() =>
+        .then(() => {
+          // 큐 적재 성공 → 방금 쓴 계정을 그 자리에서 목록·선택에서 제거한다(#4).
+          removeSubmittedAccounts(jobs);
           setFlow(
             jobs.map((j) => ({
               ...j,
               ok: true,
               msg: `${action} 즉시 처리 대기열에 추가됨`,
             })),
-          ),
-        )
+          );
+        })
         .catch(() =>
           setFlow(
             jobs.map((j) => ({
@@ -1590,11 +1639,13 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     // already prevents it. 예약도 게시 시점에 백엔드가 로그인하므로 자격증명을 먼저 저장한다.
     void persistCredentials(jobs)
       .then(() => ipc.queue.addScheduled(item, toEpochMs(date, time)))
-      .then(() =>
+      .then(() => {
+        // 예약도 큐에 적재되면 방금 쓴 계정을 그 자리에서 목록·선택에서 제거한다(#4).
+        removeSubmittedAccounts(jobs);
         setFlow(
           jobs.map((j) => ({ ...j, ok: true, msg: `${action} 예약 완료` })),
-        ),
-      )
+        );
+      })
       .catch(() =>
         notifications.show({
           message: "예약 시각이 현재보다 과거예요. 시간을 다시 선택하세요.",
@@ -1643,15 +1694,17 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
           ),
         ),
       )
-      .then(() =>
+      .then(() => {
+        // 나눠서 게시도 각 계정 큐 적재 성공 후 그 자리에서 계정을 목록·선택에서 제거한다(#4).
+        removeSubmittedAccounts(jobs);
         setFlow(
           jobs.map((j) => ({
             ...j,
             ok: true,
             msg: `${action} 즉시 처리 대기열에 추가됨`,
           })),
-        ),
-      )
+        );
+      })
       .catch(() =>
         setFlow(
           jobs.map((j) => ({
@@ -2107,6 +2160,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         onClose={() => {
           setFlow(null);
           onClose();
+        }}
+        onKeepWriting={() => {
+          // '계속작성'(#5): 게시설정창은 그대로 두고 결과 패널만 닫는다. 계정 목록은 새로고침해
+          // 방금 게시한(=#4에서 빠진) 계정이 빠진 목록을 다시 로드한다 — 바로 새 선택을 할 수 있다.
+          setFlow(null);
+          refreshAccounts();
         }}
         go={go}
       />

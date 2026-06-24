@@ -18,8 +18,8 @@ use super::activity::{record, ActivityItem, ActivityType};
 use super::log_batches::{BatchItem, BatchItemStatus, LogBatch, PostedContent, MAX_LOG_BATCHES};
 use super::posts::{CommentTarget, ModeValue};
 use super::queue::{
-    apply_cancel_now, apply_yield_now, item_priority, CommentTargetSpec, LoginTarget, PublishPlan,
-    QueueNowItem, QueueState,
+    apply_complete_now, apply_yield_now, item_priority, CommentTargetSpec, LoginTarget,
+    PublishPlan, QueueNowItem, QueueState,
 };
 use crate::auth::outcome::LoginResolution;
 use crate::auth::OrchestratorError;
@@ -330,15 +330,15 @@ async fn worker_loop<R: Runtime>(app: AppHandle<R>, runner: NowQueueRunner) {
 async fn finish_item<R: Runtime>(app: &AppHandle<R>, job: &QueueNowItem) {
     match execute_item(app, job).await {
         ItemOutcome::Completed => {
-            // 완료(N/N) 진행률이 프론트 폴링에 한 번은 잡혀 "N/N까지 차오른 뒤 사라짐"이
-            // 보이도록, 실제 작업을 한 아이템은 큐에서 빼기 전 한 폴링 주기(750ms)보다 살짝
-            // 길게 100% 상태로 머문다. plan 없는(표시 전용) 아이템은 곧장 제거한다.
-            if job.plan.is_some() {
-                tokio::time::sleep(std::time::Duration::from_millis(900)).await;
-            }
-            // 완료된 아이템은 큐에서 제거한다(취소와 동일 경로 재사용).
+            // 완료/일반 실패/도중 차단을 가리지 않고, 큐에서 **제거하지 않고** 종료(Done)로
+            // 남긴다(#1). 예전엔 곧장 제거해, 여러 작업이 거의 동시에 끝나면 큐 창이 순식간에
+            // 비어 결과를 확인하려면 알림으로 가야 했다. 이제 결과(대상별 items·progress)를 그
+            // 자리에서 보게 두고, 사용자가 ✕/"완료 항목 지우기"로 직접 치운다. 워커는 Waiting
+            // 만 집으므로 재실행되지 않는다(apply_complete_now가 Done 상한도 함께 관리).
+            // 도중 차단된 대상은 set_progress_and_items가 채운 종목별 차단/건너뜀 행(items)으로
+            // 카드에 그대로 드러난다.
             app.state::<JsonStore<QueueNowItem>>()
-                .mutate(|items| apply_cancel_now(items, &job.id));
+                .mutate(|items| apply_complete_now(items, &job.id));
         }
         ItemOutcome::Yielded(remaining) => {
             // 삭제가 아니라 중지(#232): 잔여 plan(아직 안 한 그룹만)으로 Waiting 복귀 후 재정렬.
@@ -809,18 +809,56 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
     ItemOutcome::Completed
 }
 
-/// 종목토론방(forum) 글 게시에 성공한 계정(loginId)을 모아 계정 상태를 "대기"(Waiting)로 바꾼다
-/// (#267-3, 사수 요청: forum만 — 카페·밴드 제외). forum 글의 **성공**만 본다(실패·skip 제외).
+/// 종목토론방(forum) 게시 결과를 보고 계정 상태를 갱신한다(#267-3 + 후속 #2, forum만 — 카페·
+/// 밴드 제외). 두 갈래로 나뉜다:
+/// - **게시 도중 차단**(`is_blocking_failure`)을 만난 계정은 `Blocked`로 둔다. 부분 성공이 있어도
+///   차단이 우선이다 — 다시 써도 또 차단되므로 "대기"로 두면 안 된다(사용자 지시: 도중 차단된
+///   계정은 전부 차단 상태로).
+/// - 차단되지 않았고 글 게시에 **성공**한 계정만 `Waiting`(대기)으로 둔다(#267-3).
 /// 호출부는 글을 포함한 플랜(runs_post)일 때만 부른다 — 댓글만 성공한 경우는 대기로 바꾸지 않는다.
 /// account_id가 곧 loginId(쿠키 키)라 `apply_status_by_login_id`로 같은 loginId 모든 행을 함께 갱신.
 fn apply_waiting_for_successful_posts<R: Runtime>(app: &AppHandle<R>, forum: &[ForumOutcome]) {
     use crate::ipc::accounts::{apply_status_by_login_id, Account};
-    let ids = successful_post_login_ids(forum);
-    if ids.is_empty() {
+    let blocked = blocked_post_login_ids(forum);
+    // 대기초과(페이지 대기시간 초과·HTTP 500, #7)도 모은다. 차단보다 약한 종료성 실패라 차단
+    // 계정은 뺀다(차단 우선) — 한 계정이 차단과 타임아웃을 모두 만나면 차단으로 본다.
+    let timed_out: std::collections::BTreeSet<String> = timed_out_post_login_ids(forum)
+        .into_iter()
+        .filter(|id| !blocked.contains(id))
+        .collect();
+    // 대기 후보(성공)에서 차단·대기초과 계정은 뺀다 — 종료성/일시 실패가 대기보다 우선한다(#2/#7).
+    let waiting: Vec<String> = successful_post_login_ids(forum)
+        .into_iter()
+        .filter(|id| !blocked.contains(id) && !timed_out.contains(id))
+        .collect();
+    if blocked.is_empty() && timed_out.is_empty() && waiting.is_empty() {
         return;
     }
     app.state::<JsonStore<Account>>().mutate(|list| {
-        ids.iter().fold(list, |acc, id| {
+        // 우선순위로 칠한다: 차단(종료) → 대기초과(일시 실패) → 대기(성공).
+        let list = blocked.iter().fold(list, |acc, id| {
+            apply_status_by_login_id(
+                acc,
+                id,
+                AccountStatus::Blocked,
+                Some(
+                    "글 게시 도중 차단되어 큐가 멈췄습니다. 계정이 차단 상태로 전환되었어요."
+                        .to_owned(),
+                ),
+            )
+        });
+        let list = timed_out.iter().fold(list, |acc, id| {
+            apply_status_by_login_id(
+                acc,
+                id,
+                AccountStatus::TimedOut,
+                Some(
+                    "페이지 대기시간 초과 또는 네이버 서버 오류(HTTP 500)로 게시가 실패했습니다. 잠시 후 다시 시도하세요."
+                        .to_owned(),
+                ),
+            )
+        });
+        waiting.iter().fold(list, |acc, id| {
             apply_status_by_login_id(
                 acc,
                 id,
@@ -832,6 +870,39 @@ fn apply_waiting_for_successful_posts<R: Runtime>(app: &AppHandle<R>, forum: &[F
             )
         })
     });
+}
+
+/// 게시 **도중 차단**(`is_blocking_failure`)을 만난 계정(loginId) 집합(#2, 순수). 부분 성공
+/// 여부와 무관하게, 차단성 실패가 하나라도 있으면 그 계정은 차단으로 본다. skip(앞 글 차단으로
+/// 건너뛴 글)은 그 자체가 차단 사유가 아니므로 제외하고, 429(일시적 과다요청)도 차단으로 치지
+/// 않는다(`is_blocking_failure`가 429를 제외). 카페·밴드는 대상이 아니다(forum 결과만 본다).
+fn blocked_post_login_ids(forum: &[ForumOutcome]) -> std::collections::BTreeSet<String> {
+    use crate::discussion_batch::is_blocking_failure;
+    let mut ids = std::collections::BTreeSet::new();
+    for o in forum
+        .iter()
+        .filter(|o| !o.result.ok && !o.result.skipped && is_blocking_failure(&o.result.message))
+    {
+        ids.insert(o.account_id.clone());
+    }
+    ids
+}
+
+/// 게시 **대기초과**(`is_timed_out_failure`: 페이지 대기시간 초과·HTTP 500 네이버 서버 오류)를
+/// 만난 계정(loginId) 집합(#7, 순수). 차단(`blocked_post_login_ids`)과 같은 구조지만, 일시적
+/// 서버/타이밍 실패라 별도 `TimedOut` 상태로 둬 게시 목록에서만 숨기고(대기와 동일) 재시도할 수
+/// 있게 한다. skip(앞 글 차단으로 건너뜀)은 그 자체가 대기초과 사유가 아니므로 제외한다. 카페·
+/// 밴드는 대상이 아니다(forum 결과만 본다). 호출부에서 차단이 대기초과보다 우선한다.
+fn timed_out_post_login_ids(forum: &[ForumOutcome]) -> std::collections::BTreeSet<String> {
+    use crate::discussion_batch::is_timed_out_failure;
+    let mut ids = std::collections::BTreeSet::new();
+    for o in forum
+        .iter()
+        .filter(|o| !o.result.ok && !o.result.skipped && is_timed_out_failure(&o.result.message))
+    {
+        ids.insert(o.account_id.clone());
+    }
+    ids
 }
 
 /// 종목토론방(forum) 글 게시에 성공한 계정(loginId) 집합(#267-3, 순수). forum 글(ok && !skip)의
@@ -1181,7 +1252,9 @@ fn group_accounts_for_publish(plan: &PublishPlan) -> Vec<PublishGroup> {
 /// `execute_item`의 결과(#232). 워커가 아이템을 큐에서 **제거**(완료)할지, 잔여 plan으로
 /// **Waiting 복귀**(중지/양보)할지 결정한다.
 enum ItemOutcome {
-    /// 아이템 전체를 끝까지 처리했다 → 큐에서 제거(기존 동작).
+    /// 아이템 전체를 끝까지 처리했다 → 큐에서 제거하지 않고 종료(Done) 상태로 남긴다(#1).
+    /// 성공·일반 실패·도중 차단을 가리지 않고, finish_item이 `apply_complete_now`로 결과를
+    /// 그 자리에 보존한다(대상별 차단/건너뜀은 `items`에 이미 드러난다).
     Completed,
     /// 더 높은 우선순위 작업(로그인/종토방)에 자리를 내주려 **안전지점(계정 그룹 경계)에서**
     /// 멈췄다 → 아직 게시하지 않은 그룹만 담은 잔여 plan으로 Waiting 복귀. 완료 그룹은 plan에서
@@ -3119,6 +3192,14 @@ fn mark_running(mut items: Vec<QueueNowItem>, id: &str) -> Vec<QueueNowItem> {
     items
 }
 
+/// 종목토론방 게시 도중 차단된 아이템을 **종료성 "차단" 카드**로 정착시킨다(#REQ1, 순수). 완료처럼
+/// 큐에서 빼지 않고 남기되, 진행률을 N/N으로 채워 "다 돌고 멈춤"을 나타낸다. 종목별 차단/건너뜀
+/// 행(`items`)은 set_progress_and_items가 이미 채워 둔 그대로 보존해, 사용자가 알림을 열지 않고도
+/// 무엇이 차단됐는지 큐 창에서 본다(#REQ1). 사용자가 X로 닫으면 사라진다.
+///
+/// **state는 `Running`으로 유지한다(Waiting으로 바꾸지 않음)** — `pick_next_waiting`는 Waiting
+/// 아이템만 집어 워커가 **재실행**하는데, 이 아이템엔 아직 전체 plan이 남아 있어 Waiting으로
+/// 두면 차단된 글을 통째로 **재게시**해 버린다(치명적). Running은 재픽되지 않아 안전하고, 워커
 fn update_progress<R: Runtime>(app: &AppHandle<R>, id: &str, done: u32, total: u32) {
     app.state::<JsonStore<QueueNowItem>>()
         .mutate(|items| set_progress_value(items, id, done, total));
@@ -3323,6 +3404,55 @@ mod tests {
                 ok: false,
                 message: "엔진 오류".into(),
                 trace: Some(trace.into()),
+                posted: None,
+                skipped: false,
+            },
+        }
+    }
+
+    // 게시 도중 "차단"(is_blocking_failure가 참인 메시지)으로 실패한 결과(#2). 권한 만료(403)
+    // 처럼 같은 계정의 남은 글이 전부 실패할 종료성 실패다.
+    fn forum_blocked(account: &str, name: &str, code: &str) -> ForumOutcome {
+        ForumOutcome {
+            account_id: account.into(),
+            result: ForumPublishResult {
+                code: code.into(),
+                name: name.into(),
+                ok: false,
+                message: "글쓰기 form 패킷 HTTP 실패: HTTP status 403 Forbidden".into(),
+                trace: None,
+                posted: None,
+                skipped: false,
+            },
+        }
+    }
+
+    // 앞 글이 차단돼 시도하지 않고 건너뛴 결과(#267-9). 그 자체는 차단 사유가 아니다(skipped=true).
+    fn forum_skipped(account: &str, name: &str, code: &str) -> ForumOutcome {
+        ForumOutcome {
+            account_id: account.into(),
+            result: ForumPublishResult {
+                code: code.into(),
+                name: name.into(),
+                ok: false,
+                message: "앞선 글이 로그인/권한 오류로 실패해 건너뜀".into(),
+                trace: None,
+                posted: None,
+                skipped: true,
+            },
+        }
+    }
+
+    // 페이지 대기시간 초과·네이버 서버 오류(HTTP 500)로 실패한 결과(#7). 차단이 아닌 일시적 실패다.
+    fn forum_timed_out(account: &str, name: &str, code: &str, message: &str) -> ForumOutcome {
+        ForumOutcome {
+            account_id: account.into(),
+            result: ForumPublishResult {
+                code: code.into(),
+                name: name.into(),
+                ok: false,
+                message: message.into(),
+                trace: None,
                 posted: None,
                 skipped: false,
             },
@@ -3767,6 +3897,22 @@ mod tests {
         );
         let next = mark_running(vec![now_item("a", QueueState::Waiting, Some(p))], "a");
         assert_eq!(next[0].progress, Some((0, 4)));
+    }
+
+    // #2: 도중 차단(blocking failure)이 하나라도 있으면 그 계정은 차단으로 본다 —
+    // 성공·일반 실패·건너뜀만이면 차단이 아니다. execute_item이 계정 상태를 Blocked로
+    // 바꾸는(apply_waiting_for_successful_posts) 판정과 동일한 함수를 검증한다.
+    #[test]
+    fn blocked_flag_true_only_when_a_blocking_failure_present() {
+        // 차단 1건 → true.
+        assert!(!blocked_post_login_ids(&[forum_blocked("acc", "삼성전자", "005930")]).is_empty());
+        // 성공·일반 엔진 실패·건너뜀만 → false(차단 아님).
+        let non_blocked = vec![
+            forum_ok("acc", "삼성전자", "005930"),
+            forum_fail("acc", "현대차", "005380", "ENGINE"),
+            forum_skipped("acc", "SK하이닉스", "000660"),
+        ];
+        assert!(blocked_post_login_ids(&non_blocked).is_empty());
     }
 
     #[test]
@@ -4737,6 +4883,126 @@ mod tests {
         let ids = successful_post_login_ids(&forum);
         assert!(ids.contains("acc_a"), "성공 계정은 대기 대상");
         assert!(!ids.contains("acc_b"), "실패 계정은 제외");
+    }
+
+    #[test]
+    fn blocked_login_ids_collect_only_blocking_failures() {
+        // #2: 게시 도중 차단(권한 만료 등)을 만난 계정만 모은다. 단순 엔진 오류·skip·성공은 제외.
+        let forum = vec![
+            forum_blocked("acc_block", "삼성전자", "005930"),
+            forum_fail("acc_err", "SK하이닉스", "000660", "trace"),
+            forum_skipped("acc_skip", "카카오", "035720"),
+            forum_ok("acc_ok", "네이버", "035420"),
+        ];
+        let ids = blocked_post_login_ids(&forum);
+        assert!(ids.contains("acc_block"), "차단성 실패 계정은 차단 대상");
+        assert!(!ids.contains("acc_err"), "일반 엔진 오류는 차단 아님");
+        assert!(!ids.contains("acc_skip"), "건너뜀(skip)은 차단 아님");
+        assert!(!ids.contains("acc_ok"), "성공은 차단 아님");
+    }
+
+    #[test]
+    fn mid_post_block_takes_precedence_over_waiting() {
+        // #2 핵심: 한 계정이 1글 성공 후 2글에서 차단되면(부분 성공) — 대기가 아니라 차단으로
+        // 분류돼야 한다. 같은 계정의 성공 결과가 있어도 차단이 우선한다.
+        let forum = vec![
+            forum_ok("acc_mixed", "삼성전자", "005930"),
+            forum_blocked("acc_mixed", "SK하이닉스", "000660"),
+            forum_skipped("acc_mixed", "카카오", "035720"),
+        ];
+        let blocked = blocked_post_login_ids(&forum);
+        assert!(blocked.contains("acc_mixed"), "도중 차단된 계정은 차단");
+        // 대기 후보(성공)에 들어가더라도, 호출부에서 차단 집합에 있으면 대기에서 빠진다.
+        let waiting: Vec<String> = successful_post_login_ids(&forum)
+            .into_iter()
+            .filter(|id| !blocked.contains(id))
+            .collect();
+        assert!(
+            waiting.is_empty(),
+            "차단 계정은 부분 성공이 있어도 대기로 두지 않는다"
+        );
+    }
+
+    #[test]
+    fn timed_out_login_ids_collect_only_timeout_and_server_500() {
+        // #7: 페이지 대기시간 초과·네이버 서버 오류(HTTP 500)만 대기초과로 모은다. 차단·일반
+        // 엔진 오류·skip·성공은 제외.
+        let forum = vec![
+            forum_timed_out(
+                "acc_to1",
+                "삼성전자",
+                "005930",
+                "페이지 로드 대기 시간이 초과되었습니다.",
+            ),
+            forum_timed_out(
+                "acc_to2",
+                "SK하이닉스",
+                "000660",
+                "네이버 서버에 문제가 발생했습니다 (REGISTER_HTTP_ERROR)",
+            ),
+            forum_blocked("acc_block", "카카오", "035720"),
+            forum_skipped("acc_skip", "네이버", "035420"),
+            forum_ok("acc_ok", "LG", "066570"),
+        ];
+        let ids = timed_out_post_login_ids(&forum);
+        assert!(ids.contains("acc_to1"), "대기시간 초과는 대기초과 대상");
+        assert!(ids.contains("acc_to2"), "HTTP 500 서버 오류는 대기초과 대상");
+        assert!(!ids.contains("acc_block"), "차단(403)은 대기초과 아님");
+        assert!(!ids.contains("acc_skip"), "건너뜀(skip)은 대기초과 아님");
+        assert!(!ids.contains("acc_ok"), "성공은 대기초과 아님");
+    }
+
+    #[test]
+    fn block_takes_precedence_over_timed_out() {
+        // #7: 한 계정이 타임아웃과 차단을 모두 만나면 — 더 강한 종료성 실패인 차단이 우선한다.
+        let forum = vec![
+            forum_timed_out(
+                "acc_mix",
+                "삼성전자",
+                "005930",
+                "페이지 로드 대기 시간이 초과되었습니다.",
+            ),
+            forum_blocked("acc_mix", "SK하이닉스", "000660"),
+        ];
+        let blocked = blocked_post_login_ids(&forum);
+        let timed_out: std::collections::BTreeSet<String> = timed_out_post_login_ids(&forum)
+            .into_iter()
+            .filter(|id| !blocked.contains(id))
+            .collect();
+        assert!(blocked.contains("acc_mix"), "차단이 잡혀야 한다");
+        assert!(
+            !timed_out.contains("acc_mix"),
+            "차단 계정은 대기초과에서 빠진다(차단 우선)"
+        );
+    }
+
+    #[test]
+    fn timed_out_takes_precedence_over_waiting() {
+        // #7: 한 계정이 1글 성공 후 다른 글에서 타임아웃/500이면 — 대기가 아니라 대기초과로
+        // 분류돼 게시 목록에서 숨겨진다(같은 계정의 성공이 있어도 대기초과 우선).
+        let forum = vec![
+            forum_ok("acc_mixed", "삼성전자", "005930"),
+            forum_timed_out(
+                "acc_mixed",
+                "SK하이닉스",
+                "000660",
+                "네이버 서버에 문제가 발생했습니다",
+            ),
+        ];
+        let blocked = blocked_post_login_ids(&forum);
+        let timed_out: std::collections::BTreeSet<String> = timed_out_post_login_ids(&forum)
+            .into_iter()
+            .filter(|id| !blocked.contains(id))
+            .collect();
+        let waiting: Vec<String> = successful_post_login_ids(&forum)
+            .into_iter()
+            .filter(|id| !blocked.contains(id) && !timed_out.contains(id))
+            .collect();
+        assert!(timed_out.contains("acc_mixed"), "타임아웃 계정은 대기초과");
+        assert!(
+            waiting.is_empty(),
+            "대기초과 계정은 부분 성공이 있어도 대기로 두지 않는다"
+        );
     }
 
     #[test]

@@ -64,6 +64,8 @@ export type AccountStatus =
   | "new"
   | "active"
   | "waiting"
+  | "onHold"
+  | "timedOut"
   | "badCredentials"
   | "challenge"
   | "blocked"

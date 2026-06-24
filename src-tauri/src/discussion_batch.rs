@@ -141,6 +141,48 @@ pub fn is_blocking_failure(message: &str) -> bool {
     BLOCKING_MARKERS.iter().any(|marker| m.contains(marker))
 }
 
+/// 게시 실패 메시지가 "대기초과"(일시적 서버/타이밍 문제)를 뜻하는지 판별한다(#286, 순수 함수).
+/// 두 부류를 잡는다: (1) 페이지/응답 **대기시간 초과**, (2) 네이버 **서버 오류(HTTP 500)**. 이런
+/// 실패는 계정·자격증명 문제가 아니라 잠시 후 풀릴 수 있는 일시 상태라, 차단(Blocked)이나 비번
+/// 오류와 구분해 계정을 `TimedOut`(대기초과)으로 표시한다. 차단 계열(`is_blocking_failure`)이
+/// 우선이므로, 호출부는 먼저 차단을 보고 그 다음 이걸 본다. 429(요청 과다)는 여기에 넣지 않는다.
+pub fn is_timed_out_failure(message: &str) -> bool {
+    let m = message;
+    // (2) 서버 오류: 메시지에 박힌 HTTP 상태코드가 500이거나, 명시적 서버 오류 문구.
+    if server_error_http_status(m)
+        || m.contains("서버에 문제")
+        || m.contains("네이버 서버")
+        || m.contains("Internal Server")
+    {
+        return true;
+    }
+    // (1) 대기시간 초과: 페이지/응답이 자리잡기 전에 시간이 다한 경우.
+    const TIMEOUT_MARKERS: [&str; 5] = [
+        "대기시간 초과",
+        "시간이 초과",
+        "시간 초과",
+        "timed out",
+        "timeout",
+    ];
+    TIMEOUT_MARKERS.iter().any(|marker| m.contains(marker))
+}
+
+/// 메시지에 박힌 HTTP 상태코드가 500(서버 오류)인지 본다(순수 함수, #286).
+/// `blocking_http_status`와 같은 "status 토큰 뒤 첫 3자리" 규칙을 따른다.
+fn server_error_http_status(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    let Some(idx) = lower.find("status") else {
+        return false;
+    };
+    let after = &message[idx + "status".len()..];
+    let digits: String = after
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    matches!(digits.parse::<u16>(), Ok(500))
+}
+
 /// 메시지에 박힌 HTTP 상태코드가 401/403(차단 계열)인지 본다(순수 함수, #267-9).
 /// queue_runner의 parse_http_status와 같은 "status 토큰 뒤 첫 3자리" 규칙을 따른다.
 fn blocking_http_status(message: &str) -> bool {
@@ -938,6 +980,28 @@ mod tests {
         assert!(!is_blocking_failure(
             "글 내용을 구성하는 중 문제가 발생했습니다"
         ));
+    }
+
+    #[test]
+    fn timed_out_failure_detects_timeout_and_server_500_not_others() {
+        // #286: 페이지/응답 대기시간 초과 → 대기초과.
+        assert!(is_timed_out_failure("페이지 대기시간 초과로 글 실패"));
+        assert!(is_timed_out_failure("응답 시간이 초과되었습니다"));
+        assert!(is_timed_out_failure("request timed out"));
+        // #286: 네이버 서버 오류(HTTP 500) → 대기초과.
+        assert!(is_timed_out_failure("HTTP status 500 Internal Server Error"));
+        assert!(is_timed_out_failure(
+            "네이버 서버에 문제가 발생했습니다"
+        ));
+        // 차단/비번오류/요청과다/일반실패는 대기초과가 아니다(다른 상태로 처리).
+        assert!(!is_timed_out_failure("HTTP status 403 Forbidden"));
+        assert!(!is_timed_out_failure("HTTP status 401 Unauthorized"));
+        assert!(!is_timed_out_failure("HTTP status 429 Too Many Requests"));
+        assert!(!is_timed_out_failure(
+            "글 내용을 구성하는 중 문제가 발생했습니다"
+        ));
+        // 차단(401/403)이 동시에 잡히는 메시지는 호출부에서 차단을 먼저 보므로 여기선 500만 검사.
+        assert!(!is_timed_out_failure("HTTP status 404 Not Found"));
     }
 
     #[test]

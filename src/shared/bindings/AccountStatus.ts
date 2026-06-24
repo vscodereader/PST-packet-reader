@@ -7,4 +7,4 @@
  * `blocked`(접근 차단). `error`는 그 외(전송 오류/타임아웃/미상)의 catch-all로 남겨,
  * 디스크에 이미 저장된 `"error"` 값과의 하위호환을 보장한다.
  */
-export type AccountStatus = "new" | "active" | "waiting" | "badCredentials" | "challenge" | "blocked" | "error";
+export type AccountStatus = "new" | "active" | "waiting" | "onHold" | "timedOut" | "badCredentials" | "challenge" | "blocked" | "error";

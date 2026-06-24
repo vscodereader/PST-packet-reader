@@ -17,6 +17,12 @@ use crate::store::JsonStore;
 pub enum QueueState {
     Running,
     Waiting,
+    /// 실행이 끝난(완료/실패/도중 차단으로 멈춘) 종료 상태(#1). 예전엔 완료 즉시 큐에서
+    /// 제거했지만, 그러면 여러 작업이 거의 동시에 끝나며 큐 창이 순식간에 비어 사용자가
+    /// 결과를 확인하려면 알림으로 가야 했다. 종료 아이템을 `Done`으로 큐에 남겨 결과(대상별
+    /// `items`·progress)를 그 자리에서 보게 하고, 사용자가 ✕ 또는 "완료 항목 지우기"로
+    /// 직접 치운다. 워커는 `Waiting`만 집으므로(`pick_next_waiting`) 재실행되지 않는다.
+    Done,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -249,6 +255,58 @@ pub fn apply_cancel_now(items: Vec<QueueNowItem>, id: &str) -> Vec<QueueNowItem>
     items.into_iter().filter(|i| i.id != id).collect()
 }
 
+/// 큐 창에 남겨둘 종료(`Done`) 아이템 상한(#1). 사용자가 직접 안 치워도 디스크/화면이 무한히
+/// 불어나지 않게, 가장 오래된 Done부터 이 수를 넘는 만큼 정리한다(진행 중/대기는 절대 건드리지
+/// 않는다). 한 번에 35종목×다계정 규모를 한참 넘는 값이라 정상 사용에선 잘려나가지 않는다.
+pub const MAX_DONE_NOW: usize = 50;
+
+/// 실행이 끝난 아이템을 큐에서 **제거하지 않고** 종료 상태(`Done`)로 남긴다(#1). 결과를 그
+/// 자리에서 확인할 수 있도록 progress·items(대상별 상태)는 그대로 보존한다. 일치하는 id가
+/// 없으면 no-op. Done이 `MAX_DONE_NOW`를 넘으면 가장 오래된 Done부터 정리한다(진행 중/대기
+/// 아이템은 보존). account_id가 곧 loginId라 같은 동작을 다계정에서도 일관되게 만든다.
+pub fn apply_complete_now(items: Vec<QueueNowItem>, id: &str) -> Vec<QueueNowItem> {
+    let marked = items
+        .into_iter()
+        .map(|mut item| {
+            if item.id == id {
+                item.state = QueueState::Done;
+                item.batch_id = None;
+            }
+            item
+        })
+        .collect();
+    prune_done_now(marked, MAX_DONE_NOW)
+}
+
+/// Done 아이템이 `cap`을 넘으면 **가장 오래된 것부터**(앞에서부터) 그 초과분만 제거한다(순수).
+/// Running/Waiting 아이템과 cap 이내의 Done은 원래 상대 순서 그대로 보존한다.
+pub fn prune_done_now(items: Vec<QueueNowItem>, cap: usize) -> Vec<QueueNowItem> {
+    let done_total = items.iter().filter(|i| i.state == QueueState::Done).count();
+    if done_total <= cap {
+        return items;
+    }
+    let mut to_drop = done_total - cap;
+    items
+        .into_iter()
+        .filter(|i| {
+            if i.state == QueueState::Done && to_drop > 0 {
+                to_drop -= 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect()
+}
+
+/// 종료(`Done`) 아이템을 모두 제거한다(#1, "완료 항목 지우기"). 진행 중/대기 아이템은 보존한다.
+pub fn apply_clear_done_now(items: Vec<QueueNowItem>) -> Vec<QueueNowItem> {
+    items
+        .into_iter()
+        .filter(|i| i.state != QueueState::Done)
+        .collect()
+}
+
 pub fn apply_cancel_scheduled(items: Vec<QueueScheduledItem>, id: &str) -> Vec<QueueScheduledItem> {
     items.into_iter().filter(|i| i.id != id).collect()
 }
@@ -260,11 +318,13 @@ pub fn apply_cancel_scheduled(items: Vec<QueueScheduledItem>, id: &str) -> Vec<Q
 pub fn apply_reorder_now(items: Vec<QueueNowItem>, ordered_ids: &[String]) -> Vec<QueueNowItem> {
     let mut running = Vec::new();
     let mut rest = Vec::new();
+    // 종료(Done) 아이템은 드래그 재정렬 대상이 아니다 — 맨 아래에 원래 순서로 고정한다(#1).
+    let mut done = Vec::new();
     for item in items {
-        if item.state == QueueState::Running {
-            running.push(item);
-        } else {
-            rest.push(item);
+        match item.state {
+            QueueState::Running => running.push(item),
+            QueueState::Done => done.push(item),
+            QueueState::Waiting => rest.push(item),
         }
     }
 
@@ -278,6 +338,8 @@ pub fn apply_reorder_now(items: Vec<QueueNowItem>, ordered_ids: &[String]) -> Ve
     ordered.extend(rest);
 
     running.extend(ordered);
+    // 종료 아이템은 항상 바닥(대기 뒤)에 둔다.
+    running.extend(done);
     running
 }
 
@@ -312,16 +374,20 @@ pub fn item_priority(item: &QueueNowItem) -> u8 {
 pub fn apply_priority_order(items: Vec<QueueNowItem>) -> Vec<QueueNowItem> {
     let mut running = Vec::new();
     let mut waiting = Vec::new();
+    // 종료(Done) 아이템은 우선순위 정렬 대상이 아니라 맨 아래에 원래 순서로 모은다(#1).
+    let mut done = Vec::new();
     for item in items {
-        if item.state == QueueState::Running {
-            running.push(item);
-        } else {
-            waiting.push(item);
+        match item.state {
+            QueueState::Running => running.push(item),
+            QueueState::Done => done.push(item),
+            QueueState::Waiting => waiting.push(item),
         }
     }
     // slice::sort_by_key는 안정 정렬 — 동일 우선순위의 기존 상대 순서를 보존한다.
     waiting.sort_by_key(item_priority);
     running.extend(waiting);
+    // 진행 중 → 대기(우선순위) → 종료 순. 종료는 항상 바닥에 깔아 현재 작업을 가리지 않는다.
+    running.extend(done);
     running
 }
 
@@ -414,6 +480,15 @@ pub fn cancel_queue_now(
     let next = store.mutate(|items| apply_cancel_now(items, &id));
     record(activity.inner(), ActivityType::Info, "진행 작업 취소됨");
     next
+}
+
+/// 종료(`Done`) 아이템을 모두 큐에서 치운다(#1, "완료 항목 지우기"). 진행 중/대기 작업은
+/// 보존한다. 큐 창에 쌓인 완료 결과 카드를 한 번에 비울 때 쓴다.
+#[tauri::command]
+pub fn clear_done_queue_now(
+    store: tauri::State<'_, JsonStore<QueueNowItem>>,
+) -> Vec<QueueNowItem> {
+    store.mutate(apply_clear_done_now)
 }
 
 /// 즉시 게시("지금 바로")를 게시 큐(now 큐)에 적재한다(이슈 #198). 예약
@@ -828,6 +903,102 @@ mod tests {
         let next = apply_cancel_now(items, "q1");
         assert!(next.iter().all(|i| i.id != "q1"));
         assert_eq!(next.len(), 1);
+    }
+
+    #[test]
+    fn complete_now_keeps_item_as_done_and_preserves_result() {
+        // #1: 완료 아이템은 제거되지 않고 Done으로 남아 결과(progress·items)를 보존한다.
+        let mut running = sample_now_item("q1", QueueState::Running);
+        running.progress = Some((5, 5));
+        running.batch_id = Some("b1".into());
+        let items = vec![running, sample_now_item("q2", QueueState::Running)];
+        let next = apply_complete_now(items, "q1");
+        assert_eq!(next.len(), 2, "다른 작업은 그대로 남는다");
+        let done = next.iter().find(|i| i.id == "q1").unwrap();
+        assert_eq!(done.state, QueueState::Done);
+        assert_eq!(done.progress, Some((5, 5)), "진행률 결과 보존");
+        assert_eq!(done.batch_id, None, "실행 메타는 비운다");
+        // 다른 실행 중 아이템은 건드리지 않는다(#1 핵심: 형제 큐가 사라지지 않는다).
+        assert_eq!(
+            next.iter().find(|i| i.id == "q2").unwrap().state,
+            QueueState::Running
+        );
+    }
+
+    #[test]
+    fn complete_now_unknown_id_is_noop() {
+        let items = vec![sample_now_item("q1", QueueState::Running)];
+        let next = apply_complete_now(items, "zzz");
+        assert_eq!(next[0].state, QueueState::Running);
+    }
+
+    #[test]
+    fn prune_done_now_drops_oldest_done_beyond_cap_keeping_active() {
+        // Done 3개 + 대기/실행 — cap=2면 가장 오래된 Done 1개만 정리하고 나머지는 보존.
+        let items = vec![
+            sample_now_item("d1", QueueState::Done),
+            sample_now_item("r1", QueueState::Running),
+            sample_now_item("d2", QueueState::Done),
+            sample_now_item("w1", QueueState::Waiting),
+            sample_now_item("d3", QueueState::Done),
+        ];
+        let next = prune_done_now(items, 2);
+        let ids: Vec<&str> = next.iter().map(|i| i.id.as_str()).collect();
+        assert!(!ids.contains(&"d1"), "가장 오래된 Done이 잘린다");
+        assert!(ids.contains(&"d2") && ids.contains(&"d3"), "최근 Done은 보존");
+        assert!(
+            ids.contains(&"r1") && ids.contains(&"w1"),
+            "실행/대기는 절대 건드리지 않는다"
+        );
+    }
+
+    #[test]
+    fn prune_done_now_under_cap_is_unchanged() {
+        let items = vec![
+            sample_now_item("d1", QueueState::Done),
+            sample_now_item("w1", QueueState::Waiting),
+        ];
+        let n = items.len();
+        assert_eq!(prune_done_now(items, MAX_DONE_NOW).len(), n);
+    }
+
+    #[test]
+    fn clear_done_now_removes_only_done() {
+        let items = vec![
+            sample_now_item("d1", QueueState::Done),
+            sample_now_item("r1", QueueState::Running),
+            sample_now_item("w1", QueueState::Waiting),
+            sample_now_item("d2", QueueState::Done),
+        ];
+        let next = apply_clear_done_now(items);
+        let ids: Vec<&str> = next.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["r1", "w1"], "Done만 제거, 실행·대기 보존");
+    }
+
+    #[test]
+    fn priority_order_sinks_done_to_bottom_below_waiting() {
+        // #1: Done은 우선순위 정렬에서 빠져 항상 바닥에 깔린다 — 진행 중/대기를 가리지 않는다.
+        let items = vec![
+            sample_now_item("d1", QueueState::Done),
+            sample_now_item("w1", QueueState::Waiting),
+            sample_now_item("r1", QueueState::Running),
+        ];
+        let next = apply_priority_order(items);
+        assert_eq!(next[0].id, "r1", "실행 중이 맨 앞");
+        assert_eq!(next[1].id, "w1", "대기가 가운데");
+        assert_eq!(next[2].id, "d1", "Done은 바닥");
+    }
+
+    #[test]
+    fn reorder_now_keeps_done_at_bottom() {
+        let items = vec![
+            sample_now_item("d1", QueueState::Done),
+            sample_now_item("w1", QueueState::Waiting),
+            sample_now_item("w2", QueueState::Waiting),
+        ];
+        let next = apply_reorder_now(items, &["w2".to_string(), "w1".to_string()]);
+        let ids: Vec<&str> = next.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["w2", "w1", "d1"], "대기는 재정렬되고 Done은 바닥 고정");
     }
 
     #[test]

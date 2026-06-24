@@ -41,6 +41,16 @@ pub enum AccountStatus {
     /// 숨겨 같은 계정으로 연속 게시되지 않게 한다. 사용자가 상태 배지를 클릭하면 다시 `Active`로
     /// 돌아가 정상 게시에 쓸 수 있다(프론트 STATUS_ACCOUNT_CYCLE).
     Waiting,
+    /// 로그인 중 캡차(보안문자)가 떠 자동 통과 시간(10초) 안에 풀리지 않은 "보류" 상태(#267 후속).
+    /// `Challenge`(즉시 추가 인증 필요)와 달리, 캡차는 사람이 직접 풀면 통과 가능한 회복 상태라
+    /// 별도 배지로 구분한다. 사용자가 보류된 계정만 골라 다시 선택 로그인하면 캡차 10초 대기 뒤
+    /// 자동/수동으로 풀어 `Active`로 되돌릴 수 있다. 와이어 형태는 camelCase `"onHold"`.
+    OnHold,
+    /// 글 게시가 **페이지 대기시간 초과** 또는 **네이버 서버 오류(HTTP 500)** 로 실패한 "대기초과"
+    /// 상태(#286 후속). 사용자/네트워크 잘못이 아니라 일시적 서버/타이밍 문제라 별도 배지로
+    /// 구분하고, `Waiting`/`OnHold`처럼 게시 선택 목록에서 숨긴다. 와이어 형태는 camelCase
+    /// `"timedOut"`.
+    TimedOut,
     BadCredentials,
     Challenge,
     Blocked,
@@ -314,6 +324,16 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&AccountStatus::Blocked).unwrap(),
             "\"blocked\""
+        );
+        // 보류(#267 후속)는 다단어라 camelCase "onHold"로 직렬화된다.
+        assert_eq!(
+            serde_json::to_string(&AccountStatus::OnHold).unwrap(),
+            "\"onHold\""
+        );
+        // 대기초과(#286 후속)도 camelCase "timedOut"으로 직렬화된다.
+        assert_eq!(
+            serde_json::to_string(&AccountStatus::TimedOut).unwrap(),
+            "\"timedOut\""
         );
     }
 

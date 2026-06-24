@@ -78,6 +78,10 @@ pub(crate) enum LoginOutcome {
     /// 종료 상태라 `Protected`처럼 headed여도 즉시 실패한다. 계정 상태는 `Blocked`로 매핑하고
     /// 메시지만 잠금용으로 둔다.
     Locked,
+    /// 캡차(보안문자)가 떴지만 자동 통과 시간(`CAPTCHA_GRACE`, 10초) 안에 풀리지 않은 상태(#267
+    /// 후속). 일반 `Error`와 달리 사람이 직접 풀면 회복 가능한 상태라, 계정을 "보류"(`OnHold`)로
+    /// 표시해 사용자가 보류 계정만 골라 다시 풀 수 있게 한다.
+    CaptchaUnsolved,
     Error(String),
 }
 
@@ -337,9 +341,9 @@ fn run_inner(
             LoopDecision::WaitCaptcha => {
                 let cd = *captcha_deadline.get_or_insert_with(|| Instant::now() + CAPTCHA_GRACE);
                 if Instant::now() >= cd {
-                    return Ok(LoginOutcome::Error(
-                        "캡차가 10초 안에 해결되지 않아 로그인을 취소했습니다.".to_owned(),
-                    ));
+                    // 일반 Error가 아니라 보류(OnHold)로 분류한다(#267 후속). 캡차는 사람이 직접
+                    // 풀면 회복 가능하므로, 사용자가 보류 계정만 다시 골라 풀 수 있게 한다.
+                    return Ok(LoginOutcome::CaptchaUnsolved);
                 }
                 last_negative = None;
                 pending_deadline = None; // 캡차는 pending이 아니므로 정체 타이머를 끈다.
@@ -397,28 +401,58 @@ fn challenge_kind_label(kind: ChallengeKind) -> &'static str {
     }
 }
 
-// 로그인 폼이 "완전히" 로딩될 때까지 기다린다: 페이지 로딩 완료(readyState=complete) +
-// #id/#pw가 화면에 보이고 입력 가능(disabled 아님) + 로그인 버튼 존재. 이게 다 충족돼야
-// 네이버 페이지 스크립트(키 입력 암호화 핸들러 포함)가 자리잡은 것으로 본다. 진행 상황을
-// stderr로 출력해 콘솔에서 "폼이 완전히 로딩됐는지"를 확인할 수 있게 한다.
+// "폼 준비" 신호가 흔들리지 않고 자리잡았다고 볼 연속 확인 횟수(사수 지시: 돔이 맨 마지막까지
+// 로드됐는지 확인하고 넘어가라 — 한 번 true가 떠도 곧바로 진행하지 않고 연속 N회 안정될 때만
+// 진행한다). 네이버 로그인은 상위 문서가 complete가 된 뒤에도 캡차/안티봇 iframe·스크립트가
+// 뒤늦게 한 번 더 로드되며 readyState/DOM이 잠깐 출렁이는데, 그 과도기에 타이핑하면 keydown
+// 암호화 훅이 덜 붙어 캡차가 유발된다. 100ms 폴링 × 3회면 ~0.2초 안정 구간을 확보한다.
+const FORM_READY_STABLE_POLLS: u32 = 3;
+
+/// "폼 준비" 신호의 연속 안정 횟수를 갱신한다(순수 함수). 준비됐으면 누적, 한 번이라도
+/// 흔들리면 0으로 리셋한다. `FORM_READY_STABLE_POLLS` 이상이면 호출부가 진행한다.
+fn next_ready_streak(streak: u32, ready_now: bool) -> u32 {
+    if ready_now {
+        streak.saturating_add(1)
+    } else {
+        0
+    }
+}
+
+// 로그인 폼이 "완전히" 로딩될 때까지 기다린다: 상위 문서 로딩 완료(readyState=complete) +
+// #id/#pw가 화면에 보이고 입력 가능(disabled 아님) + 로그인 버튼 존재 + **모든 하위 문서(iframe)
+// 까지 complete**. 마지막 조건이 사수 지시의 핵심이다 — 네이버 로그인은 상위 문서 하나가 아니라
+// 캡차/안티봇 iframe 등 여러 문서가 로드되는데, 상위 하나만 complete여도 넘어가면 뒤늦게 붙는
+// 키 입력 암호화/봇탐지 스크립트가 덜 자리잡아 캡차가 유발된다. 게다가 한 번 true가 떠도
+// 곧바로 진행하지 않고 연속 `FORM_READY_STABLE_POLLS`회 안정될 때만 빠져나가, "맨 마지막"
+// 문서까지 자리잡은 것을 확인한다. 진행 상황을 stderr로 출력한다.
 fn wait_for_login_form(client: &mut CdpClient) -> bool {
     tracing::info!("[LOGIN] 로그인 폼 로딩 대기 중...");
-    // 고정 대기가 아니라 폼 DOM(#id/#pw + 로그인 버튼 + 페이지 스크립트)이 자리잡는 즉시 진행한다
-    // (사수 지시: 돔 붙을 때까지 대기 → 되면 바로 다음). 아래 100ms로 촘촘히 폴링해 준비 즉시
-    // 빠져나간다. 상한(10초)은 Chrome이 끝내 폼을 못 띄울 때 무한 대기를 막는 안전장치다.
+    // 고정 대기가 아니라 폼 DOM(#id/#pw + 로그인 버튼 + 모든 iframe)이 자리잡는 즉시 진행한다
+    // (사수 지시: 돔 끝까지 붙을 때까지 대기 → 안정되면 바로 다음). 아래 100ms로 촘촘히 폴링한다.
+    // 상한(10초)은 Chrome이 끝내 폼을 못 띄울 때 무한 대기를 막는 안전장치다.
     let deadline = Instant::now() + Duration::from_secs(10);
+    // 상위 문서 + 폼 + 로그인 버튼 + 모든 하위 문서(iframe)가 complete인지 한 번에 본다. 동일
+    // 출처 iframe만 contentDocument를 읽을 수 있고, 교차 출처는 검사 불가라 막지 않는다(true 취급).
     let ready_expr = "(()=>{\
         if(document.readyState!=='complete')return false;\
         const ok=el=>!!(el&&el.offsetParent!==null&&!el.disabled);\
         const btn=document.querySelector('#log\\\\.login')\
                   ||document.querySelector('button[type=submit]');\
-        return ok(document.querySelector('#id'))\
-               &&ok(document.querySelector('#pw'))&&!!btn;\
+        if(!(ok(document.querySelector('#id'))\
+             &&ok(document.querySelector('#pw'))&&!!btn))return false;\
+        const frames=Array.prototype.slice.call(document.querySelectorAll('iframe'));\
+        return frames.every(f=>{\
+            try{const d=f.contentDocument;return !d||d.readyState==='complete';}\
+            catch(e){return true;}\
+        });\
     })()";
+    let mut streak = 0u32;
     loop {
-        if client.evaluate_bool(ready_expr).unwrap_or(false) {
+        let ready_now = client.evaluate_bool(ready_expr).unwrap_or(false);
+        streak = next_ready_streak(streak, ready_now);
+        if streak >= FORM_READY_STABLE_POLLS {
             tracing::info!(
-                "[LOGIN] ✓ 로그인 폼 완전 로딩 확인 (readyState=complete · #id/#pw 입력 가능 · 로그인 버튼 준비)"
+                "[LOGIN] ✓ 로그인 폼 완전 로딩 확인 (readyState=complete · #id/#pw 입력 가능 · 로그인 버튼 준비 · 모든 iframe complete · {FORM_READY_STABLE_POLLS}회 연속 안정)"
             );
             return true;
         }
@@ -740,6 +774,25 @@ pub(crate) fn has_session_cookies(cookies: &[Value]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ready_streak_accumulates_and_resets_on_flap() {
+        // 폼 준비 신호가 연속될 때만 누적되고, 한 번이라도 흔들리면 0으로 리셋된다(사수 지시:
+        // 돔이 맨 마지막까지 안정될 때만 진행). 3회 연속이어야 FORM_READY_STABLE_POLLS 충족.
+        let mut s = 0;
+        s = next_ready_streak(s, true);
+        assert_eq!(s, 1);
+        s = next_ready_streak(s, true);
+        assert_eq!(s, 2);
+        // 과도기(iframe 뒤늦게 로딩 등)로 흔들리면 리셋.
+        s = next_ready_streak(s, false);
+        assert_eq!(s, 0);
+        // 다시 연속 3회면 임계치 충족.
+        s = next_ready_streak(s, true);
+        s = next_ready_streak(s, true);
+        s = next_ready_streak(s, true);
+        assert!(s >= FORM_READY_STABLE_POLLS);
+    }
 
     #[test]
     fn classify_prioritizes_success() {

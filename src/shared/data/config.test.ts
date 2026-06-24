@@ -53,6 +53,10 @@ describe("label tables", () => {
         "active",
         // 글 게시 성공 후 대기 상태(#267-3).
         "waiting",
+        // 로그인 캡차 보류(#267 후속).
+        "onHold",
+        // 게시 대기초과(#286 후속).
+        "timedOut",
         "badCredentials",
         "blocked",
         "challenge",
@@ -100,5 +104,9 @@ describe("label tables", () => {
     expect(isPostable("badCredentials")).toBe(false);
     expect(isPostable("challenge")).toBe(false);
     expect(isPostable("blocked")).toBe(false);
+    // 보류(캡차 미해결)도 로그인된 상태가 아니므로 게시 대상에서 제외(#267 후속).
+    expect(isPostable("onHold")).toBe(false);
+    // 대기초과(게시 실패, #286 후속)도 게시 대상에서 제외 — 체크박스 목록에 안 보여야 한다.
+    expect(isPostable("timedOut")).toBe(false);
   });
 });
