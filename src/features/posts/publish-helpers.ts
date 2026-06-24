@@ -20,6 +20,29 @@ export function clampCommentCount(value: number | null | undefined): number {
   return n;
 }
 
+/**
+ * 선택한 종목 코드를 계정 수만큼 **균등 분배**한다(#267-5: "나눠서 게시"). 앞 버킷부터 1개씩
+ * 더 받도록 나눠, 나머지가 뒤로 몰리지 않게 한다(차이 최대 1). 예: 18개·4계정 → [5,5,4,4]
+ * (5,5,5,3이 아니라). 계정 수가 0이면 빈 배열, 종목이 계정보다 적으면 뒤 버킷은 빈 배열.
+ */
+export function distributeStocksEvenly(
+  codes: string[],
+  buckets: number,
+): string[][] {
+  if (buckets <= 0) return [];
+  const out: string[][] = Array.from({ length: buckets }, () => []);
+  const base = Math.floor(codes.length / buckets);
+  const remainder = codes.length % buckets;
+  let cursor = 0;
+  for (let b = 0; b < buckets; b++) {
+    // 앞에서 remainder개 버킷만 base+1개를 받아, 동등하게(차이 ≤ 1) 분배한다.
+    const take = base + (b < remainder ? 1 : 0);
+    out[b] = codes.slice(cursor, cursor + take);
+    cursor += take;
+  }
+  return out;
+}
+
 /** A cafe publish target parsed from a board link — the cafe plus the board
  * (menu) to post into. `boardType` is resolved later (게시 시점, 쿠키 필요). */
 export interface CafeBoardTarget {

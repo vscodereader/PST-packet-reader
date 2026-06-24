@@ -3,10 +3,41 @@ import { describe, it, expect } from "vitest";
 import {
   clampCommentCount,
   crawlToText,
+  distributeStocksEvenly,
   htmlToText,
   parseCafeBoardLink,
   unreadyNaverAccountIds,
 } from "./publish-helpers";
+
+describe("distributeStocksEvenly", () => {
+  const sizes = (codes: string[], buckets: number) =>
+    distributeStocksEvenly(codes, buckets).map((b) => b.length);
+
+  it("spreads the remainder to the FRONT buckets (#267-5: 5,5,4,4 not 5,5,5,3)", () => {
+    const codes = Array.from({ length: 18 }, (_, i) => `c${i}`);
+    expect(sizes(codes, 4)).toEqual([5, 5, 4, 4]);
+  });
+
+  it("divides evenly when divisible", () => {
+    const codes = Array.from({ length: 12 }, (_, i) => `c${i}`);
+    expect(sizes(codes, 3)).toEqual([4, 4, 4]);
+  });
+
+  it("keeps every code exactly once, in order, with no overlap", () => {
+    const codes = ["a", "b", "c", "d", "e"];
+    const out = distributeStocksEvenly(codes, 3);
+    expect(out).toEqual([["a", "b"], ["c", "d"], ["e"]]);
+    expect(out.flat()).toEqual(codes);
+  });
+
+  it("gives empty trailing buckets when fewer stocks than accounts", () => {
+    expect(sizes(["a", "b"], 4)).toEqual([1, 1, 0, 0]);
+  });
+
+  it("returns [] for non-positive bucket counts", () => {
+    expect(distributeStocksEvenly(["a"], 0)).toEqual([]);
+  });
+});
 
 describe("clampCommentCount", () => {
   it("keeps an in-range integer (including non-preset values)", () => {

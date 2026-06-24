@@ -377,6 +377,10 @@ function WriterModalInner({
   const titleRef = useRef<HTMLInputElement | null>(null);
   const imgInput = useRef<HTMLInputElement | null>(null);
   const lastFocus = useRef<"title" | "body">("body");
+  // 변수(토큰) 메뉴를 누르면 본문(contentEditable)이 포커스를 잃어 커서 위치가 사라진다.
+  // 마지막 본문 커서/선택을 저장해 두고 insertToken에서 복원해, 토큰/링크가 본문 끝에 붙지
+  // 않고 사용자가 둔 자리(엔터로 만든 새 줄 포함)에 들어가게 한다(#267-1).
+  const savedRange = useRef<Range | null>(null);
   const seeded = useRef(false);
 
   const setBodyRef = (el: HTMLDivElement | null) => {
@@ -394,6 +398,17 @@ function WriterModalInner({
   const onBodyInput = () => {
     setWordCount((bodyRef.current?.innerText ?? "").replace(/\s/g, "").length);
     setDirty(true);
+  };
+  // 본문의 현재 커서/선택 위치를 저장한다(#267-1). 본문 안의 선택일 때만 저장해, 다른 곳을
+  // 클릭한 선택으로 덮어쓰지 않는다. 키 입력·클릭·blur 때마다 갱신해 항상 최신 커서를 들고 있는다.
+  const saveBodySelection = () => {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+    const range = sel.getRangeAt(0);
+    const el = bodyRef.current;
+    if (el && el.contains(range.commonAncestorContainer)) {
+      savedRange.current = range.cloneRange();
+    }
   };
   const onPaste = (e: React.ClipboardEvent) => {
     e.preventDefault();
@@ -435,12 +450,24 @@ function WriterModalInner({
       setTitle(title.slice(0, s) + tok + title.slice(en));
       setDirty(true);
     } else {
-      bodyRef.current?.focus();
+      const el = bodyRef.current;
+      if (!el) return;
+      el.focus();
+      // 변수 메뉴를 여는 동안 잃은 본문 커서 위치를 복원한다(#267-1: 줄바꿈 뒤 토큰/링크가 본문
+      // 끝에 공백 없이 붙던 버그). 저장된 위치가 없으면(상호작용 전) 기존대로 현재 커서에 넣는다.
+      const sel = window.getSelection();
+      const r = savedRange.current;
+      if (sel && r && el.contains(r.commonAncestorContainer)) {
+        sel.removeAllRanges();
+        sel.addRange(r);
+      }
       try {
         document.execCommand("insertText", false, tok);
       } catch {
         /* no-op */
       }
+      // 삽입 후 커서 위치도 갱신해, 연속으로 토큰을 넣어도 올바른 자리에 이어 들어가게 한다.
+      saveBodySelection();
       onBodyInput();
     }
   };
@@ -775,6 +802,9 @@ function WriterModalInner({
                   toast("본문에는 텍스트·이미지만 넣을 수 있어요");
                 }}
                 onFocus={() => (lastFocus.current = "body")}
+                onKeyUp={saveBodySelection}
+                onMouseUp={saveBodySelection}
+                onBlur={saveBodySelection}
                 data-placeholder="여기에 내용을 작성하세요. 링크를 붙여넣으면 자동으로 읽어 텍스트로 치환돼요."
                 style={{
                   minHeight: showComments ? 180 : 300,
