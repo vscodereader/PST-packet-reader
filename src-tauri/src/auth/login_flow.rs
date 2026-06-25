@@ -321,12 +321,40 @@ fn run_inner(
     // pending(중간 상태)이 처음 시작된 시점 + PENDING_STALL. 인식 못 한 추가 인증 화면(2단계 등)이
     // 성공 쿠키도 안 뜨고 명시 오류/캡차도 아닌 채 머물면, 이 시각을 넘는 즉시 실패시킨다(#267-13).
     let mut pending_deadline: Option<Instant> = None;
+    // 결과 페이지 DOM이 전부 complete로 안정된 연속 폴링 횟수(사수 지시: 결과 폴링도 돔 싹 다
+    // 붙을 때까지). 임계치 전까지는 비번오류/차단/캡차 판정을 미룬다. 한 번이라도 흔들리면 0으로.
+    let mut result_dom_streak = 0u32;
     loop {
         // 인증 성공 직후 뜨는 "새 기기 등록" 페이지면 "등록 안함"을 눌러 마무리한다
         // (설계 5단계: browser_flow의 기존 로직 재사용). 없으면 무시한다.
         let _ = client.click_device_dontsave_if_present(Duration::from_millis(300));
 
         let signals = read_signals(client)?;
+
+        // 성공(세션 쿠키)은 DOM 게이트와 무관하게 즉시 확정한다 — 성공은 쿠키로 판정하므로
+        // 착지 페이지(naver.com)의 광고 iframe 로딩을 기다리느라 정상 로그인을 늦추거나 놓치지
+        // 않는다. 비번오류/차단/캡차 등 DOM 기반 판정만 아래 게이트로 미룬다.
+        if signals.logged_in {
+            let cookies = collect_naver_cookies(client)?;
+            return Ok(LoginOutcome::Ok { cookies });
+        }
+
+        // 사수 지시: 결과 폴링도 DOM이 전부 붙을 때까지 기다린 뒤 판정한다. 상위 문서 + 모든
+        // iframe이 complete로 연속 RESULT_DOM_STABLE_POLLS회 안정될 때까지는 결과를 판정하지
+        // 않고 폴링만 계속한다(과도기 DOM 오판 방지). 전체 deadline이 무한 대기를 막는다.
+        let dom_ready = client.evaluate_bool(ALL_DOCS_COMPLETE_JS).unwrap_or(false);
+        result_dom_streak = next_ready_streak(result_dom_streak, dom_ready);
+        if !result_dom_gate_open(result_dom_streak) {
+            if Instant::now() >= deadline {
+                let url = client.current_url().unwrap_or_default();
+                return Ok(LoginOutcome::Error(format!(
+                    "로그인 결과 페이지의 DOM이 끝까지 로딩되지 않아 취소했습니다. 마지막 페이지: {url}"
+                )));
+            }
+            sleep(POLL_INTERVAL);
+            continue;
+        }
+
         match decide_loop_step(last_negative, classify(&signals), wait_for_human) {
             LoopDecision::Success => {
                 let cookies = collect_naver_cookies(client)?;
@@ -416,6 +444,30 @@ fn next_ready_streak(streak: u32, ready_now: bool) -> u32 {
     } else {
         0
     }
+}
+
+// 결과 폴링도 "DOM이 전부 붙은 뒤"에 판정한다(사수 지시: 로그인 폼 대기뿐 아니라 결과 폴링도
+// 돔이 싹 다 제대로 붙을 때까지). 클릭 후 착지 페이지의 상위 문서 + 모든 iframe이 complete로
+// 연속 안정될 때까지는 비번오류/차단/캡차 판정을 미뤄, 네비게이션 과도기의 덜 그려진 DOM에서
+// 결과를 오판(조기 캡차/차단 확정 등)하지 않게 한다. 폼 대기와 동일한 100ms × 3회 안정 기준.
+const RESULT_DOM_STABLE_POLLS: u32 = 3;
+
+// 착지 페이지의 모든 문서(상위 + 모든 iframe)가 complete인지 본다(폼 셀렉터 없음 — 결과
+// 페이지엔 #id/#pw가 없다). 교차 출처 iframe은 contentDocument를 읽을 수 없어 통과(true)로
+// 둔다(브라우저 보안상 검사 불가, 막으면 영영 못 넘어간다 — 폼 대기와 동일 규약).
+const ALL_DOCS_COMPLETE_JS: &str = "(()=>{\
+    if(document.readyState!=='complete')return false;\
+    const frames=Array.prototype.slice.call(document.querySelectorAll('iframe'));\
+    return frames.every(f=>{\
+        try{const d=f.contentDocument;return !d||d.readyState==='complete';}\
+        catch(e){return true;}\
+    });\
+})()";
+
+/// 결과 판정 게이트가 열렸는지(순수 함수). DOM 안정 연속 횟수가 임계치 이상이면 결과를 판정한다.
+/// 그 전까지는 호출부가 판정을 미루고 폴링을 계속한다.
+fn result_dom_gate_open(streak: u32) -> bool {
+    streak >= RESULT_DOM_STABLE_POLLS
 }
 
 // 로그인 폼이 "완전히" 로딩될 때까지 기다린다: 상위 문서 로딩 완료(readyState=complete) +
@@ -792,6 +844,33 @@ mod tests {
         s = next_ready_streak(s, true);
         s = next_ready_streak(s, true);
         assert!(s >= FORM_READY_STABLE_POLLS);
+    }
+
+    #[test]
+    fn result_dom_gate_opens_only_after_consecutive_stable_polls() {
+        // 사수 지시: 결과 폴링도 DOM이 전부 붙을 때까지 판정을 미룬다. 임계치 미만이면 닫힘.
+        assert!(!result_dom_gate_open(0));
+        assert!(!result_dom_gate_open(RESULT_DOM_STABLE_POLLS - 1));
+        // 연속 안정이 임계치에 도달하면 게이트가 열려 결과를 판정한다.
+        assert!(result_dom_gate_open(RESULT_DOM_STABLE_POLLS));
+        assert!(result_dom_gate_open(RESULT_DOM_STABLE_POLLS + 5));
+    }
+
+    #[test]
+    fn result_dom_streak_resets_when_dom_flaps_during_navigation() {
+        // 결과 페이지도 next_ready_streak로 누적/리셋한다(폼 대기와 동일 규약). 과도기에 DOM이
+        // 흔들리면(false) 0으로 리셋돼, 다시 연속 안정될 때까지 판정을 미룬다.
+        let mut s = next_ready_streak(0, true);
+        s = next_ready_streak(s, true);
+        assert!(!result_dom_gate_open(s)); // 아직 2회 — 닫힘
+        s = next_ready_streak(s, false); // 네비게이션 과도기로 흔들림 → 리셋
+        assert_eq!(s, 0);
+        assert!(!result_dom_gate_open(s));
+        // 다시 연속 RESULT_DOM_STABLE_POLLS회면 게이트 열림.
+        for _ in 0..RESULT_DOM_STABLE_POLLS {
+            s = next_ready_streak(s, true);
+        }
+        assert!(result_dom_gate_open(s));
     }
 
     #[test]
