@@ -88,9 +88,11 @@ fn finalize(
                 Ok(LoginResolution::active())
             } else {
                 // 쿠키는 저장됐지만 유효 세션이 없다 — 인프라 오류가 아닌 로그인 실패(error)로 본다.
-                Ok(LoginResolution::failure(
+                // 예기치 못한 오류라 알림 "자세히 보기"용 백트레이스를 붙여 추적 가능하게 한다.
+                Ok(LoginResolution::failure_with_trace(
                     AccountStatus::Error,
                     "저장된 쿠키에 유효한 band 세션(band_session)이 없습니다.",
+                    Some(crate::util::backtrace_string()),
                 ))
             }
         }
