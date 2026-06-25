@@ -590,15 +590,22 @@ const ANTIBOT_READY_JS: &str = "(()=>{try{\
 const RESOURCE_COUNT_JS: &str =
     "(()=>{try{return performance.getEntriesByType('resource').length;}catch(e){return -1;}})()";
 
-/// 로그인 폼 진행 게이트(순수 함수). 사수 의도(돔이 전부 제대로 붙음)를 세 신호 **모두**로
-/// 엄격 판정한다(폴백 없음):
+/// 로그인 폼 진행 게이트(순수 함수). 사수 의도(돔이 전부 붙고 타이핑 준비 완료)를 네 신호
+/// **모두**로 엄격 판정한다(폴백 없음):
 /// ① `form_ready`(상위문서 complete + #id/#pw 보임·입력가능 + 로그인 버튼).
 /// ② `resources_settled`(직전 폴 대비 완료 리소스 수 불변 = 새로 끝난 로딩이 없음 = 로딩 정착).
-/// ③ `antibot_ready`(봇탐지/keydown 암호화 스크립트가 실제 로드됐는지).
-/// 셋 다 만족하고 연속(FORM_READY_STABLE_POLLS회) 안정일 때만 진행한다. 하나라도 안 되면 10초
-/// 상한까지 대기하고, 끝내 안 되면 타이핑하지 않고 로그인을 실패시킨다(캡차 유발 방지가 우선).
-fn login_form_gate_open(form_ready: bool, resources_settled: bool, antibot_ready: bool) -> bool {
-    form_ready && resources_settled && antibot_ready
+/// ③ `antibot_ready`(봇탐지/keydown 암호화 스크립트가 실제 로드됐는지 = 파일 다운로드).
+/// ④ `keydown_hook_ready`(그 스크립트가 #id/#pw에 실제로 keydown 리스너를 붙였는지 = 후킹 설치).
+/// 넷 다 만족하고 연속(FORM_READY_STABLE_POLLS회) 안정일 때만 타이핑한다. 시간 초과 없이 끝까지
+/// 기다린다(사수 지시) — 준비 안 된 폼에 타이핑해 캡차를 유발하지 않는 것이 우선. ④ detection은
+/// 실측 검증됨(#pw/#id 둘 다 붙고 getEventListeners가 잡음, 2026-06-25 로그).
+fn login_form_gate_open(
+    form_ready: bool,
+    resources_settled: bool,
+    antibot_ready: bool,
+    keydown_hook_ready: bool,
+) -> bool {
+    form_ready && resources_settled && antibot_ready && keydown_hook_ready
 }
 
 // 로그인 폼이 "완전히" 로딩될 때까지 기다린다: 상위 문서 로딩 완료(readyState=complete) +
@@ -670,27 +677,24 @@ fn wait_for_login_form(client: &mut CdpClient) -> bool {
             .unwrap_or(-1);
         let resources_settled = res_count >= 0 && prev_res_count == Some(res_count);
         prev_res_count = Some(res_count);
-        let gate = login_form_gate_open(form_ready, resources_settled, antibot_seen);
+        // ④ keydown 암호화 후킹이 #id/#pw에 실제 설치됐는지까지 게이트 조건에 넣는다(하드 게이트).
+        // ①②③가 다 된 뒤에만 관측한다 — 그 전엔 후킹이 붙을 수 없고 CDP 호출도 아낀다. 폴백 없이
+        // 붙을 때까지 기다린다(사수 지시: 다 준비된 뒤 타이핑). detection은 실측 검증됨(2026-06-25).
+        let keydown_hook_ready = form_ready
+            && resources_settled
+            && antibot_seen
+            && (client.expr_has_listener("document.querySelector('#pw')", "keydown")
+                || client.expr_has_listener("document.querySelector('#id')", "keydown"));
+        let gate = login_form_gate_open(
+            form_ready,
+            resources_settled,
+            antibot_seen,
+            keydown_hook_ready,
+        );
         streak = next_ready_streak(streak, gate);
         if streak >= FORM_READY_STABLE_POLLS {
-            // 관측 전용(타이밍·게이트 영향 0): 타이핑 직전 시점에 keydown 암호화 후킹이 입력칸에
-            // 실제로 붙었는지 CDP로 한 번 본다. 진행 결정은 ①②③(돔/리소스/안티봇 파일)만으로 그대로
-            // 두고(사수 지시: DOM 다 로드까지 대기), 후킹 부착 여부는 '[LOGIN][후킹관측]' 로그로만 남겨
-            // 실제 앱에서 detection이 잡히는지·언제 잡히는지 증거를 모은다(나중에 하드 게이트 승격 판단용).
-            // 못 잡아도(거짓 음성 포함) 로그인은 막지 않는다.
-            let pw_hook = client.expr_has_listener("document.querySelector('#pw')", "keydown");
-            let id_hook = client.expr_has_listener("document.querySelector('#id')", "keydown");
-            if pw_hook || id_hook {
-                tracing::info!(
-                    "[LOGIN][후킹관측] keydown 암호화 후킹 감지(타이핑 직전): #pw={pw_hook}, #id={id_hook}"
-                );
-            } else {
-                tracing::warn!(
-                    "[LOGIN][후킹관측] keydown 암호화 후킹 미감지(타이핑 직전): #pw=no, #id=no — 붙기 전이거나 관측 한계(다른 노드/방식)일 수 있음. 캡차가 뜨면 이 로그를 함께 확인"
-                );
-            }
             tracing::info!(
-                "[LOGIN] ✓ 로그인 폼 완전 로딩 확인 (readyState=complete · #id/#pw 입력 가능 · 로그인 버튼 준비 · 리소스 로딩 정착 · 안티봇 스크립트 로드 · {FORM_READY_STABLE_POLLS}회 연속 안정)"
+                "[LOGIN] ✓ 로그인 폼 완전 로딩 확인 (readyState=complete · #id/#pw 입력 가능 · 로그인 버튼 준비 · 리소스 로딩 정착 · 안티봇 스크립트 로드 · keydown 암호화 후킹 설치 확인 · {FORM_READY_STABLE_POLLS}회 연속 안정)"
             );
             return true;
         }
@@ -1204,13 +1208,15 @@ mod tests {
 
     #[test]
     fn login_form_gate_requires_form_resources_and_antibot_all() {
-        // 엄격 게이트(사수 의도): 폼 준비 + 리소스 정착 + 안티봇 스크립트 로드, 셋 다 만족해야 진행.
-        assert!(login_form_gate_open(true, true, true));
-        // 셋 중 하나라도 빠지면 진행하지 않는다(타이핑 미진행 → 캡차 방지).
-        assert!(!login_form_gate_open(false, true, true)); // 폼 미준비
-        assert!(!login_form_gate_open(true, false, true)); // 리소스 아직 로딩 중(정착 안 됨)
-        assert!(!login_form_gate_open(true, true, false)); // 안티봇/암호화 스크립트 미로드
-        assert!(!login_form_gate_open(false, false, false));
+        // 엄격 게이트(사수 의도): 폼 준비 + 리소스 정착 + 안티봇 스크립트 로드 + keydown 후킹 설치,
+        // 넷 다 만족해야 진행.
+        assert!(login_form_gate_open(true, true, true, true));
+        // 넷 중 하나라도 빠지면 진행하지 않는다(타이핑 미진행 → 캡차 방지).
+        assert!(!login_form_gate_open(false, true, true, true)); // 폼 미준비
+        assert!(!login_form_gate_open(true, false, true, true)); // 리소스 아직 로딩 중(정착 안 됨)
+        assert!(!login_form_gate_open(true, true, false, true)); // 안티봇/암호화 스크립트 미로드
+        assert!(!login_form_gate_open(true, true, true, false)); // keydown 후킹 미설치
+        assert!(!login_form_gate_open(false, false, false, false));
     }
 
     #[test]
