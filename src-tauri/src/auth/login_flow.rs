@@ -361,6 +361,10 @@ fn run_inner(
     // 결과 페이지 DOM이 전부 complete로 안정된 연속 폴링 횟수(사수 지시: 결과 폴링도 돔 싹 다
     // 붙을 때까지). 임계치 전까지는 비번오류/차단/캡차 판정을 미룬다. 한 번이라도 흔들리면 0으로.
     let mut result_dom_streak = 0u32;
+    // 결과 게이트의 리소스 정착(②) 추적: 직전 폴의 완료 리소스 수 + 상위문서+iframe이 complete인
+    // 폴이 몇 번 지속됐는지(정착이 안 되는 페이지용 상한 폴백에 쓴다).
+    let mut prev_result_res_count: Option<i64> = None;
+    let mut result_docs_complete_polls = 0u32;
     // 본인확인(휴대전화) 화면에서 번호 입력·확인을 이미 1회 시도했는지 + 그 시도 후 성공을 기다릴
     // 상한. ID가 010+8자리일 때만 설정되고, 이 안에 로그인 안 되면 보류(OnHold)로 떨어뜨린다.
     const PHONE_VERIFY_GRACE: Duration = Duration::from_secs(6);
@@ -400,7 +404,28 @@ fn run_inner(
         // iframe이 complete로 연속 RESULT_DOM_STABLE_POLLS회 안정될 때까지는 결과를 판정하지
         // 않고 폴링만 계속한다(과도기 DOM 오판 방지). 단, 캡차/본인확인 입력 대기 중이면 전체
         // deadline을 적용하지 않는다 — 각자의 상한(captcha_deadline/phone_deadline)이 따로 끊는다.
-        let dom_ready = client.evaluate_bool(ALL_DOCS_COMPLETE_JS).unwrap_or(false);
+        // 사수 의도("결과도 돔 싹 다 붙을 때까지")를 폼 게이트와 대칭으로 강화: 상위문서+모든
+        // iframe complete(①)에 더해, 페이지가 받는 모든 리소스 로딩이 정착(②)할 때까지 기다린다.
+        // 단 캡차/광고처럼 리소스가 끝없이 로딩돼 정착이 안 되는 페이지에서 판정이 deadline까지
+        // 막혀 캡차가 Error로 둔갑하지 않게, docs-complete 후 RESULT_SETTLE_MAX_POLLS(~3초)가 지나면
+        // 정착을 못 봐도 진행한다(강화하되 regression은 막는 안전 폴백).
+        let all_docs = client.evaluate_bool(ALL_DOCS_COMPLETE_JS).unwrap_or(false);
+        let dom_ready = if all_docs {
+            result_docs_complete_polls += 1;
+            let res_count = client
+                .evaluate(RESOURCE_COUNT_JS)
+                .ok()
+                .and_then(|v| v.as_i64())
+                .unwrap_or(-1);
+            let settled = res_count >= 0 && prev_result_res_count == Some(res_count);
+            prev_result_res_count = Some(res_count);
+            settled || result_docs_complete_polls >= RESULT_SETTLE_MAX_POLLS
+        } else {
+            // 네비게이션으로 문서가 다시 미완성이 되면 정착 측정을 처음부터 다시 한다.
+            prev_result_res_count = None;
+            result_docs_complete_polls = 0;
+            false
+        };
         result_dom_streak = next_ready_streak(result_dom_streak, dom_ready);
         if !result_dom_gate_open(result_dom_streak) {
             if captcha_deadline.is_none()
@@ -528,6 +553,12 @@ fn next_ready_streak(streak: u32, ready_now: bool) -> u32 {
 // 연속 안정될 때까지는 비번오류/차단/캡차 판정을 미뤄, 네비게이션 과도기의 덜 그려진 DOM에서
 // 결과를 오판(조기 캡차/차단 확정 등)하지 않게 한다. 폼 대기와 동일한 100ms × 3회 안정 기준.
 const RESULT_DOM_STABLE_POLLS: u32 = 3;
+
+/// 결과 게이트도 폼 게이트처럼 "리소스 정착(②)"까지 기다리되, 결과 페이지(캡차/광고 등)는 리소스가
+/// 끊임없이 로딩돼 정착이 안 될 수 있다. 상위문서+iframe이 complete된 뒤 이만큼(×100ms ≈ 3초)
+/// 지나도 정착을 못 보면 진행한다 — 안 그러면 캡차/오류 판정이 deadline까지 막혀 Error로 둔갑한다
+/// (강화하되 regression은 막는 안전 폴백).
+const RESULT_SETTLE_MAX_POLLS: u32 = 30;
 
 // 착지 페이지의 모든 문서(상위 + 모든 iframe)가 complete인지 본다(폼 셀렉터 없음 — 결과
 // 페이지엔 #id/#pw가 없다). 교차 출처 iframe은 contentDocument를 읽을 수 없어 통과(true)로
