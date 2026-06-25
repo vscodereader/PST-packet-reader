@@ -65,8 +65,9 @@ impl BlogCommentClient {
             self.blog_base, blog_id, log_no
         );
         let html = self.get_text(&url, cookie).await?;
-        parse_group_id(&html)
-            .ok_or_else(|| BlogError::new("블로그 글에서 groupId를 찾지 못했습니다(삭제·비공개 글일 수 있어요)"))
+        parse_group_id(&html).ok_or_else(|| {
+            BlogError::new("블로그 글에서 groupId를 찾지 못했습니다(삭제·비공개 글일 수 있어요)")
+        })
     }
 
     /// 2단계: cbox web_naver_token API로 `cbox_token`을 받는다.
@@ -153,11 +154,12 @@ impl BlogCommentClient {
             req = req.header("Cookie", c);
         }
 
-        let response = req
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| BlogError::new(format!("HTTP 전송 오류가 발생했습니다: {e}")))?;
+        let response = req.body(body).send().await.map_err(|e| {
+            BlogError::new(crate::transport_error_message!(
+                "HTTP 전송 오류가 발생했습니다",
+                e
+            ))
+        })?;
         let status = response.status();
         let raw = response
             .text()
@@ -200,10 +202,12 @@ impl BlogCommentClient {
         if let Some(c) = cookie {
             req = req.header("Cookie", c);
         }
-        let response = req
-            .send()
-            .await
-            .map_err(|e| BlogError::new(format!("HTTP 전송 오류가 발생했습니다: {e}")))?;
+        let response = req.send().await.map_err(|e| {
+            BlogError::new(crate::transport_error_message!(
+                "HTTP 전송 오류가 발생했습니다",
+                e
+            ))
+        })?;
         let status = response.status();
         let raw = response
             .text()
@@ -243,10 +247,13 @@ fn parse_group_id(html: &str) -> Option<String> {
     while let Some(rel) = html[from..].find(token) {
         let after_idx = from + rel + token.len();
         from = after_idx; // 다음 탐색은 이 토큰 뒤부터(무한 루프 방지 + 다음 출현 검사)
-        // 토큰과 값 사이의 구분자만 건너뛴다 — 임의의 먼 숫자로 점프하지 않는다.
+                          // 토큰과 값 사이의 구분자만 건너뛴다 — 임의의 먼 숫자로 점프하지 않는다.
         let after_sep = html[after_idx..]
             .trim_start_matches([' ', '=', ':', '"', '\'', '\\', '\t', '\n', '\r']);
-        let digits: String = after_sep.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let digits: String = after_sep
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
         if !digits.is_empty() {
             return Some(digits);
         }
@@ -316,9 +323,7 @@ mod tests {
 
     fn post_view_html(group_id: &str) -> String {
         // 실측 형태를 흉내낸 HTML: groupId가 대입식과 따옴표 두 곳에 나온다.
-        format!(
-            "<html><script>var groupId={group_id};\nvar foo='{group_id}';</script></html>"
-        )
+        format!("<html><script>var groupId={group_id};\nvar foo='{group_id}';</script></html>")
     }
 
     fn token_json(token: &str) -> serde_json::Value {
@@ -415,7 +420,9 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/commentBox/cbox/web_naver_create_json.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(create_success_json("7", "댓글내용")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(create_success_json("7", "댓글내용")),
+            )
             .mount(&cbox)
             .await;
 

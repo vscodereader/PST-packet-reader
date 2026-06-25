@@ -166,7 +166,7 @@ impl CafeHomeClient {
             let retryable = e.is_timeout() || e.is_connect();
             http_error(
                 "CAFE_HOME_TRANSPORT_ERROR",
-                format!("HTTP 전송 오류가 발생했습니다: {}", e),
+                crate::transport_error_message!("HTTP 전송 오류가 발생했습니다", e),
                 None,
                 retryable,
             )
@@ -179,7 +179,7 @@ impl CafeHomeClient {
         let raw_body = response.text().await.map_err(|e| {
             http_error(
                 "CAFE_HOME_TRANSPORT_ERROR",
-                format!("응답 본문을 읽지 못했습니다: {}", e),
+                crate::transport_error_message!("응답 본문을 읽지 못했습니다", e),
                 Some(status_code),
                 status_code >= 500,
             )

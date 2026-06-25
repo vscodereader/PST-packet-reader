@@ -191,7 +191,7 @@ impl JoinedCafesClient {
             ErrorEnvelope {
                 trace_id: String::new(),
                 code: "JOINED_CAFES_TRANSPORT_ERROR".to_string(),
-                message: format!("HTTP 전송 오류가 발생했습니다: {}", e),
+                message: crate::transport_error_message!("HTTP 전송 오류가 발생했습니다", e),
                 error_data: Some(NaverCafeCommonErrorData {
                     target: None,
                     http_status: None,

@@ -89,10 +89,12 @@ impl BlogPostListClient {
         if let Some(c) = cookie {
             req = req.header("Cookie", c);
         }
-        let response = req
-            .send()
-            .await
-            .map_err(|e| BlogError::new(format!("HTTP 전송 오류가 발생했습니다: {e}")))?;
+        let response = req.send().await.map_err(|e| {
+            BlogError::new(crate::transport_error_message!(
+                "HTTP 전송 오류가 발생했습니다",
+                e
+            ))
+        })?;
         let status = response.status();
         let raw = response
             .text()
@@ -127,10 +129,7 @@ impl BlogPostListClient {
         let mut posts: Vec<BlogPost> = Vec::new();
         let mut total_count: u32 = 0;
         for page in 1..=MAX_PAGES {
-            let (fetched, total) = match self
-                .fetch_page(blog_id, category_no, page, cookie)
-                .await
-            {
+            let (fetched, total) = match self.fetch_page(blog_id, category_no, page, cookie).await {
                 Ok(v) => v,
                 // 첫 페이지 실패는 댓글 대상이 0개가 되므로 오류로 알린다. 이후 페이지 실패는
                 // 부분 수집으로 진행한다(조용히 멈춘다).
@@ -143,9 +142,7 @@ impl BlogPostListClient {
             let got = fetched.len();
             posts.extend(fetched);
             // 충분히 모았거나, 전체 글 수에 도달했거나, 한 페이지가 가득 차지 않으면(마지막 페이지) 멈춘다.
-            if posts.len() >= count
-                || posts.len() as u32 >= total_count
-                || got < PAGE_SIZE as usize
+            if posts.len() >= count || posts.len() as u32 >= total_count || got < PAGE_SIZE as usize
             {
                 break;
             }
@@ -281,7 +278,10 @@ mod tests {
         // "%ED%85%8C%EC%8A%A4%ED%8A%B8" == "테스트".
         let body = r#"{"totalCount":"1","postList":[{"logNo":"1","title":"%ED%85%8C%EC%8A%A4%ED%8A%B8"}]}"#;
         let (posts, _) = parse_post_list(body).expect("파싱 성공해야 함");
-        assert_eq!(posts[0].title, "테스트", "퍼센트 인코딩 제목을 디코드해야 함");
+        assert_eq!(
+            posts[0].title, "테스트",
+            "퍼센트 인코딩 제목을 디코드해야 함"
+        );
     }
 
     #[test]
@@ -311,8 +311,7 @@ mod tests {
             .and(query_param("currentPage", "1"))
             .and(query_param("countPerPage", "30"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(list_body(54, &[10, 9, 8, 7, 6])),
+                ResponseTemplate::new(200).set_body_string(list_body(54, &[10, 9, 8, 7, 6])),
             )
             .mount(&server)
             .await;
