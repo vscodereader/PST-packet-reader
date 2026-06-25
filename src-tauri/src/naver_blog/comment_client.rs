@@ -234,15 +234,23 @@ fn object_id(group_id: &str, log_no: &str) -> String {
     format!("{}_201_{}", group_id, log_no)
 }
 
-/// PostView.naver HTML에서 숫자 `groupId`를 뽑는다. 실측 형태(`groupId=144945128`,
-/// `"groupId":144945128`, `groupId : '144945128'` 등)를 모두 잡는다.
+/// PostView.naver HTML에서 cbox `groupId`(= 그 블로그의 숫자 ID)를 뽑는다.
 ///
-/// `groupId` 토큰의 **모든 출현**을 훑어, 토큰 바로 뒤(값과의 구분자 `= : " ' 공백 \` 만 건너뛴)에
-/// 숫자가 오는 첫 출현을 고른다. 첫 출현이 `groupIdList` 같은 다른 키이거나 값이 비어 있어도
-/// (숫자 없음) 다음 출현에서 실제 숫자 groupId를 찾는다 — 블로그 스킨/HTML 변형 대응(#271 후속).
-/// 예전엔 첫 출현 뒤 임의의 먼 숫자까지 건너뛰어 잡아, 첫 토큰에 숫자가 없으면 곧장 실패했다.
+/// 네이버 블로그 cbox의 `groupId`는 블로그의 `blogNo`(숫자)와 **같다**. **현행 PostView HTML에는
+/// `groupId` 토큰이 아예 없고 `blogNo = '165657723'` 형태로만 들어 있다**(2026-06 패킷·실제 HTML
+/// 확인 — `groupId`만 찾던 옛 코드가 항상 실패해 댓글이 안 달리던 근본 원인). 그래서 `groupId`
+/// (구버전 호환)와 `blogNo`(현행) 두 토큰을 차례로 찾아, 먼저 숫자가 잡히는 쪽을 쓴다.
 fn parse_group_id(html: &str) -> Option<String> {
-    let token = "groupId";
+    // groupId(구버전) → blogNo(현행) 순. cbox groupId == blogNo 라 어느 쪽이든 같은 값이다.
+    ["groupId", "blogNo"]
+        .into_iter()
+        .find_map(|token| find_number_after_token(html, token))
+}
+
+/// HTML에서 `token`의 **모든 출현**을 훑어, 토큰 바로 뒤(값과의 구분자 `= : " ' 공백 \ \t \n \r`
+/// 만 건너뛴)에 숫자가 오는 첫 출현의 숫자열을 돌려준다(순수 함수). 숫자가 없는 출현
+/// (`groupIdList`·`blogNoCount` 등)은 다음 출현으로 넘어간다 — 블로그 스킨/HTML 변형 대응.
+fn find_number_after_token(html: &str, token: &str) -> Option<String> {
     let mut from = 0;
     while let Some(rel) = html[from..].find(token) {
         let after_idx = from + rel + token.len();
@@ -375,6 +383,29 @@ mod tests {
         );
         // 토큰은 있으나 끝내 숫자가 없으면 None.
         assert_eq!(parse_group_id(r#"{"groupId":null,"groupIdList":[]}"#), None);
+        // 현행 네이버 HTML(2026-06 패킷·실제 PostView 확인): groupId 토큰이 없고 blogNo로 들어 있다.
+        // cbox groupId == blogNo 라 blogNo에서 뽑는다 — 댓글이 안 달리던 근본 버그의 수정.
+        assert_eq!(
+            parse_group_id("var blogNo = '165657723'; // groupId 토큰 없음"),
+            Some("165657723".to_owned()),
+            "blogNo(따옴표) 형태에서 groupId(=blogNo) 추출"
+        );
+        assert_eq!(
+            parse_group_id("blogNo = 165657723"),
+            Some("165657723".to_owned()),
+            "blogNo(따옴표 없음) 형태"
+        );
+        // 숫자 없는 blogNo 출현(blogNoCount 등)은 건너뛰고 실제 blogNo를 찾는다.
+        assert_eq!(
+            parse_group_id("blogNoCount: 3, blogNo:'777'"),
+            Some("777".to_owned())
+        );
+        // groupId가 있으면 그쪽 우선(구버전 호환), blogNo는 폴백.
+        assert_eq!(
+            parse_group_id("groupId=111; blogNo='222'"),
+            Some("111".to_owned()),
+            "groupId 우선, blogNo 폴백"
+        );
     }
 
     #[test]
