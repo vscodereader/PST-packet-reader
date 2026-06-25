@@ -132,7 +132,16 @@ pub(crate) fn run(
     wait_for_human: bool,
 ) -> (BandLoginOutcome, Option<String>) {
     match run_inner(client, id, pw, wait_for_human) {
-        Ok(outcome) => (outcome, None),
+        // graceful 실패(Ok(BandLoginOutcome::Error): 폼 못 찾음/타이핑 실패/루프 오류 등)도
+        // 알림 "자세히 보기"용 백트레이스를 갖게 한다(네이버 login_flow와 동일). 예전엔 Ok 가지
+        // 전부 trace=None으로 흘려 밴드 로그인 실패가 추적 불가였다.
+        Ok(outcome) => {
+            let trace = match &outcome {
+                BandLoginOutcome::Error(_) => Some(crate::util::backtrace_string()),
+                _ => None,
+            };
+            (outcome, trace)
+        }
         // CDP/자동화 실패 — 메시지는 사용자용, trace(위치+백트레이스)는 "자세히 보기"용(#210).
         Err(error) => (
             BandLoginOutcome::Error(error.message().to_owned()),

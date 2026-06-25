@@ -103,9 +103,12 @@ fn finalize(
             if has_valid_cookie_file(&path)? {
                 Ok(LoginResolution::active())
             } else {
-                Ok(LoginResolution::failure(
+                // 쿠키는 저장됐는데 유효 세션이 없는 예기치 못한 오류(Error) — 알림 "자세히 보기"용
+                // 백트레이스를 붙여 추적 가능하게 한다(graceful 실패도 trace 보존).
+                Ok(LoginResolution::failure_with_trace(
                     AccountStatus::Error,
                     "저장된 쿠키에 유효한 네이버 세션이 없습니다.",
+                    Some(crate::util::backtrace_string()),
                 ))
             }
         }
