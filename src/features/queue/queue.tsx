@@ -32,25 +32,9 @@ import { DateTimePicker } from "@/shared/ui/date-time-picker";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformPill } from "@/shared/ui/platform-logo";
 
-// 종료(Done) 아이템의 결과를 대상별 상태(items)로 분류해 배지 문구·색을 정한다(#1). 완료
-// 아이템을 큐 창에 남겨, 알림을 열지 않아도 성공/일부실패/실패·차단을 그 자리에서 보게 한다.
-// - 실패·건너뜀이 하나도 없으면 "완료"(초록). 로그인 전용 등 하위 행이 없는 경우도 완료로 본다.
-// - 성공이 섞여 있으면 "일부 완료"(노랑).
-// - 성공이 없고 실패/건너뜀(도중 차단으로 skip된 글 포함)만 있으면 "실패·차단"(빨강).
-function doneBadge(q: QueueNowItem): { label: string; color: string } {
-  const items = q.items ?? [];
-  const fail = items.filter((it) => it.status === "fail").length;
-  const skip = items.filter((it) => it.status === "skip").length;
-  const ok = items.filter((it) => it.status === "success").length;
-  if (fail === 0 && skip === 0) return { label: "완료", color: "green" };
-  if (ok > 0) return { label: "일부 완료", color: "yellow" };
-  return { label: "실패·차단", color: "red" };
-}
-
 // 실행 중(running) 아이템은 워커가 처리 중이라 맨 앞에 고정한다. 단 실행 중인 게
 // 없으면(워커 idle) 첫 대기 아이템도 자유롭게 옮길 수 있어야 하므로, index 0을 무조건
-// 막지 않고 "선두 running 개수"만큼만 고정한다(백엔드 apply_reorder_now와 일치). 종료(Done)
-// 카드는 더 도는 작업이 아니라 항상 바닥에 깔리므로 선두 고정과 무관하다.
+// 막지 않고 "선두 running 개수"만큼만 고정한다(백엔드 apply_reorder_now와 일치).
 const pinnedCount = (list: QueueNowItem[]) =>
   list[0]?.state === "running" ? 1 : 0;
 
@@ -333,14 +317,10 @@ export function Queue({ go }: { go: GoFn }) {
       <Stack gap={8} mb={34}>
         {now.map((q) => {
           // 차단되어 멈춘 종료성 카드(#REQ1)는 state가 running이라도 더 돌지 않는다 — 스피너·
-          // 진행중 배지·드래그 잠금은 "실제로 도는"(live) 아이템에만 적용하고, 차단 카드는
-          // 따로 "차단되어 멈춤"으로 그리되 사용자가 X로 닫을 수 있게 한다.
-          // 종료(Done) 아이템(#1): 완료/실패/도중 차단을 결과 배지로 보여주고, 사용자가 X로
-          // 직접 치울 때까지 큐 창에 남는다. running(=live)은 워커가 실제로 도는 아이템뿐이다.
-          const done = q.state === "done";
+          // 큐엔 실행 중(live)·대기 아이템만 있다(완료/실패/도중 차단은 finish_item이 큐에서
+          // 제거하고 결과는 알림에서 확인). 진행중 배지·드래그 잠금은 live 아이템에만 적용한다.
           const running = q.state === "running";
           const live = running;
-          const outcome = done ? doneBadge(q) : null;
           const kd = KIND[q.kind] ?? { t: q.kind, c: "gray" };
           const KI =
             Icon[(KIND_ICON[q.kind] ?? "fileText") as keyof typeof Icon];
@@ -353,21 +333,20 @@ export function Queue({ go }: { go: GoFn }) {
             (q.plan?.forum?.length ?? 0) === 0 &&
             (q.plan?.band?.length ?? 0) === 0;
           const dragging = dragId === q.id;
-          // 실행 중·종료(Done) 카드는 대기 순번이 없다 → 순수 대기 아이템만 순번을 매긴다.
-          const order =
-            running || done
-              ? null
-              : waiting.findIndex((w) => w.id === q.id) + 1;
-          // live·done 카드 모두 클릭하면 대상별 상태(items)를 펼쳐 볼 수 있다.
-          const expanded = (live || done) && expandedId === q.id;
+          // 실행 중 카드는 대기 순번이 없다 → 순수 대기 아이템만 순번을 매긴다.
+          const order = running
+            ? null
+            : waiting.findIndex((w) => w.id === q.id) + 1;
+          // live 카드는 클릭하면 대상별 진행 상태(items)를 펼쳐 볼 수 있다.
+          const expanded = live && expandedId === q.id;
           return (
             <Box key={q.id}>
               <Paper
                 withBorder
                 radius="md"
-                draggable={!running && !done}
+                draggable={!running}
                 onClick={
-                  live || done
+                  live
                     ? () =>
                         setExpandedId((prev) => (prev === q.id ? null : q.id))
                     : undefined
@@ -391,32 +370,20 @@ export function Queue({ go }: { go: GoFn }) {
                   // 드래그로 바뀐 최종 순서를 백엔드에 영속화한다.
                   if (dragged) persistOrder(nowRef.current.map((x) => x.id));
                 }}
-                title={
-                  live
-                    ? "클릭하면 대상별 진행 상태 펼치기"
-                    : done
-                      ? "클릭하면 대상별 결과 펼치기"
-                      : undefined
-                }
+                title={live ? "클릭하면 대상별 진행 상태 펼치기" : undefined}
                 style={{
                   display: "flex",
                   alignItems: "center",
                   gap: 14,
                   padding: "13px 14px 13px 10px",
-                  // 종료(Done) 카드는 결과 색(완료=초록/일부=노랑/실패·차단=빨강) 테두리로
-                  // 진행 중(파랑)과 구분한다. 결과 색은 doneBadge(outcome)에서 온다.
-                  borderColor: done
-                    ? `var(--mantine-color-${outcome?.color ?? "gray"}-filled)`
-                    : live
-                      ? "var(--mantine-color-blue-filled)"
-                      : undefined,
-                  background: done
-                    ? `var(--mantine-color-${outcome?.color ?? "gray"}-light)`
-                    : live
-                      ? "var(--mantine-color-blue-light)"
-                      : undefined,
+                  borderColor: live
+                    ? "var(--mantine-color-blue-filled)"
+                    : undefined,
+                  background: live
+                    ? "var(--mantine-color-blue-light)"
+                    : undefined,
                   opacity: dragging ? 0.5 : 1,
-                  cursor: live || done ? "pointer" : "grab",
+                  cursor: live ? "pointer" : "grab",
                 }}
               >
                 <Box
@@ -431,19 +398,6 @@ export function Queue({ go }: { go: GoFn }) {
                 >
                   {live ? (
                     <Loader size={18} />
-                  ) : done ? (
-                    // 종료(Done) 카드: 스피너 대신 결과 아이콘(완료=체크, 그 외=결과색 점).
-                    outcome?.color === "green" ? (
-                      <Icon.checkCircle
-                        size={18}
-                        color="var(--mantine-color-green-filled)"
-                      />
-                    ) : (
-                      <Icon.alert
-                        size={18}
-                        color={`var(--mantine-color-${outcome?.color ?? "gray"}-filled)`}
-                      />
-                    )
                   ) : (
                     <>
                       <Icon.gripper
@@ -501,40 +455,6 @@ export function Queue({ go }: { go: GoFn }) {
                         transition: "transform .18s",
                       }}
                     />
-                  </Group>
-                ) : done ? (
-                  // 종료(Done) 카드(#1): 결과 배지(완료/일부 완료/실패·차단) + 펼침 + 닫기(X).
-                  // 알림을 열지 않아도 결과를 큐 창에서 바로 보고, X 또는 "완료 항목 지우기"로
-                  // 직접 치운다. 도중 차단된 종목은 펼치면 SubLog에 차단/건너뜀으로 드러난다.
-                  <Group gap={8} wrap="nowrap">
-                    <Badge
-                      size="sm"
-                      color={outcome?.color ?? "gray"}
-                      variant="light"
-                    >
-                      {outcome?.label ?? "완료"}
-                    </Badge>
-                    <Icon.chevronDown
-                      size={17}
-                      color={`var(--mantine-color-${outcome?.color ?? "gray"}-filled)`}
-                      style={{
-                        transform: expanded ? "rotate(180deg)" : "none",
-                        transition: "transform .18s",
-                      }}
-                    />
-                    <ActionIcon
-                      size="md"
-                      variant="subtle"
-                      color="gray"
-                      title="닫기"
-                      onClick={(e) => {
-                        // 카드 클릭(펼침)과 겹치지 않게 전파를 멈추고 닫기만 한다.
-                        e.stopPropagation();
-                        cancel(q.id);
-                      }}
-                    >
-                      <Icon.x size={17} />
-                    </ActionIcon>
                   </Group>
                 ) : (
                   <Group gap={8} wrap="nowrap">
