@@ -162,6 +162,18 @@ export function isPostable(status: string): boolean {
   return POSTABLE_STATUSES.includes(status);
 }
 
+// 게시 설정 계정 목록에서 **아예 숨기는**(단순 비활성화가 아니라 목록에서 제외) 상태.
+// "치워둔" 계정 — 다시 그 자리에서 게시 대상으로 고르면 안 되는 종료성 상태다:
+//  · waiting(글 게시 성공 후 대기, #267-3) — 같은 계정 연속 게시 방지
+//  · blocked(게시 도중 차단, #2) — 다시 써도 또 차단되므로 목록에서 뺀다(사용자 지시)
+//  · timedOut(페이지 대기시간 초과·HTTP500 서버오류, #7) — 일시 실패라 목록에선 숨기고 재시도
+// 로그인 문제(badCredentials/challenge/onHold/error)는 사용자가 보고 조치해야 하므로 숨기지
+// 않고 비활성(회색)으로만 둔다 — isPostable=false로 선택만 막는다.
+export const HIDDEN_FROM_PUBLISH_STATUSES = ["waiting", "blocked", "timedOut"];
+export function isHiddenFromPublish(status: string): boolean {
+  return HIDDEN_FROM_PUBLISH_STATUSES.includes(status);
+}
+
 export const STATUS_LABEL: Record<string, { t: string; c: string }> = {
   draft: { t: "임시저장", c: "gray" },
   ready: { t: "작성완료", c: "blue" },

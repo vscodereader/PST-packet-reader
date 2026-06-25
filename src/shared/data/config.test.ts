@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 
 import {
   ACTIVE_PLATFORMS,
+  isHiddenFromPublish,
   isPostable,
   isProblemStatus,
   KIND,
@@ -108,5 +109,19 @@ describe("label tables", () => {
     expect(isPostable("onHold")).toBe(false);
     // 대기초과(게시 실패, #286 후속)도 게시 대상에서 제외 — 체크박스 목록에 안 보여야 한다.
     expect(isPostable("timedOut")).toBe(false);
+  });
+
+  it("isHiddenFromPublish hides waiting/blocked/timedOut but not login-problem states", () => {
+    // 사용자 지시: 대기뿐 아니라 차단·대기초과도 게시 계정 목록에서 아예 숨긴다(비활성 아님).
+    expect(isHiddenFromPublish("waiting")).toBe(true);
+    expect(isHiddenFromPublish("blocked")).toBe(true);
+    expect(isHiddenFromPublish("timedOut")).toBe(true);
+    // 로그인 문제/정상 계열은 숨기지 않는다 — 사용자가 보고 조치하거나(실패) 선택해야(정상) 한다.
+    expect(isHiddenFromPublish("active")).toBe(false);
+    expect(isHiddenFromPublish("new")).toBe(false);
+    expect(isHiddenFromPublish("badCredentials")).toBe(false);
+    expect(isHiddenFromPublish("challenge")).toBe(false);
+    expect(isHiddenFromPublish("onHold")).toBe(false);
+    expect(isHiddenFromPublish("error")).toBe(false);
   });
 });

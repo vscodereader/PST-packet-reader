@@ -25,7 +25,12 @@ import type { ForumTarget } from "@/shared/bindings/ForumTarget";
 import type { LoginTarget } from "@/shared/bindings/LoginTarget";
 import type { NaverTarget } from "@/shared/bindings/NaverTarget";
 import type { PostJob } from "@/shared/bindings/PostJob";
-import { isPostable, KIND, STATUS_ACCOUNT } from "@/shared/data/config";
+import {
+  isHiddenFromPublish,
+  isPostable,
+  KIND,
+  STATUS_ACCOUNT,
+} from "@/shared/data/config";
 import {
   acctPlatforms,
   hasToken,
@@ -1119,9 +1124,11 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   ];
   const visibleAccts = accounts.filter(
     (a) =>
-      // 글 게시 성공 계정(대기, #267-3)은 게시 선택 목록에서 숨긴다. 계정 화면에서 상태 배지를
-      // 눌러 다시 활성으로 바꾸면 게시 가능 상태가 되어 자동으로 다시 보인다.
-      a.status !== "waiting" &&
+      // 게시 목록에서 아예 숨기는 종료성 상태: 대기(게시 성공 후, #267-3)·차단(도중 차단, #2)·
+      // 대기초과(서버/타임아웃 실패, #7). 비활성(회색)이 아니라 목록에서 제거한다(사용자 지시:
+      // 차단·대기초과도 대기처럼 안 보이게). 계정 화면에서 상태 배지를 눌러 다시 활성으로 바꾸면
+      // 게시 가능 상태가 되어 자동으로 다시 보인다.
+      !isHiddenFromPublish(a.status) &&
       // 이번 세션에서 방금 게시(큐 적재)한 계정은 그 자리에서 숨긴다(#4) — 백엔드가 '대기'로
       // 바꾸기 전이라도 목록에서 즉시 빠진다. 모달을 다시 열면(remount) 다시 보인다.
       !submittedLoginIds.has(a.loginId) &&
