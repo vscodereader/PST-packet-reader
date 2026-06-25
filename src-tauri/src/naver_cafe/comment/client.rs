@@ -91,7 +91,7 @@ fn transport_error(
     ErrorEnvelope {
         trace_id: String::new(),
         code: CODE_HTTP_TRANSPORT_ERROR.to_string(),
-        message: format!("HTTP 전송 오류가 발생했습니다: {err}"),
+        message: crate::transport_error_message!("HTTP 전송 오류가 발생했습니다", err),
         error_data: Some(error_data(
             article_id,
             ref_comment_id,

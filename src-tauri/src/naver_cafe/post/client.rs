@@ -89,15 +89,10 @@ fn transport_error(e: reqwest::Error) -> PostError {
     ErrorEnvelope {
         trace_id: String::new(),
         code: CODE_HTTP_TRANSPORT_ERROR.to_string(),
-        // 실패 지점 앵커(here!) + 런타임 백트레이스를 message 뒤에 붙인다 — "자세히 보기"
-        // trace로 노출된다(#199, 카페 댓글 api_failure_error와 동일 처리). 메인 사유는
-        // failure_reason이 따로 만든다.
-        message: format!(
-            "HTTP 전송 오류가 발생했습니다: {}\n\nat {}\n\n{}",
-            e,
-            crate::here!(),
-            crate::util::backtrace_string(),
-        ),
+        // (A) 분류 + source() 원인 체인 + (B) 실패 지점 앵커(here!) + 백트레이스를 message에
+        // 합친다 — "자세히 보기" trace로 노출된다. reqwest Display만으론 "error sending request
+        // for url"까지만 보여 진짜 원인이 안 보이므로 transport_error_message!로 통일한다.
+        message: crate::transport_error_message!("HTTP 전송 오류가 발생했습니다", e),
         error_data: Some(PostErrorData {
             cafe: NaverCafeCommonErrorData {
                 target: None,
