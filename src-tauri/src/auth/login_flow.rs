@@ -18,9 +18,11 @@ const HEADLESS_TIMEOUT: Duration = Duration::from_secs(20);
 // 캡챠 외 전부 칼같이 실패), 여기서는 pending(네비게이션 정리) 여유만 짧게 둔다. 캡차는 아래
 // CAPTCHA_GRACE로 따로 기다린다(기존 180초 사람 대기 제거 → 체감 속도 #14).
 const HEADED_PENDING_TIMEOUT: Duration = Duration::from_secs(12);
-// 캡차가 떠도 스텔스/키 품질로 자동 통과될 수 있어 잠깐 기다린다(사수 요구 #267-13: 10초).
-// 이 시간 안에 로그인되지 않으면 취소한다.
-const CAPTCHA_GRACE: Duration = Duration::from_secs(10);
+// 보류(OnHold) 계정 재로그인에서 캡차가 떴을 때, 사용자가 직접 보안문자를 입력해 풀 수 있도록
+// 창을 열어두는 상한(사용자 지시 1번: 성공할 때까지 열어두되 무한 대기는 막는 상한 120초).
+// 이 안에 로그인(쿠키)되면 성공으로 확정해 창을 닫고 활성화한다. 첫 로그인(일반 계정)은 이
+// 대기를 적용하지 않고 즉시 보류로 떨어뜨린다(decide_loop_step의 FailCaptchaToHold).
+const MANUAL_CAPTCHA_TIMEOUT: Duration = Duration::from_secs(120);
 // 결과 폴링 간격. 고정 대기가 아니라 결과 DOM이 자리잡는 즉시 다음으로 넘어가기 위해 촘촘히
 // 본다(사수 지시: 고정 400ms 금지 → 100ms로 DOM 반응성 확보). 음성 신호 2회 latch도 이만큼
 // 빨라져 비번오류/차단 확정이 ~0.2초로 떨어진다.
@@ -120,8 +122,12 @@ enum LoopDecision {
     Success,
     /// headless에서 캡차를 만남 — headed로 승격해 사람/스텔스가 풀 기회를 준다(캡차 한정).
     PromoteChallenge(ChallengeKind),
-    /// headed에서 캡차를 만남 — 즉시 포기하지 않고 CAPTCHA_GRACE(10초)까지 자동 통과를 기다린다.
+    /// 보류(OnHold) 계정 재로그인에서 캡차를 만남 — 사용자가 직접 풀도록 창을 성공까지
+    /// 열어둔다(상한 `MANUAL_CAPTCHA_TIMEOUT`, 120초). 성공하면 활성화·창 닫힘.
     WaitCaptcha,
+    /// 첫 로그인(일반 계정)에서 캡차를 만남 — 사용자 지시대로 grace 없이 즉시 실패시키고
+    /// 계정을 보류(OnHold)로 둔다. 이후 사용자가 보류 계정만 골라 재로그인해 직접 푼다.
+    FailCaptchaToHold,
     /// 캡차가 아닌 추가 인증(본인인증 OTP·새 기기 인증)을 만남 — 캡차 외라 즉시
     /// 실패시킨다(#267-13: 캡챠 외 전부 칼같이 실패). 사람 대기(180초)를 적용하지 않는다.
     FailUnsupportedChallenge(ChallengeKind),
@@ -131,7 +137,8 @@ enum LoopDecision {
     ConfirmedProtected,
     /// 잠금 확정 — 즉시 실패(`LoginOutcome::Locked`)로 옮긴다(#243).
     ConfirmedLocked,
-    KeepWaiting(Option<Signal>),
+    /// 아직 결과 미확정(중간 상태) — 계속 폴링한다.
+    KeepWaiting,
 }
 
 /// 직전 음성 신호(`last_negative`)와 현재 신호로 이번 폴링의 동작을 결정한다(순수 함수).
@@ -141,46 +148,38 @@ enum LoopDecision {
 /// 않기 위함이다. Success/Pending/캡차 대기는 음성 누적을 초기화한다. 캡차를 제외한 추가
 /// 인증(본인인증/기기인증)은 즉시 실패로 옮긴다(#267-13).
 fn decide_loop_step(
-    last_negative: Option<Signal>,
     signal: Signal,
     wait_for_human: bool,
+    manual_captcha: bool,
 ) -> LoopDecision {
     match signal {
         Signal::Success => LoopDecision::Success,
-        // 보호조치는 착지 URL로 명확히 판별되므로 2회 latch도, headed의 사람 대기도 적용하지
-        // 않고 즉시 확정한다(#228: 180초 대기 제거). `Blocked` 휴리스틱과 분리한 이유.
+        // 보호조치는 착지 URL로 명확히 판별되므로 headed의 사람 대기 없이 즉시 확정한다(#228).
         Signal::Protected => LoopDecision::ConfirmedProtected,
         // 잠금도 본문 텍스트로 명확히 판별되므로 보호조치와 동일하게 즉시 확정한다(#243).
         Signal::Locked => LoopDecision::ConfirmedLocked,
-        // 캡차만 예외: headed면 자동 통과를 CAPTCHA_GRACE(10초)까지 기다리고, headless면 headed로
-        // 승격해 풀 기회를 준다(#267-13: 캡챠 대기시간 10초).
+        // 캡차 처리(사용자 지시):
+        // - headless: headed로 승격해 풀 기회를 준다.
+        // - headed + 보류(OnHold) 재로그인(manual_captcha): 사용자가 직접 풀도록 창을 성공까지
+        //   열어둔다(WaitCaptcha, 상한 120초).
+        // - headed + 첫 로그인(일반): grace 없이 즉시 실패 → 계정을 보류로(FailCaptchaToHold).
         Signal::Challenge(ChallengeKind::Captcha) => {
-            if wait_for_human {
+            if !wait_for_human {
+                LoopDecision::PromoteChallenge(ChallengeKind::Captcha)
+            } else if manual_captcha {
                 LoopDecision::WaitCaptcha
             } else {
-                LoopDecision::PromoteChallenge(ChallengeKind::Captcha)
+                LoopDecision::FailCaptchaToHold
             }
         }
-        // 본인인증(OTP)·새 기기 인증(Device)은 캡차 외 전부 즉시 실패시킨다
-        // (#267-13). headed의 사람 대기(180초)도, headless 승격도 하지 않는다.
+        // 본인인증(OTP)·새 기기 인증(Device)은 캡차 외라 즉시 실패시킨다(#267-13).
         Signal::Challenge(kind) => LoopDecision::FailUnsupportedChallenge(kind),
-        Signal::BadCredentials => {
-            if last_negative == Some(Signal::BadCredentials) {
-                LoopDecision::ConfirmedBad
-            } else {
-                LoopDecision::KeepWaiting(Some(Signal::BadCredentials))
-            }
-        }
-        // 차단 휴리스틱도 headed에서 사람을 기다리지 않고, headed/headless 모두
-        // 2회 연속 latch로 빠르게 확정한다(#267-13: 칼같은 실패). 과도기 깜빡임만 거른다.
-        Signal::Blocked => {
-            if last_negative == Some(Signal::Blocked) {
-                LoopDecision::ConfirmedBlocked
-            } else {
-                LoopDecision::KeepWaiting(Some(Signal::Blocked))
-            }
-        }
-        Signal::Pending => LoopDecision::KeepWaiting(None),
+        // 비번오류/차단은 즉시 확정한다(사용자 지시: 즉시 실패). 클릭 직후 과도기 깜빡임은
+        // 결과 DOM 게이트(리소스 정착 + 모든 iframe complete 3회 안정)가 이미 걸러, 여기 도달
+        // 시점엔 DOM이 정착돼 있으므로 2회 latch가 더는 필요 없다.
+        Signal::BadCredentials => LoopDecision::ConfirmedBad,
+        Signal::Blocked => LoopDecision::ConfirmedBlocked,
+        Signal::Pending => LoopDecision::KeepWaiting,
     }
 }
 
@@ -225,8 +224,9 @@ pub(crate) fn run(
     id: &str,
     pw: &str,
     wait_for_human: bool,
+    manual_captcha: bool,
 ) -> (LoginOutcome, Option<String>) {
-    match run_inner(client, id, pw, wait_for_human) {
+    match run_inner(client, id, pw, wait_for_human, manual_captcha) {
         Ok(outcome) => (outcome, None),
         // CDP/자동화 실패 — 메시지는 사용자용, trace(위치 앵커+백트레이스)는 "자세히 보기"용
         // 으로 분리해 함께 돌려준다(#210). 메시지에는 백트레이스를 섞지 않는다.
@@ -249,6 +249,7 @@ fn run_inner(
     id: &str,
     pw: &str,
     wait_for_human: bool,
+    manual_captcha: bool,
 ) -> Result<LoginOutcome, AutomationError> {
     // 빈/공백 자격증명이면 브라우저 폼을 건드리지 않고 즉시 입력 실패로 중단한다(기존
     // 사이드카도 빈 자격증명이면 브라우저를 띄우지 않았다). BadCredentials로 두면 "비번
@@ -312,11 +313,9 @@ fn run_inner(
     // 성공 중인 로그인인데도 — 실패로 latch한다.
     sleep(CLICK_SETTLE);
 
-    // 음성 신호(BadCredentials/Blocked)는 한 번 보였다고 바로 확정하지 않고, 2회 연속
-    // 폴링에서 지속될 때만 확정한다(과도기 깜빡임 latch 방지).
-    let mut last_negative: Option<Signal> = None;
     let deadline = Instant::now() + timeout;
-    // 캡차를 처음 본 시점 + CAPTCHA_GRACE. 캡차가 떴을 때만 설정되고, 이 시각을 넘으면 취소한다.
+    // 보류 재로그인 캡차 직접 입력 상한(MANUAL_CAPTCHA_TIMEOUT). 캡차가 떴을 때만 설정되고,
+    // 이 시각을 넘으면 보류로 취소한다. 설정되면 전체 deadline 적용을 멈춰 사용자 입력 시간을 준다.
     let mut captcha_deadline: Option<Instant> = None;
     // pending(중간 상태)이 처음 시작된 시점 + PENDING_STALL. 인식 못 한 추가 인증 화면(2단계 등)이
     // 성공 쿠키도 안 뜨고 명시 오류/캡차도 아닌 채 머물면, 이 시각을 넘는 즉시 실패시킨다(#267-13).
@@ -333,19 +332,28 @@ fn run_inner(
 
         // 성공(세션 쿠키)은 DOM 게이트와 무관하게 즉시 확정한다 — 성공은 쿠키로 판정하므로
         // 착지 페이지(naver.com)의 광고 iframe 로딩을 기다리느라 정상 로그인을 늦추거나 놓치지
-        // 않는다. 비번오류/차단/캡차 등 DOM 기반 판정만 아래 게이트로 미룬다.
+        // 않는다. 보류 캡차 직접 입력 중에 사용자가 풀어 로그인돼도 여기서 즉시 성공 확정된다.
         if signals.logged_in {
             let cookies = collect_naver_cookies(client)?;
             return Ok(LoginOutcome::Ok { cookies });
         }
 
+        // 보류 캡차 직접 입력 대기 중이면 그 상한(120초)을 먼저 확인한다 — DOM이 잠깐 흔들려
+        // 아래 게이트에 막혀 있어도 상한은 지켜, 넘으면 보류(OnHold)로 취소한다.
+        if let Some(cd) = captcha_deadline {
+            if Instant::now() >= cd {
+                return Ok(LoginOutcome::CaptchaUnsolved);
+            }
+        }
+
         // 사수 지시: 결과 폴링도 DOM이 전부 붙을 때까지 기다린 뒤 판정한다. 상위 문서 + 모든
         // iframe이 complete로 연속 RESULT_DOM_STABLE_POLLS회 안정될 때까지는 결과를 판정하지
-        // 않고 폴링만 계속한다(과도기 DOM 오판 방지). 전체 deadline이 무한 대기를 막는다.
+        // 않고 폴링만 계속한다(과도기 DOM 오판 방지). 단, 캡차 직접 입력 대기 중(captcha_deadline
+        // 설정됨)이면 전체 deadline을 적용하지 않는다 — 위 캡차 상한이 따로 끊는다.
         let dom_ready = client.evaluate_bool(ALL_DOCS_COMPLETE_JS).unwrap_or(false);
         result_dom_streak = next_ready_streak(result_dom_streak, dom_ready);
         if !result_dom_gate_open(result_dom_streak) {
-            if Instant::now() >= deadline {
+            if captcha_deadline.is_none() && Instant::now() >= deadline {
                 let url = client.current_url().unwrap_or_default();
                 return Ok(LoginOutcome::Error(format!(
                     "로그인 결과 페이지의 DOM이 끝까지 로딩되지 않아 취소했습니다. 마지막 페이지: {url}"
@@ -355,7 +363,7 @@ fn run_inner(
             continue;
         }
 
-        match decide_loop_step(last_negative, classify(&signals), wait_for_human) {
+        match decide_loop_step(classify(&signals), wait_for_human, manual_captcha) {
             LoopDecision::Success => {
                 let cookies = collect_naver_cookies(client)?;
                 return Ok(LoginOutcome::Ok { cookies });
@@ -363,21 +371,17 @@ fn run_inner(
             LoopDecision::PromoteChallenge(kind) => {
                 return Ok(LoginOutcome::ChallengeRequired { kind });
             }
-            // headed 캡차: 즉시 포기하지 않고 CAPTCHA_GRACE(10초)까지 자동 통과를 기다린다.
-            // 10초가 지나도 로그인되지 않으면 취소(실패)한다(#267-13). 캡차가 떠 있는 동안은
-            // 음성 신호 누적을 비워, 캡차 페이지를 비번오류/차단으로 오확정하지 않게 한다.
+            // 보류(OnHold) 계정 재로그인 캡차: 사용자가 직접 풀도록 창을 성공까지 열어둔다
+            // (상한 120초). 그 안에 로그인되면 위 logged_in 단락에서 성공 확정되고, 상한을 넘으면
+            // 보류로 유지한다. 캡차 대기 중엔 정체 타이머를 끈다.
             LoopDecision::WaitCaptcha => {
-                let cd = *captcha_deadline.get_or_insert_with(|| Instant::now() + CAPTCHA_GRACE);
-                if Instant::now() >= cd {
-                    // 일반 Error가 아니라 보류(OnHold)로 분류한다(#267 후속). 캡차는 사람이 직접
-                    // 풀면 회복 가능하므로, 사용자가 보류 계정만 다시 골라 풀 수 있게 한다.
-                    return Ok(LoginOutcome::CaptchaUnsolved);
-                }
-                last_negative = None;
-                pending_deadline = None; // 캡차는 pending이 아니므로 정체 타이머를 끈다.
+                captcha_deadline
+                    .get_or_insert_with(|| Instant::now() + MANUAL_CAPTCHA_TIMEOUT);
+                pending_deadline = None;
             }
-            // 캡차가 아닌 추가 인증(본인인증 OTP/새 기기 인증) — 캡차 외라 즉시
-            // 실패시킨다(#267-13: 캡챠 외 전부 칼같이 실패). 사람 대기를 적용하지 않는다.
+            // 첫 로그인(일반 계정) 캡차: grace 없이 즉시 실패시키고 계정을 보류(OnHold)로 둔다.
+            LoopDecision::FailCaptchaToHold => return Ok(LoginOutcome::CaptchaUnsolved),
+            // 캡차가 아닌 추가 인증(본인인증 OTP/새 기기 인증) — 캡차 외라 즉시 실패(#267-13).
             LoopDecision::FailUnsupportedChallenge(kind) => {
                 return Ok(LoginOutcome::Error(format!(
                     "{} 화면이 떠 자동 로그인을 중단했습니다(캡차 외 즉시 실패).",
@@ -388,29 +392,21 @@ fn run_inner(
             LoopDecision::ConfirmedBlocked => return Ok(LoginOutcome::Blocked),
             LoopDecision::ConfirmedProtected => return Ok(LoginOutcome::Protected),
             LoopDecision::ConfirmedLocked => return Ok(LoginOutcome::Locked),
-            LoopDecision::KeepWaiting(next) => {
-                last_negative = next;
-                // next가 None이면 Pending(성공·캡차·명시오류 아님) — 인식 못 한 추가 인증 화면일
-                // 수 있다. PENDING_STALL을 넘기면 즉시 실패(크롬 종료)시킨다. next가 Some이면
-                // 비번오류/차단 latch라 곧 2회로 확정되니 정체 타이머를 끈다.
-                if next.is_none() {
-                    let pd =
-                        *pending_deadline.get_or_insert_with(|| Instant::now() + PENDING_STALL);
-                    if Instant::now() >= pd {
-                        let url = client.current_url().unwrap_or_default();
-                        return Ok(LoginOutcome::Error(format!(
-                            "로그인이 진행되지 않아 취소했습니다(캡차 외 미인식 화면 — 추가 인증 등). 마지막 페이지: {url}"
-                        )));
-                    }
-                } else {
-                    pending_deadline = None;
+            // 중간 상태(성공·캡차·명시오류 아님) — 인식 못 한 추가 인증 화면일 수 있다.
+            // PENDING_STALL을 넘기면 즉시 실패(크롬 종료)시킨다.
+            LoopDecision::KeepWaiting => {
+                let pd = *pending_deadline.get_or_insert_with(|| Instant::now() + PENDING_STALL);
+                if Instant::now() >= pd {
+                    let url = client.current_url().unwrap_or_default();
+                    return Ok(LoginOutcome::Error(format!(
+                        "로그인이 진행되지 않아 취소했습니다(캡차 외 미인식 화면 — 추가 인증 등). 마지막 페이지: {url}"
+                    )));
                 }
             }
         }
 
-        if Instant::now() >= deadline {
-            // 시간 내 결과가 확정되지 않은 경우(네비게이션 정체 등). 캡차는 위 WaitCaptcha에서
-            // 10초로 따로 끊으므로, 여기 도달은 주로 pending 정체다.
+        // 캡차 직접 입력 대기 중이 아닐 때만 전체 deadline을 적용한다(네비게이션 정체 등).
+        if captcha_deadline.is_none() && Instant::now() >= deadline {
             let url = client.current_url().unwrap_or_default();
             return Ok(LoginOutcome::Error(format!(
                 "로그인 시간이 초과되었습니다. 마지막 페이지: {url}"
@@ -1033,113 +1029,99 @@ mod tests {
         assert!(!credentials_present("user", ""));
     }
 
-    // --- decide_loop_step: 클릭 직후 과도기 신호를 영구 실패로 latch하지 않는지(2회 확정) ---
+    // --- decide_loop_step(signal, wait_for_human, manual_captcha) ---
 
     #[test]
-    fn loop_success_returns_even_after_negative() {
+    fn loop_success_returns() {
         assert_eq!(
-            decide_loop_step(None, Signal::Success, false),
+            decide_loop_step(Signal::Success, false, false),
             LoopDecision::Success
         );
-        // 직전에 음성 신호가 누적돼 있었어도 성공이면 성공으로 끝낸다.
         assert_eq!(
-            decide_loop_step(Some(Signal::BadCredentials), Signal::Success, false),
+            decide_loop_step(Signal::Success, true, true),
             LoopDecision::Success
         );
     }
 
     #[test]
-    fn loop_bad_credentials_needs_two_consecutive_polls() {
-        // 첫 히트는 확정하지 않고 대기(과도기 깜빡임일 수 있으므로).
-        assert_eq!(
-            decide_loop_step(None, Signal::BadCredentials, false),
-            LoopDecision::KeepWaiting(Some(Signal::BadCredentials))
-        );
-        // 2회 연속이면 확정.
-        assert_eq!(
-            decide_loop_step(Some(Signal::BadCredentials), Signal::BadCredentials, false),
-            LoopDecision::ConfirmedBad
-        );
-    }
-
-    #[test]
-    fn loop_pending_resets_negative_so_transient_does_not_latch() {
-        assert_eq!(
-            decide_loop_step(Some(Signal::BadCredentials), Signal::Pending, false),
-            LoopDecision::KeepWaiting(None)
-        );
-    }
-
-    #[test]
-    fn loop_blocked_confirms_over_two_polls_in_both_modes() {
-        // #267-13: 차단은 headed에서도 사람을 기다리지 않고 2회 연속 latch로 빠르게 확정한다.
-        for wait_for_human in [false, true] {
+    fn loop_bad_credentials_confirms_immediately() {
+        // 사용자 지시: 비번오류는 즉시 확정한다(2회 대기 없음). 결과 DOM 게이트가 과도기 깜빡임을
+        // 이미 걸러주므로, 여기 도달 시점엔 DOM이 정착돼 있다.
+        for (wfh, manual) in [(false, false), (true, false), (true, true)] {
             assert_eq!(
-                decide_loop_step(None, Signal::Blocked, wait_for_human),
-                LoopDecision::KeepWaiting(Some(Signal::Blocked))
+                decide_loop_step(Signal::BadCredentials, wfh, manual),
+                LoopDecision::ConfirmedBad
             );
+        }
+    }
+
+    #[test]
+    fn loop_blocked_confirms_immediately() {
+        // 사용자 지시: 차단도 즉시 확정한다(2회 대기 없음).
+        for (wfh, manual) in [(false, false), (true, false), (true, true)] {
             assert_eq!(
-                decide_loop_step(Some(Signal::Blocked), Signal::Blocked, wait_for_human),
+                decide_loop_step(Signal::Blocked, wfh, manual),
                 LoopDecision::ConfirmedBlocked
             );
         }
     }
 
     #[test]
-    fn loop_protected_fails_fast_even_in_headed_without_latch() {
-        // 핵심(#228): 보호조치는 headed에서도, 직전 음성 신호 없이도 즉시 확정한다 —
-        // 180초 HEADED_TIMEOUT 대기나 2회 latch를 적용하지 않는다.
+    fn loop_pending_keeps_waiting() {
         assert_eq!(
-            decide_loop_step(None, Signal::Protected, true),
-            LoopDecision::ConfirmedProtected
-        );
-        assert_eq!(
-            decide_loop_step(None, Signal::Protected, false),
-            LoopDecision::ConfirmedProtected
+            decide_loop_step(Signal::Pending, false, false),
+            LoopDecision::KeepWaiting
         );
     }
 
     #[test]
-    fn loop_locked_fails_fast_even_in_headed_without_latch() {
-        // 핵심(#243): 잠금도 보호조치처럼 headed에서도, 직전 음성 신호 없이도 즉시 확정한다 —
-        // 180초 HEADED_TIMEOUT 대기나 2회 latch를 적용하지 않는다.
-        assert_eq!(
-            decide_loop_step(None, Signal::Locked, true),
-            LoopDecision::ConfirmedLocked
-        );
-        assert_eq!(
-            decide_loop_step(None, Signal::Locked, false),
-            LoopDecision::ConfirmedLocked
-        );
+    fn loop_protected_and_locked_fail_fast() {
+        for wfh in [false, true] {
+            assert_eq!(
+                decide_loop_step(Signal::Protected, wfh, false),
+                LoopDecision::ConfirmedProtected
+            );
+            assert_eq!(
+                decide_loop_step(Signal::Locked, wfh, false),
+                LoopDecision::ConfirmedLocked
+            );
+        }
     }
 
     #[test]
-    fn loop_captcha_waits_in_headed_promotes_in_headless() {
-        // 캡차만 예외: headed면 자동 통과를 기다리고(WaitCaptcha), headless면 headed로 승격(#267-13).
+    fn loop_captcha_first_login_fails_to_hold_but_onhold_waits() {
+        let captcha = Signal::Challenge(ChallengeKind::Captcha);
+        // headless: headed로 승격(manual 무관).
         assert_eq!(
-            decide_loop_step(None, Signal::Challenge(ChallengeKind::Captcha), true),
-            LoopDecision::WaitCaptcha
-        );
-        assert_eq!(
-            decide_loop_step(None, Signal::Challenge(ChallengeKind::Captcha), false),
+            decide_loop_step(captcha, false, false),
             LoopDecision::PromoteChallenge(ChallengeKind::Captcha)
+        );
+        assert_eq!(
+            decide_loop_step(captcha, false, true),
+            LoopDecision::PromoteChallenge(ChallengeKind::Captcha)
+        );
+        // headed + 첫 로그인(manual=false): 즉시 실패 → 보류(FailCaptchaToHold).
+        assert_eq!(
+            decide_loop_step(captcha, true, false),
+            LoopDecision::FailCaptchaToHold
+        );
+        // headed + 보류 재로그인(manual=true): 사용자가 직접 풀도록 대기(WaitCaptcha).
+        assert_eq!(
+            decide_loop_step(captcha, true, true),
+            LoopDecision::WaitCaptcha
         );
     }
 
     #[test]
     fn loop_non_captcha_challenge_fails_fast_in_both_modes() {
         // 본인인증(OTP)·새 기기 인증(Device)은 캡차 외 전부 즉시 실패(#267-13).
-        for wait_for_human in [false, true] {
+        for wfh in [false, true] {
             assert_eq!(
-                decide_loop_step(None, Signal::Challenge(ChallengeKind::Otp), wait_for_human),
+                decide_loop_step(Signal::Challenge(ChallengeKind::Otp), wfh, false),
                 LoopDecision::FailUnsupportedChallenge(ChallengeKind::Otp)
             );
             assert_eq!(
-                decide_loop_step(
-                    None,
-                    Signal::Challenge(ChallengeKind::Device),
-                    wait_for_human
-                ),
+                decide_loop_step(Signal::Challenge(ChallengeKind::Device), wfh, true),
                 LoopDecision::FailUnsupportedChallenge(ChallengeKind::Device)
             );
         }
