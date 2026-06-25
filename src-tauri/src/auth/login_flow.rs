@@ -141,12 +141,13 @@ enum LoopDecision {
     KeepWaiting,
 }
 
-/// 직전 음성 신호(`last_negative`)와 현재 신호로 이번 폴링의 동작을 결정한다(순수 함수).
+/// 현재 페이지 신호로 이번 폴링의 동작을 결정한다(순수 함수).
 ///
-/// 핵심: BadCredentials/Blocked는 **2회 연속**일 때만 확정한다. 클릭 직후 잠깐 떴다
-/// 사라지는 `#err_common`이나 네비게이션 과도기에 폼이 사라진 상태를 영구 실패로 latch하지
-/// 않기 위함이다. Success/Pending/캡차 대기는 음성 누적을 초기화한다. 캡차를 제외한 추가
-/// 인증(본인인증/기기인증)은 즉시 실패로 옮긴다(#267-13).
+/// - BadCredentials/Blocked: 즉시 확정(사용자 지시). 결과 DOM 게이트가 클릭 직후 과도기
+///   깜빡임을 이미 걸러주므로 2회 latch 없이 즉시 실패시켜도 안전하다.
+/// - 캡차: headless면 headed로 승격, headed+보류재로그인(`manual_captcha`)이면 직접 입력
+///   대기(WaitCaptcha), headed+첫 로그인이면 즉시 보류(FailCaptchaToHold).
+/// - 캡차 외 추가 인증(본인인증/기기인증)은 즉시 실패(#267-13).
 fn decide_loop_step(
     signal: Signal,
     wait_for_human: bool,
