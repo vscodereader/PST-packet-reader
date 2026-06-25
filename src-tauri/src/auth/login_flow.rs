@@ -505,10 +505,13 @@ fn login_form_gate_open(form_ready: bool, resources_settled: bool, antibot_ready
 // 문서까지 자리잡은 것을 확인한다. 진행 상황을 stderr로 출력한다.
 fn wait_for_login_form(client: &mut CdpClient) -> bool {
     tracing::info!("[LOGIN] 로그인 폼 로딩 대기 중...");
-    // 고정 대기가 아니라 폼 DOM(#id/#pw + 로그인 버튼 + 모든 iframe)이 자리잡는 즉시 진행한다
-    // (사수 지시: 돔 끝까지 붙을 때까지 대기 → 안정되면 바로 다음). 아래 100ms로 촘촘히 폴링한다.
-    // 상한(10초)은 Chrome이 끝내 폼을 못 띄울 때 무한 대기를 막는 안전장치다.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // 고정 대기가 아니라 폼 DOM(#id/#pw + 로그인 버튼 + 모든 iframe)이 자리잡는 즉시 진행한다.
+    // 사수 지시: DOM이 끝까지 로드될 때까지 **시간 초과로 취소하지 않고 계속 기다린다**. 준비 안
+    // 된 폼에 타이핑해 ID/PW가 안 들어가는 일을 원천 차단하기 위함이다. 유일한 중단 조건은 Chrome
+    // 연결 자체가 끊긴 경우(사용자가 창을 닫음/크래시) — 그땐 기다릴 대상이 없으므로 CDP 호출이
+    // 연속 MAX_CONN_FAIL회 실패하면 중단한다(무한 wedge 방지). 아래 100ms로 촘촘히 폴링한다.
+    const MAX_CONN_FAIL: u32 = 50; // ~5초 연속 CDP 실패 = Chrome 사라짐
+    let mut conn_fail = 0u32;
     // 상위 문서 + 폼 + 로그인 버튼 + 모든 하위 문서(iframe)가 complete인지 한 번에 본다. 동일
     // 출처 iframe만 contentDocument를 읽을 수 있고, 교차 출처는 검사 불가라 막지 않는다(true 취급).
     let ready_expr = "(()=>{\
@@ -532,7 +535,26 @@ fn wait_for_login_form(client: &mut CdpClient) -> bool {
     // 없다 = 로딩 정착(조건 ②). 첫 폴은 비교 대상이 없어 정착으로 보지 않는다.
     let mut prev_res_count: Option<i64> = None;
     loop {
-        let form_ready = client.evaluate_bool(ready_expr).unwrap_or(false);
+        // form_ready 평가가 Err면 CDP 연결 이상(Chrome 닫힘/크래시일 수 있음). 일시적일 수
+        // 있어 곧장 중단하지 않고, 연속 MAX_CONN_FAIL회 실패할 때만 Chrome이 사라진 것으로 보고
+        // 중단한다. 로딩 중인 "정상 미준비"는 Err가 아니라 Ok(false)라 여기서 안 걸린다.
+        let form_ready = match client.evaluate_bool(ready_expr) {
+            Ok(r) => {
+                conn_fail = 0;
+                r
+            }
+            Err(_) => {
+                conn_fail += 1;
+                if conn_fail >= MAX_CONN_FAIL {
+                    tracing::info!(
+                        "[LOGIN] ✗ Chrome 연결이 끊겨 로그인 폼 대기를 중단(창이 닫혔거나 크래시)"
+                    );
+                    return false;
+                }
+                sleep(Duration::from_millis(100));
+                continue;
+            }
+        };
         if !antibot_seen {
             antibot_seen = client.evaluate_bool(ANTIBOT_READY_JS).unwrap_or(false);
         }
@@ -551,12 +573,8 @@ fn wait_for_login_form(client: &mut CdpClient) -> bool {
             );
             return true;
         }
-        if Instant::now() >= deadline {
-            tracing::info!(
-                "[LOGIN] ✗ 로그인 폼/리소스/스크립트가 10초 안에 다 붙지 않음 — 캡차 방지를 위해 타이핑하지 않고 실패시킴"
-            );
-            return false;
-        }
+        // 시간 초과로 취소하지 않는다(사수 지시) — DOM이 끝까지 로드될 때까지 계속 기다린다.
+        // 중단은 위 form_ready 평가의 연속 CDP 실패(Chrome 사라짐)로만 일어난다.
         sleep(Duration::from_millis(100));
     }
 }
@@ -769,10 +787,6 @@ fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<bool,
             }
         }
 
-        // 타이핑 직후 곧장 value를 읽으면 네이버 keydown 암호화 훅이 마지막 글자들을 아직
-        // 반영하기 전이라 길이가 짧게 나올 수 있다(특히 긴 비번 — 18자 등 zero-delay 연타에서
-        // 발생). 검증 전 잠깐 정착 대기해, 정상 입력을 "빈 칸"으로 오판하지 않게 한다.
-        sleep(Duration::from_millis(180));
         let got = client
             .evaluate(&format!(
                 "(()=>{{const el=document.querySelector('{selector}');\
