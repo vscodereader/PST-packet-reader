@@ -231,21 +231,27 @@ fn object_id(group_id: &str, log_no: &str) -> String {
 }
 
 /// PostView.naver HTML에서 숫자 `groupId`를 뽑는다. 실측 형태(`groupId=144945128`,
-/// `144945128';`, `groupId : '144945128'` 등)를 모두 잡도록 `groupId` 토큰 뒤 첫 숫자열을 취한다.
+/// `"groupId":144945128`, `groupId : '144945128'` 등)를 모두 잡는다.
+///
+/// `groupId` 토큰의 **모든 출현**을 훑어, 토큰 바로 뒤(값과의 구분자 `= : " ' 공백 \` 만 건너뛴)에
+/// 숫자가 오는 첫 출현을 고른다. 첫 출현이 `groupIdList` 같은 다른 키이거나 값이 비어 있어도
+/// (숫자 없음) 다음 출현에서 실제 숫자 groupId를 찾는다 — 블로그 스킨/HTML 변형 대응(#271 후속).
+/// 예전엔 첫 출현 뒤 임의의 먼 숫자까지 건너뛰어 잡아, 첫 토큰에 숫자가 없으면 곧장 실패했다.
 fn parse_group_id(html: &str) -> Option<String> {
-    let idx = html.find("groupId")?;
-    let after = &html[idx + "groupId".len()..];
-    // groupId 토큰 뒤 첫 숫자열(중간의 `=`/`:`/따옴표/공백은 건너뛴다).
-    let digits: String = after
-        .chars()
-        .skip_while(|c| !c.is_ascii_digit())
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    if digits.is_empty() {
-        None
-    } else {
-        Some(digits)
+    let token = "groupId";
+    let mut from = 0;
+    while let Some(rel) = html[from..].find(token) {
+        let after_idx = from + rel + token.len();
+        from = after_idx; // 다음 탐색은 이 토큰 뒤부터(무한 루프 방지 + 다음 출현 검사)
+        // 토큰과 값 사이의 구분자만 건너뛴다 — 임의의 먼 숫자로 점프하지 않는다.
+        let after_sep = html[after_idx..]
+            .trim_start_matches([' ', '=', ':', '"', '\'', '\\', '\t', '\n', '\r']);
+        let digits: String = after_sep.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty() {
+            return Some(digits);
+        }
     }
+    None
 }
 
 /// web_naver_token 응답에서 `result.cbox_token`을 읽는다. success/code도 함께 검증한다.
@@ -352,6 +358,18 @@ mod tests {
             Some("987654".to_owned())
         );
         assert_eq!(parse_group_id("no token here"), None);
+        // #271 후속: 첫 출현(groupIdList 등)에 숫자가 없어도 다음 출현의 실제 숫자를 찾는다.
+        assert_eq!(
+            parse_group_id(r#"var groupIdList=[]; x "groupId":144945128, y"#),
+            Some("144945128".to_owned())
+        );
+        // JSON 따옴표 값 형도 잡는다.
+        assert_eq!(
+            parse_group_id(r#"{"groupId":"998877"}"#),
+            Some("998877".to_owned())
+        );
+        // 토큰은 있으나 끝내 숫자가 없으면 None.
+        assert_eq!(parse_group_id(r#"{"groupId":null,"groupIdList":[]}"#), None);
     }
 
     #[test]
