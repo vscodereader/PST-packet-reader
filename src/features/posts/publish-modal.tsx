@@ -217,7 +217,6 @@ function DestinationPicker({
   onSelectBlog,
   onRemoveBlog,
   blogIsListTarget,
-  blogCount,
   blogHomes,
   blogHomeLink,
   setBlogHomeLink,
@@ -254,7 +253,6 @@ function DestinationPicker({
   onRemoveBlog: (key: string) => void;
   // 댓글 작성(commentTarget)이 최신글/인기글이면 true(블로그 링크 입력), url이면 false(글 링크 입력).
   blogIsListTarget: boolean;
-  blogCount: number;
   blogHomes: BlogHomeTarget[];
   blogHomeLink: string;
   setBlogHomeLink: (v: string) => void;
@@ -483,7 +481,7 @@ function DestinationPicker({
                   </Group>
                 ) : (
                   <Text fz={12} c="orange.7">
-                    댓글을 달 블로그를 추가하세요(최신 {blogCount}개 글에 댓글).
+                    댓글을 달 블로그를 추가하세요.
                   </Text>
                 )}
               </>
@@ -1897,7 +1895,6 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
               onSelectBlog={selectBlog}
               onRemoveBlog={removeBlog}
               blogIsListTarget={isListTarget}
-              blogCount={commentCount}
               blogHomes={blogHomes}
               blogHomeLink={blogHomeLink}
               setBlogHomeLink={setBlogHomeLink}
