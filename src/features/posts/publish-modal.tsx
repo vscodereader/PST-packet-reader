@@ -216,8 +216,7 @@ function DestinationPicker({
   onSaveBlogLink,
   onSelectBlog,
   onRemoveBlog,
-  blogMode,
-  onBlogModeChange,
+  blogIsListTarget,
   blogCount,
   blogHomes,
   blogHomeLink,
@@ -253,8 +252,8 @@ function DestinationPicker({
   onSaveBlogLink: () => void;
   onSelectBlog: (key: string) => void;
   onRemoveBlog: (key: string) => void;
-  blogMode: "url" | "latest";
-  onBlogModeChange: (v: "url" | "latest") => void;
+  // 댓글 작성(commentTarget)이 최신글/인기글이면 true(블로그 링크 입력), url이면 false(글 링크 입력).
+  blogIsListTarget: boolean;
   blogCount: number;
   blogHomes: BlogHomeTarget[];
   blogHomeLink: string;
@@ -425,19 +424,10 @@ function DestinationPicker({
             </Text>
           </Group>
           <Stack gap={8} p={10}>
-            {/* 블로그는 댓글 전용(#271/#279). "특정 글 URL"=각 글에 댓글, "최신 N개"=블로그의
-                최신 글 상위 N개에 댓글(카페 최신/url 토글 미러). */}
-            <SegmentedControl
-              fullWidth
-              size="xs"
-              value={blogMode}
-              onChange={(v) => onBlogModeChange(v as "url" | "latest")}
-              data={[
-                { value: "url", label: "특정 글 URL" },
-                { value: "latest", label: "최신 N개" },
-              ]}
-            />
-            {blogMode === "latest" ? (
+            {/* 블로그는 댓글 전용(#271/#279). 별도 토글 없이 댓글 작성에서 고른 대상을 따른다
+                (카페와 동일): 특정 게시글=글 링크에 댓글, 최신글/인기글=블로그 링크의 최신 N개에
+                댓글. 그래서 보이는 입력은 commentTarget에 따라 글 링크 / 블로그 링크 중 하나다. */}
+            {blogIsListTarget ? (
               <>
                 {/* 최신 N개: 블로그 홈 링크에서 blogId(+카테고리)만 뽑아 대상으로 추가한다.
                     개수는 댓글 템플릿(writer)에서 정한 commentCount를 그대로 쓴다. */}
@@ -896,10 +886,9 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [resolvedBlogs, setResolvedBlogs] = useState<ResolvedBlog[]>([]);
   const [selectedBlogs, setSelectedBlogs] = useState<string[]>([]);
   const [blogLink, setBlogLink] = useState("");
-  // 블로그 댓글 대상 모드(#279): "url"=특정 글 URL(위 selectedBlogs), "latest"=블로그의 최신 N개.
-  // 카페 commentTargetMode(latest/url)의 블로그 버전이다. "최신 N개"는 블로그 홈 링크에서 blogId
-  // (+categoryNo)만 뽑아 대상으로 삼고, 게시 시점 워커가 최신 글 상위 N개를 조회해 댓글을 단다.
-  const [blogMode, setBlogMode] = useState<"url" | "latest">("url");
+  // 블로그 댓글 대상은 별도 토글 없이 댓글 작성(writer-modal)의 commentTarget을 따른다(카페와
+  // 동일). url=특정 글 링크(selectedBlogs), latest/popular=블로그 링크의 최신 N개(blogHomes).
+  // 블로그는 '인기글' 목록 API가 없어 popular도 latest와 동일하게 최신 N개로 처리한다.
   const [blogHomes, setBlogHomes] = useState<BlogHomeTarget[]>([]);
   const [blogHomeLink, setBlogHomeLink] = useState("");
   const [when, setWhen] = useState<"now" | "schedule">("now");
@@ -1270,10 +1259,11 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         });
       }
     } else if (a.platform === "blog") {
-      // 블로그는 댓글 전용(#271). "특정 글 URL" 모드면 선택한 각 글마다 잡 1개(계정×글)로
-      // blogId+logNo를 동결한다. "최신 N개" 모드(#279)면 추가한 각 블로그(홈)마다 잡 1개로
-      // blogId(+categoryNo)+개수(blogCount)를 동결해, 워커가 그 블로그의 최신 글 상위 N개에 댓글을 단다.
-      if (blogMode === "latest") {
+      // 블로그는 댓글 전용(#271). 댓글 작성의 commentTarget을 따른다(카페와 동일, 별도 토글 없음).
+      // url이면 선택한 각 글마다 잡 1개(계정×글)로 blogId+logNo를 동결한다. 최신글/인기글이면
+      // 추가한 각 블로그(링크)마다 잡 1개로 blogId(+categoryNo)+개수(blogCount=commentCount)를
+      // 동결해, 워커가 그 블로그의 최신 글 상위 N개에 댓글을 단다(블로그는 인기글=최신글 동일).
+      if (isListTarget) {
         blogHomes.forEach((b, i) => {
           jobs.push({
             key: `${aid}-bh${i}`,
@@ -1324,10 +1314,11 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     selPlatforms.includes("band") &&
     selectedBands.length > 0 &&
     isListTarget;
-  // 블로그(#271/#279) 댓글 대상이 준비됐는지 — "특정 글 URL" 모드면 선택한 글이, "최신 N개"
-  // 모드면 추가한 블로그(홈)가 1개 이상이면 준비된 것으로 본다.
-  const blogTargetsReady =
-    blogMode === "latest" ? blogHomes.length > 0 : selectedBlogs.length > 0;
+  // 블로그(#271/#279) 댓글 대상이 준비됐는지 — 댓글 작성의 commentTarget을 따른다(카페와 동일).
+  // url이면 선택한 글이, 최신글/인기글이면 추가한 블로그(링크)가 1개 이상이면 준비된 것으로 본다.
+  const blogTargetsReady = isListTarget
+    ? blogHomes.length > 0
+    : selectedBlogs.length > 0;
   // 블로그는 댓글 전용이라 네이버 list/url 대상이 없어도 블로그만으로 충분하다.
   const blogOnlyCommentReady =
     selectedNaver.length === 0 &&
@@ -1905,8 +1896,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
               onSaveBlogLink={saveBlogLink}
               onSelectBlog={selectBlog}
               onRemoveBlog={removeBlog}
-              blogMode={blogMode}
-              onBlogModeChange={setBlogMode}
+              blogIsListTarget={isListTarget}
               blogCount={commentCount}
               blogHomes={blogHomes}
               blogHomeLink={blogHomeLink}
