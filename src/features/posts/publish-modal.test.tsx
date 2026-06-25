@@ -1489,12 +1489,13 @@ describe("PublishModal", () => {
     words: 20,
     status: "ready",
     excerpt: "요약",
-    commentTarget: "latest",
+    // 블로그는 댓글 작성의 commentTarget을 따른다(별도 토글 제거). 기본 fixture는 '특정 글'(url) 모드.
+    commentTarget: "url",
     comments: ["좋은 글이네요"],
   };
 
-  /** 블로그 계정 하나만 둔 fixture로 교체하고, 그 계정을 선택한다. */
-  async function selectBlogAccount() {
+  /** 블로그 계정 하나만 둔 fixture로 교체하고, 그 계정을 선택한다(doc로 댓글 대상 모드 지정). */
+  async function selectBlogAccount(doc: LibraryPost = blogCommentDoc) {
     setAccounts([
       {
         id: "ab",
@@ -1506,7 +1507,7 @@ describe("PublishModal", () => {
         tags: [],
       },
     ]);
-    renderPublish({ doc: blogCommentDoc });
+    renderPublish({ doc });
     // 모달은 게시 가능 계정이 하나면 그 계정을 기본 선택한다.
     await screen.findByText("blog_writer");
   }
@@ -1576,6 +1577,42 @@ describe("PublishModal", () => {
     const plan = enqueuedPlan();
     expect(plan.blog).toHaveLength(2);
     expect(plan.blog.map((b) => b.logNo).sort()).toEqual(["100", "200"]);
+  });
+
+  it("blog 최신글 모드: 댓글 대상이 최신글이면 블로그 링크만 받고 plan.blog가 count로 동결된다", async () => {
+    // 댓글 작성에서 '최신글'을 고르면(commentTarget=latest) 블로그는 토글 없이 '블로그 링크'
+    // 입력만 보여주고, 추가한 블로그의 최신 N개(=commentCount)에 댓글을 단다(인기글도 동일).
+    await selectBlogAccount({
+      ...blogCommentDoc,
+      commentTarget: "latest",
+      commentCount: 5,
+    });
+    // url 모드의 '블로그 글 링크'가 아니라 최신글 모드의 '블로그 링크'가 보인다.
+    const input = await screen.findByLabelText("블로그 링크");
+    await userEvent.type(
+      input,
+      "https://blog.naver.com/PostList.naver?blogId=press02&categoryNo=7",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "추가" }));
+    await screen.findByLabelText("press02 · 카테고리 7 제거");
+
+    const publishBtn = await screen.findByRole(
+      "button",
+      { name: /^게시 \(1\)/ },
+      { timeout: 3000 },
+    );
+    expect(publishBtn).toBeEnabled();
+    await userEvent.click(publishBtn);
+
+    const plan = enqueuedPlan();
+    expect(plan.blog).toEqual([
+      expect.objectContaining({
+        accountId: "blog_writer",
+        blogId: "press02",
+        count: 5,
+        categoryNo: 7,
+      }),
+    ]);
   });
 
   it("나눠서 즉시 게시: 계정마다 별도 큐를 적재한다(1큐=1계정)", async () => {
