@@ -231,11 +231,6 @@ export function Queue({ go }: { go: GoFn }) {
     void ipc.queue.cancelNow(id).then(setNow);
     notifications.show({ message: "대기 작업을 취소했어요", color: "blue" });
   };
-  // 종료(Done) 카드를 한 번에 치운다(#1). 진행 중/대기 작업은 그대로 둔다.
-  const clearDone = () => {
-    void ipc.queue.clearDoneNow().then(setNow);
-    notifications.show({ message: "완료 항목을 정리했어요", color: "blue" });
-  };
   const promote = (id: string) => {
     void ipc.queue.promote(id).then((next) => {
       setNow(next);
@@ -294,12 +289,9 @@ export function Queue({ go }: { go: GoFn }) {
       });
   };
 
-  // 대기 순번 계산용: 실행 중도 종료(Done)도 아닌, 순수 대기 아이템만.
-  const waiting = now.filter(
-    (q) => q.state !== "running" && q.state !== "done",
-  );
-  // 종료(Done) 아이템이 하나라도 있으면 "완료 항목 지우기"를 띄운다(#1).
-  const hasDone = now.some((q) => q.state === "done");
+  // 대기 순번 계산용: 실행 중이 아닌 순수 대기 아이템만. 완료/실패/도중 차단 아이템은
+  // finish_item이 큐에서 제거하므로(결과는 알림에서 확인), 큐엔 실행 중·대기만 남는다.
+  const waiting = now.filter((q) => q.state !== "running");
 
   return (
     <Container size={980} py={32} px={36}>
@@ -331,18 +323,6 @@ export function Queue({ go }: { go: GoFn }) {
           {now.length}건
         </Text>
         <Group gap={8} ml="auto">
-          {/* 완료 결과 카드를 한 번에 치운다(#1). 종료 아이템이 있을 때만 보인다. */}
-          {hasDone && (
-            <Button
-              size="compact-xs"
-              variant="subtle"
-              color="gray"
-              leftSection={<Icon.x size={13} />}
-              onClick={clearDone}
-            >
-              완료 항목 지우기
-            </Button>
-          )}
           <Icon.gripper size={14} color="var(--mantine-color-gray-5)" />
           <Text fz={12} c="dimmed">
             드래그로 순서 변경

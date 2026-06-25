@@ -18,7 +18,7 @@ use super::activity::{record, ActivityItem, ActivityType};
 use super::log_batches::{BatchItem, BatchItemStatus, LogBatch, PostedContent, MAX_LOG_BATCHES};
 use super::posts::{CommentTarget, ModeValue};
 use super::queue::{
-    apply_complete_now, apply_yield_now, item_priority, CommentTargetSpec, LoginTarget,
+    apply_cancel_now, apply_yield_now, item_priority, CommentTargetSpec, LoginTarget,
     PublishPlan, QueueNowItem, QueueState,
 };
 use crate::auth::outcome::LoginResolution;
@@ -330,15 +330,13 @@ async fn worker_loop<R: Runtime>(app: AppHandle<R>, runner: NowQueueRunner) {
 async fn finish_item<R: Runtime>(app: &AppHandle<R>, job: &QueueNowItem) {
     match execute_item(app, job).await {
         ItemOutcome::Completed => {
-            // 완료/일반 실패/도중 차단을 가리지 않고, 큐에서 **제거하지 않고** 종료(Done)로
-            // 남긴다(#1). 예전엔 곧장 제거해, 여러 작업이 거의 동시에 끝나면 큐 창이 순식간에
-            // 비어 결과를 확인하려면 알림으로 가야 했다. 이제 결과(대상별 items·progress)를 그
-            // 자리에서 보게 두고, 사용자가 ✕/"완료 항목 지우기"로 직접 치운다. 워커는 Waiting
-            // 만 집으므로 재실행되지 않는다(apply_complete_now가 Done 상한도 함께 관리).
-            // 도중 차단된 대상은 set_progress_and_items가 채운 종목별 차단/건너뜀 행(items)으로
-            // 카드에 그대로 드러난다.
+            // 완료/일반 실패/도중 차단을 가리지 않고 큐에서 **제거한다**(사용자 지시: 게시큐엔
+            // 돌아가는 작업만 보이고, 성공/실패 결과는 알림에서 확인). 결과(성공·실패·도중 차단
+            // 종목)는 실행 중 set_progress_and_items가 알림 로그(log_batches)·계정 상태에 이미
+            // 기록하므로, 큐에 결과 카드를 남기지 않아도 알림에서 그대로 확인된다. 워커는 Waiting
+            // 만 집으므로 제거해도 재실행되지 않는다.
             app.state::<JsonStore<QueueNowItem>>()
-                .mutate(|items| apply_complete_now(items, &job.id));
+                .mutate(|items| apply_cancel_now(items, &job.id));
         }
         ItemOutcome::Yielded(remaining) => {
             // 삭제가 아니라 중지(#232): 잔여 plan(아직 안 한 그룹만)으로 Waiting 복귀 후 재정렬.
@@ -1252,9 +1250,9 @@ fn group_accounts_for_publish(plan: &PublishPlan) -> Vec<PublishGroup> {
 /// `execute_item`의 결과(#232). 워커가 아이템을 큐에서 **제거**(완료)할지, 잔여 plan으로
 /// **Waiting 복귀**(중지/양보)할지 결정한다.
 enum ItemOutcome {
-    /// 아이템 전체를 끝까지 처리했다 → 큐에서 제거하지 않고 종료(Done) 상태로 남긴다(#1).
-    /// 성공·일반 실패·도중 차단을 가리지 않고, finish_item이 `apply_complete_now`로 결과를
-    /// 그 자리에 보존한다(대상별 차단/건너뜀은 `items`에 이미 드러난다).
+    /// 아이템 전체를 끝까지 처리했다 → finish_item이 `apply_cancel_now`로 큐에서 제거한다
+    /// (사용자 지시: 게시큐엔 돌아가는 작업만, 성공/실패 결과는 알림에서 확인). 성공·일반 실패·
+    /// 도중 차단을 가리지 않으며, 결과는 실행 중 알림 로그·계정 상태에 이미 기록돼 있다.
     Completed,
     /// 더 높은 우선순위 작업(로그인/종토방)에 자리를 내주려 **안전지점(계정 그룹 경계)에서**
     /// 멈췄다 → 아직 게시하지 않은 그룹만 담은 잔여 plan으로 Waiting 복귀. 완료 그룹은 plan에서
