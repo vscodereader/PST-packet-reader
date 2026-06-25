@@ -245,8 +245,22 @@ pub(crate) fn run(
     wait_for_human: bool,
     manual_captcha: bool,
 ) -> (LoginOutcome, Option<String>) {
-    match run_inner(client, id, pw, wait_for_human, manual_captcha) {
-        Ok(outcome) => (outcome, None),
+    // graceful 실패(Ok(LoginOutcome::Error))도 "자세히 보기"용 trace를 갖게 한다. 예전에는
+    // Ok 가지 전부를 trace=None으로 흘려, 폼 자동입력 실패("아이디 칸이 비어") 같은 비-예외
+    // 실패는 알림에 백트레이스가 안 붙어 추적이 끊겼다. 이제 타이핑 실패는 run_inner가
+    // diag(포커스/안티봇/입력 글자수 진단 + 백트레이스)를 채우고, 그 외 Error는 여기서 최소
+    // 백트레이스라도 붙여 — 모든 로그인 실패가 알림 "자세히 보기"에서 추적 가능해진다.
+    let mut diag: Option<String> = None;
+    match run_inner(client, id, pw, wait_for_human, manual_captcha, &mut diag) {
+        Ok(outcome) => {
+            let trace = match &outcome {
+                LoginOutcome::Error(_) => {
+                    Some(diag.unwrap_or_else(crate::util::backtrace_string))
+                }
+                _ => None,
+            };
+            (outcome, trace)
+        }
         // CDP/자동화 실패 — 메시지는 사용자용, trace(위치 앵커+백트레이스)는 "자세히 보기"용
         // 으로 분리해 함께 돌려준다(#210). 메시지에는 백트레이스를 섞지 않는다.
         Err(error) => (
@@ -269,6 +283,9 @@ fn run_inner(
     pw: &str,
     wait_for_human: bool,
     manual_captcha: bool,
+    // 폼 자동입력이 실패하면(타이핑이 필드에 안 들어감) 여기에 원인 진단 + 백트레이스를 채운다.
+    // 호출부(run)가 이 값을 그대로 "자세히 보기" trace로 띄운다. 성공/타이핑 외 실패는 비워 둔다.
+    diag: &mut Option<String>,
 ) -> Result<LoginOutcome, AutomationError> {
     // 빈/공백 자격증명이면 브라우저 폼을 건드리지 않고 즉시 입력 실패로 중단한다(기존
     // 사이드카도 빈 자격증명이면 브라우저를 띄우지 않았다). BadCredentials로 두면 "비번
@@ -302,14 +319,16 @@ fn run_inner(
     // 돌려준다. 빈/부분 자격증명으로 로그인 버튼을 누르면 결과가 #err_common/타임아웃으로
     // 분류돼 일시적 타이핑 실패가 영구 BadCredentials/Error로 둔갑하므로, 클릭하지 않고
     // 명확한 입력 실패로 중단한다.
-    if !type_into(client, "#id", id)? {
+    if let Some(d) = type_into(client, "#id", id)? {
+        *diag = Some(format!("{d}\n\n{}", crate::util::backtrace_string()));
         return Ok(LoginOutcome::Error(
             "로그인 폼 자동 입력에 실패했습니다(아이디 칸이 비어 로그인을 중단). 잠시 후 다시 시도하세요."
                 .to_owned(),
         ));
     }
     sleep(FIELD_PAUSE);
-    if !type_into(client, "#pw", pw)? {
+    if let Some(d) = type_into(client, "#pw", pw)? {
+        *diag = Some(format!("{d}\n\n{}", crate::util::backtrace_string()));
         return Ok(LoginOutcome::Error(
             "로그인 폼 자동 입력에 실패했습니다(비밀번호 칸이 비어 로그인을 중단). 잠시 후 다시 시도하세요."
                 .to_owned(),
@@ -772,12 +791,85 @@ fn click_login_button(client: &mut CdpClient) -> Result<(), AutomationError> {
     Ok(())
 }
 
+// 폼 자동입력 실패 원인 진단 스냅샷(순수 데이터). 타이핑이 필드에 안 들어갔을 때 CDP로 읽어
+// 채운 뒤 [`format_fill_diag`]로 "자세히 보기"용 한 덩어리 진단 문자열을 만든다. 세 원인
+// ①포커스 엇나감 ②안티봇 후킹 미설치 ③value 부분 커밋 을 신호로 구분한다.
+struct FillDiag<'a> {
+    selector: &'a str,
+    expected: usize,
+    got: usize,
+    /// 타이핑 직후 `document.activeElement.id`(포커스가 실제로 어디 잡혔나).
+    active_id: String,
+    /// 좌표를 찾아 마우스 클릭으로 포커스했나(false면 JS focus 폴백).
+    focused_via_mouse: bool,
+    field_visible: bool,
+    field_disabled: bool,
+    /// 타이핑 시점에 안티봇/keydown 암호화 스크립트가 로드돼 있었나.
+    antibot_ready: bool,
+}
+
+/// 진단 신호 조합으로 가장 유력한 실패 원인을 한 줄로 추정한다(순수 함수). 우선순위로 판정해
+/// 동시에 여러 조건이 걸려도 가장 근본 원인부터 가리킨다.
+fn fill_diag_cause(d: &FillDiag) -> &'static str {
+    let focus_ok = d.active_id == d.selector.trim_start_matches('#');
+    if !d.field_visible {
+        "필드가 화면에서 사라짐(타이핑 직전 재렌더) — 게이트가 못 거른 과도기"
+    } else if d.field_disabled {
+        "필드가 비활성(disabled) — 폼이 아직 잠겨 있음"
+    } else if !focus_ok {
+        "포커스가 입력칸에 안 잡힘(클릭 좌표 엇나감/오버레이가 가림) — 키가 다른 곳으로 감"
+    } else if !d.antibot_ready {
+        "안티봇 keydown 후킹이 미설치인 상태에서 입력 — DOM은 됐지만 후킹 늦음(게이트 강화 필요)"
+    } else if d.got > 0 {
+        "포커스·후킹 정상인데 value가 일부만 커밋(빠른 연타 경합) — 재시도로도 복구 실패"
+    } else {
+        "포커스·후킹 정상인데 키 입력이 value에 전혀 반영 안 됨(원인 미상 — 추가 조사 필요)"
+    }
+}
+
+/// [`FillDiag`]를 "자세히 보기"에 띄울 사람이 읽는 진단 문자열로 만든다(순수 함수).
+fn format_fill_diag(d: &FillDiag) -> String {
+    let focus_ok = d.active_id == d.selector.trim_start_matches('#');
+    let aid = if d.active_id.is_empty() {
+        "(없음)"
+    } else {
+        d.active_id.as_str()
+    };
+    format!(
+        "[자동입력 실패 진단] {sel} — 기대 {exp}자 · 실제 입력 {got}자 (3회 재시도 후)\n\
+         · 포커스: {focus} (activeElement=#{aid}, 마우스클릭 좌표={mouse})\n\
+         · 필드: 보임={vis}, disabled={dis}\n\
+         · 안티봇(keydown 암호화) 로드: {anti}\n\
+         → 추정 원인: {cause}",
+        sel = d.selector,
+        exp = d.expected,
+        got = d.got,
+        focus = if focus_ok { "정상" } else { "엇나감" },
+        mouse = if d.focused_via_mouse {
+            "찾음"
+        } else {
+            "못찾음(JS focus 폴백)"
+        },
+        vis = d.field_visible,
+        dis = d.field_disabled,
+        anti = d.antibot_ready,
+        cause = fill_diag_cause(d),
+    )
+}
+
 // 선택자를 마우스로 클릭해 포커스한 뒤 한 글자씩 실제 키 이벤트로 입력한다(keydown 후킹 암호화
 // 대응). 글자 사이 인위적 지연 없이 빠르게 연타한다(#267 후속). 입력 후 필드 값 길이를 확인해, 비어 있으면
-// (타이밍/렌더 문제로 헛친 경우) 최대 3회 재시도한다. 채워졌으면 `Ok(true)`, 3회 후에도 비어
-// 있으면 `Ok(false)`를 반환해 호출자가 판단하게 한다.
-fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<bool, AutomationError> {
+// (타이밍/렌더 문제로 헛친 경우) 최대 3회 재시도한다. 채워졌으면 `Ok(None)`(성공), 3회 후에도
+// 비어 있으면 원인 진단 문자열 `Ok(Some(diag))`를 반환해 호출자가 "자세히 보기" trace로 띄운다.
+fn type_into(
+    client: &mut CdpClient,
+    selector: &str,
+    text: &str,
+) -> Result<Option<String>, AutomationError> {
     let expected = text.chars().count();
+    // 실패 시 진단에 쓸 마지막 시도의 관측값(포커스 경로·입력된 글자 수).
+    let mut focused_via_mouse = false;
+    let mut last_got = 0usize;
 
     for attempt in 0..3 {
         // 첫 시도는 글자 사이 지연 없이 빠르게 친다(#267: 타이핑 리듬 지문 제거). 재시도부터는
@@ -794,7 +886,8 @@ fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<bool,
         );
         client.evaluate(&clear)?;
         // 포커스는 사람처럼 마우스 클릭으로. 좌표를 못 구하면 JS focus로 폴백.
-        if !mouse_click_selector(client, selector)? {
+        focused_via_mouse = mouse_click_selector(client, selector)?;
+        if !focused_via_mouse {
             let focus = format!(
                 "(()=>{{const el=document.querySelector('{selector}');\
                  if(el){{el.focus();return true;}}return false;}})()"
@@ -849,13 +942,45 @@ fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<bool,
             ))?
             .as_u64()
             .unwrap_or(0) as usize;
+        last_got = got;
         if got >= expected {
-            return Ok(true);
+            return Ok(None);
         }
         sleep(Duration::from_millis(500));
     }
-    // 3회 후에도 채우지 못함 — 호출자가 빈 자격증명으로 진행하지 않도록 false를 알린다.
-    Ok(false)
+    // 3회 후에도 채우지 못함 — 어느 원인인지(포커스 엇나감/안티봇 미설치/value 부분 커밋)
+    // 구분할 수 있게 현재 상태를 한 번에 스냅샷해 진단 문자열로 돌려준다. 호출자는 이를
+    // "자세히 보기" trace로 띄우고, 빈 자격증명으로는 진행하지 않는다.
+    let active_id = client
+        .evaluate_string(
+            "(()=>{const ae=document.activeElement;return ae&&ae.id?ae.id:'';})()",
+        )
+        .unwrap_or_default();
+    let field_visible = client
+        .evaluate_bool(&format!(
+            "(()=>{{const e=document.querySelector('{selector}');\
+             return !!(e&&e.offsetParent!==null);}})()"
+        ))
+        .unwrap_or(false);
+    let field_disabled = client
+        .evaluate_bool(&format!(
+            "(()=>{{const e=document.querySelector('{selector}');\
+             return !!(e&&e.disabled);}})()"
+        ))
+        .unwrap_or(false);
+    let antibot_ready = client.evaluate_bool(ANTIBOT_READY_JS).unwrap_or(false);
+    let diag = format_fill_diag(&FillDiag {
+        selector,
+        expected,
+        got: last_got,
+        active_id,
+        focused_via_mouse,
+        field_visible,
+        field_disabled,
+        antibot_ready,
+    });
+    tracing::warn!("[LOGIN] ✗ {diag}");
+    Ok(Some(diag))
 }
 
 // 셀렉터에 해당하는 "화면에 보이는" 요소가 있는지 확인한다. `offsetParent`가 null이면
@@ -965,6 +1090,51 @@ pub(crate) fn has_session_cookies(cookies: &[Value]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn diag(active_id: &str, antibot: bool, got: usize, vis: bool, dis: bool) -> FillDiag<'static> {
+        FillDiag {
+            selector: "#id",
+            expected: 6,
+            got,
+            active_id: active_id.to_owned(),
+            focused_via_mouse: true,
+            field_visible: vis,
+            field_disabled: dis,
+            antibot_ready: antibot,
+        }
+    }
+
+    #[test]
+    fn fill_diag_blames_focus_when_active_element_elsewhere() {
+        // 포커스가 #id가 아닌 다른 곳(#pw)에 잡혔으면 '키가 다른 곳으로 감'을 가리킨다.
+        let s = format_fill_diag(&diag("pw", true, 0, true, false));
+        assert!(s.contains("포커스가 입력칸에 안 잡힘"), "{s}");
+        assert!(s.contains("엇나감"), "{s}");
+    }
+
+    #[test]
+    fn fill_diag_blames_antibot_when_focused_but_hook_missing() {
+        // 포커스는 맞는데 안티봇 후킹이 아직 없으면 '게이트 강화 필요'를 가리킨다(사수 의도 위반).
+        let s = format_fill_diag(&diag("id", false, 0, true, false));
+        assert!(s.contains("안티봇 keydown 후킹"), "{s}");
+        assert!(s.contains("게이트 강화"), "{s}");
+    }
+
+    #[test]
+    fn fill_diag_blames_partial_commit_when_some_chars_typed() {
+        // 포커스·후킹 정상인데 일부 글자만 들어갔으면 연타 경합(부분 커밋)을 가리킨다.
+        let s = format_fill_diag(&diag("id", true, 3, true, false));
+        assert!(s.contains("일부만 커밋"), "{s}");
+    }
+
+    #[test]
+    fn fill_diag_blames_visibility_and_disabled_first() {
+        // 보임/disabled 문제는 포커스·안티봇보다 앞서 근본 원인으로 잡는다.
+        let gone = format_fill_diag(&diag("pw", false, 0, false, false));
+        assert!(gone.contains("화면에서 사라짐"), "{gone}");
+        let locked = format_fill_diag(&diag("pw", false, 0, true, true));
+        assert!(locked.contains("비활성(disabled)"), "{locked}");
+    }
 
     #[test]
     fn ready_streak_accumulates_and_resets_on_flap() {
