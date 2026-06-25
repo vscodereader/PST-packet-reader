@@ -19,17 +19,21 @@ use super::{
 /// 한 계정을 로그인하고 쿠키를 저장한다(승격 루프 포함). 결과는 계정 상태/안내로 해석해
 /// [`LoginResolution`]으로 돌려준다 — 실패 계열(비번오류/인증/차단)도 `Err`로 뭉개지 않고
 /// 세분화된 상태를 보존한다.
+///
+/// `manual_captcha`가 true이면(보류 계정 재로그인) 캡차가 떠도 사용자가 직접 풀도록 창을
+/// 성공까지 열어둔다. false이면(첫 로그인) 캡차는 grace 없이 즉시 실패(보류)로 떨어진다.
 pub(crate) fn login(
     paths: &RuntimePaths,
     account: &Account,
     headless: bool,
+    manual_captcha: bool,
 ) -> Result<LoginResolution, OrchestratorError> {
-    let (outcome, trace) = attempt(&account.id, &account.password, headless)?;
+    let (outcome, trace) = attempt(&account.id, &account.password, headless, manual_captcha)?;
 
     // headless에서 챌린지가 나오면 headed로 승격해 사용자가 직접 해결하도록 재실행.
     let (outcome, trace) = match outcome {
         LoginOutcome::ChallengeRequired { .. } if headless => {
-            attempt(&account.id, &account.password, false)?
+            attempt(&account.id, &account.password, false, manual_captcha)?
         }
         other => (other, trace),
     };
@@ -43,6 +47,7 @@ fn attempt(
     id: &str,
     pw: &str,
     headless: bool,
+    manual_captcha: bool,
 ) -> Result<(LoginOutcome, Option<String>), OrchestratorError> {
     let handle = chrome::launch(headless)?;
     // CDP 연결/Page 활성화 실패는 AutomationError(백트레이스 보유)다. 인프라 Err로 뭉개
@@ -65,8 +70,9 @@ fn attempt(
         ));
     }
 
-    // headed(=!headless)면 사용자가 캡차/2차 인증을 직접 풀 동안 기다린다.
-    let (outcome, trace) = login_flow::run(&mut client, id, pw, !headless);
+    // headed(=!headless)면 사용자가 캡차/2차 인증을 직접 풀 동안 기다린다. manual_captcha는
+    // 보류 계정 재로그인일 때만 true라, 캡차 직접 입력을 창을 열어둔 채 기다린다.
+    let (outcome, trace) = login_flow::run(&mut client, id, pw, !headless, manual_captcha);
 
     drop(client);
     drop(handle); // ChromeHandle Drop이 프로세스/임시 프로필을 정리한다.

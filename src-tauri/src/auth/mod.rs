@@ -38,11 +38,11 @@ pub async fn bootstrap_runtime() -> Result<RuntimePaths, OrchestratorError> {
     Ok(paths)
 }
 
-// `_app`은 sidecar 시절 shell 실행에 쓰였으나, CDP 로그인으로 전환하며 더는 쓰이지 않는다.
-// 큐 워커가 `AppHandle<R>`를 넘기므로(IPC 테스트의 MockRuntime 포함) 제네릭 시그니처는
-// 유지하되, 본문은 CDP 로그인을 직접 호출하므로 핸들은 사용하지 않는다.
+// `app`은 보류(OnHold) 계정 재로그인 판정(manual_captcha)을 위해 IPC 계정 상태를 조회하는 데
+// 쓴다. 큐 워커가 `AppHandle<R>`를 넘기므로(IPC 테스트의 MockRuntime 포함) 제네릭 시그니처를
+// 유지한다.
 pub(crate) async fn process_account<R: Runtime>(
-    _app: &AppHandle<R>,
+    app: &AppHandle<R>,
     account_id: &str,
     headless: bool,
     use_adb: bool,
@@ -88,10 +88,26 @@ pub(crate) async fn process_account<R: Runtime>(
         .await;
     }
 
+    // 보류(OnHold) 계정의 재로그인이면 캡차를 사용자가 직접 풀도록 창을 열어둔다(manual_captcha).
+    // 계정의 현재 상태는 IPC 계정 스토어에서 loginId로 찾는다. 스토어가 없으면(테스트 등) false.
+    // 첫 로그인(상태 != OnHold)이면 false라, 캡차가 떠도 grace 없이 즉시 보류로 떨어진다.
+    use tauri::Manager;
+    let manual_captcha = app
+        .try_state::<crate::store::JsonStore<crate::ipc::accounts::Account>>()
+        .map(|store| {
+            store.snapshot().iter().any(|a| {
+                a.login_id == account_id
+                    && a.status == crate::ipc::accounts::AccountStatus::OnHold
+            })
+        })
+        .unwrap_or(false);
+
     // CDP 로그인은 Chrome을 띄워 동기적으로 동작하므로 blocking 스레드에서 실행한다.
-    tauri::async_runtime::spawn_blocking(move || login::login(&paths, &account, headless))
-        .await
-        .map_err(|error| OrchestratorError::CommandFailed(format!("로그인 스레드 오류: {error}")))?
+    tauri::async_runtime::spawn_blocking(move || {
+        login::login(&paths, &account, headless, manual_captcha)
+    })
+    .await
+    .map_err(|error| OrchestratorError::CommandFailed(format!("로그인 스레드 오류: {error}")))?
 }
 
 // 로컬 쿠키가 유효해 보일 때 실제 로그인을 건너뛸지(단락) 판정한다. 단, 명시적 재로그인
