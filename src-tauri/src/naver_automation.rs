@@ -550,6 +550,44 @@ impl CdpClient {
             .unwrap_or_default())
     }
 
+    /// `target_expr`(예: `document.querySelector('#pw')`)가 가리키는 객체에 `event_type` 리스너가
+    /// **실제로 붙어 있는지** CDP로 직접 관측한다(best-effort). 봇탐지 keydown 암호화 후킹이
+    /// "파일 다운로드"를 넘어 정말 설치됐는지 확인하는 데 쓴다(로그인 폼 게이트 강화).
+    ///
+    /// `DOMDebugger.getEventListeners`는 RemoteObject `objectId`가 필요하므로, 먼저
+    /// `Runtime.evaluate`(returnByValue=false)로 노드 핸들을 얻은 뒤 조회한다. 어떤 단계든 실패하면
+    /// `false`를 돌려준다 — 호출부가 안전 폴백으로 진행하므로 `false`가 로그인을 막지 않는다.
+    pub(crate) fn expr_has_listener(&mut self, target_expr: &str, event_type: &str) -> bool {
+        let object_id = match self.call(
+            "Runtime.evaluate",
+            json!({ "expression": target_expr, "returnByValue": false }),
+        ) {
+            Ok(v) => v
+                .get("result")
+                .and_then(|r| r.get("objectId"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            Err(_) => None,
+        };
+        let Some(object_id) = object_id else {
+            return false;
+        };
+        let listeners = match self.call(
+            "DOMDebugger.getEventListeners",
+            json!({ "objectId": object_id }),
+        ) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        listeners
+            .get("listeners")
+            .and_then(Value::as_array)
+            .is_some_and(|arr| {
+                arr.iter()
+                    .any(|li| li.get("type").and_then(Value::as_str) == Some(event_type))
+            })
+    }
+
     // 현재 Chrome 탭의 URL을 읽는 함수입니다.
     pub(crate) fn current_url(&mut self) -> AutomationResult<String> {
         self.evaluate_string("location.href")

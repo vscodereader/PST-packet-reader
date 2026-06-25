@@ -507,6 +507,12 @@ fn challenge_kind_label(kind: ChallengeKind) -> &'static str {
 // 암호화 훅이 덜 붙어 캡차가 유발된다. 100ms 폴링 × 3회면 ~0.2초 안정 구간을 확보한다.
 const FORM_READY_STABLE_POLLS: u32 = 3;
 
+/// DOM(①문서 ②리소스 ③안티봇 파일)이 준비된 뒤, keydown 암호화 후킹(④)이 입력칸에 실제로
+/// 설치되길 추가로 기다리는 최대 폴 수(×100ms ≈ 5초). 사수 지시 "DOM 다 로드 후 입력"을 파일
+/// 다운로드가 아니라 **후킹 실제 설치**까지로 강화하되, 관측이 안 되거나 네이버가 구조를 바꿔도
+/// 로그인이 무한 대기에 빠지지 않게 상한을 둔다(이 안에 못 잡으면 미확인 경고 후 진행).
+const HOOK_CONFIRM_MAX_POLLS: u32 = 50;
+
 /// "폼 준비" 신호의 연속 안정 횟수를 갱신한다(순수 함수). 준비됐으면 누적, 한 번이라도
 /// 흔들리면 0으로 리셋한다. `FORM_READY_STABLE_POLLS` 이상이면 호출부가 진행한다.
 fn next_ready_streak(streak: u32, ready_now: bool) -> u32 {
@@ -577,6 +583,15 @@ fn login_form_gate_open(form_ready: bool, resources_settled: bool, antibot_ready
 // 키 입력 암호화/봇탐지 스크립트가 덜 자리잡아 캡차가 유발된다. 게다가 한 번 true가 떠도
 // 곧바로 진행하지 않고 연속 `FORM_READY_STABLE_POLLS`회 안정될 때만 빠져나가, "맨 마지막"
 // 문서까지 자리잡은 것을 확인한다. 진행 상황을 stderr로 출력한다.
+// keydown 암호화 후킹이 입력칸에 **실제로 설치**됐는지 관측한다(파일 다운로드=antibot_ready 와
+// 별개). 네이버 default_ecc 등은 자격증명 입력칸(#pw/#id)에 keydown 리스너를 붙여 입력을
+// 암호화하므로, 둘 중 하나라도 keydown 리스너가 있으면 후킹이 살아 있다고 본다. CDP 관측이 안
+// 되면(환경차/네이버 변경) false — 호출부가 안전 폴백(HOOK_CONFIRM_MAX_POLLS)으로 진행한다.
+fn keydown_hook_installed(client: &mut CdpClient) -> bool {
+    client.expr_has_listener("document.querySelector('#pw')", "keydown")
+        || client.expr_has_listener("document.querySelector('#id')", "keydown")
+}
+
 fn wait_for_login_form(client: &mut CdpClient) -> bool {
     tracing::info!("[LOGIN] 로그인 폼 로딩 대기 중...");
     // 고정 대기가 아니라 폼 DOM(#id/#pw + 로그인 버튼 + 모든 iframe)이 자리잡는 즉시 진행한다.
@@ -608,6 +623,9 @@ fn wait_for_login_form(client: &mut CdpClient) -> bool {
     // 직전 폴의 "완료 리소스 수". 이번 폴과 같으면 그 사이 새로 끝난(=로딩 중이던) 리소스가
     // 없다 = 로딩 정착(조건 ②). 첫 폴은 비교 대상이 없어 정착으로 보지 않는다.
     let mut prev_res_count: Option<i64> = None;
+    // 조건 ④(keydown 후킹 설치) 관측 상태. DOM(①②③)이 준비된 폴 수와, 후킹을 한 번이라도 확인했는지.
+    let mut dom_ready_polls = 0u32;
+    let mut hook_confirmed = false;
     loop {
         // form_ready 평가가 Err면 CDP 연결 이상(Chrome 닫힘/크래시일 수 있음). 일시적일 수
         // 있어 곧장 중단하지 않고, 연속 MAX_CONN_FAIL회 실패할 때만 Chrome이 사라진 것으로 보고
@@ -639,12 +657,33 @@ fn wait_for_login_form(client: &mut CdpClient) -> bool {
             .unwrap_or(-1);
         let resources_settled = res_count >= 0 && prev_res_count == Some(res_count);
         prev_res_count = Some(res_count);
-        let gate = login_form_gate_open(form_ready, resources_settled, antibot_seen);
+        let dom_gate = login_form_gate_open(form_ready, resources_settled, antibot_seen);
+        // 조건 ④: keydown 암호화 후킹이 "파일 다운로드"(③)를 넘어 입력칸에 **실제 설치**됐는지 CDP로
+        // 직접 관측한다(antibot_ready 의 한계 보완). DOM(①②③)이 준비된 동안에만 본다. 후킹이 확인되면
+        // 통과하고, 안 잡혀도 DOM 준비가 HOOK_CONFIRM_MAX_POLLS만큼 지속되면 무한 대기를 막으려 진행한다.
+        let hook_ready = if dom_gate {
+            dom_ready_polls += 1;
+            if !hook_confirmed {
+                hook_confirmed = keydown_hook_installed(client);
+            }
+            hook_confirmed || dom_ready_polls >= HOOK_CONFIRM_MAX_POLLS
+        } else {
+            dom_ready_polls = 0;
+            false
+        };
+        let gate = dom_gate && hook_ready;
         streak = next_ready_streak(streak, gate);
         if streak >= FORM_READY_STABLE_POLLS {
-            tracing::info!(
-                "[LOGIN] ✓ 로그인 폼 완전 로딩 확인 (readyState=complete · #id/#pw 입력 가능 · 로그인 버튼 준비 · 리소스 로딩 정착(새 리소스 없음) · 안티봇/암호화 스크립트 로드 확인 · {FORM_READY_STABLE_POLLS}회 연속 안정)"
-            );
+            if hook_confirmed {
+                tracing::info!(
+                    "[LOGIN] ✓ 로그인 폼 완전 로딩 확인 (readyState=complete · #id/#pw 입력 가능 · 로그인 버튼 준비 · 리소스 로딩 정착 · 안티봇 스크립트 로드 · keydown 암호화 후킹 설치 확인 · {FORM_READY_STABLE_POLLS}회 연속 안정)"
+                );
+            } else {
+                tracing::warn!(
+                    "[LOGIN] ⚠ keydown 암호화 후킹을 ~{}초 동안 확인하지 못해 진행합니다 — 봇탐지/캡차가 뜨면 '자세히 보기'의 자동입력 진단(안티봇 미설치)을 확인하세요",
+                    HOOK_CONFIRM_MAX_POLLS / 10
+                );
+            }
             return true;
         }
         // 시간 초과로 취소하지 않는다(사수 지시) — DOM이 끝까지 로드될 때까지 계속 기다린다.
