@@ -470,6 +470,35 @@ fn result_dom_gate_open(streak: u32) -> bool {
     streak >= RESULT_DOM_STABLE_POLLS
 }
 
+// 네이버 안티봇/키입력 암호화 스크립트가 "실제로 로드(주입)"됐는지 본다(사수·사용자 지시: DOM이
+// 다 붙어도 봇탐지/암호화 스크립트가 늦게 주입되면 그 전에 타이핑→캡차. 그래서 iframe 개수만이
+// 아니라 이 스크립트가 네트워크로 받아져 자리잡은 것까지 확인하고 넘어간다). performance resource
+// 타이밍은 리소스가 "다운로드 완료"됐을 때만 엔트리가 생기므로, 아래 패턴이 잡히면 스크립트가
+// 실제로 붙은 것이다. wtm.pstatic.net=봇탐지 번들, default_ecc=keydown 암호화(eccpw), ncaptcha=캡차.
+const ANTIBOT_READY_JS: &str = "(()=>{try{\
+    const r=performance.getEntriesByType('resource');\
+    return r.some(e=>/wtm\\.pstatic\\.net|default_ecc|ncaptcha|nclk\\.naver/i.test(e.name));\
+}catch(e){return false;}})()";
+
+// 페이지가 받은 "완료된 리소스 수"를 센다(사수 의도: 돔이 '전부' 붙었는지 — iframe 몇 개만이
+// 아니라 페이지가 받는 모든 리소스(문서·스크립트·iframe·늦게 주입되는 것 포함) 로딩이 멈췄는지).
+// PerformanceResourceTiming 엔트리는 리소스가 "끝났을 때"만 추가되므로, 이 수가 폴링 간에 더
+// 늘지 않으면 = 그 사이 새로 끝난(=로딩 중이던) 리소스가 없다 = 로딩이 정착했다는 뜻이다.
+// 늦게 주입되는 스크립트/iframe도 끝나는 순간 이 수를 늘리므로 "그 순간 iframe만" 한계를 없앤다.
+const RESOURCE_COUNT_JS: &str =
+    "(()=>{try{return performance.getEntriesByType('resource').length;}catch(e){return -1;}})()";
+
+/// 로그인 폼 진행 게이트(순수 함수). 사수 의도(돔이 전부 제대로 붙음)를 세 신호 **모두**로
+/// 엄격 판정한다(폴백 없음):
+/// ① `form_ready`(상위문서 complete + #id/#pw 보임·입력가능 + 로그인 버튼).
+/// ② `resources_settled`(직전 폴 대비 완료 리소스 수 불변 = 새로 끝난 로딩이 없음 = 로딩 정착).
+/// ③ `antibot_ready`(봇탐지/keydown 암호화 스크립트가 실제 로드됐는지).
+/// 셋 다 만족하고 연속(FORM_READY_STABLE_POLLS회) 안정일 때만 진행한다. 하나라도 안 되면 10초
+/// 상한까지 대기하고, 끝내 안 되면 타이핑하지 않고 로그인을 실패시킨다(캡차 유발 방지가 우선).
+fn login_form_gate_open(form_ready: bool, resources_settled: bool, antibot_ready: bool) -> bool {
+    form_ready && resources_settled && antibot_ready
+}
+
 // 로그인 폼이 "완전히" 로딩될 때까지 기다린다: 상위 문서 로딩 완료(readyState=complete) +
 // #id/#pw가 화면에 보이고 입력 가능(disabled 아님) + 로그인 버튼 존재 + **모든 하위 문서(iframe)
 // 까지 complete**. 마지막 조건이 사수 지시의 핵심이다 — 네이버 로그인은 상위 문서 하나가 아니라
@@ -499,17 +528,36 @@ fn wait_for_login_form(client: &mut CdpClient) -> bool {
         });\
     })()";
     let mut streak = 0u32;
+    // 안티봇/암호화 스크립트를 한 번이라도 로드 확인했는지. performance 엔트리는 사라지지 않으니
+    // 한 번 true면 계속 true로 둔다(엄격 게이트의 필수 조건 ③).
+    let mut antibot_seen = false;
+    // 직전 폴의 "완료 리소스 수". 이번 폴과 같으면 그 사이 새로 끝난(=로딩 중이던) 리소스가
+    // 없다 = 로딩 정착(조건 ②). 첫 폴은 비교 대상이 없어 정착으로 보지 않는다.
+    let mut prev_res_count: Option<i64> = None;
     loop {
-        let ready_now = client.evaluate_bool(ready_expr).unwrap_or(false);
-        streak = next_ready_streak(streak, ready_now);
+        let form_ready = client.evaluate_bool(ready_expr).unwrap_or(false);
+        if !antibot_seen {
+            antibot_seen = client.evaluate_bool(ANTIBOT_READY_JS).unwrap_or(false);
+        }
+        let res_count = client
+            .evaluate(RESOURCE_COUNT_JS)
+            .ok()
+            .and_then(|v| v.as_i64())
+            .unwrap_or(-1);
+        let resources_settled = res_count >= 0 && prev_res_count == Some(res_count);
+        prev_res_count = Some(res_count);
+        let gate = login_form_gate_open(form_ready, resources_settled, antibot_seen);
+        streak = next_ready_streak(streak, gate);
         if streak >= FORM_READY_STABLE_POLLS {
             tracing::info!(
-                "[LOGIN] ✓ 로그인 폼 완전 로딩 확인 (readyState=complete · #id/#pw 입력 가능 · 로그인 버튼 준비 · 모든 iframe complete · {FORM_READY_STABLE_POLLS}회 연속 안정)"
+                "[LOGIN] ✓ 로그인 폼 완전 로딩 확인 (readyState=complete · #id/#pw 입력 가능 · 로그인 버튼 준비 · 리소스 로딩 정착(새 리소스 없음) · 안티봇/암호화 스크립트 로드 확인 · {FORM_READY_STABLE_POLLS}회 연속 안정)"
             );
             return true;
         }
         if Instant::now() >= deadline {
-            tracing::info!("[LOGIN] ✗ 로그인 폼 로딩 시간 초과(10초)");
+            tracing::info!(
+                "[LOGIN] ✗ 로그인 폼/리소스/스크립트가 10초 안에 다 붙지 않음 — 캡차 방지를 위해 타이핑하지 않고 실패시킴"
+            );
             return false;
         }
         sleep(Duration::from_millis(100));
@@ -844,6 +892,17 @@ mod tests {
         s = next_ready_streak(s, true);
         s = next_ready_streak(s, true);
         assert!(s >= FORM_READY_STABLE_POLLS);
+    }
+
+    #[test]
+    fn login_form_gate_requires_form_resources_and_antibot_all() {
+        // 엄격 게이트(사수 의도): 폼 준비 + 리소스 정착 + 안티봇 스크립트 로드, 셋 다 만족해야 진행.
+        assert!(login_form_gate_open(true, true, true));
+        // 셋 중 하나라도 빠지면 진행하지 않는다(타이핑 미진행 → 캡차 방지).
+        assert!(!login_form_gate_open(false, true, true)); // 폼 미준비
+        assert!(!login_form_gate_open(true, false, true)); // 리소스 아직 로딩 중(정착 안 됨)
+        assert!(!login_form_gate_open(true, true, false)); // 안티봇/암호화 스크립트 미로드
+        assert!(!login_form_gate_open(false, false, false));
     }
 
     #[test]
