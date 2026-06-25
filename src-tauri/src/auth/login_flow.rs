@@ -84,6 +84,10 @@ pub(crate) enum LoginOutcome {
     /// 후속). 일반 `Error`와 달리 사람이 직접 풀면 회복 가능한 상태라, 계정을 "보류"(`OnHold`)로
     /// 표시해 사용자가 보류 계정만 골라 다시 풀 수 있게 한다.
     CaptchaUnsolved,
+    /// 로그인 후 "본인확인(휴대전화 번호)" 화면이 떠 로그인을 보류한 상태(전화번호 패킷분석).
+    /// 캡차와 동일하게 계정을 "보류"(`OnHold`)로 둔다. ID가 010+숫자8자리면 그 번호를 입력·확인까지
+    /// 시도하되 바로 성공하지 않으면, 형식이 아니면 즉시, 이 상태로 떨어진다.
+    PhoneVerify,
     Error(String),
 }
 
@@ -100,6 +104,8 @@ pub(crate) struct PageSignals {
     pub protected: bool,
     /// 계정 잠금 안내 본문("아이디 잠금") 감지(#243). `blocked`와 겹치지만 명확한 종료 신호.
     pub locked: bool,
+    /// 로그인 후 "본인확인(휴대전화 번호)" 화면(`#phone_value` tel 입력칸) 감지. 캡차처럼 보류로 처리.
+    pub phone_verify: bool,
 }
 
 /// 진행 중/확정 신호.
@@ -114,6 +120,9 @@ pub(crate) enum Signal {
     Protected,
     /// 계정 잠금 확정(본문 텍스트 기반, #243). `Protected`와 같이 headed여도 즉시 실패시킨다.
     Locked,
+    /// 본인확인(휴대전화 번호) 화면 감지(전화번호 패킷분석). ID가 010+8자리면 번호 입력·확인까지
+    /// 시도하고, 아니면 즉시 보류(OnHold)로 떨어뜨린다.
+    PhoneVerify,
 }
 
 /// 폴링 한 스텝의 판정 결과. 루프는 이 값을 실제 동작(반환/대기)으로 옮긴다.
@@ -137,6 +146,9 @@ enum LoopDecision {
     ConfirmedProtected,
     /// 잠금 확정 — 즉시 실패(`LoginOutcome::Locked`)로 옮긴다(#243).
     ConfirmedLocked,
+    /// 본인확인(휴대전화) 화면 — 루프가 ID 형식을 보고 번호 입력·확인을 시도하거나 즉시 보류로
+    /// 떨어뜨린다(클라이언트 동작이 필요해 순수 decide_loop_step이 아닌 루프 arm에서 처리).
+    HandlePhoneVerify,
     /// 아직 결과 미확정(중간 상태) — 계속 폴링한다.
     KeepWaiting,
 }
@@ -175,6 +187,8 @@ fn decide_loop_step(
         }
         // 본인인증(OTP)·새 기기 인증(Device)은 캡차 외라 즉시 실패시킨다(#267-13).
         Signal::Challenge(kind) => LoopDecision::FailUnsupportedChallenge(kind),
+        // 본인확인(휴대전화 번호) 화면 — 루프 arm이 ID 형식 보고 번호 입력·확인 시도 또는 즉시 보류.
+        Signal::PhoneVerify => LoopDecision::HandlePhoneVerify,
         // 비번오류/차단은 즉시 확정한다(사용자 지시: 즉시 실패). 클릭 직후 과도기 깜빡임은
         // 결과 DOM 게이트(리소스 정착 + 모든 iframe complete 3회 안정)가 이미 걸러, 여기 도달
         // 시점엔 DOM이 정착돼 있으므로 2회 latch가 더는 필요 없다.
@@ -198,6 +212,10 @@ pub(crate) fn classify(signals: &PageSignals) -> Signal {
         Signal::Challenge(ChallengeKind::Otp)
     } else if signals.device {
         Signal::Challenge(ChallengeKind::Device)
+    } else if signals.phone_verify {
+        // 본인확인(휴대전화) 화면. 캡차/OTP/기기 다음, 비번오류/잠금/차단보다 앞에서 잡는다 —
+        // 이 화면은 로그인 폼(#id)이 없어 blocked 휴리스틱과 겹칠 수 있으므로 먼저 분류한다.
+        Signal::PhoneVerify
     } else if signals.bad_credentials {
         Signal::BadCredentials
     } else if signals.locked {
@@ -324,6 +342,11 @@ fn run_inner(
     // 결과 페이지 DOM이 전부 complete로 안정된 연속 폴링 횟수(사수 지시: 결과 폴링도 돔 싹 다
     // 붙을 때까지). 임계치 전까지는 비번오류/차단/캡차 판정을 미룬다. 한 번이라도 흔들리면 0으로.
     let mut result_dom_streak = 0u32;
+    // 본인확인(휴대전화) 화면에서 번호 입력·확인을 이미 1회 시도했는지 + 그 시도 후 성공을 기다릴
+    // 상한. ID가 010+8자리일 때만 설정되고, 이 안에 로그인 안 되면 보류(OnHold)로 떨어뜨린다.
+    const PHONE_VERIFY_GRACE: Duration = Duration::from_secs(6);
+    let mut phone_attempted = false;
+    let mut phone_deadline: Option<Instant> = None;
     loop {
         // 인증 성공 직후 뜨는 "새 기기 등록" 페이지면 "등록 안함"을 눌러 마무리한다
         // (설계 5단계: browser_flow의 기존 로직 재사용). 없으면 무시한다.
@@ -346,15 +369,25 @@ fn run_inner(
                 return Ok(LoginOutcome::CaptchaUnsolved);
             }
         }
+        // 본인확인(휴대전화) 번호 입력·확인 후 성공 대기 상한. DOM이 잠깐 흔들려 아래 게이트에
+        // 막혀 있어도 상한은 지켜, 넘으면 보류(OnHold)로 취소한다(전화번호 패킷분석 처리).
+        if let Some(pd) = phone_deadline {
+            if Instant::now() >= pd {
+                return Ok(LoginOutcome::PhoneVerify);
+            }
+        }
 
         // 사수 지시: 결과 폴링도 DOM이 전부 붙을 때까지 기다린 뒤 판정한다. 상위 문서 + 모든
         // iframe이 complete로 연속 RESULT_DOM_STABLE_POLLS회 안정될 때까지는 결과를 판정하지
-        // 않고 폴링만 계속한다(과도기 DOM 오판 방지). 단, 캡차 직접 입력 대기 중(captcha_deadline
-        // 설정됨)이면 전체 deadline을 적용하지 않는다 — 위 캡차 상한이 따로 끊는다.
+        // 않고 폴링만 계속한다(과도기 DOM 오판 방지). 단, 캡차/본인확인 입력 대기 중이면 전체
+        // deadline을 적용하지 않는다 — 각자의 상한(captcha_deadline/phone_deadline)이 따로 끊는다.
         let dom_ready = client.evaluate_bool(ALL_DOCS_COMPLETE_JS).unwrap_or(false);
         result_dom_streak = next_ready_streak(result_dom_streak, dom_ready);
         if !result_dom_gate_open(result_dom_streak) {
-            if captcha_deadline.is_none() && Instant::now() >= deadline {
+            if captcha_deadline.is_none()
+                && phone_deadline.is_none()
+                && Instant::now() >= deadline
+            {
                 let url = client.current_url().unwrap_or_default();
                 return Ok(LoginOutcome::Error(format!(
                     "로그인 결과 페이지의 DOM이 끝까지 로딩되지 않아 취소했습니다. 마지막 페이지: {url}"
@@ -382,6 +415,28 @@ fn run_inner(
             }
             // 첫 로그인(일반 계정) 캡차: grace 없이 즉시 실패시키고 계정을 보류(OnHold)로 둔다.
             LoopDecision::FailCaptchaToHold => return Ok(LoginOutcome::CaptchaUnsolved),
+            // 본인확인(휴대전화 번호) 화면(전화번호 패킷분석). ID가 010+8자리면 그 번호를
+            // #phone_value에 입력하고 #oab.submit(확인)을 눌러 1회 시도한다(앞 +82 select는 안 건드림).
+            // 그 뒤 PHONE_VERIFY_GRACE 안에 로그인되면 위 logged_in에서 성공 확정, 안 되면 보류
+            // (OnHold, 위 phone_deadline). ID가 그 형식이 아니면 즉시 보류로 떨어뜨린다.
+            LoopDecision::HandlePhoneVerify => {
+                if !id_is_phone_format(id) {
+                    return Ok(LoginOutcome::PhoneVerify);
+                }
+                if !phone_attempted {
+                    let _ = type_into(client, "#phone_value", id)?;
+                    // 확인 버튼 클릭. id에 점이 있어 CSS 이스케이프(\\.)가 필요하다. 못 찾으면 폼의
+                    // submit으로 폴백한다.
+                    let _ = client.evaluate(
+                        "(()=>{const b=document.querySelector('#oab\\\\.submit')\
+                         ||document.querySelector('#frmNIDLogin input[type=submit]');\
+                         if(b){b.click();return true;}return false;})()",
+                    );
+                    phone_attempted = true;
+                    phone_deadline = Some(Instant::now() + PHONE_VERIFY_GRACE);
+                    pending_deadline = None;
+                }
+            }
             // 캡차가 아닌 추가 인증(본인인증 OTP/새 기기 인증) — 캡차 외라 즉시 실패(#267-13).
             LoopDecision::FailUnsupportedChallenge(kind) => {
                 return Ok(LoginOutcome::Error(format!(
@@ -406,8 +461,8 @@ fn run_inner(
             }
         }
 
-        // 캡차 직접 입력 대기 중이 아닐 때만 전체 deadline을 적용한다(네비게이션 정체 등).
-        if captcha_deadline.is_none() && Instant::now() >= deadline {
+        // 캡차/본인확인 입력 대기 중이 아닐 때만 전체 deadline을 적용한다(네비게이션 정체 등).
+        if captcha_deadline.is_none() && phone_deadline.is_none() && Instant::now() >= deadline {
             let url = client.current_url().unwrap_or_default();
             return Ok(LoginOutcome::Error(format!(
                 "로그인 시간이 초과되었습니다. 마지막 페이지: {url}"
@@ -852,6 +907,10 @@ fn read_signals(client: &mut CdpClient) -> Result<PageSignals, AutomationError> 
         && client
             .evaluate_bool("(document.body?.innerText||'').includes('아이디 잠금조치')")
             .unwrap_or(false);
+    // 본인확인(휴대전화 번호) 화면(전화번호 패킷분석). 화면에 보이는 tel 입력칸 `#phone_value`로
+    // 식별한다(placeholder "휴대전화 번호"). 이 화면은 로그인 폼(#id)이 없어 blocked 휴리스틱과
+    // 겹치므로 classify에서 blocked보다 앞서 처리한다.
+    let phone_verify = visible_exists(client, "#phone_value");
 
     Ok(PageSignals {
         logged_in,
@@ -862,7 +921,15 @@ fn read_signals(client: &mut CdpClient) -> Result<PageSignals, AutomationError> 
         blocked,
         protected,
         locked,
+        phone_verify,
     })
+}
+
+/// 로그인 ID가 "010 + 숫자 8자리"(총 11자리) 휴대전화 형식인지(순수 함수). 본인확인 화면에서
+/// 이 형식이면 그 번호를 입력·확인까지 시도하고, 아니면 즉시 보류로 떨어뜨린다(사용자 지시).
+pub(crate) fn id_is_phone_format(id: &str) -> bool {
+    let t = id.trim();
+    t.len() == 11 && t.starts_with("010") && t.bytes().all(|b| b.is_ascii_digit())
 }
 
 // Network.getCookies로 .naver.com 쿠키를 수거한다.
@@ -997,6 +1064,41 @@ mod tests {
             Signal::Blocked
         );
         assert_eq!(classify(&PageSignals::default()), Signal::Pending);
+    }
+
+    #[test]
+    fn classify_phone_verify_wins_over_blocked() {
+        // 본인확인(휴대전화) 화면도 로그인 폼(#id)이 없어 blocked 휴리스틱을 동시에 만족하지만,
+        // PhoneVerify로 먼저 분류돼야 한다(전화번호 패킷분석).
+        assert_eq!(
+            classify(&PageSignals {
+                phone_verify: true,
+                blocked: true,
+                ..Default::default()
+            }),
+            Signal::PhoneVerify
+        );
+    }
+
+    #[test]
+    fn phone_verify_decision_and_id_format() {
+        // 본인확인 화면은 루프 arm 처리(HandlePhoneVerify)로 넘긴다 — manual/headed 무관.
+        for (wfh, manual) in [(false, false), (true, false), (true, true)] {
+            assert_eq!(
+                decide_loop_step(Signal::PhoneVerify, wfh, manual),
+                LoopDecision::HandlePhoneVerify
+            );
+        }
+        // ID가 010+숫자8자리(총11자리)면 휴대전화 형식.
+        assert!(id_is_phone_format("01011111111"));
+        assert!(id_is_phone_format(" 01087654321 ")); // 공백 trim
+        // 아닌 형식은 모두 false.
+        assert!(!id_is_phone_format("0101111111")); // 10자리
+        assert!(!id_is_phone_format("010111111111")); // 12자리
+        assert!(!id_is_phone_format("01111111111")); // 010으로 시작 안 함
+        assert!(!id_is_phone_format("0101111111a")); // 숫자 아님
+        assert!(!id_is_phone_format("invest_king7")); // 일반 ID
+        assert!(!id_is_phone_format(""));
     }
 
     #[test]

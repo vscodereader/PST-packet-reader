@@ -104,6 +104,8 @@ pub(crate) fn outcome_to_status(outcome: &LoginOutcome) -> AccountStatus {
         }
         // 캡차 미해결은 사람이 직접 풀면 회복 가능하므로 별도 "보류"(OnHold)로 둔다(#267 후속).
         LoginOutcome::CaptchaUnsolved => AccountStatus::OnHold,
+        // 본인확인(휴대전화) 화면도 캡차와 동일하게 "보류"(OnHold)로 둔다(전화번호 패킷분석).
+        LoginOutcome::PhoneVerify => AccountStatus::OnHold,
         LoginOutcome::Error(_) => AccountStatus::Error,
     }
 }
@@ -140,7 +142,13 @@ pub(crate) fn resolve_non_ok(outcome: LoginOutcome, trace: Option<String>) -> Lo
             "계정이 잠겨 로그인할 수 없습니다. 네이버에서 본인 확인으로 잠금을 해제한 뒤 다시 시도하세요."
                 .to_owned()
         }
-        // Ok/BadCredentials/Blocked는 정적 안내 문구를 그대로 쓴다.
+        // 본인확인(휴대전화) 화면은 OnHold로 매핑되지만 안내는 캡차용이 아니라 전화 본인확인용으로
+        // 둔다(전화번호 패킷분석). ID가 010+8자리가 아니거나 번호 확인이 바로 통과 못 하면 보류된다.
+        LoginOutcome::PhoneVerify => {
+            "본인확인(휴대전화 번호) 화면이 떠 로그인이 보류되었습니다. 계정 ID가 휴대전화 형식이면 자동 입력을 시도하며, 통과하지 못하면 보류로 남습니다."
+                .to_owned()
+        }
+        // Ok/BadCredentials/Blocked/CaptchaUnsolved는 정적 안내 문구를 그대로 쓴다.
         _ => guide(&status).to_owned(),
     };
     if status == AccountStatus::Active {
