@@ -706,7 +706,14 @@ fn click_login_button(client: &mut CdpClient) -> Result<(), AutomationError> {
 fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<bool, AutomationError> {
     let expected = text.chars().count();
 
-    for _ in 0..3 {
+    for attempt in 0..3 {
+        // 첫 시도는 글자 사이 지연 없이 빠르게 친다(#267: 타이핑 리듬 지문 제거). 재시도부터는
+        // 글자마다 작은 지연을 줘, 0지연 연타로 마지막 글자들이 입력칸에 덜 반영되던 경우를 복구한다.
+        let per_key_delay = if attempt == 0 {
+            None
+        } else {
+            Some(Duration::from_millis(35))
+        };
         // 기존 값 비우기(재시도 시 중복 입력 방지). 셀렉터는 고정 안전 문자열(#id/#pw).
         let clear = format!(
             "(()=>{{const el=document.querySelector('{selector}');\
@@ -755,11 +762,17 @@ fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<bool,
                     "modifiers": modifiers,
                 }),
             )?;
-            // 글자 사이 인위적 지연을 두지 않는다(#267 후속 요청: 타이핑 지연 제거 → 빠른 입력).
-            // 키 다운/업은 CDP가 순서대로 동기 처리하고, code·keyCode를 채워 네이버 keydown 암호화
-            // 훅이 정상 동작하므로(합성 입력 탐지 회피의 핵심), 지연 없이 연타해도 값이 들어간다.
+            // 첫 시도는 지연 0(빠른 입력, #267). 재시도부터는 글자마다 작은 지연을 줘, 빠른
+            // 연타로 마지막 글자들이 입력칸에 덜 반영되던 경우를 복구한다.
+            if let Some(d) = per_key_delay {
+                sleep(d);
+            }
         }
 
+        // 타이핑 직후 곧장 value를 읽으면 네이버 keydown 암호화 훅이 마지막 글자들을 아직
+        // 반영하기 전이라 길이가 짧게 나올 수 있다(특히 긴 비번 — 18자 등 zero-delay 연타에서
+        // 발생). 검증 전 잠깐 정착 대기해, 정상 입력을 "빈 칸"으로 오판하지 않게 한다.
+        sleep(Duration::from_millis(180));
         let got = client
             .evaluate(&format!(
                 "(()=>{{const el=document.querySelector('{selector}');\
