@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Account } from "@/shared/data/types";
 
-import { buildLoginNowItem } from "./login-queue";
+import { buildLoginNowItem, isSelectiveLoginPlatform } from "./login-queue";
 
 function acct(over: Partial<Account>): Account {
   return {
@@ -71,5 +71,32 @@ describe("buildLoginNowItem", () => {
       "id-3",
     );
     expect(item.locs).toEqual([{ p: "band", name: "band01" }]);
+  });
+
+  it("블로그 계정도 종토방처럼 naver 로그인으로 묶는다", () => {
+    // 네이버블로그(blog)는 네이버 쿠키 기반이라 종토방과 동일하게 naver 로그인을 쓴다(선택 로그인).
+    const item = buildLoginNowItem(
+      [acct({ id: "b1", loginId: "blog01", platform: "blog" })],
+      "id-blog",
+    );
+    expect(item.plan?.login?.[0]).toMatchObject({
+      accountId: "blog01",
+      platform: "naver",
+      useAdb: true,
+      force: true,
+    });
+    // 큐 카드에는 원래 플랫폼(blog)으로 표시된다.
+    expect(item.locs).toEqual([{ p: "blog", name: "blog01" }]);
+  });
+});
+
+describe("isSelectiveLoginPlatform", () => {
+  it("종토방·블로그만 선택 로그인을 허용하고 카페·밴드는 막는다", () => {
+    // 종토방(forum)과 네이버블로그(blog)는 명시적 선택 로그인을 쓴다.
+    expect(isSelectiveLoginPlatform("forum")).toBe(true);
+    expect(isSelectiveLoginPlatform("blog")).toBe(true);
+    // 카페(naver)·밴드(band)는 게시 직전 백엔드가 로그인을 원자 처리하므로 선택 로그인 제외.
+    expect(isSelectiveLoginPlatform("naver")).toBe(false);
+    expect(isSelectiveLoginPlatform("band")).toBe(false);
   });
 });

@@ -443,9 +443,10 @@ describe("Accounts", () => {
     ).toBeInTheDocument();
   });
 
-  // 종토방(forum) 전용 선택 로그인(#228). 게시 직전 백엔드가 카페·밴드 로그인을 원자
-  // 처리하므로 선택 로그인은 종토방에만 남긴다 — 선택 계정이 전부 forum일 때만 버튼 노출.
-  describe("선택 로그인 (종토방 전용, #228)", () => {
+  // 선택 로그인은 종토방(forum)·네이버블로그(blog) 전용(#228 + 블로그 추가). 둘 다 네이버 쿠키
+  // 기반이라 naver 로그인으로 묶는다. 카페·밴드는 게시 직전 백엔드가 로그인을 원자 처리하므로
+  // 제외 — 선택 계정이 전부 forum/blog일 때만 버튼 노출(블로그 단위 검증은 login-queue.test.ts).
+  describe("선택 로그인 (종토방·블로그 전용, #228)", () => {
     // loginId 텍스트로 해당 행을 찾아 체크박스를 토글한다(인덱스 의존 회피).
     const toggleRow = async (loginId: string) => {
       const row = screen.getByText(loginId).closest("tr")!;

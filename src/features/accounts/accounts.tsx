@@ -37,7 +37,7 @@ import { ipc } from "@/shared/ipc";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo } from "@/shared/ui/platform-logo";
 
-import { buildLoginNowItem } from "./login-queue";
+import { buildLoginNowItem, isSelectiveLoginPlatform } from "./login-queue";
 
 const PER_PAGE = 10;
 const PLATFORM_OPTIONS = [
@@ -351,7 +351,7 @@ export function Accounts({ go }: { go: GoFn }) {
 
   // 선택한 계정을 즉시 처리 대기열(now 큐)에 로그인 작업으로 적재한다(#210). 로그인도
   // 게시와 같은 큐에서 처리되며, 성공/실패는 각 계정 status 배지와 알림 로그(자세히 보기의
-  // 백트레이스 포함)에 반영된다. 종토방 전용이므로 buildLoginNowItem은 forum→naver 로그인으로 묶는다.
+  // 백트레이스 포함)에 반영된다. 종토방·블로그 모두 buildLoginNowItem이 naver 로그인으로 묶는다.
   const runLogin = async () => {
     const targets = rows.filter(
       (r) => sel.includes(r.id) && r.loginId.trim() && r.pw,
@@ -434,12 +434,13 @@ export function Accounts({ go }: { go: GoFn }) {
   // 선택분. "선택 로그인 (N)" 카운트가 화면에 보이는 체크박스 수보다 커지던 문제를 막는다.
   const selPresent = sel.filter((id) => rows.some((r) => r.id === id));
 
-  // 선택 계정이 전부 종목토론방(forum)일 때만 선택 로그인을 허용한다(#228). 카페·밴드는
-  // 게시 직전 백엔드가 [회전→로그인→게시]를 원자 처리하므로 별도 로그인이 불필요하다.
-  // 네이버/밴드가 하나라도 섞이면 버튼을 숨긴다.
-  const forumOnly =
+  // 선택 계정이 전부 선택 로그인 지원 플랫폼(종목토론방·네이버블로그)일 때만 선택 로그인을
+  // 허용한다(#228 + 블로그 추가). 둘 다 네이버 쿠키 기반이라 buildLoginNowItem이 동일하게
+  // naver 로그인으로 묶는다. 카페·밴드는 게시 직전 백엔드가 [회전→로그인→게시]를 원자 처리하므로
+  // 별도 로그인이 불필요하다 — 하나라도 섞이면 버튼을 숨긴다.
+  const loginEligible =
     selPresent.length > 0 &&
-    acctPlatforms(selPresent, rows).every((p) => p === "forum");
+    acctPlatforms(selPresent, rows).every(isSelectiveLoginPlatform);
 
   const allTags = useMemo(
     () => [...new Set([...rows.flatMap((r) => r.tags)])],
@@ -498,7 +499,7 @@ export function Accounts({ go }: { go: GoFn }) {
           </Text>
         </Box>
         <Group gap="xs">
-          {forumOnly && (
+          {loginEligible && (
             <Button
               size="sm"
               variant="light"
