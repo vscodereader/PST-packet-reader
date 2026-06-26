@@ -2,7 +2,7 @@ import { Box } from "@mantine/core";
 
 import bandLogo from "@/assets/logos/band.svg";
 import blogLogo from "@/assets/logos/blog.svg";
-import clipLogo from "@/assets/logos/clip.png";
+import clipLogo from "@/assets/logos/clip.svg";
 import instagramLogo from "@/assets/logos/instagram.svg";
 import naverLogo from "@/assets/logos/naver.svg";
 import navercafeLogo from "@/assets/logos/navercafe.svg";
