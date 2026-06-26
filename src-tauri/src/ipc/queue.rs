@@ -148,6 +148,31 @@ pub struct BlogTarget {
     pub category_no: Option<u32>,
 }
 
+/// 네이버 클립 댓글 대상(#클립). 블로그처럼 네이버 쿠키를 재사용하는 댓글 전용 대상. 사용자가
+/// 창작자 링크(`https://clip.naver.com/@<handle>`)를 넣으면 그 창작자의 최신 미디어 `count`개에
+/// 댓글을 단다. 댓글 전 계정마다 클립 프로필 생성을 보장한다(워커). 기존 plan과 호환되도록
+/// 추가 필드는 기본값을 허용한다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
+#[serde(rename_all = "camelCase")]
+pub struct ClipTarget {
+    pub account_id: String,
+    /// 표시 이름(예약 시점 동결). 완료 로그/큐 표시에 handle 등을 보여준다.
+    pub name: String,
+    /// 창작자 핸들(@ 제외). 예: "dongzzi_chef". 최신 N개 조회의 대상이다.
+    pub handle: String,
+    /// 원본 링크(`https://clip.naver.com/@<handle>`). 완료 로그 표시용.
+    pub link: String,
+    /// "최신 N개" 모드: 채워지면 이 창작자의 최신 미디어 상위 N개에 댓글을 단다. None이면 1개.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub count: Option<u32>,
+    /// 미디어 종류 탭: "video"면 영상만(?tab=video), 그 외/None이면 전체(?tab=all). 기본=전체.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "string")]
+    pub media_type: Option<String>,
+}
+
 /// 로그인 배치의 계정 1건. `account_id`는 로그인 쿠키 키(= loginId) 규약을 따른다.
 /// `platform`이 `Band`면 band.us 로그인(`process_band_account`), 그 외(naver/forum 등)는
 /// 네이버 로그인(`process_account`)으로 처리된다(프론트 `runLogin`의 naver/band 분기 미러).
@@ -188,6 +213,9 @@ pub struct PublishPlan {
     /// 기존 plan과 호환되도록 기본값(빈 Vec)을 허용한다.
     #[serde(default)]
     pub blog: Vec<BlogTarget>,
+    /// 네이버 클립 댓글 대상(#클립). 블로그와 같은 네이버 쿠키 재사용. 기본값(빈 Vec) 허용.
+    #[serde(default)]
+    pub clip: Vec<ClipTarget>,
     /// 로그인 전용 아이템의 계정 목록. 게시 아이템에는 없다(직렬화 생략 → 기존 plan과 호환).
     /// 워커(`execute_item`)는 이 필드가 채워진 아이템을 게시 대신 계정별 로그인으로 처리한다
     /// (배치 1개 = 아이템 1개, 진행률 분모 = 계정 수). 일원화: 로그인도 now 큐로 흐른다(#210).
@@ -836,6 +864,7 @@ mod tests {
                 count: None,
                 category_no: None,
             }],
+            clip: vec![],
             login: None,
         }
     }
@@ -992,6 +1021,7 @@ mod tests {
             forum: vec![],
             band: vec![],
             blog: vec![],
+            clip: vec![],
             login: None,
         }
     }

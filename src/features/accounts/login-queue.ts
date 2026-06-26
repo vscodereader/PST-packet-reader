@@ -9,7 +9,7 @@ import type { Account, PlatformId } from "@/shared/data/types";
  * [회전→로그인→게시]를 원자 처리하므로 별도 선택 로그인이 불필요하다(#228, 블로그 추가).
  */
 export function isSelectiveLoginPlatform(platform: PlatformId): boolean {
-  return platform === "forum" || platform === "blog";
+  return platform === "forum" || platform === "blog" || platform === "clip";
 }
 
 /**
@@ -59,6 +59,7 @@ export function buildLoginNowItem(
       forum: [],
       band: [],
       blog: [],
+      clip: [],
       login,
     },
   };

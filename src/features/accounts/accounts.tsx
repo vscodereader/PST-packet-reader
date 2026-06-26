@@ -44,6 +44,7 @@ const PLATFORM_OPTIONS = [
   { value: "forum", label: "종목토론방" },
   { value: "naver", label: "네이버 카페" },
   { value: "blog", label: "네이버블로그" },
+  { value: "clip", label: "네이버 클립" },
   { value: "band", label: "밴드" },
 ];
 
@@ -474,6 +475,11 @@ export function Accounts({ go }: { go: GoFn }) {
       value: "blog",
       label: "네이버블로그",
       count: rows.filter((r) => r.platform === "blog").length,
+    },
+    {
+      value: "clip",
+      label: "네이버 클립",
+      count: rows.filter((r) => r.platform === "clip").length,
     },
     {
       value: "band",

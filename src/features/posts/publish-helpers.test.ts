@@ -8,6 +8,7 @@ import {
   parseBlogLink,
   parseBlogPostLink,
   parseCafeBoardLink,
+  parseClipLink,
   unreadyNaverAccountIds,
 } from "./publish-helpers";
 
@@ -336,5 +337,37 @@ describe("unreadyNaverAccountIds", () => {
     expect(
       unreadyNaverAccountIds(["a1", "a2"], accounts, picks, "post"),
     ).toEqual([]);
+  });
+});
+
+describe("parseClipLink", () => {
+  it("parses a creator handle from the clip URL", () => {
+    expect(parseClipLink("https://clip.naver.com/@dongzzi_chef")).toEqual({
+      handle: "dongzzi_chef",
+    });
+  });
+
+  it("reads the video tab", () => {
+    expect(
+      parseClipLink("https://clip.naver.com/@dongzzi_chef?tab=video"),
+    ).toEqual({ handle: "dongzzi_chef", mediaType: "video" });
+  });
+
+  it("reads the all tab", () => {
+    expect(
+      parseClipLink("https://clip.naver.com/@dongzzi_chef?tab=all"),
+    ).toEqual({ handle: "dongzzi_chef", mediaType: "all" });
+  });
+
+  it("unwraps a percent-encoded @ handle", () => {
+    expect(parseClipLink("https://clip.naver.com/%40dongzzi_chef")).toEqual({
+      handle: "dongzzi_chef",
+    });
+  });
+
+  it("returns null for non-clip or handle-less URLs", () => {
+    expect(parseClipLink("https://clip.naver.com/contents?x=1")).toBeNull();
+    expect(parseClipLink("https://blog.naver.com/jwh7596")).toBeNull();
+    expect(parseClipLink(undefined)).toBeNull();
   });
 });

@@ -101,6 +101,7 @@ describe("Queue", () => {
       forum: [],
       band: [],
       blog: [],
+      clip: [],
     };
     const items: QueueNowItem[] = [
       {

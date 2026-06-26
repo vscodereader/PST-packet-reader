@@ -23,6 +23,7 @@ fn platform_str(p: &PlatformId) -> &'static str {
         Forum => "forum",
         Naver => "naver",
         Blog => "blog",
+        Clip => "clip",
         Band => "band",
         Instagram => "instagram",
         Threads => "threads",

@@ -25,6 +25,7 @@ pub mod band_post;
 pub mod naver_cafe;
 // 네이버 블로그 댓글 게시(#271). 카페 저장 쿠키를 재사용하는 댓글 전용 모듈(별도 로그인 없음).
 pub mod naver_blog;
+pub mod naver_clip;
 // 네이버 증권 토론방 패킷 게시 엔진.
 pub mod discussion_batch;
 mod forum_stocks;
