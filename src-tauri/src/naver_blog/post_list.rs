@@ -18,6 +18,7 @@
 //! `Debug` 출력에 절대 포함하지 않는다.
 
 use super::error::BlogError;
+use super::headers::blog_document_headers;
 use crate::naver_cafe::post::BROWSER_USER_AGENT;
 
 /// 블로그 글 목록 API 호스트.
@@ -85,6 +86,12 @@ impl BlogPostListClient {
             self.base_url, blog_id, page, category_no, PAGE_SIZE
         );
         let mut req = self.http.get(&url).header("User-Agent", BROWSER_USER_AGENT);
+        // 위장 헤더(#312): 로그인 세션의 빈약한 요청은 봇차단당할 수 있어 PostView와 동일하게
+        // Referer(블로그 홈)·sec-fetch 등을 싣는다. PostTitleListAsync는 비교적 관대하지만 대칭을 맞춘다.
+        let referer = format!("{}/{}", self.base_url, blog_id);
+        for (name, value) in blog_document_headers(&referer) {
+            req = req.header(name, value);
+        }
         // 보안: Cookie 헤더 값은 로그에 기록하지 않는다.
         if let Some(c) = cookie {
             req = req.header("Cookie", c);
@@ -429,6 +436,24 @@ mod tests {
             .fetch_latest_posts(blog_id(), 7, 1, Some(fake_cookie))
             .await
             .expect("헤더/쿠키/categoryNo 매칭 성공해야 함");
+    }
+
+    // #312: 글 목록 GET도 PostView와 동일하게 위장 헤더(Referer + sec-fetch)를 실어야 한다.
+    #[tokio::test]
+    async fn fetch_sends_disguise_headers() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(list_path()))
+            .and(header_exists("Referer"))
+            .and(header("sec-fetch-mode", "navigate"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(list_body(1, &[1])))
+            .mount(&server)
+            .await;
+        let client = BlogPostListClient::with_base_url(server.uri());
+        client
+            .fetch_latest_posts(blog_id(), 0, 1, None)
+            .await
+            .expect("위장 헤더가 실려야 성공");
     }
 
     // ------------------------------------------------------------------

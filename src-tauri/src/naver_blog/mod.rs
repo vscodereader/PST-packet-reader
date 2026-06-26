@@ -4,6 +4,7 @@
 
 pub mod comment_client;
 pub mod error;
+pub(crate) mod headers;
 pub mod post_list;
 
 pub use comment_client::{BlogCommentClient, BlogCommentResult};

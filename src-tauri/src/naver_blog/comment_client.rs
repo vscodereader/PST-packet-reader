@@ -14,6 +14,7 @@
 //! `Debug` 출력에 절대 포함하지 않는다.
 
 use super::error::BlogError;
+use super::headers::{blog_cbox_headers, blog_document_headers};
 use crate::naver_cafe::post::BROWSER_USER_AGENT;
 
 /// 블로그 본문/cbox API 호스트.
@@ -64,9 +65,20 @@ impl BlogCommentClient {
             "{}/PostView.naver?blogId={}&logNo={}",
             self.blog_base, blog_id, log_no
         );
-        let html = self.get_text(&url, cookie).await?;
+        // 위장 헤더(#312): 로그인 세션인데 Referer·sec-fetch 등이 없으면 네이버가 봇 인터스티셜
+        // (200이지만 blogNo 없는 페이지)을 돌려줘 groupId를 못 찾는다. Referer는 같은 오리진의
+        // 블로그 홈으로 둬 sec-fetch-site: same-origin과 일관되게 한다.
+        let referer = format!("{}/{}", self.blog_base, blog_id);
+        let html = self
+            .get_text(&url, &blog_document_headers(&referer), cookie)
+            .await?;
         parse_group_id(&html).ok_or_else(|| {
-            BlogError::new("블로그 글에서 groupId를 찾지 못했습니다(삭제·비공개 글일 수 있어요)")
+            // 진단(#312): 또 막히면 어떤 응답이 왔는지 보이도록 길이 + 앞부분 스니펫을 남긴다.
+            // 본문(HTML)에는 쿠키가 없으므로 자격 증명 노출 위험이 없다.
+            BlogError::new(format!(
+                "블로그 글에서 groupId를 찾지 못했습니다(삭제·비공개 글이거나 네이버 봇차단 응답일 수 있어요). {}",
+                response_diagnostic(&html)
+            ))
         })
     }
 
@@ -83,8 +95,14 @@ impl BlogCommentClient {
             "{}/commentBox/cbox/web_naver_token_json.json?ticket=blog&templateId=default&pool=blogid&_cv=&lang=ko&pageType=default&country=&objectId={}&categoryId=&pageSize=50&indexSize=10&groupId={}&listType=OBJECT&userType=",
             self.cbox_base, object_id, group_id
         );
-        let _ = blog_id;
-        let body = self.get_text(&url, cookie).await?;
+        // cbox는 apis.naver.com(=same-site)이라 Referer를 글 PostView 페이지로 둔다(#312).
+        let referer = format!(
+            "{}/PostView.naver?blogId={}&logNo={}",
+            BLOG_HOST, blog_id, log_no
+        );
+        let body = self
+            .get_text(&url, &blog_cbox_headers(&referer), cookie)
+            .await?;
         parse_cbox_token(&body)
             .ok_or_else(|| BlogError::new("블로그 댓글 토큰(cbox_token)을 받지 못했습니다"))
     }
@@ -146,9 +164,12 @@ impl BlogCommentClient {
             .http
             .post(&url)
             .header("Content-Type", "application/x-www-form-urlencoded")
-            .header("Origin", BLOG_HOST)
-            .header("Referer", &referer)
             .header("User-Agent", BROWSER_USER_AGENT);
+        // 위장 헤더(#312): cbox 쓰기도 읽기와 동일한 same-site 지문을 실어 봇차단을 피한다.
+        // Referer만 이 글의 PostView로 따로 둔다(blog_cbox_headers가 Origin/sec-fetch/accept-language 채움).
+        for (name, value) in blog_cbox_headers(&referer) {
+            req = req.header(name, value);
+        }
         // 보안: Cookie 헤더 값은 로그에 기록하지 않는다.
         if let Some(c) = cookie {
             req = req.header("Cookie", c);
@@ -195,9 +216,18 @@ impl BlogCommentClient {
             .await
     }
 
-    /// 공통 GET — 쿠키 헤더와 브라우저 User-Agent를 실어 본문 텍스트를 받는다.
-    async fn get_text(&self, url: &str, cookie: Option<&str>) -> Result<String, BlogError> {
+    /// 공통 GET — 위장 헤더 세트(#312)·쿠키·브라우저 User-Agent를 실어 본문 텍스트를 받는다.
+    /// `headers`는 [`blog_document_headers`]/[`blog_cbox_headers`]가 만든 (이름, 값) 목록이다.
+    async fn get_text(
+        &self,
+        url: &str,
+        headers: &[(&str, String)],
+        cookie: Option<&str>,
+    ) -> Result<String, BlogError> {
         let mut req = self.http.get(url).header("User-Agent", BROWSER_USER_AGENT);
+        for (name, value) in headers {
+            req = req.header(*name, value);
+        }
         // 보안: Cookie 헤더 값은 로그에 기록하지 않는다.
         if let Some(c) = cookie {
             req = req.header("Cookie", c);
@@ -232,6 +262,15 @@ impl Default for BlogCommentClient {
 /// cbox objectId 규약: `{groupId}_201_{logNo}`.
 fn object_id(group_id: &str, log_no: &str) -> String {
     format!("{}_201_{}", group_id, log_no)
+}
+
+/// 진단 문자열(#312): 응답 길이 + 공백 정리한 앞부분 스니펫(최대 160자). groupId 파싱 실패 시
+/// "어떤 페이지가 왔는지"를 trace로 보여 봇차단/리다이렉트/빈응답을 구분하게 한다(순수 함수).
+/// 본문(HTML/JSON)에는 쿠키가 없어 자격 증명 노출 위험이 없다.
+fn response_diagnostic(body: &str) -> String {
+    let snippet: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let snippet: String = snippet.chars().take(160).collect();
+    format!("응답길이={}, 앞부분=\"{}\"", body.len(), snippet)
 }
 
 /// PostView.naver HTML에서 cbox `groupId`(= 그 블로그의 숫자 ID)를 뽑는다.
@@ -601,7 +640,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_group_id_missing_token_fails_with_trace() {
+    async fn resolve_group_id_missing_token_fails_with_trace_and_diagnostic() {
         let blog = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/PostView.naver"))
@@ -614,6 +653,56 @@ mod tests {
             .await
             .expect_err("groupId 없으면 실패");
         assert!(err.message().contains("groupId"));
+        // 진단(#312): 응답 길이·스니펫이 메시지에 실려 봇차단/빈응답을 사후 구분할 수 있다.
+        assert!(err.message().contains("응답길이="));
+        assert!(err.message().contains("no group here"));
         assert!(err.trace().contains("at "));
+    }
+
+    // #312: PostView GET이 위장 헤더(Referer + sec-fetch)를 실어야 네이버 봇차단을 피한다.
+    #[tokio::test]
+    async fn resolve_group_id_sends_disguise_headers() {
+        let blog = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/PostView.naver"))
+            .and(header_exists("Referer"))
+            .and(header("sec-fetch-mode", "navigate"))
+            .and(header("sec-fetch-dest", "document"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(post_view_html("77")))
+            .mount(&blog)
+            .await;
+        let client = BlogCommentClient::with_base_urls(blog.uri(), "http://unused");
+        let gid = client
+            .resolve_group_id("b", "l", None)
+            .await
+            .expect("위장 헤더가 실려야 성공");
+        assert_eq!(gid, "77");
+    }
+
+    // #312: cbox 토큰 GET은 same-site 지문(Origin/Referer/cors)을 실어야 한다.
+    #[tokio::test]
+    async fn fetch_cbox_token_sends_cors_disguise_headers() {
+        let cbox = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/commentBox/cbox/web_naver_token_json.json"))
+            .and(header("Origin", "https://blog.naver.com"))
+            .and(header("sec-fetch-mode", "cors"))
+            .and(header_exists("Referer"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(token_json("OK")))
+            .mount(&cbox)
+            .await;
+        let client = BlogCommentClient::with_base_urls("http://unused", cbox.uri());
+        let token = client
+            .fetch_cbox_token("b", "l", "1", None)
+            .await
+            .expect("cors 위장 헤더가 실려야 성공");
+        assert_eq!(token, "OK");
+    }
+
+    #[test]
+    fn response_diagnostic_reports_length_and_collapsed_snippet() {
+        let d = response_diagnostic("  <html>\n  hello   world  </html>  ");
+        assert!(d.contains("응답길이="));
+        assert!(d.contains("<html> hello world </html>"));
     }
 }
