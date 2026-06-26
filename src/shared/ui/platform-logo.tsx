@@ -2,6 +2,7 @@ import { Box } from "@mantine/core";
 
 import bandLogo from "@/assets/logos/band.svg";
 import blogLogo from "@/assets/logos/blog.svg";
+import clipLogo from "@/assets/logos/clip.png";
 import instagramLogo from "@/assets/logos/instagram.svg";
 import naverLogo from "@/assets/logos/naver.svg";
 import navercafeLogo from "@/assets/logos/navercafe.svg";
@@ -25,6 +26,8 @@ const LOGO: Partial<Record<PlatformId, string>> = {
   naver: navercafeLogo,
   // 블로그(#271)는 네이버 블로그 전용 로고(초록 'b|')를 쓴다.
   blog: blogLogo,
+  // 클립(#클립)은 네이버 클립 전용 로고(검정 배경 + 네온 그린 재생 마크)를 쓴다.
+  clip: clipLogo,
   band: bandLogo,
   instagram: instagramLogo,
   threads: threadsLogo,
