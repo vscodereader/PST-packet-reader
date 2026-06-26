@@ -20,6 +20,7 @@ import { useEffect, useState } from "react";
 
 import type { BandTarget } from "@/shared/bindings/BandTarget";
 import type { BlogTarget } from "@/shared/bindings/BlogTarget";
+import type { ClipTarget } from "@/shared/bindings/ClipTarget";
 import type { CommentTargetSpec } from "@/shared/bindings/CommentTargetSpec";
 import type { ForumTarget } from "@/shared/bindings/ForumTarget";
 import type { LoginTarget } from "@/shared/bindings/LoginTarget";
@@ -68,6 +69,7 @@ import {
   parseBlogLink,
   parseBlogPostLink,
   parseCafeBoardLink,
+  parseClipLink,
 } from "./publish-helpers";
 import { StockCrawlModal } from "./stock-crawl-modal";
 
@@ -109,6 +111,14 @@ function blogKey(blogId: string, logNo: string): string {
 interface BlogHomeTarget {
   blogId: string;
   categoryNo?: number;
+  link: string;
+}
+
+/** "최신 N개" 모드(#클립)의 클립 대상 — 창작자 링크에서 뽑은 handle(+탭). 특정 영상이 아니라
+ *  창작자 자체가 대상이라 게시 시점 워커가 최신 미디어 상위 N개를 조회해 댓글을 단다. */
+interface ClipHomeTarget {
+  handle: string;
+  mediaType?: "all" | "video";
   link: string;
 }
 
@@ -222,6 +232,11 @@ function DestinationPicker({
   setBlogHomeLink,
   onSaveBlogHomeLink,
   onRemoveBlogHome,
+  clipHomes,
+  clipHomeLink,
+  setClipHomeLink,
+  onSaveClipHomeLink,
+  onRemoveClipHome,
 }: {
   selPlatforms: PlatformId[];
   stockCodes: string[];
@@ -258,6 +273,11 @@ function DestinationPicker({
   setBlogHomeLink: (v: string) => void;
   onSaveBlogHomeLink: () => void;
   onRemoveBlogHome: (blogId: string, categoryNo?: number) => void;
+  clipHomes: ClipHomeTarget[];
+  clipHomeLink: string;
+  setClipHomeLink: (v: string) => void;
+  onSaveClipHomeLink: () => void;
+  onRemoveClipHome: (handle: string, mediaType?: "all" | "video") => void;
 }) {
   const card = {
     border: "1px solid var(--mantine-color-gray-2)",
@@ -558,6 +578,75 @@ function DestinationPicker({
                   </Text>
                 )}
               </>
+            )}
+          </Stack>
+        </Box>
+      )}
+      {selPlatforms.includes("clip") && (
+        <Box style={card}>
+          <Group gap={9} px={11} py={9} style={head}>
+            <PlatformLogo id="clip" size={22} />
+            <Text fz={13} fw={700}>
+              네이버 클립
+            </Text>
+          </Group>
+          <Stack gap={8} p={10}>
+            {/* 클립은 댓글 전용(#클립)·항상 "최신 N개". 창작자 링크(@아이디)를 추가하면 그 창작자의
+                최신 미디어 상위 N개(개수=댓글 템플릿 commentCount)에 댓글을 단다. ?tab=video면 영상만. */}
+            <Group gap={8} align="flex-end" wrap="nowrap">
+              <TextInput
+                style={{ flex: 1 }}
+                label="클립 링크"
+                placeholder="https://clip.naver.com/@dongzzi_chef"
+                value={clipHomeLink}
+                onChange={(e) => setClipHomeLink(e.currentTarget.value)}
+                leftSection={<Icon.link size={14} />}
+                aria-label="클립 링크"
+              />
+              <Button
+                variant="light"
+                color="green"
+                onClick={onSaveClipHomeLink}
+                disabled={!clipHomeLink.trim()}
+              >
+                추가
+              </Button>
+            </Group>
+            {clipHomes.length > 0 ? (
+              <Group gap={6}>
+                {clipHomes.map((c) => {
+                  const label =
+                    c.mediaType === "video"
+                      ? `@${c.handle} · 영상만`
+                      : `@${c.handle}`;
+                  return (
+                    <Badge
+                      key={`${c.handle}/${c.mediaType ?? ""}`}
+                      color="green"
+                      variant="light"
+                      rightSection={
+                        <ActionIcon
+                          size={14}
+                          variant="transparent"
+                          color="green"
+                          aria-label={`${label} 제거`}
+                          onClick={() =>
+                            onRemoveClipHome(c.handle, c.mediaType)
+                          }
+                        >
+                          <Icon.x size={10} />
+                        </ActionIcon>
+                      }
+                    >
+                      {label}
+                    </Badge>
+                  );
+                })}
+              </Group>
+            ) : (
+              <Text fz={12} c="orange.7">
+                댓글을 달 클립 창작자를 추가하세요.
+              </Text>
             )}
           </Stack>
         </Box>
@@ -889,6 +978,9 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   // 블로그는 '인기글' 목록 API가 없어 popular도 latest와 동일하게 최신 N개로 처리한다.
   const [blogHomes, setBlogHomes] = useState<BlogHomeTarget[]>([]);
   const [blogHomeLink, setBlogHomeLink] = useState("");
+  // 클립(#클립)도 댓글 전용·항상 최신 N개. 창작자 링크(@handle)를 추가하면 clipHomes에 누적한다.
+  const [clipHomes, setClipHomes] = useState<ClipHomeTarget[]>([]);
+  const [clipHomeLink, setClipHomeLink] = useState("");
   const [when, setWhen] = useState<"now" | "schedule">("now");
   const [date, setDate] = useState(() => nowParts().date);
   const [time, setTime] = useState(() => nowParts().time);
@@ -1046,6 +1138,40 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const removeBlogHome = (blogId: string, categoryNo?: number) =>
     setBlogHomes((s) =>
       s.filter((b) => !(b.blogId === blogId && b.categoryNo === categoryNo)),
+    );
+
+  // 클립(#클립): 창작자 링크(@handle)를 파싱해 clipHomes에 누적한다(중복 제거). 파싱 실패면 안내.
+  const saveClipHomeLink = () => {
+    const link = clipHomeLink.trim();
+    if (!link) return;
+    const parsed = parseClipLink(link);
+    if (!parsed) {
+      notifications.show({
+        message:
+          "클립 주소를 인식하지 못했어요. 댓글을 달 창작자 페이지(clip.naver.com/@아이디)로 들어가 그 주소를 붙여넣어 주세요.",
+        color: "red",
+      });
+      return;
+    }
+    setClipHomeLink("");
+    setClipHomes((prev) =>
+      prev.some(
+        (c) => c.handle === parsed.handle && c.mediaType === parsed.mediaType,
+      )
+        ? prev
+        : [
+            ...prev,
+            {
+              handle: parsed.handle,
+              ...(parsed.mediaType ? { mediaType: parsed.mediaType } : {}),
+              link,
+            },
+          ],
+    );
+  };
+  const removeClipHome = (handle: string, mediaType?: "all" | "video") =>
+    setClipHomes((s) =>
+      s.filter((c) => !(c.handle === handle && c.mediaType === mediaType)),
     );
 
   if (!doc) {
@@ -1292,6 +1418,23 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
           });
         });
       }
+    } else if (a.platform === "clip") {
+      // 클립도 댓글 전용(#클립) — 항상 "최신 N개" 모드. 추가한 창작자(@handle)마다 잡 1개로
+      // handle + 개수(clipCount=commentCount) + 탭(전체/영상)을 동결해, 워커가 그 창작자의 최신
+      // 미디어 상위 N개에 댓글을 단다(댓글 전 클립 프로필 생성은 백엔드가 보장).
+      clipHomes.forEach((c, i) => {
+        jobs.push({
+          key: `${aid}-cl${i}`,
+          platform: "clip",
+          loginId: a.loginId,
+          targetName: `@${c.handle} · 최신 ${commentCount}건`,
+          clipHandle: c.handle,
+          clipCount: commentCount,
+          ...(c.mediaType ? { clipMediaType: c.mediaType } : {}),
+          board: "댓글",
+          status: a.status,
+        });
+      });
     }
   });
   // forum은 보통 종목(stockCodes)을 1개 이상 골라야 한다. 단 "특정 게시글" 댓글이면 URL이
@@ -1322,6 +1465,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     selectedNaver.length === 0 &&
     selPlatforms.includes("blog") &&
     blogTargetsReady;
+  // 클립(#클립)도 댓글 전용·항상 최신 N개 — 추가한 창작자(@handle)가 1개 이상이면 준비된 것으로 본다.
+  const clipTargetsReady = clipHomes.length > 0;
+  const clipOnlyCommentReady =
+    selectedNaver.length === 0 &&
+    selPlatforms.includes("clip") &&
+    clipTargetsReady;
   // url 모드의 "대상 해석됨"은 카페·종목토론방·밴드 글 중 하나라도 풀린 링크가 있으면 충분하다
   // — 사용자가 넣은 링크가 어느 플랫폼 글인지에 따라 해당 목록에 잡힌다(여러 링크/혼합 허용).
   const urlTargetResolved =
@@ -1333,7 +1482,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     (comments.length > 0 &&
       ((isListTarget ? listTargetReady : urlTargetResolved) ||
         bandOnlyCommentReady ||
-        blogOnlyCommentReady));
+        blogOnlyCommentReady ||
+        clipOnlyCommentReady));
   // 네이버 카페가 선택됐으면 게시할 게시판을 1개 이상 골라야 한다(밴드와 동일). url 댓글
   // 대상은 게시판이 필요 없어 면제한다. 게시판 미선택이면 게시를 막아 조용한 누락을 막는다.
   const naverReady =
@@ -1351,6 +1501,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   // 블로그(#271)가 선택됐으면 게시할 블로그 글을 1개 이상 골라야 게시 가능(카페 게시판 미러).
   // 글을 추가하고 선택해야 게시할 수 있다 — 미선택이면 게시를 막아 조용한 누락을 방지한다.
   const blogReady = !selPlatforms.includes("blog") || blogTargetsReady;
+  // 클립(#클립)이 선택됐으면 창작자(@handle)를 1개 이상 추가해야 게시 가능.
+  const clipReady = !selPlatforms.includes("clip") || clipTargetsReady;
   const canPublish =
     usableSelected.length > 0 &&
     targetsOk &&
@@ -1358,6 +1510,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     naverReady &&
     bandReady &&
     blogReady &&
+    clipReady &&
     jobs.length > 0;
 
   // 종목토론방(forum) 계정들의 로그인 ID(중복 제거, 선택 순서 유지). "나눠서 게시"의 분배 단위.
@@ -1512,6 +1665,18 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
             : {}),
         };
       });
+    // 클립(#클립): 항상 "최신 N개" — handle + count(+탭)을 동결한다. 워커가 그 창작자의 최신
+    // 미디어 상위 N개에 댓글을 단다(댓글 전 클립 프로필 생성은 백엔드가 보장).
+    const clip: ClipTarget[] = jobs
+      .filter((j) => j.platform === "clip")
+      .map((j) => ({
+        accountId: j.loginId,
+        name: j.targetName,
+        handle: j.clipHandle ?? "",
+        link: `https://clip.naver.com/@${j.clipHandle ?? ""}`,
+        ...(j.clipCount != null ? { count: j.clipCount } : {}),
+        ...(j.clipMediaType ? { mediaType: j.clipMediaType } : {}),
+      }));
     // 게시 대상 계정마다 로그인 스펙을 동봉한다(#225). 워커가 게시 직전에 계정 단위로
     // [IP 회전 → 로그인 → 게시]를 원자 실행해 "로그인 IP == 게시 IP"를 맞춘다 — 그래야
     // 네이버 카페 10004(IP check failure)를 피한다. force/useAdb는 기존 선택 로그인과 동일.
@@ -1540,6 +1705,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       forum,
       band,
       blog,
+      clip,
       login: [...loginByAccount.values()],
     };
   };
@@ -1900,6 +2066,11 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
               setBlogHomeLink={setBlogHomeLink}
               onSaveBlogHomeLink={saveBlogHomeLink}
               onRemoveBlogHome={removeBlogHome}
+              clipHomes={clipHomes}
+              clipHomeLink={clipHomeLink}
+              setClipHomeLink={setClipHomeLink}
+              onSaveClipHomeLink={saveClipHomeLink}
+              onRemoveClipHome={removeClipHome}
             />
           </>
         )}

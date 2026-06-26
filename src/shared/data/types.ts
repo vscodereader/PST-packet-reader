@@ -19,6 +19,7 @@ export type PlatformId =
   | "forum"
   | "naver"
   | "blog"
+  | "clip"
   | "band"
   | "instagram"
   | "threads";
@@ -149,6 +150,13 @@ export interface PublishJob {
   blogCount?: number;
   /** blog "최신 N개" 모드(#279): 글 목록을 좁힐 카테고리 번호(있으면). 없으면 전체. */
   categoryNo?: number;
+  /** clip(네이버 클립) 전용(#클립): 창작자 핸들(@ 제외). 채워지면 워커가 그 창작자의 최신
+   *  미디어 상위 clipCount개에 댓글을 단다(댓글 전 클립 프로필 생성은 백엔드가 보장). */
+  clipHandle?: string;
+  /** clip "최신 N개" 모드: 댓글을 달 최신 미디어 개수. */
+  clipCount?: number;
+  /** clip 탭: "video"면 영상만(?tab=video), 그 외/미지정이면 전체(?tab=all). */
+  clipMediaType?: string;
   board: string;
   status: AccountStatus;
 }

@@ -226,6 +226,62 @@ export function parseBlogLink(url: string | undefined): BlogLinkTarget | null {
   return null;
 }
 
+/** 네이버 클립 창작자 링크에서 파싱한 댓글 대상(#클립) — 창작자 핸들과 미디어 탭. */
+export interface ClipLinkTarget {
+  /** 창작자 핸들(@ 제외). 예: "dongzzi_chef". */
+  handle: string;
+  /** "video"면 영상만(?tab=video), 그 외/없으면 전체(?tab=all). */
+  mediaType?: "all" | "video";
+}
+
+/**
+ * 네이버 클립 **창작자** URL에서 핸들(@ 제외)과 탭(전체/영상)을 뽑는다(#클립).
+ *
+ * 클립도 블로그처럼 댓글 전용이며, 사용자가 창작자 링크를 넣으면 그 창작자의 최신 미디어 N개에
+ * 댓글을 단다. 다음을 모두 지원한다:
+ *   - `https://clip.naver.com/@dongzzi_chef`            (전체)
+ *   - `https://clip.naver.com/@dongzzi_chef?tab=video`  (영상만)
+ *   - `https://clip.naver.com/@dongzzi_chef?tab=all`    (전체)
+ *   - 위가 encoded로 한 번 더 감싸진 형태(점진적 decodeURIComponent로 풀어 매칭).
+ * 인식 못 하면 `null` — 호출부가 추가를 거부한다.
+ */
+export function parseClipLink(url: string | undefined): ClipLinkTarget | null {
+  if (!url) return null;
+
+  const candidates: string[] = [url];
+  let cur = url;
+  for (let i = 0; i < 3; i++) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(cur);
+    } catch {
+      break;
+    }
+    if (decoded === cur) break;
+    candidates.push(decoded);
+    cur = decoded;
+  }
+
+  const tabOf = (s: string): "all" | "video" | undefined => {
+    const m = s.match(/[?&]tab=(video|all)/i);
+    if (!m) return undefined;
+    return m[1]!.toLowerCase() === "video" ? "video" : "all";
+  };
+
+  for (const c of candidates) {
+    // clip.naver.com/@<handle> — handle은 영숫자/._- 허용. @는 인코딩(%40)일 수 있어 위 디코드가 푼다.
+    const m = c.match(/clip\.naver\.com\/@([A-Za-z0-9][A-Za-z0-9._-]*)/i);
+    if (m?.[1]) {
+      const mediaType = tabOf(c);
+      return mediaType !== undefined
+        ? { handle: m[1], mediaType }
+        : { handle: m[1] };
+    }
+  }
+
+  return null;
+}
+
 /** 붙여넣은 URL 처리. 종목 시세 링크(6자리 코드)는 시세 줄로 바꾸고, 그 외 링크/내용은
  * 붙여넣은 원문 그대로 둔다 — URL이 본문에 남아야 게시 글에서 링크가 보인다. 예전엔
  * 일반 링크를 "[host에서 가져온 내용]" 가짜 문구로 바꿔 URL이 통째로 유실됐다. */

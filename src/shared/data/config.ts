@@ -34,6 +34,14 @@ export const PLATFORMS: Platform[] = [
     targetLabel: "블로그",
   },
   {
+    id: "clip",
+    name: "네이버 클립",
+    short: "클립",
+    color: "green",
+    soon: false,
+    targetLabel: "클립",
+  },
+  {
     id: "band",
     name: "밴드",
     short: "밴드",
@@ -91,6 +99,8 @@ export const BOARDS: Record<string, string[]> = {
   naver: ["자유게시판", "종목분석", "질문/답변", "공지사항", "정보 공유"],
   // 블로그(#271)는 댓글 전용이라 별도 게시판 개념이 없다 — 표시용 단일 항목만 둔다.
   blog: ["댓글"],
+  // 클립(#클립)도 댓글 전용 — 표시용 단일 항목만 둔다.
+  clip: ["댓글"],
   band: ["전체글", "공지", "사진첩", "일정"],
 };
 

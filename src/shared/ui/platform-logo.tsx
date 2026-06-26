@@ -13,6 +13,7 @@ const INITIAL: Record<PlatformId, string> = {
   forum: "토",
   naver: "N",
   blog: "블",
+  clip: "클",
   band: "B",
   instagram: "I",
   threads: "@",

@@ -145,6 +145,17 @@ struct BlogOutcome {
     result: Result<crate::naver_blog::BlogCommentResult, crate::naver_blog::BlogError>,
 }
 
+/// 네이버 클립 댓글 게시 결과 1건(#클립) — 블로그(`BlogOutcome`)의 클립 버전. 어느 계정·미디어
+/// (표시 이름·URL)에 댓글을 달았는지와 실행 결과를 묶는다. 결과는 [`ClipCommentResult`](성공)
+/// 또는 [`ClipError`](실패). 성공/실패 모두 완료 로그(`PlatformId::Clip`)에 남긴다.
+struct ClipOutcome {
+    account_id: String,
+    name: String,
+    link: String,
+    contents: String,
+    result: Result<crate::naver_clip::ClipCommentResult, crate::naver_clip::ClipError>,
+}
+
 /// 대기(`Waiting`) 아이템 중 **우선순위가 가장 높은 것**을 고른다(`Running`은 건너뛴다).
 /// 우선순위는 `item_priority`(로그인 0 > 종토 1 > 카페/밴드 2). 동순위면 `min_by_key`가
 /// 먼저 나오는 것을 돌려주므로 들어온 순서(FIFO)가 보존된다(#229). 큐는 적재/재정렬 시
@@ -405,6 +416,7 @@ fn is_url_comment_only_plan(plan: &PublishPlan) -> bool {
         && plan.forum.is_empty()
         && plan.band.is_empty()
         && plan.blog.is_empty()
+        && plan.clip.is_empty()
     {
         return false;
     }
@@ -412,7 +424,8 @@ fn is_url_comment_only_plan(plan: &PublishPlan) -> bool {
     let naver_ok = plan.naver.iter().all(|t| is_url_spec(&t.comment_target));
     let forum_ok = plan.forum.iter().all(|t| !t.comment_url.trim().is_empty());
     let band_ok = plan.band.iter().all(|t| is_url_spec(&t.comment_target));
-    // 블로그(#271)는 항상 특정 글(blogId+logNo)을 대상으로 하는 댓글 전용이라 url 댓글로 본다.
+    // 블로그(#271)·클립(#클립)은 항상 댓글 전용(HTTP, 저장 쿠키)이라 url 댓글로 본다 — 동시 레인에서
+    // 돌고 게시 시점 재로그인·IP 회전을 생략한다(자원 비공유라 안전).
     naver_ok && forum_ok && band_ok
 }
 
@@ -442,8 +455,11 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
     // 로그인 전용 아이템(#210): 게시 타깃(naver/forum/band)이 하나도 없고 login만 있으면
     // 게시 경로를 타지 않고 계정별 로그인만 수행하고 종료한다(하위호환). login이 게시와 함께
     // 있으면 아래 그룹 게시 경로가 계정별로 [회전→로그인→그 계정 게시]를 원자화한다(#10004).
-    let no_publish_targets =
-        plan.naver.is_empty() && plan.forum.is_empty() && plan.band.is_empty() && plan.blog.is_empty();
+    let no_publish_targets = plan.naver.is_empty()
+        && plan.forum.is_empty()
+        && plan.band.is_empty()
+        && plan.blog.is_empty()
+        && plan.clip.is_empty();
     if let Some(login) = plan.login.as_ref().filter(|l| !l.is_empty()) {
         if no_publish_targets {
             run_login_targets(app, id, login).await;
@@ -469,6 +485,7 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
     let mut all_forum: Vec<ForumOutcome> = Vec::new();
     let mut all_band: Vec<BandOutcome> = Vec::new();
     let mut all_blog: Vec<BlogOutcome> = Vec::new();
+    let mut all_clip: Vec<ClipOutcome> = Vec::new();
 
     let cafe_link = crate::template_tokens::resolve_link(&plan.link_override, "");
     let cafe_comments: Vec<String> = plan
@@ -498,6 +515,7 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                 &all_forum,
                 &all_band,
                 &all_blog,
+                &all_clip,
                 &all_fetch_failures,
             );
             return ItemOutcome::Yielded(Box::new(retain_plan_accounts(
@@ -531,10 +549,12 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                     all_forum.extend(synth_forum_failures(plan, acc, &skip));
                     // 블로그 댓글 대상(#271)도 조용히 누락하지 않고 Fail로 남긴다.
                     all_blog.extend(synth_blog_failures(plan, acc, &skip));
+                    // 클립 댓글 대상(#클립)도 조용히 누락하지 않고 Fail로 남긴다.
+                    all_clip.extend(synth_clip_failures(plan, acc, &skip));
                 }
                 AccountFamily::Band => all_band.extend(synth_band_failures(plan, acc, &skip)),
             }
-            done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band, &all_blog);
+            done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band, &all_blog, &all_clip);
             set_progress_and_items(
                 app,
                 id,
@@ -548,6 +568,7 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                     &all_forum,
                     &all_band,
                     &all_blog,
+                    &all_clip,
                 ),
             );
             continue;
@@ -573,6 +594,7 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                             &all_forum,
                             &all_band,
                             &all_blog,
+                            &all_clip,
                             running_post_items_for(plan, acc),
                         );
                         let base_done = done;
@@ -581,7 +603,7 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                         })
                         .await;
                         all_posts.extend(reports);
-                        done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band, &all_blog);
+                        done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band, &all_blog, &all_clip);
                         set_progress_and_items(
                             app,
                             id,
@@ -595,6 +617,7 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                                 &all_forum,
                                 &all_band,
                                 &all_blog,
+                                &all_clip,
                             ),
                         );
                     }
@@ -620,6 +643,7 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                             &all_forum,
                             &all_band,
                             &all_blog,
+                            &all_clip,
                         );
                         let mut live: Vec<BatchItem> = comment_jobs
                             .iter()
@@ -661,7 +685,7 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                         .await;
                         all_comments.extend(reports);
                     }
-                    done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band, &all_blog);
+                    done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band, &all_blog, &all_clip);
                     set_progress_and_items(
                         app,
                         id,
@@ -675,6 +699,7 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                             &all_forum,
                             &all_band,
                             &all_blog,
+                            &all_clip,
                         ),
                     );
                 }
@@ -691,11 +716,12 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                         &all_forum,
                         &all_band,
                         &all_blog,
+                        &all_clip,
                     );
                     let outcomes =
                         run_blog_targets(app, plan, id, base, done, total, Some(acc)).await;
                     all_blog.extend(outcomes);
-                    done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band, &all_blog);
+                    done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band, &all_blog, &all_clip);
                     set_progress_and_items(
                         app,
                         id,
@@ -709,6 +735,41 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                             &all_forum,
                             &all_band,
                             &all_blog,
+                            &all_clip,
+                        ),
+                    );
+                }
+                // 4. 네이버 클립 댓글(#클립) — 이 계정 대상만. 블로그처럼 네이버 저장 쿠키를 재사용
+                // 하되, 게시 직전 계정마다 클립 프로필 생성을 보장한다(run_clip_targets 내부).
+                if !plan.clip.is_empty() && item_present(app, id) {
+                    let base = build_items(
+                        plan,
+                        &all_posts,
+                        &all_comments,
+                        &all_fetch_failures,
+                        &all_forum,
+                        &all_band,
+                        &all_blog,
+                        &all_clip,
+                    );
+                    let outcomes =
+                        run_clip_targets(app, plan, id, base, done, total, Some(acc)).await;
+                    all_clip.extend(outcomes);
+                    done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band, &all_blog, &all_clip);
+                    set_progress_and_items(
+                        app,
+                        id,
+                        done,
+                        total,
+                        build_items(
+                            plan,
+                            &all_posts,
+                            &all_comments,
+                            &all_fetch_failures,
+                            &all_forum,
+                            &all_band,
+                            &all_blog,
+                            &all_clip,
                         ),
                     );
                 }
@@ -726,11 +787,12 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                         &all_forum,
                         &all_band,
                         &all_blog,
+                        &all_clip,
                     );
                     let outcomes =
                         run_band_targets(app, plan, id, base, done, total, Some(acc)).await;
                     all_band.extend(outcomes);
-                    done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band, &all_blog);
+                    done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band, &all_blog, &all_clip);
                     set_progress_and_items(
                         app,
                         id,
@@ -744,6 +806,7 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                             &all_forum,
                             &all_band,
                             &all_blog,
+                            &all_clip,
                         ),
                     );
                 }
@@ -763,10 +826,11 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
             &all_forum,
             &all_band,
             &all_blog,
+            &all_clip,
         );
         let outcomes = run_forum_targets(app, plan, id, base, done, total, None).await;
         all_forum.extend(outcomes);
-        done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band, &all_blog);
+        done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band, &all_blog, &all_clip);
         set_progress_and_items(
             app,
             id,
@@ -780,6 +844,7 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                 &all_forum,
                 &all_band,
                 &all_blog,
+                &all_clip,
             ),
         );
     }
@@ -802,6 +867,7 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
         &all_forum,
         &all_band,
         &all_blog,
+        &all_clip,
         &all_fetch_failures,
     );
     ItemOutcome::Completed
@@ -927,6 +993,7 @@ fn flush_completion_log<R: Runtime>(
     forum: &[ForumOutcome],
     band: &[BandOutcome],
     blog: &[BlogOutcome],
+    clip: &[ClipOutcome],
     fetch_failures: &[CommentFetchFailure],
 ) {
     let batch = build_log_batch(
@@ -936,6 +1003,7 @@ fn flush_completion_log<R: Runtime>(
         forum,
         band,
         blog,
+        clip,
         fetch_failures,
         now_ms(),
         LB_SEQ.fetch_add(1, Ordering::Relaxed),
@@ -952,8 +1020,9 @@ fn resolved_count(
     forum: &[ForumOutcome],
     band: &[BandOutcome],
     blog: &[BlogOutcome],
+    clip: &[ClipOutcome],
 ) -> u32 {
-    (posts.len() + comments.len() + forum.len() + band.len() + blog.len()) as u32
+    (posts.len() + comments.len() + forum.len() + band.len() + blog.len() + clip.len()) as u32
 }
 
 /// 한 계정의 카페 글 대상만 "처리 중" BatchItem으로 만든다(계정 그룹 게시 라이브 표시).
@@ -978,9 +1047,10 @@ fn set_running_phase<R: Runtime>(
     forum: &[ForumOutcome],
     band: &[BandOutcome],
     blog: &[BlogOutcome],
+    clip: &[ClipOutcome],
     running: Vec<BatchItem>,
 ) {
-    let mut items = build_items(plan, posts, comments, fetch_failures, forum, band, blog);
+    let mut items = build_items(plan, posts, comments, fetch_failures, forum, band, blog, clip);
     items.extend(running);
     set_queue_items(app, id, items);
 }
@@ -1193,6 +1263,10 @@ fn group_accounts_for_publish(plan: &PublishPlan) -> Vec<PublishGroup> {
     for bl in &plan.blog {
         has_naver.insert(bl.account_id.clone());
     }
+    // 클립(#클립)도 같은 네이버 쿠키 재사용이라 Naver 패밀리로 묶는다.
+    for c in &plan.clip {
+        has_naver.insert(c.account_id.clone());
+    }
     for b in &plan.band {
         has_band.insert(b.account_id.clone());
     }
@@ -1349,6 +1423,13 @@ fn retain_plan_accounts(
         // 블로그(#271)는 카페와 같은 Naver 패밀리라 keep_naver로 거른다(카페·종토방과 동일).
         blog: plan
             .blog
+            .iter()
+            .filter(|t| keep_naver.contains(&t.account_id))
+            .cloned()
+            .collect(),
+        // 클립(#클립)도 Naver 패밀리라 keep_naver로 거른다.
+        clip: plan
+            .clip
             .iter()
             .filter(|t| keep_naver.contains(&t.account_id))
             .cloned()
@@ -2899,8 +2980,319 @@ fn blog_work_skeleton_items(work: &[BlogWorkItem]) -> Vec<BatchItem> {
         .collect()
 }
 
+// ───────────────────────────── 네이버 클립(#클립) ─────────────────────────────
+
+/// `run_clip_targets`가 펼친 클립 댓글 작업 1건(블로그 BlogWorkItem의 클립 버전).
+enum ClipWorkItem {
+    /// 실제로 댓글을 달 미디어 1건(최신 N개로 펼친 미디어 1개).
+    Comment(ClipCommentJob),
+    /// 미디어가 모자라(전체 < N) 댓글을 못 다는 자리 — "영상이 없습니다" 실패로 남긴다.
+    Shortfall {
+        account_id: String,
+        name: String,
+        link: String,
+    },
+    /// 프로필 보장/핸들 해석/목록 조회 자체가 실패한 대상 — 그 오류(backtrace)를 실패로 남긴다.
+    FetchFailure {
+        account_id: String,
+        name: String,
+        link: String,
+        error: crate::naver_clip::ClipError,
+    },
+}
+
+/// 댓글을 달 클립 미디어 1건의 동결된 실행 정보. `media_id`=cbox objectId, `profile_id`=창작자.
+struct ClipCommentJob {
+    account_id: String,
+    name: String,
+    link: String,
+    media_id: String,
+    profile_id: String,
+}
+
+/// ClipTarget.media_type(Option<String>)을 [`ClipMediaType`]으로 해석한다. "video"=영상만, 그 외=전체.
+fn clip_media_type_of(target: &crate::ipc::queue::ClipTarget) -> crate::naver_clip::ClipMediaType {
+    match target.media_type.as_deref() {
+        Some(v) if v.eq_ignore_ascii_case("video") => crate::naver_clip::ClipMediaType::Video,
+        _ => crate::naver_clip::ClipMediaType::All,
+    }
+}
+
+/// 한 그룹의 클립 댓글 대상을 합성 실패 결과로 만든다(로그인/IP 실패로 댓글조차 못 함).
+fn synth_clip_failures(plan: &PublishPlan, account_id: &str, skip: &GroupSkip) -> Vec<ClipOutcome> {
+    plan.clip
+        .iter()
+        .filter(|c| c.account_id == account_id)
+        .map(|c| ClipOutcome {
+            account_id: c.account_id.clone(),
+            name: c.name.clone(),
+            link: c.link.clone(),
+            contents: String::new(),
+            result: Err(crate::naver_clip::ClipError::new(format!(
+                "{} — {}",
+                failure_reason(&skip.code, None),
+                skip.trace_body()
+            ))),
+        })
+        .collect()
+}
+
+/// 클립 댓글 게시 결과 1건 → BatchItem(블로그 blog_outcome_to_item의 클립 버전).
+fn clip_outcome_to_item(o: &ClipOutcome) -> BatchItem {
+    let (status, msg, trace, posted) = match &o.result {
+        Ok(_) => (
+            BatchItemStatus::Success,
+            "댓글 게시 완료".to_owned(),
+            None,
+            Some(PostedContent {
+                comment: Some(o.contents.clone()),
+                url: Some(o.link.clone()),
+                ..Default::default()
+            }),
+        ),
+        Err(e) => (
+            BatchItemStatus::Fail,
+            format!("댓글 게시 실패 — {}", e.message()),
+            Some(e.trace().to_owned()),
+            None,
+        ),
+    };
+    BatchItem {
+        platform: PlatformId::Clip,
+        target: o.name.clone(),
+        code: None,
+        board: None,
+        login_id: o.account_id.clone(),
+        status,
+        msg,
+        trace,
+        posted,
+    }
+}
+
+/// 펼친 클립 댓글 작업을 "대기 중" BatchItem으로(라이브 스켈레톤). 순서는 run_clip_targets 루프와 일치.
+fn clip_work_skeleton_items(work: &[ClipWorkItem]) -> Vec<BatchItem> {
+    work.iter()
+        .map(|w| {
+            let (name, account_id) = match w {
+                ClipWorkItem::Comment(job) => (&job.name, &job.account_id),
+                ClipWorkItem::Shortfall {
+                    name, account_id, ..
+                }
+                | ClipWorkItem::FetchFailure {
+                    name, account_id, ..
+                } => (name, account_id),
+            };
+            BatchItem {
+                platform: PlatformId::Clip,
+                target: name.clone(),
+                code: None,
+                board: None,
+                login_id: account_id.clone(),
+                status: BatchItemStatus::Waiting,
+                msg: "대기 중".to_owned(),
+                trace: None,
+                posted: None,
+            }
+        })
+        .collect()
+}
+
+/// 클립 댓글 대상을 실행한다(#클립, 블로그 run_blog_targets 미러). 계정마다 게시 직전 **클립
+/// 프로필 생성을 보장**하고, 창작자 핸들→profileId 해석 후 최신 N개 미디어에 댓글을 단다. 도배
+/// 방지로 한 댓글 뒤 다음 댓글까지 10초 텀(첫 댓글 즉시, 정지 즉시 반영). 블로그와 동일하게
+/// 프로필/해석/조회 실패는 그 대상을 합성 실패로 남기고(조용히 누락하지 않음) 진행한다.
+async fn run_clip_targets<R: Runtime>(
+    app: &AppHandle<R>,
+    plan: &PublishPlan,
+    id: &str,
+    base_items: Vec<BatchItem>,
+    base_done: u32,
+    total: u32,
+    account_filter: Option<&str>,
+) -> Vec<ClipOutcome> {
+    let targets: Vec<&crate::ipc::queue::ClipTarget> = plan
+        .clip
+        .iter()
+        .filter(|t| account_filter.is_none_or(|acc| t.account_id == acc))
+        .collect();
+    // 클립도 종목이 없어 #{링크}만 치환한다. 카페/블로그처럼 비어있지 않은 댓글을 줄바꿈으로 합친다.
+    let clip_link = crate::template_tokens::resolve_link(&plan.link_override, "");
+    let contents: String = plan
+        .comments
+        .iter()
+        .map(|c| crate::template_tokens::resolve_cafe_band(c, &clip_link))
+        .filter(|c| !c.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // 실행 시점에 (프로필 보장 → 핸들 해석 → 최신 N개 조회)로 작업을 펼친다. 어느 단계든 실패하면
+    // 그 대상의 want개를 합성 실패로 남긴다(조용히 누락 금지). 프로필 보장은 계정당 1회만 한다.
+    let mut work: Vec<ClipWorkItem> = Vec::new();
+    let mut profile_ready: std::collections::HashMap<String, Result<(), String>> = Default::default();
+    for t in &targets {
+        let want = t.count.unwrap_or(1).max(1) as usize;
+        let media_type = clip_media_type_of(t);
+        let fail_all = |work: &mut Vec<ClipWorkItem>, error: crate::naver_clip::ClipError| {
+            // 같은 오류 메시지를 want개에 복제하면 backtrace 캡처가 반복되니, 첫 건만 실오류로 두고
+            // 나머지는 같은 사유 문자열로 남긴다(대상이 want개 실패로 보이게).
+            let msg = error.message().to_owned();
+            work.push(ClipWorkItem::FetchFailure {
+                account_id: t.account_id.clone(),
+                name: t.name.clone(),
+                link: t.link.clone(),
+                error,
+            });
+            for _ in 1..want {
+                work.push(ClipWorkItem::FetchFailure {
+                    account_id: t.account_id.clone(),
+                    name: t.name.clone(),
+                    link: t.link.clone(),
+                    error: crate::naver_clip::ClipError::new(msg.clone()),
+                });
+            }
+        };
+
+        // (a) 프로필 보장(계정당 1회 캐시).
+        let ensured = match profile_ready.get(&t.account_id) {
+            Some(r) => r.clone(),
+            None => {
+                let r = crate::naver_clip::ensure_clip_profile_for_account(&t.account_id)
+                    .await
+                    .map_err(|e| e.message().to_owned());
+                profile_ready.insert(t.account_id.clone(), r.clone());
+                r
+            }
+        };
+        if let Err(msg) = ensured {
+            fail_all(&mut work, crate::naver_clip::ClipError::new(msg));
+            continue;
+        }
+
+        // (b) 핸들 → profileId.
+        let profile_id = match crate::naver_clip::resolve_clip_profile_id_for_account(
+            &t.account_id,
+            &t.handle,
+        )
+        .await
+        {
+            Ok(pid) => pid,
+            Err(e) => {
+                fail_all(&mut work, e);
+                continue;
+            }
+        };
+
+        // (c) 최신 N개 미디어 조회 → 미디어마다 댓글 작업 1건.
+        match crate::naver_clip::fetch_latest_clips_for_account(
+            &t.account_id,
+            &profile_id,
+            media_type,
+            want,
+        )
+        .await
+        {
+            Ok(clips) => {
+                for media in &clips {
+                    work.push(ClipWorkItem::Comment(ClipCommentJob {
+                        account_id: t.account_id.clone(),
+                        name: t.name.clone(),
+                        link: format!("https://clip.naver.com/shorts/{}", media.media_id),
+                        media_id: media.media_id.clone(),
+                        profile_id: profile_id.clone(),
+                    }));
+                }
+                let shortfall = want.saturating_sub(clips.len());
+                for _ in 0..shortfall {
+                    work.push(ClipWorkItem::Shortfall {
+                        account_id: t.account_id.clone(),
+                        name: t.name.clone(),
+                        link: t.link.clone(),
+                    });
+                }
+            }
+            Err(e) => fail_all(&mut work, e),
+        }
+    }
+
+    let mut live = clip_work_skeleton_items(&work);
+    write_live_phase(app, id, &base_items, &live, base_done, total);
+    let mut outcomes = Vec::new();
+    // 도배 방지: 한 댓글 뒤 다음 댓글까지 10초 텀(첫 댓글 즉시).
+    let mut posted_any = false;
+    for (i, w) in work.into_iter().enumerate() {
+        let outcome = match w {
+            ClipWorkItem::FetchFailure {
+                account_id,
+                name,
+                link,
+                error,
+            } => ClipOutcome {
+                account_id,
+                name,
+                link,
+                contents: String::new(),
+                result: Err(error),
+            },
+            ClipWorkItem::Shortfall {
+                account_id,
+                name,
+                link,
+            } => ClipOutcome {
+                account_id,
+                name,
+                link,
+                contents: String::new(),
+                result: Err(crate::naver_clip::ClipError::new("영상이 없습니다")),
+            },
+            ClipWorkItem::Comment(job) => {
+                if !item_present(app, id) {
+                    break;
+                }
+                if posted_any {
+                    for _ in 0..100 {
+                        if !item_present(app, id) {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    if !item_present(app, id) {
+                        break;
+                    }
+                }
+                if let Some(it) = live.get_mut(i) {
+                    it.status = BatchItemStatus::Running;
+                    it.msg = "댓글 게시 중…".to_owned();
+                }
+                write_live_phase(app, id, &base_items, &live, base_done, total);
+                let result = crate::naver_clip::create_clip_comment_for_account(
+                    &job.account_id,
+                    &job.media_id,
+                    &job.profile_id,
+                    &contents,
+                )
+                .await;
+                posted_any = true;
+                ClipOutcome {
+                    account_id: job.account_id,
+                    name: job.name,
+                    link: job.link,
+                    contents: contents.clone(),
+                    result,
+                }
+            }
+        };
+        if let Some(slot) = live.get_mut(i) {
+            *slot = clip_outcome_to_item(&outcome);
+        }
+        write_live_phase(app, id, &base_items, &live, base_done, total);
+        outcomes.push(outcome);
+    }
+    outcomes
+}
+
 /// 누적된 플랫폼별 결과를 대상별 BatchItem 목록으로 합친다(라이브 큐 상태·최종 알림 로그
-/// 공용). 순서는 글→댓글→조회 실패→종토방→밴드→블로그로 고정한다.
+/// 공용). 순서는 글→댓글→조회 실패→종토방→밴드→블로그→클립으로 고정한다.
 #[allow(clippy::too_many_arguments)]
 fn build_items(
     plan: &PublishPlan,
@@ -2910,6 +3302,7 @@ fn build_items(
     forum_outcomes: &[ForumOutcome],
     band_outcomes: &[BandOutcome],
     blog_outcomes: &[BlogOutcome],
+    clip_outcomes: &[ClipOutcome],
 ) -> Vec<BatchItem> {
     let mut items = Vec::new();
     items.extend(post_reports.iter().map(|r| post_report_to_item(plan, r)));
@@ -2939,6 +3332,7 @@ fn build_items(
             .map(|o| band_outcome_to_item(o, &band_title, &band_body, band_comment.as_deref())),
     );
     items.extend(blog_outcomes.iter().map(blog_outcome_to_item));
+    items.extend(clip_outcomes.iter().map(clip_outcome_to_item));
     items
 }
 
@@ -3067,6 +3461,7 @@ fn build_log_batch(
     forum_outcomes: &[ForumOutcome],
     band_outcomes: &[BandOutcome],
     blog_outcomes: &[BlogOutcome],
+    clip_outcomes: &[ClipOutcome],
     comment_fetch_failures: &[CommentFetchFailure],
     at: i64,
     seq: u64,
@@ -3079,6 +3474,7 @@ fn build_log_batch(
         forum_outcomes,
         band_outcomes,
         blog_outcomes,
+        clip_outcomes,
     );
 
     LogBatch {
@@ -3157,8 +3553,11 @@ fn estimate_total(plan: &PublishPlan) -> u32 {
     // 로그인 **전용** 아이템(#210)만 진행률 분모 = 계정 수. 게시 타깃(naver/forum/band)이
     // 동봉돼 있으면(종토방 선택 로그인 등) 분모는 아래 실제 게시 작업 수로 잡는다 — 안 그러면
     // 3계정×3글이 0/9가 아니라 0/3으로 시작하고 done이 분모를 넘어(5/3) 보인다.
-    let no_publish_targets =
-        plan.naver.is_empty() && plan.forum.is_empty() && plan.band.is_empty() && plan.blog.is_empty();
+    let no_publish_targets = plan.naver.is_empty()
+        && plan.forum.is_empty()
+        && plan.band.is_empty()
+        && plan.blog.is_empty()
+        && plan.clip.is_empty();
     if no_publish_targets {
         if let Some(login) = plan.login.as_ref().filter(|l| !l.is_empty()) {
             return login.len() as u32;
@@ -3191,7 +3590,13 @@ fn estimate_total(plan: &PublishPlan) -> u32 {
         0
     };
     // 블로그(#271)는 댓글 전용 — 대상 1건당 댓글 1개로 센다(글당 한 댓글).
-    (posts + comments + plan.forum.len() + plan.band.len() + plan.blog.len()) as u32
+    // 클립(#클립)은 "최신 N개" 모드라 대상별 count(없으면 1)의 합으로 센다.
+    let clip: usize = plan
+        .clip
+        .iter()
+        .map(|t| t.count.unwrap_or(1).max(1) as usize)
+        .sum();
+    (posts + comments + plan.forum.len() + plan.band.len() + plan.blog.len() + clip) as u32
 }
 
 /// 아이템을 `Running`으로 전이하고 진행률을 `(0, 추정 total)`로 초기화한다. execute_item이
@@ -3264,6 +3669,7 @@ mod tests {
             forum: vec![],
             band: vec![],
             blog: vec![],
+            clip: vec![],
             login: None,
         }
     }
@@ -4198,7 +4604,7 @@ mod tests {
     #[test]
     fn build_items_maps_post_report_with_cafe_name_label() {
         let p = plan(ModeValue::Post, vec![naver_target("u0")]);
-        let items = build_items(&p, &[post_report("u0", 123, 456)], &[], &[], &[], &[], &[]);
+        let items = build_items(&p, &[post_report("u0", 123, 456)], &[], &[], &[], &[], &[], &[]);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].status, BatchItemStatus::Success);
         assert_eq!(items[0].target, "테스트카페");
@@ -4459,7 +4865,7 @@ mod tests {
             post_report("u0", 123, 999),
             post_fail("u1", "456", "NO_COOKIES", "쿠키 없음"),
         ];
-        let b = build_log_batch(&p, &reports, &[], &[], &[], &[], &[], 1_700_000_000_000, 0);
+        let b = build_log_batch(&p, &reports, &[], &[], &[], &[], &[], &[], 1_700_000_000_000, 0);
         assert_eq!(b.id, "lb-q-1700000000000-0");
         assert_eq!(b.title, "T");
         assert_eq!(b.body.as_deref(), Some("B")); // post 모드 → 본문 스냅샷
@@ -4634,6 +5040,7 @@ mod tests {
             &synth_forum_failures(&p, "u0", &skip),
             &synth_band_failures(&p, "u0", &skip),
             &[],
+            &[],
         );
         assert!(items[0].msg.contains("IP가 계속 변동"));
         assert_eq!(items[0].status, BatchItemStatus::Fail);
@@ -4654,7 +5061,7 @@ mod tests {
         let posts = synth_post_failures(&p, "u0", &skip);
         let forum = synth_forum_failures(&p, "u0", &skip);
         let band = synth_band_failures(&p, "u0", &skip);
-        let items = build_items(&p, &posts, &[], &[], &forum, &band, &[]);
+        let items = build_items(&p, &posts, &[], &[], &forum, &band, &[], &[]);
         assert_eq!(items.len(), 3, "카페·종토방·밴드 3개 항목");
         for it in &items {
             let tr = it.trace.as_deref().unwrap_or_default();
@@ -4693,6 +5100,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
         assert!(!items[0]
             .trace
@@ -4721,7 +5129,7 @@ mod tests {
         assert_eq!(fails.len(), 1);
         assert_eq!(fails[0].cafe_id, 123);
         // build_items가 Fail 항목으로 렌더링한다.
-        let items = build_items(&p, &[], &[], &fails, &[], &[], &[]);
+        let items = build_items(&p, &[], &[], &fails, &[], &[], &[], &[]);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].status, BatchItemStatus::Fail);
         // both 모드는 self-comment가 글에 의존하므로 별도 합성 댓글 실패를 만들지 않는다.
@@ -4815,7 +5223,7 @@ mod tests {
         // 네이버 원문은 영어("Page Not Found"), errorCode 10404.
         let cafe = cafe_error(Some(404), Some("10404"), Some("Page Not Found"));
         let reports = vec![post_fail_api("u0", "123", cafe)];
-        let b = build_log_batch(&p, &reports, &[], &[], &[], &[], &[], 1, 0);
+        let b = build_log_batch(&p, &reports, &[], &[], &[], &[], &[], &[], 1, 0);
         assert_eq!(b.items[0].status, BatchItemStatus::Fail);
         // 메인 라인: 영어 원문·HTTP 없이 한국어 사유 + 식별 코드.
         assert_eq!(
@@ -4833,7 +5241,7 @@ mod tests {
     fn build_log_batch_comment_mode_snapshots_comment_not_body() {
         let mut p = plan(ModeValue::Comment, vec![naver_target("u0")]);
         p.comments = vec!["  ".into(), "좋은 글이네요".into()];
-        let b = build_log_batch(&p, &[], &[], &[], &[], &[], &[], 1, 0);
+        let b = build_log_batch(&p, &[], &[], &[], &[], &[], &[], &[], 1, 0);
         assert!(b.body.is_none()); // comment 모드 → 본문 스냅샷 없음
         assert_eq!(b.comment.as_deref(), Some("좋은 글이네요")); // 공백 항목은 건너뜀
         assert!(b.items.is_empty());
@@ -4843,7 +5251,7 @@ mod tests {
     fn build_log_batch_includes_forum_items_with_code_and_account() {
         let p = plan(ModeValue::Post, vec![]);
         let forum = vec![forum_ok("u0", "삼성전자", "005930")];
-        let b = build_log_batch(&p, &[], &[], &forum, &[], &[], &[], 1, 0);
+        let b = build_log_batch(&p, &[], &[], &forum, &[], &[], &[], &[], 1, 0);
         assert_eq!(b.items.len(), 1);
         assert_eq!(b.items[0].platform, PlatformId::Forum);
         assert_eq!(b.items[0].target, "삼성전자");
@@ -4863,7 +5271,7 @@ mod tests {
             "005930",
             "Chrome 실행 실패: connect refused",
         )];
-        let b = build_log_batch(&p, &[], &[], &forum, &[], &[], &[], 1, 0);
+        let b = build_log_batch(&p, &[], &[], &forum, &[], &[], &[], &[], 1, 0);
         assert_eq!(b.items.len(), 1);
         assert_eq!(b.items[0].status, BatchItemStatus::Fail);
         assert_eq!(b.items[0].msg, "엔진 오류");
@@ -5153,7 +5561,7 @@ mod tests {
             band_ok("u3", "부분밴드", 1, 2), // 댓글 일부 실패 → Fail 표기
             band_fail("u2", "실패밴드"),     // 게시 실패
         ];
-        let b = build_log_batch(&p, &[], &[], &[], &bands, &[], &[], 1, 0);
+        let b = build_log_batch(&p, &[], &[], &[], &bands, &[], &[], &[], 1, 0);
         assert_eq!(b.items.len(), 4);
 
         assert_eq!(b.items[0].platform, PlatformId::Band);
@@ -5201,7 +5609,7 @@ mod tests {
             band_commented("u1", "정보밴드", 0, 2), // 대상 있었으나 전부 실패 → Fail
             band_commented("u2", "빈밴드", 0, 0),   // 댓글 대상 글 없음 → Fail
         ];
-        let b = build_log_batch(&p, &[], &[], &[], &bands, &[], &[], 1, 0);
+        let b = build_log_batch(&p, &[], &[], &[], &bands, &[], &[], &[], 1, 0);
         assert_eq!(b.items.len(), 3);
 
         assert_eq!(b.items[0].platform, PlatformId::Band);
@@ -5257,7 +5665,7 @@ mod tests {
         // 블로그는 카페·밴드와 별개 platform(Blog)으로, 성공 시 단 댓글 본문과 글 URL을 남긴다.
         let p = plan(ModeValue::Comment, vec![]);
         let blog = vec![blog_ok("u0", "press02")];
-        let b = build_log_batch(&p, &[], &[], &[], &[], &blog, &[], 1, 0);
+        let b = build_log_batch(&p, &[], &[], &[], &[], &blog, &[], &[], 1, 0);
         assert_eq!(b.items.len(), 1);
         assert_eq!(b.items[0].platform, PlatformId::Blog);
         assert_eq!(b.items[0].target, "press02");
@@ -5279,7 +5687,7 @@ mod tests {
         // 실패는 메인=친절 사유 / 자세히=BlogError trace(backtrace 포함, #199)로 나눈다.
         let p = plan(ModeValue::Comment, vec![]);
         let blog = vec![blog_fail("u1", "cho41004")];
-        let b = build_log_batch(&p, &[], &[], &[], &[], &blog, &[], 1, 0);
+        let b = build_log_batch(&p, &[], &[], &[], &[], &blog, &[], &[], 1, 0);
         assert_eq!(b.items.len(), 1);
         assert_eq!(b.items[0].platform, PlatformId::Blog);
         assert_eq!(b.items[0].status, BatchItemStatus::Fail);
@@ -5303,7 +5711,7 @@ mod tests {
             contents: String::new(),
             result: Err(crate::naver_blog::BlogError::new("글이 없습니다")),
         };
-        let b = build_log_batch(&p, &[], &[], &[], &[], &[shortfall], &[], 1, 0);
+        let b = build_log_batch(&p, &[], &[], &[], &[], &[shortfall], &[], &[], 1, 0);
         assert_eq!(b.items.len(), 1);
         assert_eq!(b.items[0].platform, PlatformId::Blog);
         assert_eq!(b.items[0].status, BatchItemStatus::Fail);
@@ -5363,7 +5771,7 @@ mod tests {
             message: "list fetch failed".into(),
             cafe: Some(cafe_error(Some(500), None, Some("Internal Server Error"))),
         }];
-        let b = build_log_batch(&p, &[], &[], &[], &[], &[], &failures, 1, 0);
+        let b = build_log_batch(&p, &[], &[], &[], &[], &[], &[], &failures, 1, 0);
         assert_eq!(b.items.len(), 1);
         assert_eq!(b.items[0].status, BatchItemStatus::Fail);
         assert_eq!(b.items[0].login_id, "u0");
