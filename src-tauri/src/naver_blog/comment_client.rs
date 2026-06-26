@@ -193,7 +193,12 @@ impl BlogCommentClient {
             )));
         }
         parse_create_result(&raw).ok_or_else(|| {
-            BlogError::new("블로그 댓글 등록에 실패했습니다(네이버가 성공을 반환하지 않음)")
+            // 진단(#312-후속): 네이버가 success/code=1000을 안 준 진짜 사유(code·message)를 노출한다.
+            // 금칙어·중복·이웃공개·스팸차단 등을 사후 구분할 수 있다. 본문엔 쿠키가 없다.
+            BlogError::new(format!(
+                "블로그 댓글 등록에 실패했습니다(네이버가 성공을 반환하지 않음). {}",
+                create_failure_detail(&raw)
+            ))
         })
     }
 
@@ -346,6 +351,27 @@ fn parse_create_result(body: &str) -> Option<BlogCommentResult> {
         comment_no,
         contents,
     })
+}
+
+/// web_naver_create 실패 응답에서 진단 문자열을 만든다(#312-후속). `success`/`code`/`message`를
+/// 뽑아 거절 사유를 드러내고, JSON 파싱이 안 되면 [`response_diagnostic`] 스니펫으로 떨어진다.
+/// 본문(JSON)에는 쿠키가 없어 자격 증명 노출 위험이 없다(순수 함수).
+fn create_failure_detail(body: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(json_slice(body)) {
+        Ok(json) => {
+            let success = json.get("success").and_then(|v| v.as_bool());
+            let code = json.get("code").and_then(|v| v.as_str());
+            let message = json.get("message").and_then(|v| v.as_str());
+            format!(
+                "success={}, code={}, message={}",
+                success.map(|b| b.to_string()).unwrap_or_else(|| "?".into()),
+                code.unwrap_or("?"),
+                message.unwrap_or("?")
+            )
+        }
+        // JSON이 아니면(봇차단 HTML 등) 길이+스니펫으로 보여준다.
+        Err(_) => response_diagnostic(body),
+    }
 }
 
 /// 응답 앞에 JSONP/가드 접두가 붙는 경우를 대비해 첫 `{`부터의 슬라이스를 돌려준다.
@@ -697,6 +723,26 @@ mod tests {
             .await
             .expect("cors 위장 헤더가 실려야 성공");
         assert_eq!(token, "OK");
+    }
+
+    #[test]
+    fn create_failure_detail_surfaces_code_and_message() {
+        let body = serde_json::json!({
+            "success": false, "code": "4090",
+            "message": "이미 등록된 댓글입니다."
+        })
+        .to_string();
+        let d = create_failure_detail(&body);
+        assert!(d.contains("success=false"));
+        assert!(d.contains("code=4090"));
+        assert!(d.contains("이미 등록된 댓글입니다."));
+    }
+
+    #[test]
+    fn create_failure_detail_falls_back_to_snippet_for_non_json() {
+        let d = create_failure_detail("<html>로그인이 필요합니다</html>");
+        assert!(d.contains("응답길이="));
+        assert!(d.contains("로그인이 필요합니다"));
     }
 
     #[test]
