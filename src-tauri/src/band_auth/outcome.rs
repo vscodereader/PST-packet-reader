@@ -66,7 +66,11 @@ mod tests {
             &BandLoginOutcome::Error("연결 실패".into()),
             Some("at band.rs:1:1\n\nframe0".to_owned()),
         );
-        assert_eq!(r.trace.as_deref(), Some("at band.rs:1:1\n\nframe0"));
+        // 사용자 사유가 백트레이스 위에 먼저 붙는다(자세히 보기 전문 노출, 공유 LoginResolution).
+        assert_eq!(
+            r.trace.as_deref(),
+            Some("연결 실패\n\nat band.rs:1:1\n\nframe0")
+        );
     }
 
     #[test]
