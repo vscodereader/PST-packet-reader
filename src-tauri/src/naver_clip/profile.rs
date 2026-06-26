@@ -103,7 +103,7 @@ impl ClipProfileClient {
         let body = serde_json::json!({
             "operationName": "NaverProfile",
             "variables": {},
-            "extensions": {},
+            "extensions": {"clientLibrary": {"name": "@apollo/client", "version": "4.1.9"}},
             "query": QUERY,
         })
         .to_string();
@@ -142,18 +142,30 @@ impl ClipProfileClient {
                 "nickname": nickname,
                 "profileImageUrl": profile_image_url,
             }},
-            "extensions": {},
+            // 실측 브라우저와 동일하게 Apollo clientLibrary 확장을 싣는다(빈 {}와 차이 제거).
+            "extensions": {"clientLibrary": {"name": "@apollo/client", "version": "4.1.9"}},
             "query": QUERY,
         })
         .to_string();
         let raw = self.post_graphql(&body, cookie).await?;
+        // 진단: 실패 시 보낸 입력값(clipId/nickname/이미지유무)과 원본 응답을 에러에 남긴다 — 어떤
+        // 입력이 -7020을 유발하는지 사후 식별용(쿠키는 없음). nickname은 그대로 노출(자격 증명 아님).
+        let input_diag = format!(
+            "입력[clipId={clip_id}, nickname=\"{nickname}\", img={}]",
+            if profile_image_url.is_empty() {
+                "(없음)"
+            } else {
+                "있음"
+            }
+        );
         match parse_sign_up(&raw) {
             SignUpResult::Succeed => Ok(()),
             SignUpResult::CommonError { code, message } => Err(ClipError::new(format!(
-                "클립 프로필 생성에 실패했습니다(code={code}, {message})"
+                "클립 프로필 생성에 실패했습니다(code={code}, {message}). {input_diag} {}",
+                response_diagnostic(&raw)
             ))),
             SignUpResult::Unknown => Err(ClipError::new(format!(
-                "클립 프로필 생성 응답을 해석하지 못했습니다(형식 변경). {}",
+                "클립 프로필 생성 응답을 해석하지 못했습니다(형식 변경). {input_diag} {}",
                 response_diagnostic(&raw)
             ))),
         }
