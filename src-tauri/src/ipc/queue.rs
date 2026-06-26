@@ -255,50 +255,6 @@ pub fn apply_cancel_now(items: Vec<QueueNowItem>, id: &str) -> Vec<QueueNowItem>
     items.into_iter().filter(|i| i.id != id).collect()
 }
 
-/// 큐 창에 남겨둘 종료(`Done`) 아이템 상한(#1). 사용자가 직접 안 치워도 디스크/화면이 무한히
-/// 불어나지 않게, 가장 오래된 Done부터 이 수를 넘는 만큼 정리한다(진행 중/대기는 절대 건드리지
-/// 않는다). 한 번에 35종목×다계정 규모를 한참 넘는 값이라 정상 사용에선 잘려나가지 않는다.
-pub const MAX_DONE_NOW: usize = 50;
-
-/// 실행이 끝난 아이템을 큐에서 **제거하지 않고** 종료 상태(`Done`)로 남긴다(#1). 결과를 그
-/// 자리에서 확인할 수 있도록 progress·items(대상별 상태)는 그대로 보존한다. 일치하는 id가
-/// 없으면 no-op. Done이 `MAX_DONE_NOW`를 넘으면 가장 오래된 Done부터 정리한다(진행 중/대기
-/// 아이템은 보존). account_id가 곧 loginId라 같은 동작을 다계정에서도 일관되게 만든다.
-pub fn apply_complete_now(items: Vec<QueueNowItem>, id: &str) -> Vec<QueueNowItem> {
-    let marked = items
-        .into_iter()
-        .map(|mut item| {
-            if item.id == id {
-                item.state = QueueState::Done;
-                item.batch_id = None;
-            }
-            item
-        })
-        .collect();
-    prune_done_now(marked, MAX_DONE_NOW)
-}
-
-/// Done 아이템이 `cap`을 넘으면 **가장 오래된 것부터**(앞에서부터) 그 초과분만 제거한다(순수).
-/// Running/Waiting 아이템과 cap 이내의 Done은 원래 상대 순서 그대로 보존한다.
-pub fn prune_done_now(items: Vec<QueueNowItem>, cap: usize) -> Vec<QueueNowItem> {
-    let done_total = items.iter().filter(|i| i.state == QueueState::Done).count();
-    if done_total <= cap {
-        return items;
-    }
-    let mut to_drop = done_total - cap;
-    items
-        .into_iter()
-        .filter(|i| {
-            if i.state == QueueState::Done && to_drop > 0 {
-                to_drop -= 1;
-                false
-            } else {
-                true
-            }
-        })
-        .collect()
-}
-
 /// 종료(`Done`) 아이템을 모두 제거한다(#1, "완료 항목 지우기"). 진행 중/대기 아이템은 보존한다.
 pub fn apply_clear_done_now(items: Vec<QueueNowItem>) -> Vec<QueueNowItem> {
     items
@@ -903,63 +859,6 @@ mod tests {
         let next = apply_cancel_now(items, "q1");
         assert!(next.iter().all(|i| i.id != "q1"));
         assert_eq!(next.len(), 1);
-    }
-
-    #[test]
-    fn complete_now_keeps_item_as_done_and_preserves_result() {
-        // #1: 완료 아이템은 제거되지 않고 Done으로 남아 결과(progress·items)를 보존한다.
-        let mut running = sample_now_item("q1", QueueState::Running);
-        running.progress = Some((5, 5));
-        running.batch_id = Some("b1".into());
-        let items = vec![running, sample_now_item("q2", QueueState::Running)];
-        let next = apply_complete_now(items, "q1");
-        assert_eq!(next.len(), 2, "다른 작업은 그대로 남는다");
-        let done = next.iter().find(|i| i.id == "q1").unwrap();
-        assert_eq!(done.state, QueueState::Done);
-        assert_eq!(done.progress, Some((5, 5)), "진행률 결과 보존");
-        assert_eq!(done.batch_id, None, "실행 메타는 비운다");
-        // 다른 실행 중 아이템은 건드리지 않는다(#1 핵심: 형제 큐가 사라지지 않는다).
-        assert_eq!(
-            next.iter().find(|i| i.id == "q2").unwrap().state,
-            QueueState::Running
-        );
-    }
-
-    #[test]
-    fn complete_now_unknown_id_is_noop() {
-        let items = vec![sample_now_item("q1", QueueState::Running)];
-        let next = apply_complete_now(items, "zzz");
-        assert_eq!(next[0].state, QueueState::Running);
-    }
-
-    #[test]
-    fn prune_done_now_drops_oldest_done_beyond_cap_keeping_active() {
-        // Done 3개 + 대기/실행 — cap=2면 가장 오래된 Done 1개만 정리하고 나머지는 보존.
-        let items = vec![
-            sample_now_item("d1", QueueState::Done),
-            sample_now_item("r1", QueueState::Running),
-            sample_now_item("d2", QueueState::Done),
-            sample_now_item("w1", QueueState::Waiting),
-            sample_now_item("d3", QueueState::Done),
-        ];
-        let next = prune_done_now(items, 2);
-        let ids: Vec<&str> = next.iter().map(|i| i.id.as_str()).collect();
-        assert!(!ids.contains(&"d1"), "가장 오래된 Done이 잘린다");
-        assert!(ids.contains(&"d2") && ids.contains(&"d3"), "최근 Done은 보존");
-        assert!(
-            ids.contains(&"r1") && ids.contains(&"w1"),
-            "실행/대기는 절대 건드리지 않는다"
-        );
-    }
-
-    #[test]
-    fn prune_done_now_under_cap_is_unchanged() {
-        let items = vec![
-            sample_now_item("d1", QueueState::Done),
-            sample_now_item("w1", QueueState::Waiting),
-        ];
-        let n = items.len();
-        assert_eq!(prune_done_now(items, MAX_DONE_NOW).len(), n);
     }
 
     #[test]
