@@ -72,24 +72,14 @@ pub(crate) struct IpRotation {
     pub changed: bool,
 }
 
-/// 비행기 모드를 켬과 끔으로 토글하여 IP 변경을 유도한다.
-/// 토글 전후의 외부 IP를 stderr로 출력해 `pnpm tauri dev` 콘솔에서 IP 회전 여부를
-/// 직접 눈으로 확인할 수 있게 한다. (Samsung One UI는 `cmd connectivity airplane-mode`로
-/// 토글해도 상단 버튼에 불이 안 들어올 수 있으나, IP가 바뀌면 라디오는 실제로 순환한 것.)
-/// 비행기모드 토글(IP 회전)의 ON 대기 방식. 호출 맥락에 따라 다르다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IpRotationMode {
-    /// "IP 변경" 버튼: 라디오가 실제로 끊겼다 재등록해 IP가 바뀌도록 고정 hold(3초)를 둔다.
-    /// 설정 플래그만 즉시 1이 되어선 라디오가 안 끊겨 IP가 그대로이기 때문(필수).
-    EnsureIpChange,
-    /// 로그인: 고정 대기 없이 **실제 상태**로 진행한다 — ON 후 폰 인터넷이 실제로 끊긴 걸
-    /// 확인할 때까지 기다렸다가 OFF하고, 그 뒤 외부 IP가 `before`와 달라질 때까지 api로 폴링해
-    /// **IP가 바뀐 순간 즉시** 다음으로 넘어간다. 라디오 드롭·IP 변경을 실제로 확인하므로
-    /// 로그인 중에도 IP가 바뀐다(임의의 고정 3초 없음).
-    WaitForIpChange,
-}
-
-pub async fn toggle_airplane_mode(mode: IpRotationMode) -> Result<IpRotation, OrchestratorError> {
+/// 비행기 모드를 켰다 꺼 IP 변경을 유도한다(로그인·밴드·"IP 변경" 버튼 공용).
+///
+/// 고정 대기 없이 **실제 상태**로 진행한다 — ON 후 폰 인터넷이 실제로 끊긴 걸(라디오 드롭)
+/// `ping 8.8.8.8` fail로 확인할 때까지 기다렸다가 OFF하고, 그 뒤 외부 IP가 `before`와 달라질
+/// 때까지 폴링해 **IP가 바뀐 순간 즉시** 반환한다. 토글 전후 IP를 로그로 남겨 콘솔에서 회전
+/// 여부를 눈으로 확인할 수 있다. (Samsung One UI는 `cmd connectivity airplane-mode`로 토글해도
+/// 상단 버튼에 불이 안 들어올 수 있으나, IP가 바뀌면 라디오는 실제로 순환한 것.)
+pub async fn toggle_airplane_mode() -> Result<IpRotation, OrchestratorError> {
     let before = fetch_external_ip().await;
     tracing::info!("[ADB] ✈ 비행기모드 ON");
     run_adb_timed(
@@ -99,18 +89,8 @@ pub async fn toggle_airplane_mode(mode: IpRotationMode) -> Result<IpRotation, Or
             .collect(),
     )
     .await?;
-    // ON 동안 라디오가 실제로 끊기게 한다: 버튼은 고정 3초 hold, 로그인은 폰 인터넷이 실제로
-    // 끊긴 걸 확인할 때까지(고정 대기 없음).
-    match mode {
-        IpRotationMode::EnsureIpChange => {
-            tracing::info!(
-                "[ADB]   └ 상태 확인: 비행기모드 {}",
-                airplane_mode_state().await
-            );
-            sleep(Duration::from_secs(config::ADB_AIRPLANE_ENABLE_SECS)).await;
-        }
-        IpRotationMode::WaitForIpChange => wait_until_phone_offline().await,
-    }
+    // ON 동안 라디오가 실제로 끊긴 걸(폰 인터넷 차단) 확인할 때까지 기다린다(고정 대기 없음).
+    wait_until_phone_offline().await;
     tracing::info!("[ADB] ✈ 비행기모드 OFF — 인터넷 복구 대기");
     run_adb_timed(
         airplane_mode_args(false)
@@ -119,22 +99,9 @@ pub async fn toggle_airplane_mode(mode: IpRotationMode) -> Result<IpRotation, Or
             .collect(),
     )
     .await?;
-    // OFF 후: 버튼은 인터넷 복구 후 IP를 1회 읽고, 로그인은 인터넷 복구 후 IP가 실제로 바뀔
-    // 때까지 api로 폴링해 바뀌면 즉시 진행한다.
-    let after = match mode {
-        IpRotationMode::EnsureIpChange => {
-            tracing::info!(
-                "[ADB]   └ 상태 확인: 비행기모드 {}",
-                airplane_mode_state().await
-            );
-            wait_for_internet_connection().await?;
-            fetch_external_ip().await
-        }
-        IpRotationMode::WaitForIpChange => {
-            wait_for_internet_connection().await?;
-            wait_for_ip_change(&before).await
-        }
-    };
+    // OFF 후: 인터넷 복구를 기다렸다가, 외부 IP가 실제로 바뀔 때까지 폴링해 바뀌면 즉시 반환한다.
+    wait_for_internet_connection().await?;
+    let after = wait_for_ip_change(&before).await;
 
     tracing::info!("[ADB] ─────────── IP 회전 결과 ───────────");
     tracing::info!("[ADB]   기존 IP: {before}");
@@ -177,34 +144,8 @@ fn airplane_mode_args(enable: bool) -> [&'static str; 5] {
     ]
 }
 
-/// 비행기모드 *실제* 상태를 읽어 로그용 한 줄 라벨로 돌려준다(부작용 없는 상태 조회).
-/// 토글 명령이 먹혔는지 확인용 — `settings get global airplane_mode_on`이 "1"=ON / "0"=OFF.
-/// 조회 실패는 토글 자체를 막지 않도록 "(상태 확인 실패)"로 표기한다(로그 전용).
-async fn airplane_mode_state() -> String {
-    match run_adb_timed(
-        ["shell", "settings", "get", "global", "airplane_mode_on"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    )
-    .await
-    {
-        Ok(out) => airplane_state_label(out.trim()).to_string(),
-        Err(_) => "(상태 확인 실패)".to_string(),
-    }
-}
-
-/// `airplane_mode_on` 원시 출력("1"/"0")을 사람이 읽을 라벨로 변환한다(순수 함수).
-fn airplane_state_label(raw: &str) -> &'static str {
-    match raw {
-        "1" => "ON(켜짐)",
-        "0" => "OFF(꺼짐)",
-        _ => "(알 수 없음)",
-    }
-}
-
 /// 비행기모드 ON 후, 폰 인터넷이 **실제로 끊길 때까지**(라디오 드롭) ADB ping 프로브로 폴링하고
-/// 끊긴 걸 확인하면 즉시 반환한다(WaitForIpChange 전용 — 고정 대기 없음). 설정 플래그가 아니라
+/// 끊긴 걸 확인하면 즉시 반환한다(고정 대기 없음). 설정 플래그가 아니라
 /// 실제 연결 상태를 보므로, 라디오가 끊겨 IP가 바뀔 토대를 보장한다. 끝내 못 끊으면(WiFi 유지 등)
 /// 상한(ADB_INTERNET_TIMEOUT_SECS)을 넘겨 그대로 진행한다.
 async fn wait_until_phone_offline() {
@@ -224,7 +165,7 @@ async fn wait_until_phone_offline() {
 }
 
 /// 외부 IP가 `before`와 **실제로 달라질 때까지** api.ipify.org를 폴링하고, 바뀌면 즉시 그 IP를
-/// 반환한다(WaitForIpChange 전용). 비정상 응답("(확인 실패)" 등)은 아직 안 바뀐 것으로 보고
+/// 반환한다. 비정상 응답("(확인 실패)" 등)은 아직 안 바뀐 것으로 보고
 /// 재시도한다. 상한(ADB_INTERNET_TIMEOUT_SECS)을 넘으면 마지막으로 읽은 값을 반환한다(같으면
 /// 호출부가 "그대로"로 로깅 — 보통 CGNAT/테더링 경로 문제).
 async fn wait_for_ip_change(before: &str) -> String {
@@ -344,28 +285,18 @@ fn internet_probe_command() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        airplane_mode_args, airplane_state_label, has_authorized_device, internet_probe_command,
-        is_valid_changed_ip,
+        airplane_mode_args, has_authorized_device, internet_probe_command, is_valid_changed_ip,
     };
 
     #[test]
     fn is_valid_changed_ip_detects_real_change() {
-        // WaitForIpChange(로그인)이 'IP가 실제로 바뀜'을 판정하는 근거.
+        // IP 회전이 'IP가 실제로 바뀜'을 판정하는 근거.
         assert!(is_valid_changed_ip("1.1.1.1", "2.2.2.2")); // 유효 + 다름 → 바뀜
         assert!(!is_valid_changed_ip("1.1.1.1", "1.1.1.1")); // 같음 → 아직
         assert!(!is_valid_changed_ip("1.1.1.1", "(확인 실패)")); // 비정상 응답 → 아직
         assert!(!is_valid_changed_ip("1.1.1.1", "")); // 빈 값 → 아직
         // before가 비정상이었어도, 유효 IP를 새로 받으면 바뀐 것으로 본다.
         assert!(is_valid_changed_ip("(확인 실패)", "3.3.3.3"));
-    }
-
-    #[test]
-    fn airplane_state_label_maps_raw_setting() {
-        assert_eq!(airplane_state_label("1"), "ON(켜짐)");
-        assert_eq!(airplane_state_label("0"), "OFF(꺼짐)");
-        // settings get은 끝에 개행이 붙으므로 호출부에서 trim 후 넘긴다.
-        assert_eq!(airplane_state_label("1\n".trim()), "ON(켜짐)");
-        assert_eq!(airplane_state_label("null"), "(알 수 없음)");
     }
 
     #[test]
