@@ -1989,6 +1989,8 @@ async fn run_blog_targets<R: Runtime>(
     let mut live = blog_work_skeleton_items(&work);
     write_live_phase(app, id, &base_items, &live, base_done, total);
     let mut outcomes = Vec::new();
+    // 도배 방지: 한 댓글을 올린 뒤 다음 댓글까지 3초 텀을 둔다. 첫 댓글은 즉시 단다.
+    let mut posted_any = false;
     for (i, w) in work.into_iter().enumerate() {
         let outcome = match w {
             // 조회 실패/글 부족은 네트워크 호출 없이 곧장 실패 결과로 굳힌다(대기/재시도 없음).
@@ -2019,6 +2021,19 @@ async fn run_blog_targets<R: Runtime>(
                 if !item_present(app, id) {
                     break;
                 }
+                // 직전 댓글이 올라갔으면 다음 댓글까지 3초 대기(도배 방지). 정지를 빠르게
+                // 반영하려고 100ms씩 쪼개 대기하고, 도중 큐에서 빠지면 멈춘다.
+                if posted_any {
+                    for _ in 0..30 {
+                        if !item_present(app, id) {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    if !item_present(app, id) {
+                        break;
+                    }
+                }
                 if let Some(it) = live.get_mut(i) {
                     it.status = BatchItemStatus::Running;
                     it.msg = "댓글 게시 중…".to_owned();
@@ -2031,6 +2046,8 @@ async fn run_blog_targets<R: Runtime>(
                     &contents,
                 )
                 .await;
+                // 성공/실패와 무관하게 "한 댓글 시도"가 끝났으므로 다음부터 3초 텀을 적용한다.
+                posted_any = true;
                 BlogOutcome {
                     account_id: job.account_id,
                     name: job.name,
@@ -3294,7 +3311,11 @@ mod tests {
             ));
         let (status, _msg, trace) = resolve_login_status(&with_trace);
         assert_eq!(status, AccountStatus::Error);
-        assert_eq!(trace.as_deref(), Some("at x.rs:1:1\n\nframe0"));
+        // 사용자 사유가 백트레이스 위에 먼저 붙는다(자세히 보기 전문 노출).
+        assert_eq!(
+            trace.as_deref(),
+            Some("연결 실패\n\nat x.rs:1:1\n\nframe0")
+        );
     }
 
     #[test]

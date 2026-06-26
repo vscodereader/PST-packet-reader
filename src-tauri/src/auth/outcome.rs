@@ -49,9 +49,13 @@ impl LoginResolution {
         message: impl Into<String>,
         trace: Option<String>,
     ) -> Self {
+        let message = message.into();
+        // 사용자 사유를 "자세히 보기" 백트레이스 **위**에 먼저 적는다 — 메인 한 줄에서 사유가
+        // 잘려도 전문을 볼 수 있게 한다(블로그 BlogError와 동일 철학, 네이버 로그인 실패용).
+        let trace = trace.map(|t| format!("{message}\n\n{t}"));
         Self {
             status,
-            message: message.into(),
+            message,
             succeeded: false,
             trace,
         }
@@ -239,7 +243,11 @@ mod tests {
             Some("at file.rs:1:1\n\nframe0".to_owned()),
         );
         assert_eq!(r.status, AccountStatus::Error);
-        assert_eq!(r.trace.as_deref(), Some("at file.rs:1:1\n\nframe0"));
+        // 사용자 사유가 백트레이스 위에 먼저 붙는다(자세히 보기에서 전문 노출).
+        assert_eq!(
+            r.trace.as_deref(),
+            Some("연결 실패\n\nat file.rs:1:1\n\nframe0")
+        );
     }
 
     #[test]

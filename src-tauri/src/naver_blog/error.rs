@@ -22,15 +22,19 @@ impl BlogError {
     #[track_caller]
     pub fn new(message: impl Into<String>) -> Self {
         let loc = std::panic::Location::caller();
+        let message = message.into();
         Self {
-            message: message.into(),
+            // 사용자 사유 메시지를 백트레이스 **위**에 먼저 적는다 — 네이버가 준 거절 사유
+            // (예: 도배방지 입력 제한)가 메인 한 줄에서 잘려도 "자세히 보기"에서 전문이 보이게 한다.
             trace: format!(
-                "at {}:{}:{}\n\n{}",
+                "{}\n\nat {}:{}:{}\n\n{}",
+                message,
                 loc.file(),
                 loc.line(),
                 loc.column(),
                 crate::util::backtrace_string(),
             ),
+            message,
         }
     }
 
@@ -64,6 +68,11 @@ mod tests {
         // trace는 앵커(at …)와 backtrace 본문을 합쳐 비어 있지 않다(자세히 보기 노출).
         assert!(err.trace().contains("at "));
         assert!(!err.trace().is_empty());
+        // 사용자 사유가 백트레이스(at …) **위**에 먼저 적힌다 — 메인 한 줄이 잘려도 전문 노출.
+        assert!(err.trace().starts_with("댓글 등록 실패"));
+        let msg_at = err.trace().find("댓글 등록 실패").unwrap();
+        let anchor_at = err.trace().find("at ").unwrap();
+        assert!(msg_at < anchor_at, "메시지가 앵커보다 앞에 있어야 한다");
     }
 
     #[test]

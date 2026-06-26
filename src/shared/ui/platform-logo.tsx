@@ -1,6 +1,7 @@
 import { Box } from "@mantine/core";
 
 import bandLogo from "@/assets/logos/band.svg";
+import blogLogo from "@/assets/logos/blog.svg";
 import instagramLogo from "@/assets/logos/instagram.svg";
 import naverLogo from "@/assets/logos/naver.svg";
 import navercafeLogo from "@/assets/logos/navercafe.svg";
@@ -21,8 +22,8 @@ const INITIAL: Record<PlatformId, string> = {
 const LOGO: Partial<Record<PlatformId, string>> = {
   forum: naverLogo,
   naver: navercafeLogo,
-  // 블로그(#271)도 네이버 서비스라 네이버 로고 자산을 재사용한다.
-  blog: naverLogo,
+  // 블로그(#271)는 네이버 블로그 전용 로고(초록 'b|')를 쓴다.
+  blog: blogLogo,
   band: bandLogo,
   instagram: instagramLogo,
   threads: threadsLogo,
