@@ -50,6 +50,9 @@ impl ClipProfileClient {
         }
         let (nickname, profile_image_url) = self.fetch_naver_profile(cookie).await?;
         let clip_id = generate_clip_id();
+        // 네이버 클립은 **숫자만/빈/너무 짧은 닉네임**을 거부한다(-7020, 실측: nickname="040" 실패).
+        // 영문자가 포함된 안전한 값으로 보정한다(없으면 clipId 사용 — 영숫자라 항상 유효).
+        let nickname = safe_nickname(&nickname, &clip_id);
         self.sign_up(&clip_id, &nickname, &profile_image_url, cookie)
             .await
     }
@@ -254,24 +257,45 @@ fn parse_header_code(body: &str) -> Option<i64> {
     json.get("header")?.get("code")?.as_i64()
 }
 
-/// 클라이언트가 정하는 임시 clipId(서버가 나중에 변경 허용). 시간 기반 base36 영숫자 10자.
-/// 전역 유일성이 필요하지만 충돌 확률은 낮고, 충돌 시 SignUp이 CommonError로 알려준다.
+/// 클라이언트가 정하는 임시 clipId(서버가 나중에 변경 허용). 시간 기반 base36 영숫자 **10자**
+/// (실측 성공값 "uizpj525n7"과 동일 길이), 항상 영문자로 시작(핸들 규칙 안전). 전역 유일성이
+/// 필요하지만 충돌 확률은 낮고, 충돌 시 SignUp이 CommonError로 알려준다.
 fn generate_clip_id() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let mut n = nanos;
-    let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
-    let mut out = Vec::new();
-    while n > 0 && out.len() < 11 {
-        out.push(digits[(n % 36) as usize]);
-        n /= 36;
+    let alnum = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let letters = b"abcdefghijklmnopqrstuvwxyz";
+    // 첫 글자는 영문자.
+    let mut s = String::new();
+    s.push(letters[(n % 26) as usize] as char);
+    n /= 26;
+    // 나머지 9자는 영숫자. nanos가 다 떨어지면(이론상) 'x'로 채워 항상 10자를 보장한다.
+    while s.chars().count() < 10 {
+        let c = if n > 0 {
+            let ch = alnum[(n % 36) as usize];
+            n /= 36;
+            ch
+        } else {
+            b'x'
+        };
+        s.push(c as char);
     }
-    // 앞에 영문자를 붙여 항상 글자로 시작하게 한다(핸들 규칙 안전).
-    let mut s = String::from("c");
-    s.push_str(&String::from_utf8_lossy(&out));
-    s.chars().take(11).collect()
+    s.chars().take(10).collect()
+}
+
+/// SignUp 닉네임을 보정한다(순수). 네이버 클립은 빈/숫자만/너무 짧은 닉네임을 거부(-7020)하므로,
+/// **영문자가 1개 이상 + 2자 이상**일 때만 원본을 쓰고, 아니면 `fallback`(clipId 등 영숫자)을 쓴다.
+fn safe_nickname(raw: &str, fallback: &str) -> String {
+    let t = raw.trim();
+    let ok = t.chars().count() >= 2 && t.chars().any(|c| c.is_alphabetic());
+    if ok {
+        t.to_string()
+    } else {
+        fallback.to_string()
+    }
 }
 
 /// 진단 문자열(응답 길이 + 스니펫). 본문엔 쿠키가 없다.
@@ -323,11 +347,21 @@ mod tests {
     }
 
     #[test]
-    fn generate_clip_id_is_alnum_starts_letter() {
+    fn generate_clip_id_is_10_alnum_starts_letter() {
         let id = generate_clip_id();
-        assert!(id.starts_with('c'));
-        assert!(id.len() >= 2 && id.len() <= 11);
+        assert_eq!(id.chars().count(), 10, "실측 성공값과 동일하게 10자");
+        assert!(id.chars().next().unwrap().is_ascii_alphabetic(), "첫 글자는 영문자");
         assert!(id.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn safe_nickname_replaces_digit_only_or_empty() {
+        // 숫자만(-7020 유발)·빈·1자 → fallback. 영문 포함 2자+ → 원본.
+        assert_eq!(safe_nickname("040", "ab12cd34ef"), "ab12cd34ef");
+        assert_eq!(safe_nickname("", "ab12cd34ef"), "ab12cd34ef");
+        assert_eq!(safe_nickname("a", "ab12cd34ef"), "ab12cd34ef");
+        assert_eq!(safe_nickname("NULL", "fb"), "NULL");
+        assert_eq!(safe_nickname("동찌", "fb"), "동찌"); // 한글도 alphabetic → 유지
     }
 
     #[tokio::test]
