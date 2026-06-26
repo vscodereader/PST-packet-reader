@@ -76,6 +76,18 @@ pub async fn ensure_clip_profile_for_account(account_id: &str) -> Result<(), Cli
     client.ensure_profile(Some(&cookie_header)).await
 }
 
+/// 사람이 클릭해서 댓글 단 클립을 여는 **표시용 URL**을 만든다(완료 로그 "열기"). `/shorts/{id}`
+/// 형식은 "페이지 없음"이 떠서, 실제로 열리는 contents 형식을 쓴다(사용자 확인). `recId`는 JSON을
+/// 한 번 URL 인코딩한 값이고 `serviceType=NTV`다(브라우저가 댓글 단 영상을 여는 실제 형식).
+pub fn clip_view_url(handle: &str, media_id: &str) -> String {
+    let rec_id = format!("{{\"targetProfileId\":\"{handle}\",\"open\":true}}");
+    format!(
+        "https://clip.naver.com/contents?recType=CLIP_PC&recId={}&mediaType=ALL&serviceType=NTV&seedMediaId={}",
+        urlencoding::encode(&rec_id),
+        media_id
+    )
+}
+
 /// 계정의 저장 세션 쿠키를 Cookie 헤더 문자열로 해석한다(블로그 resolve_cookie_header와 동일 규약).
 /// 쿠키 값은 반환 오류/로그에 절대 노출되지 않는다.
 fn resolve_cookie_header(account_id: &str) -> Result<String, ClipError> {
@@ -97,4 +109,21 @@ fn resolve_cookie_header(account_id: &str) -> Result<String, ClipError> {
             "계정 '{account_id}'의 네이버 세션 쿠키를 찾지 못했습니다. 다시 로그인하세요."
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clip_view_url;
+
+    #[test]
+    fn clip_view_url_uses_contents_form_with_ntv() {
+        let u = clip_view_url("mugidaebackgwa", "C00E987F8F08A9775D34E7AAAD8A72F2B5FC");
+        // /shorts/ 가 아니라 실제로 열리는 contents 형식이어야 한다.
+        assert!(u.starts_with("https://clip.naver.com/contents?"));
+        assert!(!u.contains("/shorts/"));
+        assert!(u.contains("serviceType=NTV"));
+        assert!(u.contains("seedMediaId=C00E987F8F08A9775D34E7AAAD8A72F2B5FC"));
+        // recId JSON(핸들 포함)이 URL 인코딩돼 들어간다.
+        assert!(u.contains("recId=%7B%22targetProfileId%22%3A%22mugidaebackgwa%22"));
+    }
 }

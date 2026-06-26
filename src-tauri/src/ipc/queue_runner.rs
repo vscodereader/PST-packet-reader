@@ -3197,7 +3197,8 @@ async fn run_clip_targets<R: Runtime>(
                     work.push(ClipWorkItem::Comment(ClipCommentJob {
                         account_id: t.account_id.clone(),
                         name: t.name.clone(),
-                        link: format!("https://clip.naver.com/shorts/{}", media.media_id),
+                        // 표시용 링크는 실제로 열리는 contents 형식(/shorts/는 "페이지 없음").
+                        link: crate::naver_clip::clip_view_url(&t.handle, &media.media_id),
                         media_id: media.media_id.clone(),
                         profile_id: profile_id.clone(),
                     }));
