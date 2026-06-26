@@ -163,6 +163,14 @@ impl ClipProfileClient {
         );
         match parse_sign_up(&raw) {
             SignUpResult::Succeed => Ok(()),
+            // -7020 = 본인인증(실명·연령확인) 미완료 계정(실측 확인). 네이버 정책상 코드로 우회
+            // 불가하므로, 사용자에게 본인인증을 먼저 하라고 명확히 안내한다(입력 문제 아님).
+            SignUpResult::CommonError { code, .. } if code == "-7020" => Err(ClipError::new(
+                "네이버 클립 댓글은 본인인증(실명·연령확인)이 완료된 계정만 가능합니다. 이 계정은 \
+                 본인인증이 안 돼 있어요 — 네이버 클립에 직접 로그인해 본인인증을 먼저 완료한 뒤 \
+                 다시 시도하세요(code=-7020)."
+                    .to_string(),
+            )),
             SignUpResult::CommonError { code, message } => Err(ClipError::new(format!(
                 "클립 프로필 생성에 실패했습니다(code={code}, {message}). {input_diag} {}",
                 response_diagnostic(&raw)
@@ -418,5 +426,25 @@ mod tests {
             .expect_err("CommonError는 실패");
         assert!(err.message().contains("이미 사용중"));
         assert!(err.trace().contains("at "));
+    }
+
+    #[tokio::test]
+    async fn sign_up_7020_maps_to_identity_verification_message() {
+        // -7020 = 본인인증 미완료 → code 대신 본인인증 안내 메시지로 바꾼다.
+        let clip = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"data":{"signUp":{"__typename":"CommonError","message":null,"code":-7020}}}"#,
+            ))
+            .mount(&clip)
+            .await;
+        let client = ClipProfileClient::with_base_urls(clip.uri(), "http://unused");
+        let err = client
+            .sign_up("iodsx8sl11", "iodsx8sl11", "http://img", None)
+            .await
+            .expect_err("-7020은 실패");
+        assert!(err.message().contains("본인인증"));
+        assert!(err.message().contains("-7020"));
     }
 }
