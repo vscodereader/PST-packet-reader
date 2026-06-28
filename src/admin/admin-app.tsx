@@ -17,6 +17,7 @@ import { ChangePassword } from "./auth/change-password";
 import { Login } from "./auth/login";
 import { Signup } from "./auth/signup";
 import { AccountDistribute } from "./features/account-distribute/account-distribute";
+import { CommLog } from "./features/comm-log/comm-log";
 import { DeviceConnection } from "./features/device-connection/device-connection";
 import { Operators } from "./features/operators/operators";
 import { ResultReport } from "./features/result-report/result-report";
@@ -35,6 +36,7 @@ const NAV: NavEntry[] = [
   { id: "report", icon: "chart", label: "결과 보고" },
   { id: "operators", icon: "settings", label: "운영자 관리" },
   { id: "change-pw", icon: "eye", label: "비밀번호 변경" },
+  { id: "comm-log", icon: "fileText", label: "통신 로그" },
 ];
 
 function NavButton({
@@ -125,6 +127,8 @@ function AppScreen({ screen }: { screen: Screen }) {
       return <Operators />;
     case "change-pw":
       return <ChangePassword forced={false} go={() => undefined} />;
+    case "comm-log":
+      return <CommLog />;
     default:
       return null;
   }

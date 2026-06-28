@@ -8,7 +8,8 @@ export type Screen =
   | "distribute"
   | "report"
   | "operators"
-  | "change-pw";
+  | "change-pw"
+  | "comm-log";
 
 // 로그인 전(인증) 화면들 — 사이드바 없이 전체화면으로 렌더.
 export const AUTH_SCREENS: Screen[] = ["login", "signup", "force-pw"];
@@ -28,4 +29,5 @@ export const PREVIEW_SCREENS: ScreenMeta[] = [
   { value: "report", label: "결과 보고", group: "앱(로그인 후)" },
   { value: "operators", label: "운영자 관리", group: "앱(로그인 후)" },
   { value: "change-pw", label: "비밀번호 변경", group: "앱(로그인 후)" },
+  { value: "comm-log", label: "통신 로그", group: "앱(로그인 후)" },
 ];
