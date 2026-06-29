@@ -590,6 +590,30 @@ const ANTIBOT_READY_JS: &str = "(()=>{try{\
 const RESOURCE_COUNT_JS: &str =
     "(()=>{try{return performance.getEntriesByType('resource').length;}catch(e){return -1;}})()";
 
+// [진단·임시] 게이트가 열리는 '바로 그 순간'의 네트워크/안티봇 상태 스냅샷(순수 관측 — 전역을
+// 전혀 건드리지 않아 봇탐지 표면 0). performance 리소스 타이밍만 읽는다:
+//  - rs             : document.readyState
+//  - resCount       : 완료된 리소스 수
+//  - sinceLastNetMs : 마지막으로 '완료된' 리소스 이후 경과(ms). 작을수록 방금도 뭔가 끝났다 =
+//                     아직 로딩 활발(=탭 로딩바 도는 중). -1은 리소스 엔트리가 아직 없음.
+//  - antibot        : default_ecc/wtm/ncaptcha/nclk 중 도착한 것 + 각 도착시각(ms)
+//  - iframes        : 현재 iframe 개수
+// 주의: performance 엔트리는 '완료' 시에만 생기므로 진행 중(in-flight) 요청을 직접 세지는 못한다.
+// sinceLastNetMs 가 작다는 것이 "아직 네트워크가 활발하다(=로딩바 돎)"의 안전한 대리지표다.
+const GATE_NET_SNAPSHOT_JS: &str = "(()=>{try{\
+    const now=performance.now();\
+    const res=performance.getEntriesByType('resource');\
+    let last=0;for(const e of res){if(e.responseEnd>last)last=e.responseEnd;}\
+    const since=last?Math.round(now-last):-1;\
+    const pats=[['default_ecc',/default_ecc/i],['wtm',/wtm\\.pstatic\\.net/i],\
+                ['ncaptcha',/ncaptcha/i],['nclk',/nclk\\.naver/i]];\
+    const hits=[];for(const p of pats){const m=res.find(e=>p[1].test(e.name));\
+        if(m)hits.push(p[0]+'@'+Math.round(m.responseEnd)+'ms');}\
+    const frames=document.querySelectorAll('iframe').length;\
+    return JSON.stringify({rs:document.readyState,resCount:res.length,\
+        sinceLastNetMs:since,antibot:hits,iframes:frames});\
+}catch(e){return '{\"err\":\"'+String(e)+'\"}';}})()";
+
 /// 로그인 폼 진행 게이트(순수 함수). 사수 의도(돔이 전부 붙고 타이핑 준비 완료)를 네 신호
 /// **모두**로 엄격 판정한다(폴백 없음):
 /// ① `form_ready`(상위문서 complete + #id/#pw 보임·입력가능 + 로그인 버튼).
@@ -693,6 +717,13 @@ fn wait_for_login_form(client: &mut CdpClient) -> bool {
         );
         streak = next_ready_streak(streak, gate);
         if streak >= FORM_READY_STABLE_POLLS {
+            // [진단·임시] 게이트가 열리는 바로 그 순간의 네트워크/안티봇 스냅샷을 먼저 남긴다 —
+            // 로딩바가 도는 중(=아직 네트워크 활발)에 게이트가 열리는지 실측 확인용. sinceLastNetMs
+            // 가 작으면(예: <300) 방금도 리소스가 끝났다 = 아직 로딩 중인데 타이핑이 나간다는 증거.
+            let snap = client
+                .evaluate_string(GATE_NET_SNAPSHOT_JS)
+                .unwrap_or_else(|e| format!("(스냅샷 실패: {e})"));
+            tracing::info!("[LOGIN] ⏱ 게이트 OPEN 직전 네트워크 스냅샷: {snap}");
             tracing::info!(
                 "[LOGIN] ✓ 로그인 폼 완전 로딩 확인 (readyState=complete · #id/#pw 입력 가능 · 로그인 버튼 준비 · 리소스 로딩 정착 · 안티봇 스크립트 로드 · keydown 암호화 후킹 설치 확인 · {FORM_READY_STABLE_POLLS}회 연속 안정)"
             );
@@ -855,8 +886,15 @@ struct FillDiag<'a> {
     focused_via_mouse: bool,
     field_visible: bool,
     field_disabled: bool,
+    /// 입력칸이 `readOnly` 인지(타이핑 직후 관측). `disabled` 와 별개로 value 가 안 박히는
+    /// 원인(가설 B): 폼이 JS로 readonly 를 풀기 전에 타이핑하면 키는 가도 value 가 0이다.
+    read_only: bool,
     /// 타이핑 시점에 안티봇/keydown 암호화 스크립트가 로드돼 있었나.
     antibot_ready: bool,
+    /// 타이핑한 keydown 의 기본동작이 차단(`preventDefault`)됐는지(가설 A). `Some(true)`=차단
+    /// (안티봇이 합성 입력을 막음), `Some(false)`=정상, `None`=keydown 이 document 까지 도달
+    /// 안 함(전파 중단 등으로 관측 불가).
+    default_prevented: Option<bool>,
 }
 
 /// 진단 신호 조합으로 가장 유력한 실패 원인을 한 줄로 추정한다(순수 함수). 우선순위로 판정해
@@ -867,14 +905,18 @@ fn fill_diag_cause(d: &FillDiag) -> &'static str {
         "필드가 화면에서 사라짐(타이핑 직전 재렌더) — 게이트가 못 거른 과도기"
     } else if d.field_disabled {
         "필드가 비활성(disabled) — 폼이 아직 잠겨 있음"
+    } else if d.read_only {
+        "필드가 readOnly — 폼이 입력 잠금 상태에서 타이핑(JS가 풀기 전) → value 미반영 [가설 B]"
     } else if !focus_ok {
         "포커스가 입력칸에 안 잡힘(클릭 좌표 엇나감/오버레이가 가림) — 키가 다른 곳으로 감"
     } else if !d.antibot_ready {
         "안티봇 keydown 후킹이 미설치인 상태에서 입력 — DOM은 됐지만 후킹 늦음(게이트 강화 필요)"
+    } else if d.default_prevented == Some(true) {
+        "keydown 기본동작이 차단됨(preventDefault) — 안티봇이 합성 입력을 막아 value 미반영 [가설 A]"
     } else if d.got > 0 {
         "포커스·후킹 정상인데 value가 일부만 커밋(빠른 연타 경합) — 재시도로도 복구 실패"
     } else {
-        "포커스·후킹 정상인데 키 입력이 value에 전혀 반영 안 됨(원인 미상 — 추가 조사 필요)"
+        "포커스·후킹 정상·기본동작 차단도 아닌데 키 입력이 value에 전혀 반영 안 됨(원인 미상 — 추가 조사 필요)"
     }
 }
 
@@ -886,11 +928,17 @@ fn format_fill_diag(d: &FillDiag) -> String {
     } else {
         d.active_id.as_str()
     };
+    let dp = match d.default_prevented {
+        Some(true) => "예(차단됨)",
+        Some(false) => "아니오",
+        None => "관측 안 됨(이벤트 미도달/전파중단)",
+    };
     format!(
         "[자동입력 실패 진단] {sel} — 기대 {exp}자 · 실제 입력 {got}자 (3회 재시도 후)\n\
          · 포커스: {focus} (activeElement=#{aid}, 마우스클릭 좌표={mouse})\n\
-         · 필드: 보임={vis}, disabled={dis}\n\
+         · 필드: 보임={vis}, disabled={dis}, readOnly={ro}\n\
          · 안티봇(keydown 암호화) 로드: {anti}\n\
+         · keydown 기본동작 차단(preventDefault): {dp}\n\
          → 추정 원인: {cause}",
         sel = d.selector,
         exp = d.expected,
@@ -903,10 +951,25 @@ fn format_fill_diag(d: &FillDiag) -> String {
         },
         vis = d.field_visible,
         dis = d.field_disabled,
+        ro = d.read_only,
         anti = d.antibot_ready,
+        dp = dp,
         cause = fill_diag_cause(d),
     )
 }
+
+// keydown 의 기본동작 차단(preventDefault) 관측용 1회 설치 recorder(가설 A 판별). document 의
+// 버블 단계에서 마지막 keydown 의 `defaultPrevented` 를 `window.__pmDp` 에 기록한다 — 버블 단계라
+// 대상(#id) 자체 핸들러(네이버 후킹)가 호출한 preventDefault 까지 반영된다. 이미 설치돼 있으면
+// 리스너를 다시 달지 않고 플래그만 리셋한다(같은 로그인에서 #id·#pw 두 번 호출되므로). navigate
+// 로 새 문서가 뜨면 window 상태가 초기화되니 로그인 간 누수도 없다. best-effort 로 설치한다.
+const INSTALL_DP_RECORDER_JS: &str = "(()=>{if(!window.__pmDpInstalled){\
+    window.__pmDpInstalled=true;\
+    document.addEventListener('keydown',function(e){window.__pmDp=e.defaultPrevented;},false);}\
+    window.__pmDp=null;return true;})()";
+// recorder 가 기록한 값을 읽는다: 1=차단(preventDefault 호출됨), 0=정상(차단 안 됨),
+// -1=keydown 이 document 까지 도달 안 함(전파 중단/미관측).
+const READ_DP_JS: &str = "(()=>{const v=window.__pmDp;return v==null?-1:(v?1:0);})()";
 
 // 선택자를 마우스로 클릭해 포커스한 뒤 한 글자씩 실제 키 이벤트로 입력한다(keydown 후킹 암호화
 // 대응). 글자 사이 인위적 지연 없이 빠르게 연타한다(#267 후속). 입력 후 필드 값 길이를 확인해, 비어 있으면
@@ -921,6 +984,10 @@ fn type_into(
     // 실패 시 진단에 쓸 마지막 시도의 관측값(포커스 경로·입력된 글자 수).
     let mut focused_via_mouse = false;
     let mut last_got = 0usize;
+
+    // 타이핑 전에 keydown 기본동작 차단 관측 recorder 를 설치한다(가설 A 판별용). best-effort:
+    // CDP 가 잠깐 실패해도 타이핑 자체는 막지 않는다(진단 보강이지 입력 경로가 아니다).
+    let _ = client.evaluate(INSTALL_DP_RECORDER_JS);
 
     for attempt in 0..3 {
         // 첫 시도는 글자 사이 지연 없이 빠르게 친다(#267: 타이핑 리듬 지문 제거). 재시도부터는
@@ -1019,7 +1086,19 @@ fn type_into(
              return !!(e&&e.disabled);}})()"
         ))
         .unwrap_or(false);
+    let read_only = client
+        .evaluate_bool(&format!(
+            "(()=>{{const e=document.querySelector('{selector}');\
+             return !!(e&&e.readOnly);}})()"
+        ))
+        .unwrap_or(false);
     let antibot_ready = client.evaluate_bool(ANTIBOT_READY_JS).unwrap_or(false);
+    // recorder 가 기록한 keydown 기본동작 차단 여부를 tri-state 로 읽는다(1=차단/0=정상/-1=미관측).
+    let default_prevented = match client.evaluate(READ_DP_JS).ok().and_then(|v| v.as_i64()) {
+        Some(1) => Some(true),
+        Some(0) => Some(false),
+        _ => None,
+    };
     let diag = format_fill_diag(&FillDiag {
         selector,
         expected,
@@ -1028,7 +1107,9 @@ fn type_into(
         focused_via_mouse,
         field_visible,
         field_disabled,
+        read_only,
         antibot_ready,
+        default_prevented,
     });
     tracing::warn!("[LOGIN] ✗ {diag}");
     Ok(Some(diag))
@@ -1151,7 +1232,9 @@ mod tests {
             focused_via_mouse: true,
             field_visible: vis,
             field_disabled: dis,
+            read_only: false,
             antibot_ready: antibot,
+            default_prevented: None,
         }
     }
 
@@ -1185,6 +1268,39 @@ mod tests {
         assert!(gone.contains("화면에서 사라짐"), "{gone}");
         let locked = format_fill_diag(&diag("pw", false, 0, true, true));
         assert!(locked.contains("비활성(disabled)"), "{locked}");
+    }
+
+    #[test]
+    fn fill_diag_blames_readonly_before_focus_and_antibot() {
+        // 가설 B: 포커스/안티봇이 정상이라도 필드가 readOnly 면 그걸 먼저 근본 원인으로 잡고,
+        // 진단 문자열에 readOnly 상태와 가설 라벨이 드러난다.
+        let mut d = diag("id", true, 0, true, false);
+        d.read_only = true;
+        let s = format_fill_diag(&d);
+        assert!(s.contains("readOnly=true"), "{s}");
+        assert!(s.contains("가설 B"), "{s}");
+    }
+
+    #[test]
+    fn fill_diag_blames_preventdefault_when_focus_and_hook_ok() {
+        // 가설 A: 포커스·후킹 정상·readOnly 아님인데 keydown 기본동작이 차단됐으면(안티봇이
+        // 합성 입력을 막음) preventDefault 를 근본 원인으로 가리킨다.
+        let mut d = diag("id", true, 0, true, false);
+        d.default_prevented = Some(true);
+        let s = format_fill_diag(&d);
+        assert!(s.contains("preventDefault): 예(차단됨)"), "{s}");
+        assert!(s.contains("가설 A"), "{s}");
+    }
+
+    #[test]
+    fn fill_diag_unknown_only_when_not_prevented() {
+        // 기본동작 차단이 '아니오(Some(false))'로 관측됐는데도 value 가 0이면, 가설 A 가 아니라
+        // 진짜 미상으로 남긴다(차단도 아니면서 안 들어감 → 추가 조사 필요).
+        let mut d = diag("id", true, 0, true, false);
+        d.default_prevented = Some(false);
+        let s = format_fill_diag(&d);
+        assert!(s.contains("원인 미상"), "{s}");
+        assert!(s.contains("preventDefault): 아니오"), "{s}");
     }
 
     #[test]
