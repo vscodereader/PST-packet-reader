@@ -890,16 +890,24 @@ fn apply_waiting_for_successful_posts<R: Runtime>(app: &AppHandle<R>, forum: &[F
         .into_iter()
         .filter(|id| !blocked.contains(id))
         .collect();
-    // 대기 후보(성공)에서 차단·대기초과 계정은 뺀다 — 종료성/일시 실패가 대기보다 우선한다(#2/#7).
-    let waiting: Vec<String> = successful_post_login_ids(forum)
+    // 차단도 대기초과도 아닌 "그 밖의 실패"(약관 동의하기 비활성·버튼 못찾음, 응답 읽기 IO 실패
+    // 등)는 전부 `Error`로 칠한다(사용자 지시: 대기초과·보류·활성 기준이 아니면 전부 에러 —
+    // 오류가 떠도 계정이 활성으로 남지 않게). 차단·대기초과는 각자 전용 상태가 우선이라 뺀다.
+    let errored: std::collections::BTreeSet<String> = errored_post_login_ids(forum)
         .into_iter()
         .filter(|id| !blocked.contains(id) && !timed_out.contains(id))
         .collect();
-    if blocked.is_empty() && timed_out.is_empty() && waiting.is_empty() {
+    // 대기 후보(성공)에서 차단·대기초과·에러 계정은 뺀다 — 종료성/일시/그밖의 실패가 대기보다
+    // 우선한다(#2/#7 + 후속). 같은 계정에 성공과 실패가 섞이면 실패를 표면화한다(기존 #7과 동일 철학).
+    let waiting: Vec<String> = successful_post_login_ids(forum)
+        .into_iter()
+        .filter(|id| !blocked.contains(id) && !timed_out.contains(id) && !errored.contains(id))
+        .collect();
+    if blocked.is_empty() && timed_out.is_empty() && errored.is_empty() && waiting.is_empty() {
         return;
     }
     app.state::<JsonStore<Account>>().mutate(|list| {
-        // 우선순위로 칠한다: 차단(종료) → 대기초과(일시 실패) → 대기(성공).
+        // 우선순위로 칠한다: 차단(종료) → 대기초과(일시 실패) → 에러(그밖의 실패) → 대기(성공).
         let list = blocked.iter().fold(list, |acc, id| {
             apply_status_by_login_id(
                 acc,
@@ -918,6 +926,17 @@ fn apply_waiting_for_successful_posts<R: Runtime>(app: &AppHandle<R>, forum: &[F
                 AccountStatus::TimedOut,
                 Some(
                     "페이지 대기시간 초과 또는 네이버 서버 오류(HTTP 500)로 게시가 실패했습니다. 잠시 후 다시 시도하세요."
+                        .to_owned(),
+                ),
+            )
+        });
+        let list = errored.iter().fold(list, |acc, id| {
+            apply_status_by_login_id(
+                acc,
+                id,
+                AccountStatus::Error,
+                Some(
+                    "글 게시에 실패해 '에러' 상태로 전환했습니다(약관 동의·세션 등). 자세한 원인은 완료 로그의 '자세히 보기'에서 확인한 뒤, 상태를 눌러 다시 시도하세요."
                         .to_owned(),
                 ),
             )
@@ -975,6 +994,26 @@ fn timed_out_post_login_ids(forum: &[ForumOutcome]) -> std::collections::BTreeSe
 fn successful_post_login_ids(forum: &[ForumOutcome]) -> std::collections::BTreeSet<String> {
     let mut ids = std::collections::BTreeSet::new();
     for o in forum.iter().filter(|o| o.result.ok && !o.result.skipped) {
+        ids.insert(o.account_id.clone());
+    }
+    ids
+}
+
+/// 종목토론방(forum) 게시가 **차단도 대기초과도 아닌 "그 밖의 실패"**로 끝난 계정(loginId)
+/// 집합(순수). 약관 동의하기 비활성/버튼 못찾음, 약관 동의 처리 실패, CDP 응답 읽기 IO 실패처럼
+/// `is_blocking_failure`·`is_timed_out_failure` 어느 마커에도 안 걸리는 실패가 대상이다. 사용자
+/// 지시(후속): 대기초과·보류·활성(성공) 기준이 아닌 실패는 전부 `Error`로 칠해 계정이 활성으로
+/// 남지 않게 한다. skip(앞 글 차단으로 건너뜀)은 그 자체가 실패 사유가 아니므로 제외한다. 차단·
+/// 대기초과는 전용 상태가 우선이므로 호출부에서 그 계정을 뺀다(차단 > 대기초과 > 에러 > 대기).
+fn errored_post_login_ids(forum: &[ForumOutcome]) -> std::collections::BTreeSet<String> {
+    use crate::discussion_batch::{is_blocking_failure, is_timed_out_failure};
+    let mut ids = std::collections::BTreeSet::new();
+    for o in forum.iter().filter(|o| {
+        !o.result.ok
+            && !o.result.skipped
+            && !is_blocking_failure(&o.result.message)
+            && !is_timed_out_failure(&o.result.message)
+    }) {
         ids.insert(o.account_id.clone());
     }
     ids
@@ -5430,6 +5469,62 @@ mod tests {
         assert!(
             waiting.is_empty(),
             "대기초과 계정은 부분 성공이 있어도 대기로 두지 않는다"
+        );
+    }
+
+    #[test]
+    fn errored_collects_unclassified_failures_only() {
+        // 사용자 지시(후속): 차단도 대기초과도 아닌 게시 실패(약관 동의하기 비활성·버튼 못찾음,
+        // 응답 읽기 IO 실패 등 "엔진 오류" 계열)는 전부 'Error'로 칠해 계정이 활성으로 안 남게 한다.
+        let forum = vec![
+            forum_fail("acc_err", "삼성전자", "005930", "trace-x"), // message "엔진 오류" — 미분류
+            forum_blocked("acc_block", "카카오", "035720"),         // 차단(403)
+            forum_timed_out("acc_to", "LG", "066570", "페이지 로드 대기 시간이 초과되었습니다."),
+            forum_skipped("acc_skip", "네이버", "035420"),
+            forum_ok("acc_ok", "SK하이닉스", "000660"),
+        ];
+        let ids = errored_post_login_ids(&forum);
+        assert!(ids.contains("acc_err"), "미분류 실패는 에러 대상");
+        assert!(!ids.contains("acc_block"), "차단은 에러 아님(전용 상태가 우선)");
+        assert!(!ids.contains("acc_to"), "대기초과는 에러 아님(전용 상태가 우선)");
+        assert!(!ids.contains("acc_skip"), "건너뜀(skip)은 에러 아님");
+        assert!(!ids.contains("acc_ok"), "성공은 에러 아님");
+    }
+
+    #[test]
+    fn error_takes_precedence_over_waiting_but_not_blocked_or_timed_out() {
+        // 한 계정이 1글 성공 + 다른 글 미분류 실패면 — 대기가 아니라 에러로 표면화한다(#7과 동일
+        // 철학). 같은 계정에 차단/대기초과가 있으면 그 전용 상태가 우선이라 에러에서 빠진다.
+        let forum = vec![
+            forum_ok("acc_mix", "삼성전자", "005930"),
+            forum_fail("acc_mix", "SK하이닉스", "000660", "trace-y"),
+            forum_blocked("acc_block_err", "카카오", "035720"),
+            forum_fail("acc_block_err", "네이버", "035420", "trace-z"),
+        ];
+        let blocked = blocked_post_login_ids(&forum);
+        let timed_out: std::collections::BTreeSet<String> = timed_out_post_login_ids(&forum)
+            .into_iter()
+            .filter(|id| !blocked.contains(id))
+            .collect();
+        let errored: std::collections::BTreeSet<String> = errored_post_login_ids(&forum)
+            .into_iter()
+            .filter(|id| !blocked.contains(id) && !timed_out.contains(id))
+            .collect();
+        let waiting: Vec<String> = successful_post_login_ids(&forum)
+            .into_iter()
+            .filter(|id| {
+                !blocked.contains(id) && !timed_out.contains(id) && !errored.contains(id)
+            })
+            .collect();
+        assert!(errored.contains("acc_mix"), "성공+미분류실패 계정은 에러");
+        assert!(
+            waiting.is_empty(),
+            "에러 계정은 부분 성공이 있어도 대기로 두지 않는다"
+        );
+        assert!(blocked.contains("acc_block_err"), "차단이 잡혀야 한다");
+        assert!(
+            !errored.contains("acc_block_err"),
+            "차단 계정은 에러에서 빠진다(차단 우선)"
         );
     }
 
