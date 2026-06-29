@@ -143,23 +143,6 @@ impl CdpClient {
             r#"
                 (async () => {
                   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-                  const requiredItems = [
-                    {
-                      id: 'service',
-                      labelSelector: 'label[for="service"]',
-                      fallbackXpath: '//*[@id="__next"]/div/div/ul[1]/li/label'
-                    },
-                    {
-                      id: 'privateNaver',
-                      labelSelector: 'label[for="privateNaver"]',
-                      fallbackXpath: '//*[@id="__next"]/div/div/ul[2]/li/label'
-                    },
-                    {
-                      id: 'privateNF',
-                      labelSelector: 'label[for="privateNF"]',
-                      fallbackXpath: '//*[@id="__next"]/div/div/ul[3]/li/label'
-                    }
-                  ];
                   const visible = el => {
                     if (!el) return false;
                     const r = el.getBoundingClientRect();
@@ -170,13 +153,6 @@ impl CdpClient {
                       && s.visibility !== 'hidden';
                   };
                   const text = el => String(el?.innerText || el?.textContent || '');
-                  const getByXpath = xpath => document.evaluate(
-                    xpath,
-                    document,
-                    null,
-                    XPathResult.FIRST_ORDERED_NODE_TYPE,
-                    null
-                  ).singleNodeValue;
                   const clickEl = el => {
                     el.scrollIntoView({ block: 'center', inline: 'center' });
                     el.click();
@@ -208,82 +184,99 @@ impl CdpClient {
                     return pred();
                   };
                   const clicked = [];
-                  const allAgree = [...document.querySelectorAll('label, button, div, span')]
-                    .find(el => visible(el) && text(el).includes('약관 모두 동의하기'));
+                  // 약관 폼 컨테이너를 느슨하게 잡는다(고정 id 의존 제거). 못 잡으면 document 전체.
+                  const root =
+                    document.querySelector('#__next') ||
+                    document.querySelector('form') ||
+                    document.body;
+                  const esc = s => (window.CSS && CSS.escape ? CSS.escape(s) : s);
+                  const labelFor = box =>
+                    (box.id && root.querySelector('label[for="' + esc(box.id) + '"]'))
+                    || box.closest('label');
+                  const labelText = box => {
+                    const row = box.closest('li, div');
+                    return (text(labelFor(box)) + ' ' + text(row)).trim();
+                  };
+                  const scanBoxes = () =>
+                    [...root.querySelectorAll('input[type="checkbox"]')].filter(visible);
 
-                  if (allAgree) {
-                    clickEl(allAgree);
-                    clicked.push('all-agree:clicked');
-                    await sleep(600);
+                  // 컨테이너 안의 모든 체크박스를 1급 시민으로 다룬다(하드코딩 id/xpath 제거).
+                  let boxes = scanBoxes();
+
+                  // 전체동의 마스터: '모두/전체 동의' 라벨이 붙은 체크박스, 없으면 문서순 첫 체크박스.
+                  const master =
+                    boxes.find(b => /(약관\s*)?(모두|전체)\s*동의/.test(labelText(b))) || boxes[0];
+                  if (master && !master.checked) {
+                    ensureChecked(master, labelFor(master));
+                    clicked.push('master:click');
+                    await sleep(400);
+                    boxes = scanBoxes(); // 마스터가 자식 항목을 켰을 수 있으니 다시 읽는다.
                   }
 
-                  for (const item of requiredItems) {
-                    const input = document.getElementById(item.id);
-                    const label =
-                      document.querySelector(item.labelSelector)
-                      || getByXpath(item.fallbackXpath);
-
-                    if (!label) {
-                      clicked.push(item.id + ':label-not-found');
-                      continue;
-                    }
-
-                    if (input && input.checked) {
-                      clicked.push(item.id + ':already-checked');
-                      continue;
-                    }
-
-                    ensureChecked(input, label);
-                    clicked.push(
-                      item.id + (input && input.checked ? ':checked' : ':clicked')
-                    );
-                    await sleep(300);
+                  // 노출된 체크박스를 전부 checked 보장 — label이 없어도 input을 직접 처리한다
+                  // (기존 'label 못 찾으면 체크 스킵' 결함을 해소: input이 살아있으면 무조건 켠다).
+                  for (const box of boxes) {
+                    if (box.checked) { clicked.push((box.id || 'box') + ':already'); continue; }
+                    ensureChecked(box, labelFor(box));
+                    clicked.push((box.id || 'box') + (box.checked ? ':checked' : ':try'));
+                    await sleep(150);
                   }
 
-                  await sleep(600);
+                  await sleep(400);
 
-                  let agreeBtn = [...document.querySelectorAll('button')]
-                    .find(btn => visible(btn) && text(btn).includes('동의하기'));
-
-                  if (!agreeBtn) {
-                    agreeBtn = getByXpath('//*[@id="__next"]/div/div/div[2]/div/button');
-                  }
+                  // 동의/진행 버튼을 여러 단서로 탐색(텍스트 + type=submit + 폼 최하단 버튼).
+                  const buttons =
+                    [...root.querySelectorAll('button, input[type="submit"]')].filter(visible);
+                  const isFinalBtn = b => {
+                    const t = (text(b) || b.value || '').trim();
+                    if (/(모두|전체)\s*동의/.test(t)) return false; // 전체동의는 액션 버튼이 아님
+                    return /(동의하기|확인|다음|시작하기|완료)/.test(t);
+                  };
+                  const agreeBtn =
+                    buttons.find(isFinalBtn) ||
+                    buttons.find(b => b.type === 'submit') ||
+                    buttons[buttons.length - 1];
 
                   if (!agreeBtn) {
                     return JSON.stringify({
                       ok: false,
-                      error: '동의하기 버튼을 찾지 못했습니다.',
+                      error: '동의 버튼을 찾지 못했습니다. (visible checkbox=' + boxes.length
+                        + ', button=' + buttons.length + ')',
                       clicked
                     });
                   }
 
                   agreeBtn.scrollIntoView({ block: 'center', inline: 'center' });
 
-                  // 버튼이 활성화될 때까지 최대 6초 폴링하며, 매 회 미체크 필수항목을 재시도한다.
-                  // (라벨 클릭이 한 번에 안 먹거나 활성화가 늦게 반영되는 경우 대비)
+                  // 버튼이 활성화될 때까지 최대 6초 폴링하며, 매 회 미체크 체크박스를 재시도한다.
                   const enabled = await waitUntil(() => {
                     if (!agreeBtn.disabled) return true;
-                    for (const item of requiredItems) {
-                      const input = document.getElementById(item.id);
-                      if (input && !input.checked) {
-                        const label =
-                          document.querySelector(item.labelSelector)
-                          || getByXpath(item.fallbackXpath);
-                        ensureChecked(input, label);
-                      }
+                    for (const box of scanBoxes()) {
+                      if (!box.checked) ensureChecked(box, labelFor(box));
                     }
                     return !agreeBtn.disabled;
                   }, 6000, 300);
 
                   if (!enabled) {
-                    const checkedState = requiredItems.map(it => {
-                      const input = document.getElementById(it.id);
-                      return it.id + '=' + (input ? (input.checked ? 'on' : 'off') : 'none');
-                    });
+                    // 실패 시 DOM 스냅샷을 남겨 다음에 원인(어떤 체크박스/버튼이 있었는지)을 파악한다.
+                    const snap = {
+                      checkboxCount: boxes.length,
+                      checkboxes: scanBoxes().map(b => ({
+                        id: b.id || null,
+                        name: b.name || null,
+                        checked: b.checked,
+                        label: labelText(b).slice(0, 40)
+                      })),
+                      buttons: buttons.map(b => ({
+                        text: (text(b) || b.value || '').trim().slice(0, 30),
+                        disabled: b.disabled,
+                        type: b.type || null
+                      })),
+                      picked: (text(agreeBtn) || agreeBtn.value || '').trim().slice(0, 30)
+                    };
                     return JSON.stringify({
                       ok: false,
-                      error: '동의하기 버튼이 아직 비활성화 상태입니다. (필수항목 체크 상태: '
-                        + checkedState.join(', ') + ')',
+                      error: '동의 버튼이 활성화되지 않았습니다. snapshot=' + JSON.stringify(snap),
                       clicked
                     });
                   }
