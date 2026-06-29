@@ -86,6 +86,7 @@ impl CdpClient {
                     "https://stock.naver.com",
                     "https://m.stock.naver.com",
                     "https://apis.naver.com",
+                    "https://nid.naver.com",
                     "https://static.nid.naver.com"
                 ]
             }),

@@ -128,6 +128,19 @@ fn open_discussion_session(
     }
     chrome.ensure_discussion_page()?;
 
+    // 게시 직전, 주입한 세션이 서버측에서 이미 죽었으면 네이버가 로그인 페이지(nid.naver.com)로
+    // 리다이렉트시킨다(특히 로그인↔게시 간격이 큰 느린 망). 그대로 두면 뒤의 getCookies가
+    // 엉뚱한 "쿠키 못찾음"으로 떨어지므로, 여기서 "세션 만료=재로그인 필요"로 명확히 구분해
+    // 차단 처리한다("다시 로그인" 마커 → is_blocking_failure → 계정 Blocked). 진단용으로 현재
+    // URL은 로그에만 남긴다(사용자 메시지엔 토큰 가능성이 있는 전체 URL을 넣지 않는다).
+    let current_url = chrome.current_url()?;
+    if current_url.contains("nid.naver.com") {
+        tracing::warn!("[POST] 게시 직전 로그인 페이지로 리다이렉트됨 — 세션 만료 추정. url={current_url}");
+        return Err(AutomationError::new(
+            "네이버 세션이 만료되어 로그인 페이지(nid.naver.com)로 돌아갔습니다. 계정을 다시 로그인한 뒤 시도하세요.",
+        ));
+    }
+
     let packet_client = chrome.build_naver_packet_client()?;
     let login_profile = packet_client.read_login_profile()?;
 

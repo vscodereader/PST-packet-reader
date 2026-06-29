@@ -101,7 +101,8 @@ fn finalize(
                 "savedAt": now_secs(),
                 "cookies": cookies,
             });
-            std::fs::write(&path, serde_json::to_string_pretty(&payload)?)?;
+            let contents = serde_json::to_string_pretty(&payload)?;
+            write_cookie_file_resilient(&path, &contents)?;
 
             if has_valid_cookie_file(&path)? {
                 Ok(LoginResolution::active())
@@ -116,5 +117,102 @@ fn finalize(
             }
         }
         other => Ok(resolve_non_ok(other, trace)),
+    }
+}
+
+/// IO 실패에 **경로·동작·OS 코드**를 담은 진단 가능한 오류를 만든다(#디스크IO 후속). 바닥
+/// `io: <메시지>`만으론 어느 파일에서 무슨 동작이 왜 실패했는지 알 수 없어, 외부 오류(500/403)와
+/// 구분도 안 됐다. 이걸로 "디스크 접근 실패 — 경로/원인 확인"이 메시지에 드러나게 한다.
+fn disk_io_error(op: &str, path: &std::path::Path, e: &std::io::Error) -> OrchestratorError {
+    OrchestratorError::CommandFailed(format!(
+        "{op} 실패 [{}]: {e} (kind={:?}, os={:?})",
+        path.display(),
+        e.kind(),
+        e.raw_os_error()
+    ))
+}
+
+/// 쿠키 파일을 견고하게 저장한다(#디스크IO 후속, 통제 가능한 IO 실패를 "되게" 만든다).
+/// ⒜ 부모 디렉터리 보장(네이버 finalize엔 그동안 직전 보장이 없어 밴드와 비대칭이었다),
+/// ⒝ 같은 디렉터리에 임시파일로 쓰고 rename으로 교체(원자적 — 부분기록/손상 방지, 최종 파일
+///    점유 창 축소), ⒞ 백신/인덱서의 **일시적 파일 잠금**(Windows 공유위반 os error 32·권한 거부)
+///    에만 짧게 백오프 재시도. 디스크 풀 등 영구 오류는 재시도하지 않고 진단 메시지로 올린다.
+fn write_cookie_file_resilient(
+    path: &std::path::Path,
+    contents: &str,
+) -> Result<(), OrchestratorError> {
+    use std::io::ErrorKind;
+    // ⒜ 디렉터리 보장.
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| disk_io_error("쿠키 디렉터리 생성", dir, &e))?;
+    }
+    // 일시적(재시도 가치 있는) 잠금: 권한 거부 또는 Windows 공유위반(os error 32).
+    let is_transient =
+        |e: &std::io::Error| e.kind() == ErrorKind::PermissionDenied || e.raw_os_error() == Some(32);
+
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+
+    const ATTEMPTS: u32 = 4;
+    let mut last: Option<std::io::Error> = None;
+    for attempt in 0..ATTEMPTS {
+        // ⒝ 임시파일 쓰기 → rename 교체(원자적).
+        match std::fs::write(&tmp, contents).and_then(|()| std::fs::rename(&tmp, path)) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if attempt + 1 < ATTEMPTS && is_transient(&e) {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        150 * (attempt as u64 + 1),
+                    ));
+                    last = Some(e);
+                    continue;
+                }
+                let _ = std::fs::remove_file(&tmp); // 실패한 임시파일 흔적 제거(best-effort).
+                return Err(disk_io_error("쿠키 저장", path, &e));
+            }
+        }
+    }
+    // 모든 시도가 일시적 오류로 소진된 경우.
+    Err(disk_io_error(
+        "쿠키 저장(재시도 소진)",
+        path,
+        &last.unwrap_or_else(|| std::io::Error::new(ErrorKind::Other, "unknown")),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resilient_write_creates_parent_dir_and_writes_atomically() {
+        // ⒜ 부모 디렉터리가 없어도 만들어 쓰고, 내용이 정확히 저장되는지.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested").join("user.json");
+        write_cookie_file_resilient(&path, "{\"a\":1}").expect("write ok");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}");
+        // 임시파일은 남지 않는다(rename으로 교체).
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        assert!(!std::path::PathBuf::from(tmp).exists(), "임시파일이 남으면 안 됨");
+    }
+
+    #[test]
+    fn resilient_write_overwrites_existing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("user.json");
+        write_cookie_file_resilient(&path, "old").expect("first write");
+        write_cookie_file_resilient(&path, "new").expect("overwrite");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    #[test]
+    fn disk_io_error_includes_path_and_os_context() {
+        let e = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err = disk_io_error("쿠키 저장", std::path::Path::new("/x/user.json"), &e);
+        let msg = err.to_string();
+        assert!(msg.contains("/x/user.json"), "경로 포함");
+        assert!(msg.contains("PermissionDenied"), "원인 kind 포함");
     }
 }
