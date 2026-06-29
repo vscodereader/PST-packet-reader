@@ -40,15 +40,25 @@ const CLICK_SETTLE: Duration = Duration::from_millis(800);
 const PENDING_STALL: Duration = Duration::from_secs(6);
 
 // 봇탐지(ncaptcha/wtm) 완화용 스텔스 스크립트. 페이지 스크립트보다 먼저 모든 새 문서에서
-// 실행되어 CDP 제어 흔적인 `navigator.webdriver` 를 일반 크롬과 동일한 값으로 맞춘다.
+// 실행되어 자동화 흔적을 일반 크롬과 동일하게 맞춘다.
 //
 // 네이버 안티봇 번들(wtm.pstatic.net)의 검사는
 //   getWebdriver(){ return void 0!==navigator.webdriver ? Boolean(navigator.webdriver).toString() : "" }
-// 형태다. 일반(비자동화) 크롬은 `navigator.webdriver === false` 라 "false"를 보고한다. 따라서
-// `undefined`(필드 없음)로 두면 오히려 일반 크롬과 달라지므로, 정확히 `false`로 맞춘다.
-// Chrome 실행 플래그 `--disable-blink-features=AutomationControlled` 가 headed에선 네이티브로
-// false를 주지만, 헤드리스에선 webdriver가 노출될 수 있어 JS로 한 번 더 false로 덮는다.
-const STEALTH_INIT_JS: &str = "Object.defineProperty(navigator,'webdriver',{get:()=>false});";
+// 형태다. 일반(비자동화) 크롬은 `navigator.webdriver === false` 라 "false"를 보고한다.
+//
+// ⚠️ 핵심(지문 비교로 실측, 2026-06-29): 예전엔 `Object.defineProperty(navigator,'webdriver',…)`로
+// **인스턴스에 직접** 박았는데, 그러면 `navigator.hasOwnProperty('webdriver')===true`가 되어
+// **일반 크롬(프로토타입에만 존재 → own=false)과 달라지는 탐지 흔적**을 스스로 남겼다(매크로만
+// 캡차가 뜨던 직접 원인 후보). 그래서 일반 크롬과 **위치까지 동일**하도록 `Navigator.prototype`에
+// 정의한다(인스턴스에는 own 속성을 만들지 않는다). 값은 그대로 `false`.
+//
+// languages 도 빈 incognito 프로필에선 `["ko-KR"]` 1개뿐이라 일반 크롬(`ko-KR,ko,en-US,en`)과
+// 달라 탐지 표면이 된다(같은 실측). 프로토타입에 4개 배열로 맞춰 인스턴스 own 흔적 없이 정렬한다.
+const STEALTH_INIT_JS: &str = "(()=>{try{\
+    Object.defineProperty(Navigator.prototype,'webdriver',\
+        {get:()=>false,configurable:true,enumerable:true});}catch(e){}\
+    try{Object.defineProperty(Navigator.prototype,'languages',\
+        {get:()=>['ko-KR','ko','en-US','en'],configurable:true,enumerable:true});}catch(e){}})();";
 
 /// 챌린지(추가 인증) 종류.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
