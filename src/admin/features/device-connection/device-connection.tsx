@@ -1,4 +1,5 @@
 import {
+  ActionIcon,
   Badge,
   Box,
   Button,
@@ -8,6 +9,7 @@ import {
   Stack,
   Text,
   ThemeIcon,
+  Tooltip,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { IconDeviceDesktop } from "@tabler/icons-react";
@@ -65,8 +67,14 @@ function mmss(total: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-/** 좌측 컴퓨터 아이콘 + (이름 / 상태 텍스트 + 상태 원) 한 행. */
-function DeviceRow({ device }: { device: Device }) {
+/** 좌측 컴퓨터 아이콘 + (이름 / 상태 텍스트 + 상태 원) + 우측 삭제 버튼 한 행. */
+function DeviceRow({
+  device,
+  onDelete,
+}: {
+  device: Device;
+  onDelete: () => void;
+}) {
   return (
     <Paper withBorder radius="md" p="sm">
       <Group gap="md" wrap="nowrap">
@@ -105,6 +113,18 @@ function DeviceRow({ device }: { device: Device }) {
             </Text>
           </Group>
         </Box>
+        {/* 기기 삭제: 실제로는 DELETE /devices/{id} → 기기표에서 줄 삭제(=옛 기기토큰 자동 거부, §6). */}
+        <Tooltip label="기기 삭제 (등록 해제)" withArrow>
+          <ActionIcon
+            variant="subtle"
+            color="red"
+            size="lg"
+            aria-label={`${device.name} 삭제`}
+            onClick={onDelete}
+          >
+            <Icon.trash size={18} />
+          </ActionIcon>
+        </Tooltip>
       </Group>
     </Paper>
   );
@@ -145,6 +165,17 @@ export function DeviceConnection() {
     // 수동 새로고침: "안 바뀌는" 경우 대비 안전장치(§6-3).
     setLastRefreshed("방금 전");
     notifications.show({ message: "목록을 새로고침했어요", color: "gray" });
+  };
+
+  const deleteDevice = (id: string, name: string) => {
+    // UI 단계: 목록에서 제거 + 토스트. 실제로는 DELETE /devices/{id} →
+    // 서버가 기기표에서 그 줄을 삭제 → 옛 기기토큰은 매칭되는 기기가 없어 자동 거부(§6).
+    // 그 뒤 [기기코드 발급]으로 새 코드를 만들어 같은 컴퓨터를 다시 등록하면 새 토큰이 발급된다.
+    setDevices((prev) => prev.filter((d) => d.id !== id));
+    notifications.show({
+      message: `${name} 기기를 삭제했어요 (등록 해제)`,
+      color: "red",
+    });
   };
 
   // 연결 시 자동 새로고침 + 토스트 시연. 실제로는 admin SSE의 online 이벤트가 트리거(§6-3).
@@ -306,7 +337,11 @@ export function DeviceConnection() {
         <Box style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
           <Stack gap="xs">
             {devices.map((d) => (
-              <DeviceRow key={d.id} device={d} />
+              <DeviceRow
+                key={d.id}
+                device={d}
+                onDelete={() => deleteDevice(d.id, d.name)}
+              />
             ))}
           </Stack>
         </Box>
