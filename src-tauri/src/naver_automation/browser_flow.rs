@@ -130,15 +130,33 @@ impl CdpClient {
         )
     }
 
-    // 네이버페이 약관 동의 화면이 떠 있으면 자동으로 동의 처리한다(약관 모두 동의 → 필수
-    // 항목 체크 → 동의하기). 종토방 게시 전 로그인 직후 이 화면이 떠 있으면 막지 않고
-    // 자동 진행한다. 약관 페이지가 아니면 즉시 통과해 매 게시에 불필요한 대기를 넣지 않는다.
+    // 게시 전 네이버페이 약관 동의(=네이버페이 금융서비스 가입) 화면이 떠 있으면 자동으로 통과한다.
+    // 패킷 분석 결과 "동의하기"는 사실 체크박스가 아니라 가입 URL로 가는 GET 리다이렉트 체인이다
+    // (join?...consent=N → 302 → 약관동의 termcd=40 → 콜백 → 가입 완료). 그래서 ⒜ 먼저 그 가입
+    // URL로 직접 이동해 브라우저가 체인을 따라가게 하고(견고·DOM 무관, 선택 동의는 모두 N으로 거절),
+    // ⒝ 그래도 약관 페이지에 남아 있으면 기존 체크박스 동의 로직을 폴백으로 시도한다(기존 코드 보존).
+    // 약관 페이지가 아니면 즉시 통과해 매 게시에 불필요한 대기를 넣지 않는다.
     pub(super) fn handle_npay_agreement_if_present(&mut self) -> AutomationResult<bool> {
         if !self.is_npay_agreement_page()? {
             return Ok(false);
         }
 
-        // 약관 페이지면 1회 자동 동의 처리하고 결과로 빠져나온다.
+        // ⒜ 주 경로: 가입(약관동의) URL로 직접 이동. 선택 동의(마케팅/마이데이터/머니스토리)는 N으로
+        // 거절하고, 성공 시 토론 페이지로·실패 시 약관 페이지로 되돌아오게 한다(실패면 아래 폴백이 탄다).
+        const FINANCIAL_JOIN_URL: &str = "https://member-web.pay.naver.com/financial-service/join?from_pc=Y&nf_personalized_service_consent=N&naver_personalized_service_consent=N&optional_ads_and_mydata_usage_consent=N&moneystory_subscription_consent=N&join_success_url=https://stock.naver.com/discussion&join_fail_url=https://member.pay.naver.com/financial-member/agreement";
+        self.navigate(FINANCIAL_JOIN_URL)?;
+        self.wait_for_ready_state(Duration::from_secs(30)).ok();
+        sleep(Duration::from_secs(2));
+        if !self.is_npay_agreement_page()? {
+            // 가입 완료(약관 페이지를 벗어남). 토론 페이지로 복귀하고 끝낸다.
+            self.wait_for_ready_state(Duration::from_secs(10)).ok();
+            if !self.current_url()?.contains("stock.naver.com/discussion") {
+                self.navigate(DISCUSSION_URL)?;
+            }
+            return Ok(true);
+        }
+
+        // ⒝ 폴백: 가입 URL로 안 끝났으면(아직 약관 페이지) 기존 체크박스 동의 로직을 시도한다.
         let result = self.evaluate_string(
             r#"
                 (async () => {
