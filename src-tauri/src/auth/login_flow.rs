@@ -614,6 +614,44 @@ const GATE_NET_SNAPSHOT_JS: &str = "(()=>{try{\
         sinceLastNetMs:since,antibot:hits,iframes:frames});\
 }catch(e){return '{\"err\":\"'+String(e)+'\"}';}})()";
 
+// [진단·임시] 자동화/CDP 지문 스냅샷 — naver 봇탐지(wtm)가 읽는 클라이언트 신호가 정상 크롬과
+// 다른지 확인용. 같은 계정 손 로그인(정상 크롬)=성공인데 매크로=캡차라면, 차이는 이 지문에 있다.
+// **핵심은 cdpConsoleTrap**: Runtime.enable 이 켜져 있으면 CDP가 console 인자를 직렬화하며 getter를
+// 호출한다(naver wtm 의 실제 CDP 탐지 방식). 우리는 enable_page_only 로 Runtime 을 안 켜므로 false 여야
+// 정상이다. true 면 CDP 제어가 페이지에 누출(=캡차 유발 가능)된다는 직접 증거다.
+//   webdriver       : false 여야 정상(스텔스 + AutomationControlled off). true/undefined 면 누출.
+//   webdriverOwn    : navigator 자신 속성으로 webdriver 가 정의됐나(우리 스텔스 override 가 먹었나).
+//   uaHeadless      : userAgent 에 "Headless" 누출(headless 탐지).
+//   hasChrome/chromeRuntime/plugins/mimeTypes/languages : 정상 크롬 대비 결핍(headless 텔).
+//   permMismatch    : Notification.permission='denied' && permissions.query='prompt' (고전적 headless 텔).
+//   glVendor/glRenderer : SwiftShader 등 software GL = headless 텔.
+const AUTOMATION_FINGERPRINT_JS: &str = "(async()=>{try{\
+    let cdpConsoleTrap=false;\
+    try{const t={};Object.defineProperty(t,'i',{get(){cdpConsoleTrap=true;return 1;}});console.debug(t);}catch(e){}\
+    let permMismatch=null;\
+    try{const p=await navigator.permissions.query({name:'notifications'});\
+        permMismatch=(Notification.permission==='denied'&&p.state==='prompt');}catch(e){}\
+    let glVendor='',glRenderer='';\
+    try{const c=document.createElement('canvas');const gl=c.getContext('webgl')||c.getContext('experimental-webgl');\
+        if(gl){const d=gl.getExtension('WEBGL_debug_renderer_info');\
+            if(d){glVendor=String(gl.getParameter(d.UNMASKED_VENDOR_WEBGL));\
+                  glRenderer=String(gl.getParameter(d.UNMASKED_RENDERER_WEBGL));}}}catch(e){}\
+    const nav=navigator;const ua=nav.userAgent;\
+    return JSON.stringify({\
+        webdriver:nav.webdriver,\
+        webdriverOwn:!!Object.getOwnPropertyDescriptor(nav,'webdriver'),\
+        uaHeadless:/headless/i.test(ua),\
+        hasChrome:!!window.chrome,\
+        chromeRuntime:!!(window.chrome&&window.chrome.runtime),\
+        plugins:nav.plugins.length,\
+        mimeTypes:nav.mimeTypes.length,\
+        languages:(nav.languages||[]).join(','),\
+        permMismatch:permMismatch,\
+        cdpConsoleTrap:cdpConsoleTrap,\
+        glVendor:glVendor,glRenderer:glRenderer\
+    });\
+}catch(e){return '{\"err\":\"'+String(e)+'\"}';}})()";
+
 /// 로그인 폼 진행 게이트(순수 함수). 사수 의도(돔이 전부 붙고 타이핑 준비 완료)를 네 신호
 /// **모두**로 엄격 판정한다(폴백 없음):
 /// ① `form_ready`(상위문서 complete + #id/#pw 보임·입력가능 + 로그인 버튼).
@@ -724,6 +762,12 @@ fn wait_for_login_form(client: &mut CdpClient) -> bool {
                 .evaluate_string(GATE_NET_SNAPSHOT_JS)
                 .unwrap_or_else(|e| format!("(스냅샷 실패: {e})"));
             tracing::info!("[LOGIN] ⏱ 게이트 OPEN 직전 네트워크 스냅샷: {snap}");
+            // [진단·임시] 자동화/CDP 지문도 같이 남긴다 — 손 로그인(정상 크롬)에서 같은 JS를 찍어
+            // 비교하면, 매크로에서만 캡차가 뜨는 차이(특히 cdpConsoleTrap·webdriver·headless 텔)를 짚는다.
+            let fp = client
+                .evaluate_string(AUTOMATION_FINGERPRINT_JS)
+                .unwrap_or_else(|e| format!("(지문 실패: {e})"));
+            tracing::info!("[LOGIN] 🕵 자동화/CDP 지문: {fp}");
             tracing::info!(
                 "[LOGIN] ✓ 로그인 폼 완전 로딩 확인 (readyState=complete · #id/#pw 입력 가능 · 로그인 버튼 준비 · 리소스 로딩 정착 · 안티봇 스크립트 로드 · keydown 암호화 후킹 설치 확인 · {FORM_READY_STABLE_POLLS}회 연속 안정)"
             );
