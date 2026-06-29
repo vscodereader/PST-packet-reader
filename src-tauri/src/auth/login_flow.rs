@@ -590,6 +590,30 @@ const ANTIBOT_READY_JS: &str = "(()=>{try{\
 const RESOURCE_COUNT_JS: &str =
     "(()=>{try{return performance.getEntriesByType('resource').length;}catch(e){return -1;}})()";
 
+// [진단·임시] 게이트가 열리는 '바로 그 순간'의 네트워크/안티봇 상태 스냅샷(순수 관측 — 전역을
+// 전혀 건드리지 않아 봇탐지 표면 0). performance 리소스 타이밍만 읽는다:
+//  - rs             : document.readyState
+//  - resCount       : 완료된 리소스 수
+//  - sinceLastNetMs : 마지막으로 '완료된' 리소스 이후 경과(ms). 작을수록 방금도 뭔가 끝났다 =
+//                     아직 로딩 활발(=탭 로딩바 도는 중). -1은 리소스 엔트리가 아직 없음.
+//  - antibot        : default_ecc/wtm/ncaptcha/nclk 중 도착한 것 + 각 도착시각(ms)
+//  - iframes        : 현재 iframe 개수
+// 주의: performance 엔트리는 '완료' 시에만 생기므로 진행 중(in-flight) 요청을 직접 세지는 못한다.
+// sinceLastNetMs 가 작다는 것이 "아직 네트워크가 활발하다(=로딩바 돎)"의 안전한 대리지표다.
+const GATE_NET_SNAPSHOT_JS: &str = "(()=>{try{\
+    const now=performance.now();\
+    const res=performance.getEntriesByType('resource');\
+    let last=0;for(const e of res){if(e.responseEnd>last)last=e.responseEnd;}\
+    const since=last?Math.round(now-last):-1;\
+    const pats=[['default_ecc',/default_ecc/i],['wtm',/wtm\\.pstatic\\.net/i],\
+                ['ncaptcha',/ncaptcha/i],['nclk',/nclk\\.naver/i]];\
+    const hits=[];for(const p of pats){const m=res.find(e=>p[1].test(e.name));\
+        if(m)hits.push(p[0]+'@'+Math.round(m.responseEnd)+'ms');}\
+    const frames=document.querySelectorAll('iframe').length;\
+    return JSON.stringify({rs:document.readyState,resCount:res.length,\
+        sinceLastNetMs:since,antibot:hits,iframes:frames});\
+}catch(e){return '{\"err\":\"'+String(e)+'\"}';}})()";
+
 /// 로그인 폼 진행 게이트(순수 함수). 사수 의도(돔이 전부 붙고 타이핑 준비 완료)를 네 신호
 /// **모두**로 엄격 판정한다(폴백 없음):
 /// ① `form_ready`(상위문서 complete + #id/#pw 보임·입력가능 + 로그인 버튼).
@@ -693,6 +717,13 @@ fn wait_for_login_form(client: &mut CdpClient) -> bool {
         );
         streak = next_ready_streak(streak, gate);
         if streak >= FORM_READY_STABLE_POLLS {
+            // [진단·임시] 게이트가 열리는 바로 그 순간의 네트워크/안티봇 스냅샷을 먼저 남긴다 —
+            // 로딩바가 도는 중(=아직 네트워크 활발)에 게이트가 열리는지 실측 확인용. sinceLastNetMs
+            // 가 작으면(예: <300) 방금도 리소스가 끝났다 = 아직 로딩 중인데 타이핑이 나간다는 증거.
+            let snap = client
+                .evaluate_string(GATE_NET_SNAPSHOT_JS)
+                .unwrap_or_else(|e| format!("(스냅샷 실패: {e})"));
+            tracing::info!("[LOGIN] ⏱ 게이트 OPEN 직전 네트워크 스냅샷: {snap}");
             tracing::info!(
                 "[LOGIN] ✓ 로그인 폼 완전 로딩 확인 (readyState=complete · #id/#pw 입력 가능 · 로그인 버튼 준비 · 리소스 로딩 정착 · 안티봇 스크립트 로드 · keydown 암호화 후킹 설치 확인 · {FORM_READY_STABLE_POLLS}회 연속 안정)"
             );
