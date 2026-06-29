@@ -224,24 +224,38 @@ impl CdpClient {
 
                   await sleep(400);
 
-                  // 동의/진행 버튼을 여러 단서로 탐색(텍스트 + type=submit + 폼 최하단 버튼).
+                  // 동의 버튼 탐색. '동의하기'(정식 동의 버튼)를 최우선으로, 그다음 '동의' 포함(단
+                  // '모두/전체 동의'는 제외), 그다음 폼 submit 버튼까지만 본다. 못 찾으면 "마지막
+                  // 버튼" 같은 추측 클릭을 하지 않고 에러+스냅샷으로 끝낸다(취소/닫기 등 오클릭 방지).
                   const buttons =
                     [...root.querySelectorAll('button, input[type="submit"]')].filter(visible);
-                  const isFinalBtn = b => {
-                    const t = (text(b) || b.value || '').trim();
-                    if (/(모두|전체)\s*동의/.test(t)) return false; // 전체동의는 액션 버튼이 아님
-                    return /(동의하기|확인|다음|시작하기|완료)/.test(t);
-                  };
+                  const btnText = b => (text(b) || b.value || '').trim();
+                  // 실패 진단용 DOM 스냅샷(어떤 체크박스/버튼이 있었는지). picked는 고른 버튼(없으면 null).
+                  const snapshot = picked => JSON.stringify({
+                    checkboxCount: boxes.length,
+                    checkboxes: scanBoxes().map(b => ({
+                      id: b.id || null,
+                      name: b.name || null,
+                      checked: b.checked,
+                      label: labelText(b).slice(0, 40)
+                    })),
+                    buttons: buttons.map(b => ({
+                      text: btnText(b).slice(0, 30),
+                      disabled: b.disabled,
+                      type: b.type || null
+                    })),
+                    picked: picked ? btnText(picked).slice(0, 30) : null
+                  });
                   const agreeBtn =
-                    buttons.find(isFinalBtn) ||
+                    buttons.find(b => btnText(b).includes('동의하기')) ||
+                    buttons.find(b => btnText(b).includes('동의') && !/(모두|전체)\s*동의/.test(btnText(b))) ||
                     buttons.find(b => b.type === 'submit') ||
-                    buttons[buttons.length - 1];
+                    null;
 
                   if (!agreeBtn) {
                     return JSON.stringify({
                       ok: false,
-                      error: '동의 버튼을 찾지 못했습니다. (visible checkbox=' + boxes.length
-                        + ', button=' + buttons.length + ')',
+                      error: '동의 버튼을 찾지 못했습니다. snapshot=' + snapshot(null),
                       clicked
                     });
                   }
@@ -258,25 +272,9 @@ impl CdpClient {
                   }, 6000, 300);
 
                   if (!enabled) {
-                    // 실패 시 DOM 스냅샷을 남겨 다음에 원인(어떤 체크박스/버튼이 있었는지)을 파악한다.
-                    const snap = {
-                      checkboxCount: boxes.length,
-                      checkboxes: scanBoxes().map(b => ({
-                        id: b.id || null,
-                        name: b.name || null,
-                        checked: b.checked,
-                        label: labelText(b).slice(0, 40)
-                      })),
-                      buttons: buttons.map(b => ({
-                        text: (text(b) || b.value || '').trim().slice(0, 30),
-                        disabled: b.disabled,
-                        type: b.type || null
-                      })),
-                      picked: (text(agreeBtn) || agreeBtn.value || '').trim().slice(0, 30)
-                    };
                     return JSON.stringify({
                       ok: false,
-                      error: '동의 버튼이 활성화되지 않았습니다. snapshot=' + JSON.stringify(snap),
+                      error: '동의 버튼이 활성화되지 않았습니다. snapshot=' + snapshot(agreeBtn),
                       clicked
                     });
                   }
