@@ -27,54 +27,69 @@ interface LogLine {
   level: Level;
 }
 
-// 더미 통신 로그 — 실제로는 서버 감사로그 DB에서 내려온다. 비밀(PW/쿠키)은 찍지 않는다.
+// 더미 통신 로그 — 실제로는 서버 감사로그 DB에서 내려온다.
+// 표시 규칙(설계 §10-5): ★통신 로그에 한해★ ID·PW를 마스킹 없이 그대로 표시한다(운영자 결정).
+// (다른 화면 — 결과 보고 §10-4-1 등 — 은 마스킹 유지. 통신 로그만 예외.)
+// 계정별로 한 줄씩(어느 ID/PW가 성공/보류/실패인지) + IP는 기존→바뀐, 명령은 무엇을 보냈는지 전부 명시.
 const LOG_LINES: LogLine[] = [
   {
     ts: "2026-06-28 10:20:01.102",
     tag: "[SSE]",
     dir: "하위-001 → 서버",
     device: "하위-001",
-    msg: "스트림 연결됨 (device_id=d1)",
+    msg: "스트림 연결됨 (device_id=d1, 기기토큰 검증 OK)",
     level: "info",
   },
   {
     ts: "2026-06-28 10:20:01.340",
     tag: "[REGISTER]",
-    dir: "하위-002 → 서버",
-    device: "하위-002",
-    msg: "기기코드 8237 등록 성공, 토큰 발급 ✅",
+    dir: "하위-003 → 서버",
+    device: "하위-003",
+    msg: "기기코드 8237 등록 성공 → 기기토큰 발급 ✅",
     level: "ok",
   },
+  // 하트비트: 각 하위가 주기적으로 "살아있음 + 현재 IP"를 보고. 두 하위의 IP가
+  // 서로 다른 건 서로 다른 컴퓨터/폰이라 그런 것(같은 하위의 IP가 바뀌는 게 'IP 변경').
   {
     ts: "2026-06-28 10:20:03.001",
     tag: "[HEARTBEAT]",
     dir: "하위-001 → 서버",
     device: "하위-001",
-    msg: "online · IP 1.2.3.4",
+    msg: "online · IP 211.234.194.24",
     level: "info",
   },
   {
     ts: "2026-06-28 10:20:03.220",
     tag: "[HEARTBEAT]",
-    dir: "하위-002 → 서버",
-    device: "하위-002",
-    msg: "online · IP 9.10.11.12",
+    dir: "하위-003 → 서버",
+    device: "하위-003",
+    msg: "online · IP 121.165.10.77",
     level: "info",
   },
+  // 분배: 어느 하위에 몇 건을, 어떤 계정(마스킹 ID)을 보냈는지 명시.
   {
     ts: "2026-06-28 10:20:05.220",
     tag: "[CMD]",
     dir: "Admin → 하위-001",
     device: "하위-001",
-    msg: "import_then_login_all (commandId=c-1001)",
+    msg: "distribute_accounts(계정 분배) 4건 → chol_invest/ch0lInvest!, moa_stock7/moaStock#22, viptrade77/vipTrade@77, dki_master/dkiMaster12 (commandId=c-1001, operator=admin)",
     level: "cmd",
   },
   {
-    ts: "2026-06-28 10:20:05.998",
+    ts: "2026-06-28 10:20:05.880",
+    tag: "[RESULT]",
+    dir: "하위-001 → Admin",
+    device: "하위-001",
+    msg: "c-1001 import 완료: imported 4 / skipped 0 (chol_invest, moa_stock7, viptrade77, dki_master)",
+    level: "ok",
+  },
+  // 자동 전체 로그인 시작 → 첫 계정에서 IP 로테이션(비행기모드). 이 구간엔 못 보내고 대기.
+  {
+    ts: "2026-06-28 10:20:06.300",
     tag: "[STATE]",
     dir: "하위-001 → 서버",
     device: "하위-001",
-    msg: "ROTATING — IP 변경 시작, 명령 버튼 비활성",
+    msg: "ROTATING — IP 회전 시작 (기존 IP 211.234.194.24), 명령 버튼 비활성",
     level: "warn",
   },
   {
@@ -82,7 +97,7 @@ const LOG_LINES: LogLine[] = [
     tag: "[SSE]",
     dir: "하위-001 ✗",
     device: "하위-001",
-    msg: "스트림 끊김 (비행기모드)",
+    msg: "스트림 끊김 (비행기모드 ON — 폰 인터넷 차단)",
     level: "warn",
   },
   {
@@ -90,7 +105,7 @@ const LOG_LINES: LogLine[] = [
     tag: "[SSE]",
     dir: "하위-001 → 서버",
     device: "하위-001",
-    msg: "재연결 성공 · new IP 5.6.7.8 (토큰 동일)",
+    msg: "재연결 성공 · 기존 IP 211.234.194.24 → 바뀐 IP 211.234.194.28 (✓ IP 변경됨, 토큰 동일)",
     level: "ok",
   },
   {
@@ -98,65 +113,84 @@ const LOG_LINES: LogLine[] = [
     tag: "[HEARTBEAT]",
     dir: "하위-001 → 서버",
     device: "하위-001",
-    msg: "online · IP 5.6.7.8",
+    msg: "online · IP 211.234.194.28",
     level: "info",
   },
+  // 재연결 후, 대기했던 로그인 결과를 '계정별 한 줄씩' 같은 commandId로 올린다.
   {
-    ts: "2026-06-28 10:20:18.770",
+    ts: "2026-06-28 10:20:14.220",
     tag: "[RESULT]",
     dir: "하위-001 → Admin",
     device: "하위-001",
-    msg: "c-1001 진행 3/10 (st**** 로그인 성공 ✅)",
+    msg: "c-1001 로그인 chol_invest / ch0lInvest! → 성공(Active) ✅",
     level: "ok",
   },
   {
-    ts: "2026-06-28 10:20:31.220",
+    ts: "2026-06-28 10:20:21.500",
+    tag: "[STATE]",
+    dir: "하위-001 → 서버",
+    device: "하위-001",
+    msg: "ROTATING — IP 회전 시작 (기존 IP 211.234.194.28), 다음 계정 로그인 전",
+    level: "warn",
+  },
+  {
+    ts: "2026-06-28 10:20:27.640",
+    tag: "[SSE]",
+    dir: "하위-001 → 서버",
+    device: "하위-001",
+    msg: "재연결 성공 · 기존 IP 211.234.194.28 → 바뀐 IP 211.234.194.31 (✓ IP 변경됨, 토큰 동일)",
+    level: "ok",
+  },
+  {
+    ts: "2026-06-28 10:20:28.900",
     tag: "[RESULT]",
     dir: "하위-001 → Admin",
     device: "하위-001",
-    msg: "c-1001 진행 7/10 (vp**** 캡차 → 보류)",
+    msg: "c-1001 로그인 moa_stock7 / moaStock#22 → 성공(Active) ✅",
+    level: "ok",
+  },
+  {
+    ts: "2026-06-28 10:20:35.100",
+    tag: "[RESULT]",
+    dir: "하위-001 → Admin",
+    device: "하위-001",
+    msg: "c-1001 로그인 viptrade77 / vipTrade@77 → 캡차 감지 → 보류(OnHold), 사람이 직접 처리",
     level: "info",
   },
   {
-    ts: "2026-06-28 10:20:45.010",
+    ts: "2026-06-28 10:20:42.330",
     tag: "[RESULT]",
     dir: "하위-001 → Admin",
     device: "하위-001",
-    msg: "c-1001 완료: 성공3 / 보류2 / 대기초과3 / 실패2 ✅",
+    msg: "c-1001 로그인 dki_master / dkiMaster12 → 비번오류(BadCredentials) → 실패",
+    level: "fail",
+  },
+  {
+    ts: "2026-06-28 10:20:43.010",
+    tag: "[RESULT]",
+    dir: "하위-001 → Admin",
+    device: "하위-001",
+    msg: "c-1001 배치 완료: 성공2 / 보류1 / 대기초과0 / 실패1 (총 받은 4)",
     level: "ok",
   },
+  // 실패 계정만 자동 삭제 — 어떤 ID를, 왜 지웠는지 명시(되돌리기 불가라 회신 필수).
   {
     ts: "2026-06-28 10:20:45.300",
     tag: "[CMD]",
     dir: "Admin → 하위-001",
     device: "하위-001",
-    msg: "delete_accounts (실패 2건 자동삭제, commandId=c-1001)",
+    msg: "delete_accounts(계정 삭제) 1건 → dki_master / dkiMaster12 (사유: 비번오류) (commandId=c-1001)",
     level: "cmd",
   },
   {
-    ts: "2026-06-28 10:21:02.300",
-    tag: "[CMD]",
-    dir: "Admin → 하위-003",
-    device: "하위-003",
-    msg: "distribute_accounts (4건, commandId=c-1002)",
-    level: "cmd",
-  },
-  {
-    ts: "2026-06-28 10:21:02.880",
+    ts: "2026-06-28 10:20:45.560",
     tag: "[RESULT]",
-    dir: "하위-003 → Admin",
-    device: "하위-003",
-    msg: "c-1002 import 완료: imported 4 / skipped 0",
+    dir: "하위-001 → Admin",
+    device: "하위-001",
+    msg: "c-1001 삭제 완료: dki_master / dkiMaster12 제거 · 유지(보류 viptrade77, 대기초과 0건)",
     level: "ok",
   },
-  {
-    ts: "2026-06-28 10:21:40.120",
-    tag: "[RESULT]",
-    dir: "하위-003 → Admin",
-    device: "하위-003",
-    msg: "c-1002 로그인 완료: 성공2 / 보류1 / 대기초과1 / 실패0",
-    level: "ok",
-  },
+  // 다른 컴퓨터가 꺼짐 → 그 하위로 간 명령은 거부. '무슨 명령'을 거부했는지 명시(§4-2).
   {
     ts: "2026-06-28 10:22:05.660",
     tag: "[HEARTBEAT]",
@@ -167,10 +201,10 @@ const LOG_LINES: LogLine[] = [
   },
   {
     ts: "2026-06-28 10:22:30.900",
-    tag: "[CMD]",
+    tag: "[REJECT]",
     dir: "Admin → 하위-002",
     device: "하위-002",
-    msg: "명령 거부 — 대상 offline (commandId=c-1003)",
+    msg: "거부: device_name=하위-002 명령=import_then_login_all(전체로그인) commandId=c-1003 사유=대상 컴퓨터 꺼짐(offline·거부코드 409) operator=admin src=/home/csw/projects/pstmacro/src-tauri/src/agent/commands.rs (예정 위치·핸들러 미구현)",
     level: "fail",
   },
 ];
@@ -301,8 +335,9 @@ export function CommLog() {
       </Paper>
 
       <Text size="xs" c="dimmed">
-        ※ 비밀번호·쿠키 등 자격증명은 로그에 남기지 않습니다(기존 컨벤션). ID는
-        앞 2글자만 노출(st****).
+        ※ <b>통신 로그에 한해</b> ID·PW를 마스킹 없이 그대로 표시합니다(운영자
+        결정). 다른 화면(결과 보고 등)은 마스킹 유지. 계정별
+        성공/보류/실패·사유, IP는 기존→바뀐, 명령은 무엇을 보냈는지 모두 표시.
       </Text>
     </Box>
   );

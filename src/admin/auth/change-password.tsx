@@ -25,58 +25,70 @@ export function ChangePassword({
   go: (s: Screen) => void;
   onDone?: () => void;
 }) {
+  const submit = () => {
+    notifications.show({
+      message: "비밀번호가 변경되었습니다",
+      color: "green",
+    });
+    onDone?.(); // 강제 변경 완료 표시(다음 로그인은 앱으로).
+    go("login"); // 변경 후 재로그인(§5).
+  };
+
   const body = (
     <Paper withBorder radius="md" p="xl" w={400} shadow="sm">
-      <Stack gap="md">
-        <Stack gap={4} align="center">
-          <ThemeIcon
-            size={46}
-            radius="md"
-            variant="light"
-            color={forced ? "orange" : "blue"}
-          >
-            <Icon.settings size={24} />
-          </ThemeIcon>
-          <Text fw={800} size="xl">
-            비밀번호 변경
-          </Text>
-        </Stack>
-
-        {forced && (
-          <Alert variant="light" color="orange" p="sm">
-            <Text size="xs">
-              기본 비밀번호(<b>Superadmin</b>)를 그대로 사용할 수 없습니다. 새
-              비밀번호로 변경한 뒤 <b>다시 로그인</b>해 주세요.
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          submit();
+        }}
+      >
+        <Stack gap="md">
+          <Stack gap={4} align="center">
+            <ThemeIcon
+              size={46}
+              radius="md"
+              variant="light"
+              color={forced ? "orange" : "blue"}
+            >
+              <Icon.settings size={24} />
+            </ThemeIcon>
+            <Text fw={800} size="xl">
+              비밀번호 변경
             </Text>
-          </Alert>
-        )}
+          </Stack>
 
-        <PasswordInput
-          label="현재 비밀번호"
-          placeholder={forced ? "Superadmin" : "현재 비밀번호"}
-        />
-        <PasswordInput label="새 비밀번호" placeholder="새 비밀번호" />
-        <PasswordInput
-          label="새 비밀번호 확인"
-          placeholder="새 비밀번호 다시 입력"
-        />
+          {forced && (
+            <Alert variant="light" color="orange" p="sm">
+              <Text size="xs">
+                기본 비밀번호(<b>Superadmin</b>)를 그대로 사용할 수 없습니다. 새
+                비밀번호로 변경한 뒤 <b>다시 로그인</b>해 주세요.
+              </Text>
+            </Alert>
+          )}
 
-        <Button
-          fullWidth
-          color={forced ? "orange" : "blue"}
-          onClick={() => {
-            notifications.show({
-              message: "비밀번호가 변경되었습니다",
-              color: "green",
-            });
-            onDone?.(); // 강제 변경 완료 표시(다음 로그인은 앱으로).
-            // 변경 후 재로그인(§5).
-            go("login");
-          }}
-        >
-          변경하고 다시 로그인
-        </Button>
-      </Stack>
+          {/* 현재 비밀번호는 미리 채워둔다(강제 변경=기본 Superadmin). 운영자는 새 비번만
+            입력/재입력하면 된다 — 매번 현재 비번을 다시 타이핑할 필요 없음. */}
+          <PasswordInput
+            label="현재 비밀번호"
+            defaultValue={forced ? "Superadmin" : ""}
+            placeholder={forced ? "Superadmin" : "현재 비밀번호"}
+          />
+          <PasswordInput
+            label="새 비밀번호"
+            placeholder="새 비밀번호"
+            data-autofocus
+          />
+          <PasswordInput
+            label="새 비밀번호 확인"
+            placeholder="새 비밀번호 다시 입력"
+          />
+
+          {/* type=submit → 새 비번 입력칸에서 Enter만 쳐도 제출(버튼 클릭 불필요). */}
+          <Button type="submit" fullWidth color={forced ? "orange" : "blue"}>
+            변경하고 다시 로그인
+          </Button>
+        </Stack>
+      </form>
     </Paper>
   );
 
