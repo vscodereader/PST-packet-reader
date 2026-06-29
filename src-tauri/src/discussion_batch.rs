@@ -255,7 +255,8 @@ where
             continue;
         }
 
-        let outcome = run_one_forum_stock(&request, stock, title, body, comment, &app);
+        let outcome =
+            run_one_forum_stock_with_retry(&request, stock, title, body, comment, &app, &who, kind);
         // 실패면 사용자용 메시지(message)와 캡처된 스택(trace)을 분리해 들고 간다(#199).
         // 성공 시 작성된 글 URL을 메시지에 함께 실어, 완료 로그에서 올라간 글을 확인할 수 있게 한다.
         let (ok, message, trace, posted) = match outcome {
@@ -318,6 +319,54 @@ fn comment_detail_url(
         .filter(|url| !url.is_empty())
         .map(ToOwned::to_owned)
         .or(report_post_url)
+}
+
+/// 종목 게시 실패가 "재시도 가치가 있는지"(대기초과 = 일시적 서버/타이밍 문제) 판별한다(순수).
+/// 차단(로그인/권한/쿠키)·비번오류·약관동의 실패 같은 건 재시도해도 또 실패하므로 제외하고,
+/// `is_timed_out_failure`(페이지/응답 시간초과·HTTP 500 네이버 서버 오류)만 재시도 대상으로 본다.
+/// 차단이 대기초과보다 우선이므로 차단 계열이면 재시도하지 않는다.
+fn is_retryable_forum_failure(message: &str) -> bool {
+    !is_blocking_failure(message) && is_timed_out_failure(message)
+}
+
+/// 대기초과(일시적 시간초과/서버오류) 실패 시 같은 종목 게시를 몇 번까지 다시 시도할지(#대기초과
+/// 후속). 재시도 사이 짧게 쉬어 일시적 자원 경쟁/네트워크 흔들림이 가라앉을 시간을 준다.
+const FORUM_TIMEOUT_RETRIES: usize = 2;
+const FORUM_RETRY_DELAY: Duration = Duration::from_secs(3);
+
+// 한 종목 게시를 시도하되, 대기초과(일시적 시간초과/서버오류)면 짧은 대기 후 최대
+// `FORUM_TIMEOUT_RETRIES`회 다시 시도한다. 차단/성공/그 밖의 실패는 즉시 반환한다(재시도 무의미).
+// 로그인 경로는 건드리지 않고, 게시 종목 단위에서만 재시도해 일시적 대기초과로 글이 빠지는 것을 줄인다.
+fn run_one_forum_stock_with_retry<R: Runtime>(
+    request: &ForumPublishRequest,
+    stock: &DiscussionStock,
+    title: &str,
+    body: &str,
+    comment: &str,
+    app: &tauri::AppHandle<R>,
+    who: &str,
+    kind: &str,
+) -> Result<PostedContent, AutomationError> {
+    let mut attempt = 0usize;
+    loop {
+        match run_one_forum_stock(request, stock, title, body, comment, app) {
+            Ok(posted) => return Ok(posted),
+            Err(error) => {
+                if attempt < FORUM_TIMEOUT_RETRIES && is_retryable_forum_failure(error.message()) {
+                    attempt += 1;
+                    tracing::info!(
+                        "[POST] {who}  \"{}\" 종목토론방 {kind} 대기초과 — {attempt}/{FORUM_TIMEOUT_RETRIES}회 재시도({}초 후): {}",
+                        stock.name,
+                        FORUM_RETRY_DELAY.as_secs(),
+                        error.message()
+                    );
+                    sleep(FORUM_RETRY_DELAY);
+                    continue;
+                }
+                return Err(error);
+            }
+        }
+    }
 }
 
 // 한 종목에 글/댓글을 게시하는 함수입니다(kind에 따라 엔진 함수를 고릅니다).
@@ -1002,6 +1051,23 @@ mod tests {
         ));
         // 차단(401/403)이 동시에 잡히는 메시지는 호출부에서 차단을 먼저 보므로 여기선 500만 검사.
         assert!(!is_timed_out_failure("HTTP status 404 Not Found"));
+    }
+
+    #[test]
+    fn retryable_forum_failure_only_for_timed_out_not_blocking_or_other() {
+        // 대기초과(일시적 시간초과/서버오류)만 재시도한다.
+        assert!(is_retryable_forum_failure("페이지 로드 대기 시간이 초과되었습니다."));
+        assert!(is_retryable_forum_failure("네이버 서버에 문제가 발생했습니다"));
+        assert!(is_retryable_forum_failure("HTTP status 500 Internal Server Error"));
+        // 차단(401/403/쿠키)은 재시도해도 또 실패 → 재시도 금지.
+        assert!(!is_retryable_forum_failure("HTTP status 403 Forbidden"));
+        assert!(!is_retryable_forum_failure("쿠키를 찾지 못했습니다"));
+        // 약관 동의하기 비활성 같은 미분류 실패도 재시도 대상 아님(대기초과가 아니므로).
+        assert!(!is_retryable_forum_failure(
+            "동의하기 버튼이 아직 비활성화 상태입니다."
+        ));
+        // 요청 과다(429)는 차단도 대기초과도 아니라 재시도 대상이 아니다.
+        assert!(!is_retryable_forum_failure("HTTP status 429 Too Many Requests"));
     }
 
     #[test]

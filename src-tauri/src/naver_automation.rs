@@ -24,6 +24,10 @@ use tungstenite::{Message, WebSocket};
 
 const DISCUSSION_URL: &str = "https://stock.naver.com/discussion";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
+/// 게시(글쓰기/댓글) 경로의 페이지 로드(`wait_for_ready_state`) 대기 상한. WSL2 자원 경쟁 등으로
+/// 일시적으로 로드가 느려질 때 "대기초과"로 빠지는 빈도를 줄이려 `DEFAULT_TIMEOUT`(20초)보다
+/// 넉넉히 잡는다. 로그인 경로(auth)는 이 값을 쓰지 않으므로 영향이 없다(#대기초과 후속).
+pub(crate) const POST_READY_TIMEOUT: Duration = Duration::from_secs(45);
 /// DevTools WebSocket 핸드셰이크 전 TCP 연결 타임아웃. tungstenite `connect()`는 연결에
 /// 타임아웃이 없어, Chrome이 떴지만 DevTools가 응답하지 않으면 무한 대기한다(#210 로그인
 /// 멈춤의 한 원인). TCP 연결을 이 시간으로 묶는다(이후 입출력은 DEFAULT_TIMEOUT).
@@ -201,7 +205,7 @@ pub fn run_naver_discussion_macro(
             match comment_url {
                 Some(url) => {
                     chrome.navigate(url)?;
-                    chrome.wait_for_ready_state(Duration::from_secs(30))?;
+                    chrome.wait_for_ready_state(POST_READY_TIMEOUT)?;
                     sleep(Duration::from_secs(2));
                     packet_client.ensure_profile_intro_setup(url)?;
                 }
@@ -291,7 +295,7 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
     }
 
     chrome.navigate(&post_url)?;
-    chrome.wait_for_ready_state(Duration::from_secs(30))?;
+    chrome.wait_for_ready_state(POST_READY_TIMEOUT)?;
     sleep(Duration::from_secs(2));
     packet_client.ensure_profile_intro_setup(&post_url)?;
     chrome.submit_comment_and_refresh(&packet_client, comment)?;
