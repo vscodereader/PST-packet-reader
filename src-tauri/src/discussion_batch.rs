@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::thread::sleep;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -329,14 +329,31 @@ fn is_retryable_forum_failure(message: &str) -> bool {
     !is_blocking_failure(message) && is_timed_out_failure(message)
 }
 
-/// 대기초과(일시적 시간초과/서버오류) 실패 시 같은 종목 게시를 몇 번까지 다시 시도할지(#대기초과
-/// 후속). 재시도 사이 짧게 쉬어 일시적 자원 경쟁/네트워크 흔들림이 가라앉을 시간을 준다.
-const FORUM_TIMEOUT_RETRIES: usize = 2;
-const FORUM_RETRY_DELAY: Duration = Duration::from_secs(3);
+/// 대기초과(일시적 시간초과/서버오류) 실패 시 같은 종목 게시를 재시도하는 정책(#대기초과 후속,
+/// 사용자 지시). **주 종료조건은 "계정 막힘(차단) 감지"**다: 매 재시도마다 결과를 다시 분류해,
+/// 실패가 차단/막힘 계열(`is_blocking_failure`: 로그인 만료·권한 없음·쿠키 못찾음 등)로 바뀌면
+/// 즉시 재시도를 멈추고 그 막힘 메시지를 그대로 돌려준다 → 호출부가 계정을 Blocked로 표시한다.
+/// 차단이 아니라 계속 시간초과(일시적)면 백오프(3→6→12→24→30…초)로 끈질기게 다시 시도한다.
+/// 단 "네이버 자체 먹통/세션 사망"처럼 차단 메시지 없이 계속 timeout만 나는 경우엔 차단 감지가
+/// 안 걸려 무한히 돌 수 있어, 넉넉한 시간 상한(`FORUM_RETRY_TOTAL_BUDGET`)을 안전망으로 둔다 —
+/// 이 상한을 넘으면 그때 대기초과로 남겨 글을 잃지 않고 큐도 영영 막지 않는다.
+const FORUM_TIMEOUT_RETRIES: usize = 30;
+const FORUM_RETRY_BACKOFF_BASE_SECS: u64 = 3;
+const FORUM_RETRY_BACKOFF_MAX_SECS: u64 = 30;
+const FORUM_RETRY_TOTAL_BUDGET: Duration = Duration::from_secs(600);
 
-// 한 종목 게시를 시도하되, 대기초과(일시적 시간초과/서버오류)면 짧은 대기 후 최대
-// `FORUM_TIMEOUT_RETRIES`회 다시 시도한다. 차단/성공/그 밖의 실패는 즉시 반환한다(재시도 무의미).
-// 로그인 경로는 건드리지 않고, 게시 종목 단위에서만 재시도해 일시적 대기초과로 글이 빠지는 것을 줄인다.
+/// `attempt`회차(0부터)의 재시도 전 대기 시간(초). 매회 2배로 늘리되 상한으로 캡한다(순수 함수).
+fn forum_retry_delay_secs(attempt: usize) -> u64 {
+    FORUM_RETRY_BACKOFF_BASE_SECS
+        .checked_shl(attempt as u32)
+        .unwrap_or(u64::MAX)
+        .min(FORUM_RETRY_BACKOFF_MAX_SECS)
+}
+
+// 한 종목 게시를 시도하되, 대기초과(일시적 시간초과/서버오류)면 백오프 후 다시 시도한다. 차단/성공/
+// 그 밖의 실패는 즉시 반환한다(재시도 무의미). 재시도는 횟수(`FORUM_TIMEOUT_RETRIES`)와 총 누적
+// 시간(`FORUM_RETRY_TOTAL_BUDGET`) 둘 중 하나라도 넘으면 멈춰, 진짜 안 되는 종목이 큐를 무한정
+// 막지 않게 한다. 로그인 경로는 건드리지 않고 게시 종목 단위에서만 재시도한다.
 fn run_one_forum_stock_with_retry<R: Runtime>(
     request: &ForumPublishRequest,
     stock: &DiscussionStock,
@@ -347,20 +364,25 @@ fn run_one_forum_stock_with_retry<R: Runtime>(
     who: &str,
     kind: &str,
 ) -> Result<PostedContent, AutomationError> {
+    let started = Instant::now();
     let mut attempt = 0usize;
     loop {
         match run_one_forum_stock(request, stock, title, body, comment, app) {
             Ok(posted) => return Ok(posted),
             Err(error) => {
-                if attempt < FORUM_TIMEOUT_RETRIES && is_retryable_forum_failure(error.message()) {
+                let within_budget = started.elapsed() < FORUM_RETRY_TOTAL_BUDGET;
+                if attempt < FORUM_TIMEOUT_RETRIES
+                    && within_budget
+                    && is_retryable_forum_failure(error.message())
+                {
+                    let delay = forum_retry_delay_secs(attempt);
                     attempt += 1;
                     tracing::info!(
-                        "[POST] {who}  \"{}\" 종목토론방 {kind} 대기초과 — {attempt}/{FORUM_TIMEOUT_RETRIES}회 재시도({}초 후): {}",
+                        "[POST] {who}  \"{}\" 종목토론방 {kind} 대기초과 — {attempt}/{FORUM_TIMEOUT_RETRIES}회 재시도({delay}초 후): {}",
                         stock.name,
-                        FORUM_RETRY_DELAY.as_secs(),
                         error.message()
                     );
-                    sleep(FORUM_RETRY_DELAY);
+                    sleep(Duration::from_secs(delay));
                     continue;
                 }
                 return Err(error);
@@ -1068,6 +1090,19 @@ mod tests {
         ));
         // 요청 과다(429)는 차단도 대기초과도 아니라 재시도 대상이 아니다.
         assert!(!is_retryable_forum_failure("HTTP status 429 Too Many Requests"));
+    }
+
+    #[test]
+    fn forum_retry_backoff_doubles_then_caps() {
+        // 끈질기되 상한: 3→6→12→24→30(캡)→30… 으로 늘되 FORUM_RETRY_BACKOFF_MAX_SECS에서 멈춘다.
+        assert_eq!(forum_retry_delay_secs(0), 3);
+        assert_eq!(forum_retry_delay_secs(1), 6);
+        assert_eq!(forum_retry_delay_secs(2), 12);
+        assert_eq!(forum_retry_delay_secs(3), 24);
+        assert_eq!(forum_retry_delay_secs(4), FORUM_RETRY_BACKOFF_MAX_SECS); // 48→30 캡
+        assert_eq!(forum_retry_delay_secs(5), FORUM_RETRY_BACKOFF_MAX_SECS);
+        // 큰 회차에서도 오버플로 없이 캡 유지(saturating_shl).
+        assert_eq!(forum_retry_delay_secs(99), FORUM_RETRY_BACKOFF_MAX_SECS);
     }
 
     #[test]
