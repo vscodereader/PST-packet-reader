@@ -181,6 +181,32 @@ impl CdpClient {
                     el.scrollIntoView({ block: 'center', inline: 'center' });
                     el.click();
                   };
+                  // 라벨 클릭이 React 컨트롤드 체크박스에 안 먹는 경우가 있어, input.checked를
+                  // 직접 확인하고 안 되면 input 클릭 + change/input 이벤트까지 디스패치한다.
+                  const ensureChecked = (input, label) => {
+                    if (label) clickEl(label);
+                    if (!input) return;
+                    if (!input.checked) {
+                      try { input.click(); } catch (e) {}
+                    }
+                    if (!input.checked) {
+                      try {
+                        input.checked = true;
+                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                      } catch (e) {}
+                    }
+                  };
+                  // 고정 sleep 대신 조건이 참이 될 때까지 폴링한다(버튼 활성화가 늦게
+                  // 반영돼도 잡도록). pred는 매 회 재시도 로직을 겸할 수 있다.
+                  const waitUntil = async (pred, timeoutMs, stepMs) => {
+                    const end = Date.now() + timeoutMs;
+                    while (Date.now() < end) {
+                      if (pred()) return true;
+                      await sleep(stepMs);
+                    }
+                    return pred();
+                  };
                   const clicked = [];
                   const allAgree = [...document.querySelectorAll('label, button, div, span')]
                     .find(el => visible(el) && text(el).includes('약관 모두 동의하기'));
@@ -207,12 +233,14 @@ impl CdpClient {
                       continue;
                     }
 
-                    clickEl(label);
-                    clicked.push(item.id + ':clicked');
-                    await sleep(400);
+                    ensureChecked(input, label);
+                    clicked.push(
+                      item.id + (input && input.checked ? ':checked' : ':clicked')
+                    );
+                    await sleep(300);
                   }
 
-                  await sleep(800);
+                  await sleep(600);
 
                   let agreeBtn = [...document.querySelectorAll('button')]
                     .find(btn => visible(btn) && text(btn).includes('동의하기'));
@@ -230,30 +258,34 @@ impl CdpClient {
                   }
 
                   agreeBtn.scrollIntoView({ block: 'center', inline: 'center' });
-                  await sleep(300);
 
-                  if (agreeBtn.disabled) {
+                  // 버튼이 활성화될 때까지 최대 6초 폴링하며, 매 회 미체크 필수항목을 재시도한다.
+                  // (라벨 클릭이 한 번에 안 먹거나 활성화가 늦게 반영되는 경우 대비)
+                  const enabled = await waitUntil(() => {
+                    if (!agreeBtn.disabled) return true;
                     for (const item of requiredItems) {
-                      const label =
-                        document.querySelector(item.labelSelector)
-                        || getByXpath(item.fallbackXpath);
-
-                      if (label) {
-                        clickEl(label);
-                        clicked.push(item.id + ':retry-clicked');
-                        await sleep(300);
+                      const input = document.getElementById(item.id);
+                      if (input && !input.checked) {
+                        const label =
+                          document.querySelector(item.labelSelector)
+                          || getByXpath(item.fallbackXpath);
+                        ensureChecked(input, label);
                       }
                     }
+                    return !agreeBtn.disabled;
+                  }, 6000, 300);
 
-                    await sleep(600);
-
-                    if (agreeBtn.disabled) {
-                      return JSON.stringify({
-                        ok: false,
-                        error: '동의하기 버튼이 아직 비활성화 상태입니다.',
-                        clicked
-                      });
-                    }
+                  if (!enabled) {
+                    const checkedState = requiredItems.map(it => {
+                      const input = document.getElementById(it.id);
+                      return it.id + '=' + (input ? (input.checked ? 'on' : 'off') : 'none');
+                    });
+                    return JSON.stringify({
+                      ok: false,
+                      error: '동의하기 버튼이 아직 비활성화 상태입니다. (필수항목 체크 상태: '
+                        + checkedState.join(', ') + ')',
+                      clicked
+                    });
                   }
 
                   agreeBtn.click();
