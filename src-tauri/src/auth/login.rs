@@ -28,6 +28,9 @@ pub(crate) fn login(
     headless: bool,
     manual_captcha: bool,
 ) -> Result<LoginResolution, OrchestratorError> {
+    // [진단·임시] PSTMACRO_LOGIN_MANUAL 이 설정되면 자동 타이핑을 끄고(run_inner에서) 사용자가 직접
+    // 입력하게 둔다. 사용자가 창을 보고 입력해야 하므로 headless 를 강제로 끈다(headed 고정).
+    let headless = headless && std::env::var("PSTMACRO_LOGIN_MANUAL").is_err();
     let (outcome, trace) = attempt(&account.id, &account.password, headless, manual_captcha)?;
 
     // headless에서 챌린지가 나오면 headed로 승격해 사용자가 직접 해결하도록 재실행.

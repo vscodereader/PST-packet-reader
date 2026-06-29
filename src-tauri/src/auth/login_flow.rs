@@ -323,6 +323,13 @@ fn run_inner(
         ));
     }
 
+    // [진단·임시] 수동입력 모드(PSTMACRO_LOGIN_MANUAL): 자동 타이핑을 생략하고 사용자가 이 CDP
+    // 크롬 창에서 직접 입력하게 둔다. 같은 환경(CDP·플래그)에서 손입력=성공이면 원인은 합성 입력
+    // (행동데이터), 손입력에도 캡차면 원인은 환경(CDP/플래그)임을 가른다(폼은 위에서 이미 준비됨).
+    if std::env::var("PSTMACRO_LOGIN_MANUAL").is_ok() {
+        return manual_login_wait(client);
+    }
+
     // 위 wait_for_login_form이 "폼 완전 로딩"을 확인(로그)한 뒤에만 여기 도달한다. 곧장
     // 아이디 입력 → 2초 대기 → 비밀번호 입력 → 2초 대기 → 로그인 클릭.
     // 3회 재시도 후에도 필드가 비어 있으면(일시적 렌더/타이밍 문제) type_into가 false를
@@ -1171,6 +1178,39 @@ fn type_into(
 
 // 셀렉터에 해당하는 "화면에 보이는" 요소가 있는지 확인한다. `offsetParent`가 null이면
 // 숨겨진 요소이므로(예: 항상 DOM에 존재하는 Caps Lock 경고) false로 본다.
+// [진단·임시] 수동입력 진단모드(PSTMACRO_LOGIN_MANUAL). 자동 타이핑/클릭을 생략하고, 열린 CDP
+// 크롬 창에서 사용자가 직접 로그인할 때까지(최대 180초) 세션 쿠키를 폴링한다. 같은 환경에서
+// 손입력=성공이면 합성 입력(행동데이터)이 원인, 손입력에도 캡차면 환경(CDP/플래그)이 원인.
+fn manual_login_wait(client: &mut CdpClient) -> Result<LoginOutcome, AutomationError> {
+    tracing::info!(
+        "[LOGIN] 🧪 수동입력 진단모드 — 자동 타이핑 생략. 열린 Chrome 창에서 직접 아이디/비밀번호를 입력해 로그인하세요(최대 180초). 캡차가 뜨는지 눈으로 확인하세요."
+    );
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let mut captcha_logged = false;
+    loop {
+        let cookies = collect_naver_cookies(client)?;
+        if has_session_cookies(&cookies) {
+            tracing::info!(
+                "[LOGIN] 🧪 수동입력 성공 — 세션 쿠키 확인. 환경(CDP/플래그)은 정상 → 원인은 매크로의 합성 입력(행동데이터)."
+            );
+            return Ok(LoginOutcome::Ok { cookies });
+        }
+        if !captcha_logged && visible_exists(client, "#captchaDiv, #captcha, img#captchaimg") {
+            tracing::info!(
+                "[LOGIN] 🧪 수동입력 중에도 캡차 감지 — 입력이 아니라 환경(CDP/플래그)이 원인일 가능성."
+            );
+            captcha_logged = true;
+        }
+        if Instant::now() >= deadline {
+            tracing::info!("[LOGIN] 🧪 수동입력 대기 시간초과(180초)");
+            return Ok(LoginOutcome::Error(
+                "수동입력 진단: 180초 내 로그인되지 않음".to_owned(),
+            ));
+        }
+        sleep(Duration::from_millis(500));
+    }
+}
+
 fn visible_exists(client: &mut CdpClient, selector: &str) -> bool {
     let expr = format!(
         "(()=>{{const e=document.querySelector('{selector}');\
