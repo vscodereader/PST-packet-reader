@@ -1,14 +1,17 @@
 import {
+  ActionIcon,
   Badge,
   Box,
   Button,
   Checkbox,
   Group,
   Paper,
+  PasswordInput,
   ScrollArea,
   Stack,
   Table,
   Text,
+  TextInput,
   ThemeIcon,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
@@ -27,6 +30,17 @@ interface Account {
   id: string;
   loginId: string;
 }
+
+// 계정 추가용 인라인 편집 행(모달/prompt 대신). 저장 전까지만 클라이언트에 머무는 임시 행이라
+// 비밀번호도 여기서만 잠깐 들고 있다가 import 성공 시 버린다(서버가 at-rest 암호화, §7).
+interface Draft {
+  key: string;
+  loginId: string;
+  pw: string;
+}
+
+// 인라인 추가 행 key 일련번호. 같은 tick에 여러 행을 추가해도 충돌하지 않게 카운터로 발급한다.
+let draftSeq = 0;
 
 interface OnlineDevice {
   id: string;
@@ -71,6 +85,8 @@ export function AccountDistribute() {
   );
   const [selAcc, setSelAcc] = useState<Set<string>>(new Set());
   const [selDev, setSelDev] = useState<Set<string>>(new Set());
+  // 인라인 추가 중인 행들(아직 import 안 된 임시 행). 데스크톱 pstmacro처럼 "행 추가→그 자리에서 입력".
+  const [drafts, setDrafts] = useState<Draft[]>([]);
 
   // 스테이징 계정·online 하위 로드(서버 연결 시 실데이터, 오프라인이면 더미 유지).
   const loadAccounts = () => {
@@ -100,14 +116,41 @@ export function AccountDistribute() {
       });
   }, []);
 
-  // 계정 추가(스테이징) — 서버 import 엔드포인트로 1건 추가(at-rest 암호화는 서버가 수행, §7).
-  const addAccount = async () => {
-    const loginId = window.prompt("추가할 계정 아이디");
-    if (loginId == null || loginId.trim() === "") return;
-    const pw = window.prompt(`${loginId}의 비밀번호`);
-    if (pw == null || pw === "") return;
+  // 계정 추가(스테이징) — 모달/prompt 대신 표에 빈 인라인 행을 하나 추가하고, 그 행에서 직접
+  // 아이디·비밀번호를 입력하게 한다(데스크톱 pstmacro와 동일 UX).
+  const addDraftRow = () => {
+    draftSeq += 1;
+    setDrafts((prev) => [
+      ...prev,
+      { key: `draft-${draftSeq}`, loginId: "", pw: "" },
+    ]);
+  };
+
+  const updateDraft = (key: string, patch: Partial<Draft>) =>
+    setDrafts((prev) =>
+      prev.map((d) => (d.key === key ? { ...d, ...patch } : d)),
+    );
+
+  const removeDraft = (key: string) =>
+    setDrafts((prev) => prev.filter((d) => d.key !== key));
+
+  // 인라인 행 저장 — 서버 import 엔드포인트로 1건 추가(at-rest 암호화는 서버가 수행, §7). 성공하면
+  // 임시 행을 지우고 스테이징 풀을 갱신한다. 오프라인 미리보기면 로컬 풀에 바로 반영한다.
+  const saveDraft = async (key: string) => {
+    const draft = drafts.find((d) => d.key === key);
+    if (!draft) return;
+    const loginId = draft.loginId.trim();
+    const pw = draft.pw;
+    if (loginId === "" || pw === "") {
+      notifications.show({
+        message: "아이디와 비밀번호를 모두 입력하세요",
+        color: "red",
+      });
+      return;
+    }
     try {
-      const r = await api.accounts.import([{ loginId: loginId.trim(), pw }]);
+      const r = await api.accounts.import([{ loginId, pw }]);
+      removeDraft(key);
       loadAccounts();
       notifications.show({
         message: `계정 추가: ${r.imported}건 (중복 ${r.skipped})`,
@@ -115,10 +158,9 @@ export function AccountDistribute() {
       });
     } catch (e) {
       if (isOffline(e)) {
-        setAccounts((prev) => [
-          ...prev,
-          { id: `local-${prev.length + 1}`, loginId: loginId.trim() },
-        ]);
+        draftSeq += 1;
+        setAccounts((prev) => [...prev, { id: `local-${draftSeq}`, loginId }]);
+        removeDraft(key);
         notifications.show({ message: "계정 추가(미리보기)", color: "green" });
       } else {
         notifications.show({
@@ -224,7 +266,7 @@ export function AccountDistribute() {
               variant="light"
               size="sm"
               leftSection={<Icon.plus size={16} />}
-              onClick={() => void addAccount()}
+              onClick={addDraftRow}
             >
               계정 추가
             </Button>
@@ -262,6 +304,63 @@ export function AccountDistribute() {
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
+              {drafts.map((d) => (
+                <Table.Tr key={d.key} bg="var(--mantine-color-blue-light)">
+                  <Table.Td>
+                    <ActionIcon
+                      variant="subtle"
+                      color="gray"
+                      aria-label="행 취소"
+                      onClick={() => removeDraft(d.key)}
+                    >
+                      <Icon.x size={16} />
+                    </ActionIcon>
+                  </Table.Td>
+                  <Table.Td>
+                    <TextInput
+                      size="xs"
+                      autoFocus
+                      placeholder="아이디"
+                      aria-label="새 계정 아이디"
+                      value={d.loginId}
+                      onChange={(e) =>
+                        updateDraft(d.key, { loginId: e.currentTarget.value })
+                      }
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void saveDraft(d.key);
+                        if (e.key === "Escape") removeDraft(d.key);
+                      }}
+                    />
+                  </Table.Td>
+                  <Table.Td>
+                    <Group gap={4} wrap="nowrap">
+                      <PasswordInput
+                        size="xs"
+                        placeholder="비밀번호"
+                        aria-label="새 계정 비밀번호"
+                        value={d.pw}
+                        style={{ flex: 1 }}
+                        onChange={(e) =>
+                          updateDraft(d.key, { pw: e.currentTarget.value })
+                        }
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") void saveDraft(d.key);
+                          if (e.key === "Escape") removeDraft(d.key);
+                        }}
+                      />
+                      <ActionIcon
+                        variant="light"
+                        color="blue"
+                        aria-label="계정 저장"
+                        disabled={d.loginId.trim() === "" || d.pw === ""}
+                        onClick={() => void saveDraft(d.key)}
+                      >
+                        <Icon.check size={16} />
+                      </ActionIcon>
+                    </Group>
+                  </Table.Td>
+                </Table.Tr>
+              ))}
               {accounts.map((a) => (
                 <Table.Tr key={a.id}>
                   <Table.Td>
@@ -277,7 +376,7 @@ export function AccountDistribute() {
                   </Table.Td>
                 </Table.Tr>
               ))}
-              {accounts.length === 0 && (
+              {accounts.length === 0 && drafts.length === 0 && (
                 <Table.Tr>
                   <Table.Td colSpan={3}>
                     <Text c="dimmed" ta="center" py="md">
