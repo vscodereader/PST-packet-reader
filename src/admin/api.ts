@@ -155,6 +155,7 @@ export interface LoginLineDto {
   loginId: string;
   pw: string;
   reason?: string; // 보류사유·실패사유. 대기초과는 없음.
+  trace?: string; // 실패 백트레이스(게시 결과와 동일하게 "자세히 보기"용).
 }
 export interface LoginReportDto {
   device: string;
@@ -173,6 +174,9 @@ export interface LoginReportDto {
     timedout: number;
     failed: number;
   };
+  // 이 분배에서 등록된 계정 수와, 그중 로그인 엔진이 본 수(§10-1 등록 확인).
+  registered: number;
+  registeredVisible: number;
 }
 
 export const api = {

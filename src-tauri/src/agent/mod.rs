@@ -60,6 +60,9 @@ pub struct AgentStatus {
 struct Followup {
     queue_id: String,
     login_ids: Vec<String>,
+    // 이 분배에서 새로 등록된 계정 수와, 그중 로그인 엔진이 볼 수 있는 수(§10-1 등록 확인).
+    registered: usize,
+    registered_visible: usize,
 }
 
 fn now_ms() -> u128 {
@@ -164,13 +167,18 @@ async fn drain_events<R: Runtime>(
 fn dispatch<R: Runtime>(app: &AppHandle<R>, cmd: &Command) -> (&'static str, String, Option<Followup>) {
     match cmd.kind.as_str() {
         "distribute_accounts" => {
-            let added = add_accounts(app, &cmd.accounts);
+            let (added, visible) = add_accounts(app, &cmd.accounts);
             let login_ids: Vec<String> = cmd.accounts.iter().map(|a| a.login_id.clone()).collect();
             let queue_id = enqueue_login(app, &login_ids);
             (
                 "ok",
-                format!("계정 {added}건 등록 + 자동 로그인 시작(종토)"),
-                queue_id.map(|q| Followup { queue_id: q, login_ids }),
+                format!("계정 {added}건 등록(로그인 대상 {visible}건) + 자동 로그인 시작(종토)"),
+                queue_id.map(|q| Followup {
+                    queue_id: q,
+                    login_ids,
+                    registered: added,
+                    registered_visible: visible,
+                }),
             )
         }
         "import_then_login_all" => {
@@ -180,7 +188,12 @@ fn dispatch<R: Runtime>(app: &AppHandle<R>, cmd: &Command) -> (&'static str, Str
             (
                 "ok",
                 format!("전체 로그인 시작 — {n}건"),
-                queue_id.map(|q| Followup { queue_id: q, login_ids: ids }),
+                queue_id.map(|q| Followup {
+                    queue_id: q,
+                    login_ids: ids,
+                    registered: 0,
+                    registered_visible: 0,
+                }),
             )
         }
         "delete_accounts" => {
@@ -192,7 +205,8 @@ fn dispatch<R: Runtime>(app: &AppHandle<R>, cmd: &Command) -> (&'static str, Str
     }
 }
 
-fn add_accounts<R: Runtime>(app: &AppHandle<R>, accounts: &[AccountIn]) -> usize {
+/// 반환: (IPC 스토어에 새로 추가된 수, 그중 로그인 엔진(accounts.json)이 볼 수 있는 수).
+fn add_accounts<R: Runtime>(app: &AppHandle<R>, accounts: &[AccountIn]) -> (usize, usize) {
     let store = app.state::<JsonStore<Account>>();
     let mut added = 0usize;
     store.mutate(|mut list| {
@@ -207,6 +221,7 @@ fn add_accounts<R: Runtime>(app: &AppHandle<R>, accounts: &[AccountIn]) -> usize
                 pw: a.pw.clone(),
                 status: AccountStatus::New,
                 status_msg: None,
+                status_trace: None,
                 last: "—".into(),
                 tags: vec![],
             });
@@ -227,7 +242,7 @@ fn add_accounts<R: Runtime>(app: &AppHandle<R>, accounts: &[AccountIn]) -> usize
             label: a.login_id.clone(),
         })
         .collect();
-    match crate::auth::save_accounts_file(&auth_accounts) {
+    let visible = match crate::auth::save_accounts_file(&auth_accounts) {
         Ok(merged) => {
             // 진단: 방금 등록한 계정이 로그인 엔진이 읽는 파일에서 실제로 보이는지 확인.
             let visible = auth_accounts
@@ -240,15 +255,17 @@ fn add_accounts<R: Runtime>(app: &AppHandle<R>, accounts: &[AccountIn]) -> usize
                 total = auth_accounts.len(),
                 "[AGENT] 분배 계정 등록 — IPC 스토어 + accounts.json(로그인 엔진) 양쪽 기록"
             );
+            visible
         }
         Err(error) => {
             tracing::warn!(
                 "[AGENT] accounts.json 기록 실패 — 자동 로그인이 'account not found'로 실패할 수 있음: {error}"
             );
+            0
         }
-    }
+    };
 
-    added
+    (added, visible)
 }
 
 fn all_login_ids<R: Runtime>(app: &AppHandle<R>) -> Vec<String> {
@@ -336,7 +353,8 @@ struct Tally {
     success: usize,
     onhold: Vec<(String, String, String)>, // (loginId, pw, 보류사유)
     timedout: Vec<(String, String)>,        // (loginId, pw)
-    failed: Vec<(String, String, String)>,  // (loginId, pw, 실패사유)
+    // (loginId, pw, 실패사유, trace) — trace는 "자세히 보기"용 백트레이스(없으면 None).
+    failed: Vec<(String, String, String, Option<String>)>,
 }
 
 /// 큐 아이템이 끝날(Done) 때까지 기다렸다가 계정 상태로 §10-4 분류 → 보고 + 실패 자동삭제 + 누적 갱신.
@@ -370,7 +388,7 @@ async fn report_login_results<R: Runtime>(
     let report = format_report(&tally, received, &cum);
     let _ = net::post_result(&client, &cfg.server_url, &cfg.device_token, &command_id, "ok", &report).await;
     // 구조화 로그인 결과도 보고(§10-4-1) → 결과보고 '로그인 결과' 탭이 실데이터로 렌더.
-    let body = login_report_body(&command_id, &tally, &cum);
+    let body = login_report_body(&command_id, &tally, &cum, f.registered, f.registered_visible);
     let _ = net::post_login_report(&client, &cfg.server_url, &cfg.device_token, &body).await;
 
     // 실패 계정 자동삭제(§10-1 (4)) — 단, *비밀번호 오류(BadCredentials)*처럼 계정 자체가 무효인
@@ -379,7 +397,7 @@ async fn report_login_results<R: Runtime>(
     // 스냅샷에서 다시 확인해 BadCredentials만 고르고, 나머지 실패는 보존하고 로그로 남긴다.
     if !tally.failed.is_empty() {
         let snapshot = app.state::<JsonStore<Account>>().snapshot();
-        let failed_ids: Vec<String> = tally.failed.iter().map(|(id, _, _)| id.clone()).collect();
+        let failed_ids: Vec<String> = tally.failed.iter().map(|(id, _, _, _)| id.clone()).collect();
         let (delete_ids, retained_ids) = partition_auto_delete(&failed_ids, |id| {
             snapshot
                 .iter()
@@ -400,8 +418,8 @@ async fn report_login_results<R: Runtime>(
                 tally
                     .failed
                     .iter()
-                    .filter(|(id, _, _)| delete_ids.contains(id))
-                    .map(|(id, pw, why)| format!("{id}/{pw} (사유: {why})"))
+                    .filter(|(id, _, _, _)| delete_ids.contains(id))
+                    .map(|(id, pw, why, _)| format!("{id}/{pw} (사유: {why})"))
                     .collect::<Vec<_>>()
                     .join(", ")
             );
@@ -435,6 +453,7 @@ fn classify_accounts<R: Runtime>(app: &AppHandle<R>, login_ids: &[String]) -> Ta
                 id.clone(),
                 String::new(),
                 "계정이 스토어에 없음(중복/삭제 추정)".to_string(),
+                None,
             ));
             continue;
         };
@@ -459,7 +478,7 @@ fn classify_accounts<R: Runtime>(app: &AppHandle<R>, login_ids: &[String]) -> Ta
                 } else {
                     why
                 };
-                t.failed.push((id.clone(), pw, reason));
+                t.failed.push((id.clone(), pw, reason, acct.status_trace.clone()));
             }
         }
     }
@@ -481,7 +500,8 @@ fn format_report(t: &Tally, received: usize, cum: &Cumulative) -> String {
     for (id, pw) in &t.timedout {
         s.push_str(&format!("\n  대기초과  {id} / {pw}"));
     }
-    for (id, pw, why) in &t.failed {
+    for (id, pw, why, _trace) in &t.failed {
+        // 통신로그 텍스트엔 사유 한 줄만(백트레이스는 구조화 보고의 trace로 가서 "자세히 보기"에 노출).
         s.push_str(&format!("\n  실패  {id} / {pw}  사유: {why}"));
     }
     s.push_str(&format!(
@@ -494,7 +514,13 @@ fn format_report(t: &Tally, received: usize, cum: &Cumulative) -> String {
 
 /// §10-4-1 구조화 로그인 결과 본문(서버 `LoginReportReq` 모양). 성공은 개수만, 보류/실패는
 /// ID/PW+사유, 대기초과는 ID/PW만. 누적 합계 동봉. 순수함수(테스트 대상).
-fn login_report_body(command_id: &str, t: &Tally, cum: &Cumulative) -> serde_json::Value {
+fn login_report_body(
+    command_id: &str,
+    t: &Tally,
+    cum: &Cumulative,
+    registered: usize,
+    registered_visible: usize,
+) -> serde_json::Value {
     let line3 = |v: &[(String, String, String)]| -> Vec<serde_json::Value> {
         v.iter()
             .map(|(id, pw, why)| serde_json::json!({ "loginId": id, "pw": pw, "reason": why }))
@@ -505,13 +531,23 @@ fn login_report_body(command_id: &str, t: &Tally, cum: &Cumulative) -> serde_jso
             .map(|(id, pw)| serde_json::json!({ "loginId": id, "pw": pw }))
             .collect()
     };
+    // 실패 줄은 사유(reason) + 백트레이스(trace, 게시 결과와 동일하게 "자세히 보기"용)를 함께 싣는다.
+    let failed: Vec<serde_json::Value> = t
+        .failed
+        .iter()
+        .map(|(id, pw, why, trace)| {
+            serde_json::json!({ "loginId": id, "pw": pw, "reason": why, "trace": trace })
+        })
+        .collect();
     serde_json::json!({
         "commandId": command_id,
+        "registered": registered,
+        "registeredVisible": registered_visible,
         "batch": {
             "success": t.success,
             "onhold": line3(&t.onhold),
             "timedout": line2(&t.timedout),
-            "failed": line3(&t.failed),
+            "failed": failed,
         },
         "cumulative": {
             "received": cum.received,
@@ -760,7 +796,12 @@ mod tests {
             success: 3,
             onhold: vec![("aaa".into(), "pw1".into(), "캡차".into())],
             timedout: vec![("bbb".into(), "pw2".into())],
-            failed: vec![("ccc".into(), "pw3".into(), "비번오류".into())],
+            failed: vec![(
+                "ccc".into(),
+                "pw3".into(),
+                "연결 실패".into(),
+                Some("at x.rs:1:1\n\nframe0".into()),
+            )],
         };
         let cum = Cumulative {
             received: 20,
@@ -769,14 +810,19 @@ mod tests {
             timedout: 5,
             failed: 6,
         };
-        let v = login_report_body("c-1", &t, &cum);
+        let v = login_report_body("c-1", &t, &cum, 2, 2);
         assert_eq!(v["commandId"], "c-1");
         assert_eq!(v["batch"]["success"], 3);
         // 보류·실패는 ID/PW+사유, 대기초과는 사유 없음.
         assert_eq!(v["batch"]["onhold"][0]["loginId"], "aaa");
         assert_eq!(v["batch"]["onhold"][0]["reason"], "캡차");
         assert!(v["batch"]["timedout"][0].get("reason").is_none());
-        assert_eq!(v["batch"]["failed"][0]["reason"], "비번오류");
+        assert_eq!(v["batch"]["failed"][0]["reason"], "연결 실패");
+        // 실패 줄은 "자세히 보기"용 trace를 함께 싣는다(게시 결과와 동일).
+        assert_eq!(v["batch"]["failed"][0]["trace"], "at x.rs:1:1\n\nframe0");
+        // 등록 정보(§10-1 등록 확인)도 동봉.
+        assert_eq!(v["registered"], 2);
+        assert_eq!(v["registeredVisible"], 2);
         // 누적 합계 동봉.
         assert_eq!(v["cumulative"]["received"], 20);
         assert_eq!(v["cumulative"]["failed"], 6);

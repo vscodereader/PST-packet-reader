@@ -312,9 +312,12 @@ pub struct PostReportDto {
 pub struct LoginLineDto {
     pub login_id: String,
     pub pw: String,
-    /// 보류사유(캡차/전화번호)·실패사유(trace/메시지). 대기초과는 없음.
+    /// 보류사유(캡차/전화번호)·실패사유(메시지 한 줄). 대기초과는 없음.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// 실패 백트레이스(게시 결과의 PostItemDto.trace와 동일 역할) — Admin "자세히 보기"에 노출.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<String>,
 }
 
 /// 이번 배치 분류.
@@ -350,6 +353,13 @@ pub struct LoginReportReq {
     pub batch: LoginBatchDto,
     #[serde(default)]
     pub cumulative: LoginCumulativeDto,
+    /// 이 분배에서 새로 *등록*된 계정 수(자동 로그인과 별개로 "등록은 됐는지" 확인용, §10-1).
+    #[serde(default)]
+    pub registered: usize,
+    /// 그중 로그인 엔진이 실제로 볼 수 있는(accounts.json에 반영된) 계정 수 — 0이면 등록은
+    /// 됐지만 로그인 대상으로 안 잡힌 것(과거 "account not found" 버그의 신호).
+    #[serde(default)]
+    pub registered_visible: usize,
 }
 
 /// 서버 보관용 로그인 결과(컴퓨터당 최신 1건 — 누적이 합계를 담으므로).
@@ -359,6 +369,8 @@ pub struct LoginReport {
     pub device_name: String,
     pub batch: LoginBatchDto,
     pub cumulative: LoginCumulativeDto,
+    pub registered: usize,
+    pub registered_visible: usize,
     pub received_at: DateTime<Utc>,
 }
 
@@ -371,4 +383,6 @@ pub struct LoginReportDto {
     pub received_at: String,
     pub batch: LoginBatchDto,
     pub cumulative: LoginCumulativeDto,
+    pub registered: usize,
+    pub registered_visible: usize,
 }

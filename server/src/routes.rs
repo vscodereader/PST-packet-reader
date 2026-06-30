@@ -714,7 +714,9 @@ async fn login_report(
     let device = st.auth_device(&headers).await?;
     let b = &req.batch;
     let summary = format!(
-        "로그인 결과: 성공 {} / 보류 {} / 대기초과 {} / 실패 {}{}",
+        "등록 {}건(로그인 대상 {}건) · 로그인 결과: 성공 {} / 보류 {} / 대기초과 {} / 실패 {}{}",
+        req.registered,
+        req.registered_visible,
         b.success,
         b.onhold.len(),
         b.timedout.len(),
@@ -730,6 +732,8 @@ async fn login_report(
         device_name: device.name.clone(),
         batch: req.batch,
         cumulative: req.cumulative,
+        registered: req.registered,
+        registered_visible: req.registered_visible,
         received_at: Utc::now(),
     };
     st.repo.add_login_report(report).await?;
@@ -754,6 +758,8 @@ async fn list_login_reports(
                 received_at: r.received_at.to_rfc3339(),
                 batch: r.batch,
                 cumulative: r.cumulative,
+                registered: r.registered,
+                registered_visible: r.registered_visible,
             })
             .collect(),
     ))

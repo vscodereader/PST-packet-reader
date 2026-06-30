@@ -947,6 +947,7 @@ fn apply_waiting_for_successful_posts<R: Runtime>(app: &AppHandle<R>, forum: &[F
                     "글 게시 도중 차단되어 큐가 멈췄습니다. 계정이 차단 상태로 전환되었어요."
                         .to_owned(),
                 ),
+                None,
             )
         });
         let list = timed_out.iter().fold(list, |acc, id| {
@@ -958,6 +959,7 @@ fn apply_waiting_for_successful_posts<R: Runtime>(app: &AppHandle<R>, forum: &[F
                     "페이지 대기시간 초과 또는 네이버 서버 오류(HTTP 500)로 게시가 실패했습니다. 잠시 후 다시 시도하세요."
                         .to_owned(),
                 ),
+                None,
             )
         });
         let list = errored.iter().fold(list, |acc, id| {
@@ -969,6 +971,7 @@ fn apply_waiting_for_successful_posts<R: Runtime>(app: &AppHandle<R>, forum: &[F
                     "글 게시에 실패해 '에러' 상태로 전환했습니다(약관 동의·세션 등). 자세한 원인은 완료 로그의 '자세히 보기'에서 확인한 뒤, 상태를 눌러 다시 시도하세요."
                         .to_owned(),
                 ),
+                None,
             )
         });
         waiting.iter().fold(list, |acc, id| {
@@ -980,6 +983,7 @@ fn apply_waiting_for_successful_posts<R: Runtime>(app: &AppHandle<R>, forum: &[F
                     "글 게시 완료 — 대기 상태입니다. 상태를 눌러 다시 활성으로 바꿀 수 있어요."
                         .to_owned(),
                 ),
+                None,
             )
         })
     });
@@ -1804,6 +1808,7 @@ async fn do_login_and_capture_ip<R: Runtime>(
                 &login.account_id,
                 status.clone(),
                 Some(msg.clone()),
+                trace.clone(),
             )
         });
     let succeeded = matches!(&result, Ok(res) if res.succeeded);
@@ -2442,7 +2447,7 @@ async fn run_login_targets<R: Runtime>(app: &AppHandle<R>, id: &str, targets: &[
         // 계정 세밀 상태/사유를 accounts 스토어에 반영한다(loginId가 같은 모든 행). 프론트
         // accounts 화면이 이 값을 폴링해 상태 배지/tooltip을 갱신한다.
         app.state::<JsonStore<Account>>().mutate(|list| {
-            apply_status_by_login_id(list, &t.account_id, status.clone(), Some(msg.clone()))
+            apply_status_by_login_id(list, &t.account_id, status.clone(), Some(msg.clone()), trace.clone())
         });
         // 활동 피드에도 상태별 타입으로 남긴다(기존 전용 로그인 큐와 동일 UX).
         record(
@@ -5625,9 +5630,9 @@ mod tests {
     }
 
     #[test]
-    fn timed_out_login_ids_collect_only_timeout_and_server_500() {
-        // #7: 페이지 대기시간 초과·네이버 서버 오류(HTTP 500)만 대기초과로 모은다. 차단·일반
-        // 엔진 오류·skip·성공은 제외.
+    fn timed_out_login_ids_collect_only_timeout_not_server_500() {
+        // #342: 페이지 대기시간 초과(+일시적 네트워크 끊김)만 대기초과(재시도)로 모은다. HTTP
+        // 500/403 같은 "네이버 서버의 판정"은 통제 불가라 빨리 실패시킨다 — 대기초과 아님.
         let forum = vec![
             forum_timed_out(
                 "acc_to1",
@@ -5636,7 +5641,7 @@ mod tests {
                 "페이지 로드 대기 시간이 초과되었습니다.",
             ),
             forum_timed_out(
-                "acc_to2",
+                "acc_500",
                 "SK하이닉스",
                 "000660",
                 "네이버 서버에 문제가 발생했습니다 (REGISTER_HTTP_ERROR)",
@@ -5646,8 +5651,11 @@ mod tests {
             forum_ok("acc_ok", "LG", "066570"),
         ];
         let ids = timed_out_post_login_ids(&forum);
-        assert!(ids.contains("acc_to1"), "대기시간 초과는 대기초과 대상");
-        assert!(ids.contains("acc_to2"), "HTTP 500 서버 오류는 대기초과 대상");
+        assert!(ids.contains("acc_to1"), "대기시간 초과는 대기초과(재시도) 대상");
+        assert!(
+            !ids.contains("acc_500"),
+            "HTTP 500 서버 오류는 빠른 실패 — 대기초과(재시도) 아님(#342)"
+        );
         assert!(!ids.contains("acc_block"), "차단(403)은 대기초과 아님");
         assert!(!ids.contains("acc_skip"), "건너뜀(skip)은 대기초과 아님");
         assert!(!ids.contains("acc_ok"), "성공은 대기초과 아님");
@@ -5679,15 +5687,16 @@ mod tests {
 
     #[test]
     fn timed_out_takes_precedence_over_waiting() {
-        // #7: 한 계정이 1글 성공 후 다른 글에서 타임아웃/500이면 — 대기가 아니라 대기초과로
-        // 분류돼 게시 목록에서 숨겨진다(같은 계정의 성공이 있어도 대기초과 우선).
+        // #7: 한 계정이 1글 성공 후 다른 글에서 대기시간 초과면 — 대기가 아니라 대기초과로
+        // 분류돼 게시 목록에서 숨겨진다(같은 계정의 성공이 있어도 대기초과 우선). (HTTP 500은
+        // #342로 대기초과가 아니라 즉시 실패이므로, 여기선 실제 타임아웃 문구로 검증한다.)
         let forum = vec![
             forum_ok("acc_mixed", "삼성전자", "005930"),
             forum_timed_out(
                 "acc_mixed",
                 "SK하이닉스",
                 "000660",
-                "네이버 서버에 문제가 발생했습니다",
+                "페이지 로드 대기 시간이 초과되었습니다.",
             ),
         ];
         let blocked = blocked_post_login_ids(&forum);

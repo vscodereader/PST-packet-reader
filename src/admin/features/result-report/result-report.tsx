@@ -51,12 +51,22 @@ const REPORTS: DeviceReport[] = [
       ],
       failed: [
         { loginId: "stock_id063", pw: "daily#stock1", reason: "비번오류" },
-        { loginId: "stock_id067", pw: "stockpw22", reason: "보호조치" },
+        {
+          loginId: "stock_id067",
+          pw: "stockpw22",
+          reason: "연결 실패(CDP 소켓 중단)",
+          trace:
+            "연결이 닫혔습니다 (os error 10053)\n" +
+            "   0: pstmacro_lib::auth::login_flow::run_inner\n" +
+            "   1: pstmacro_lib::auth::process_account\n   at login_flow.rs:317:5",
+        },
         { loginId: "stock_id071", pw: "naverabc1", reason: "비번오류" },
         { loginId: "stock_id074", pw: "qwer1234!", reason: "잠금" },
       ],
     },
     cumulative: { received: 20, success: 6, onhold: 3, timedout: 5, failed: 6 },
+    registered: 4,
+    registeredVisible: 4,
   },
   {
     device: "하위-003",
@@ -72,6 +82,8 @@ const REPORTS: DeviceReport[] = [
       ],
     },
     cumulative: { received: 9, success: 5, onhold: 2, timedout: 1, failed: 1 },
+    registered: 5,
+    registeredVisible: 5,
   },
 ];
 
@@ -83,20 +95,53 @@ function maskHead(s: string, visible = 2): string {
 
 // 모든 섹션이 같은 고정폭을 써서 ID·PW 열이 세로로 정렬되게 한다.
 function LineRow({ line, withReason }: { line: Line; withReason: boolean }) {
+  const [showTrace, setShowTrace] = useState(false);
   return (
-    <Group gap="md" wrap="nowrap" style={{ fontSize: 12 }}>
-      <Text w={150} ff="monospace" truncate>
-        {maskHead(line.loginId)}
-      </Text>
-      <Text w={120} ff="monospace" c="dimmed" truncate>
-        {maskHead(line.pw)}
-      </Text>
-      {withReason && (
-        <Text c="dimmed" style={{ flex: 1 }} truncate>
-          {line.reason ?? ""}
+    <Box>
+      <Group gap="md" wrap="nowrap" style={{ fontSize: 12 }}>
+        <Text w={150} ff="monospace" truncate>
+          {maskHead(line.loginId)}
         </Text>
+        <Text w={120} ff="monospace" c="dimmed" truncate>
+          {maskHead(line.pw)}
+        </Text>
+        {withReason && (
+          <Text c="dimmed" style={{ flex: 1 }} truncate>
+            {line.reason ?? ""}
+          </Text>
+        )}
+        {/* 실패 줄에 백트레이스가 있으면 게시 결과와 동일하게 "자세히 보기" 토글. */}
+        {line.trace && (
+          <Button
+            size="compact-xs"
+            variant="default"
+            radius="xl"
+            onClick={() => setShowTrace((s) => !s)}
+          >
+            {showTrace ? "접기" : "자세히 보기"}
+          </Button>
+        )}
+      </Group>
+      {line.trace && showTrace && (
+        <Box
+          component="pre"
+          mt={6}
+          p="sm"
+          style={{
+            background: "#1f2329",
+            color: "#e6e8eb",
+            borderRadius: "var(--mantine-radius-sm)",
+            fontSize: 11.5,
+            lineHeight: 1.6,
+            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+            whiteSpace: "pre-wrap",
+            overflowX: "auto",
+          }}
+        >
+          {line.trace}
+        </Box>
       )}
-    </Group>
+    </Box>
   );
 }
 
@@ -138,6 +183,19 @@ function LoginReportCard({ r }: { r: DeviceReport }) {
           <Text fw={800} size="lg">
             {r.device}
           </Text>
+          {/* 계정 등록 확인(§10-1): 등록 N건 + 로그인 엔진이 본 수. 둘이 같으면 ✓(초록),
+              다르면 등록은 됐지만 로그인 대상에 안 잡힌 것(주황 — 과거 account not found 신호). */}
+          {r.registered > 0 && (
+            <Badge
+              color={r.registeredVisible === r.registered ? "teal" : "orange"}
+              variant="light"
+              radius="sm"
+            >
+              {r.registeredVisible === r.registered
+                ? `등록 ${r.registered}건 ✓`
+                : `등록 ${r.registered}건 (로그인 대상 ${r.registeredVisible}건)`}
+            </Badge>
+          )}
         </Group>
         <Group gap={6}>
           <Text size="xs" c="dimmed" fw={600}>

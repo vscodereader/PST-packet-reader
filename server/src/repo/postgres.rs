@@ -64,8 +64,13 @@ CREATE TABLE IF NOT EXISTS login_reports (
   device_name TEXT NOT NULL,
   received_at TIMESTAMPTZ NOT NULL,
   batch JSONB NOT NULL,
-  cumulative JSONB NOT NULL
+  cumulative JSONB NOT NULL,
+  registered INT NOT NULL DEFAULT 0,
+  registered_visible INT NOT NULL DEFAULT 0
 );
+-- 기존 DB 업그레이드(멱등): 등록 건수 컬럼 추가(§10-1 등록 확인).
+ALTER TABLE login_reports ADD COLUMN IF NOT EXISTS registered INT NOT NULL DEFAULT 0;
+ALTER TABLE login_reports ADD COLUMN IF NOT EXISTS registered_visible INT NOT NULL DEFAULT 0;
 "#;
 
 pub struct PostgresRepo {
@@ -467,19 +472,23 @@ impl Repository for PostgresRepo {
             .map_err(|e| AppError::Internal(format!("로그인 누적 직렬화 실패: {e}")))?;
         // device_id당 최신 1건(UPSERT).
         sqlx::query(
-            "INSERT INTO login_reports (device_id, device_name, received_at, batch, cumulative)
-             VALUES ($1,$2,$3,$4,$5)
+            "INSERT INTO login_reports (device_id, device_name, received_at, batch, cumulative, registered, registered_visible)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
              ON CONFLICT (device_id) DO UPDATE SET
                device_name = EXCLUDED.device_name,
                received_at = EXCLUDED.received_at,
                batch = EXCLUDED.batch,
-               cumulative = EXCLUDED.cumulative",
+               cumulative = EXCLUDED.cumulative,
+               registered = EXCLUDED.registered,
+               registered_visible = EXCLUDED.registered_visible",
         )
         .bind(report.device_id)
         .bind(&report.device_name)
         .bind(report.received_at)
         .bind(batch)
         .bind(cumulative)
+        .bind(report.registered as i32)
+        .bind(report.registered_visible as i32)
         .execute(&self.pool)
         .await
         .map_err(db_err)?;
@@ -502,6 +511,8 @@ impl Repository for PostgresRepo {
                     received_at: r.get("received_at"),
                     batch,
                     cumulative,
+                    registered: r.get::<i32, _>("registered") as usize,
+                    registered_visible: r.get::<i32, _>("registered_visible") as usize,
                 })
             })
             .collect()

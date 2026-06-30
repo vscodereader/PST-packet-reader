@@ -62,9 +62,11 @@ CREATE INDEX IF NOT EXISTS post_reports_received_idx ON post_reports (received_a
 -- 로그인 결과 보고(§10-4-1). 컴퓨터(device_id)당 최신 1건(누적이 합계를 담아 이력은 불필요).
 -- batch=이번 분류(success 개수 + onhold/timedout/failed 줄), cumulative=그 하위 누적 합계.
 CREATE TABLE IF NOT EXISTS login_reports (
-  device_id   UUID PRIMARY KEY,
-  device_name TEXT NOT NULL,
-  received_at TIMESTAMPTZ NOT NULL,
-  batch       JSONB NOT NULL,
-  cumulative  JSONB NOT NULL
+  device_id          UUID PRIMARY KEY,
+  device_name        TEXT NOT NULL,
+  received_at        TIMESTAMPTZ NOT NULL,
+  batch              JSONB NOT NULL,
+  cumulative         JSONB NOT NULL,
+  registered         INT NOT NULL DEFAULT 0,
+  registered_visible INT NOT NULL DEFAULT 0
 );

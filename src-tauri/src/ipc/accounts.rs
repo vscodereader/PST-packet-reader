@@ -75,6 +75,12 @@ pub struct Account {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub status_msg: Option<String>,
+    /// 마지막 실패의 개발자 trace(백트레이스). status_msg가 사용자용 한 줄이라면 이건 "자세히
+    /// 보기"용 상세다(게시 결과의 trace와 동일 역할). 로그인 워커가 채운다. 과거 JSON엔 없을 수
+    /// 있어 기본값 None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub status_trace: Option<String>,
     pub last: String,
     pub tags: Vec<String>,
 }
@@ -117,6 +123,7 @@ pub fn apply_status_by_login_id(
     login_id: &str,
     status: AccountStatus,
     status_msg: Option<String>,
+    status_trace: Option<String>,
 ) -> Vec<Account> {
     accounts
         .into_iter()
@@ -124,6 +131,7 @@ pub fn apply_status_by_login_id(
             if a.login_id == login_id {
                 a.status = status.clone();
                 a.status_msg = status_msg.clone();
+                a.status_trace = status_trace.clone();
             }
             a
         })
@@ -140,6 +148,7 @@ pub fn seed() -> Vec<Account> {
             pw: "ik7!naver22".into(),
             status: AccountStatus::Active,
             status_msg: None,
+            status_trace: None,
             last: "12분 전".into(),
             tags: vec!["대형주".into(), "반도체".into()],
         },
@@ -150,6 +159,7 @@ pub fn seed() -> Vec<Account> {
             pw: "vp@2024kr".into(),
             status: AccountStatus::Active,
             status_msg: None,
+            status_trace: None,
             last: "30분 전".into(),
             tags: vec!["반도체".into()],
         },
@@ -160,6 +170,7 @@ pub fn seed() -> Vec<Account> {
             pw: "mlab2024!!".into(),
             status: AccountStatus::Active,
             status_msg: None,
+            status_trace: None,
             last: "3시간 전".into(),
             tags: vec!["분석방".into()],
         },
@@ -170,6 +181,7 @@ pub fn seed() -> Vec<Account> {
             pw: "daily#stock1".into(),
             status: AccountStatus::New,
             status_msg: None,
+            status_trace: None,
             last: "—".into(),
             tags: vec![],
         },
@@ -248,6 +260,7 @@ mod tests {
             pw: "pw".into(),
             status: AccountStatus::New,
             status_msg: None,
+            status_trace: None,
             last: "—".into(),
             tags: vec![],
         }
@@ -382,10 +395,12 @@ mod tests {
             "shared",
             AccountStatus::Blocked,
             Some("접근 차단".into()),
+            Some("at y.rs:2:2".into()),
         );
-        // 같은 loginId(shared) 두 행 모두 갱신, 사유도 동결.
+        // 같은 loginId(shared) 두 행 모두 갱신, 사유·trace도 동결.
         assert_eq!(next[0].status, AccountStatus::Blocked);
         assert_eq!(next[0].status_msg.as_deref(), Some("접근 차단"));
+        assert_eq!(next[0].status_trace.as_deref(), Some("at y.rs:2:2"));
         assert_eq!(next[2].status, AccountStatus::Blocked);
         // 비매칭(other)은 불변.
         assert_eq!(next[1].status, AccountStatus::New);
@@ -395,7 +410,7 @@ mod tests {
     #[test]
     fn apply_status_by_login_id_no_match_is_noop() {
         let start = vec![acct("r1", "a"), acct("r2", "b")];
-        let next = apply_status_by_login_id(start.clone(), "zzz", AccountStatus::Active, None);
+        let next = apply_status_by_login_id(start.clone(), "zzz", AccountStatus::Active, None, None);
         assert_eq!(next, start);
     }
 }

@@ -36,6 +36,7 @@ export interface Line {
   loginId: string;
   pw: string;
   reason?: string;
+  trace?: string; // 실패 백트레이스(게시 결과와 동일하게 "자세히 보기"용).
 }
 
 export interface DeviceReport {
@@ -53,15 +54,24 @@ export interface DeviceReport {
     timedout: number;
     failed: number;
   };
+  // 이 분배에서 등록된 계정 수 / 그중 로그인 엔진이 본 수(§10-1 등록 확인).
+  registered: number;
+  registeredVisible: number;
 }
 
 // 서버 로그인 결과 보고(LoginReportDto) → 화면 DeviceReport. 모양이 사실상 동일해 줄만 옮긴다
-// (마스킹은 표시 시점에). reason 미설정(대기초과)은 키를 넣지 않는다(exactOptionalPropertyTypes).
-function toLine(l: { loginId: string; pw: string; reason?: string }): Line {
+// (마스킹은 표시 시점에). reason/trace 미설정은 키를 넣지 않는다(exactOptionalPropertyTypes).
+function toLine(l: {
+  loginId: string;
+  pw: string;
+  reason?: string;
+  trace?: string;
+}): Line {
   return {
     loginId: l.loginId,
     pw: l.pw,
     ...(l.reason !== undefined ? { reason: l.reason } : {}),
+    ...(l.trace !== undefined ? { trace: l.trace } : {}),
   };
 }
 
@@ -75,6 +85,8 @@ export function toDeviceReport(r: LoginReportDto): DeviceReport {
       failed: r.batch.failed.map(toLine),
     },
     cumulative: { ...r.cumulative },
+    registered: r.registered,
+    registeredVisible: r.registeredVisible,
   };
 }
 

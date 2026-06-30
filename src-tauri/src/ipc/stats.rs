@@ -175,6 +175,7 @@ mod tests {
             pw: "p".into(),
             status,
             status_msg: None,
+            status_trace: None,
             last: "—".into(),
             tags: vec![],
         }
