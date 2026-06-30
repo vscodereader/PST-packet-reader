@@ -1732,14 +1732,11 @@ async fn do_login_and_capture_ip<R: Runtime>(
     Ok(crate::auth::fetch_external_ip().await)
 }
 
-/// 종목토론방 동시 게시 상한(#237). 계정마다 전용 디버그 Chrome을 띄우므로, 한 번에 너무
-/// 많이 띄우면 메모리/CPU가 고갈된다. 이 수만큼씩 묶어 동시에 돌리고 다음 묶음으로 넘어간다.
-const FORUM_PARALLEL_CAP: usize = 4;
 
 /// 종목토론방 대상을 **계정별로 동시에** 게시한다(#237). 계정마다 디버그 포트 Chrome을 직접
 /// 띄우는데(`launch_debug_chrome` = 빈 포트 자동배정 + 고유 프로필), 포트·프로필이 모두 달라
 /// 여러 개를 동시에 띄워도 충돌이 없다. 카페(9222)·밴드(HTTP)와도 자원이 겹치지 않아, 카페/밴드가
-/// 도는 중에도 종토방은 병렬로 흐른다. 동시 수는 `FORUM_PARALLEL_CAP`로 제한한다. 계정·종목별
+/// 도는 중에도 종토방은 병렬로 흐른다. 동시 수는 사용자 설정 "최대 작동 가능 작업 수"(#284, 0=무제한)를 따른다. 계정·종목별
 /// 결과를 돌려준다(완료 로그용). Chrome 기동/태스크 실패 시 그 계정의 종목들을 실패 결과로
 /// 합성해 진행률·로그가 조용히 누락되지 않게 한다(거짓 100% 방지). 각 묶음 시작 전 협조적
 /// 취소(item_present)를 확인해, 취소된 아이템의 남은 계정은 게시하지 않는다.
@@ -1775,10 +1772,16 @@ async fn run_forum_targets<R: Runtime>(
                 )
             })
             .collect();
+        let limit = read_concurrency_limit(app);
+        let cap_label = if limit == 0 {
+            "무제한(전부 동시)".to_owned()
+        } else {
+            format!("{limit}개씩")
+        };
         tracing::info!(
-            "[POST] 종목토론방 게시 시작 — {}계정을 묶음당 최대 {}개씩 동시 게시: {}",
+            "[POST] 종목토론방 게시 시작 — {}계정을 묶음당 최대 {} 동시 게시(최대 작동 작업 수 설정): {}",
             reqs.len(),
-            FORUM_PARALLEL_CAP,
+            cap_label,
             who_list.join(", ")
         );
     }
@@ -1795,7 +1798,11 @@ async fn run_forum_targets<R: Runtime>(
         starts.push(acc_off);
         acc_off += req.stocks.len();
     }
-    // 계정마다 전용 디버그 Chrome을 띄워 FORUM_PARALLEL_CAP개씩 동시에 게시한다. 결과는
+    // 계정마다 전용 디버그 Chrome을 띄워 동시에 게시한다. 한 묶음에 띄울 계정 수는 사용자 설정
+    // "최대 작동 가능 작업 수"(#284)를 따른다 — 0이면 무제한(남은 전 계정을 한 묶음에 동시 게시).
+    // 예전엔 FORUM_PARALLEL_CAP(4)로 하드코딩돼, 사용자가 30~40계정을 넣어도 4개씩만 돌던 문제를
+    // 고친다(사용자 지적 2026-06-30: #284로 제한을 푼 뒤에도 이 내부 캡이 남아 따로 놀았다).
+    // 한도는 묶음마다 다시 읽어, 사용자가 도중에 한도를 바꿔도 다음 묶음부터 반영된다. 결과는
     // 계정(req) 순서대로 모은다(#237).
     let mut outcomes = Vec::new();
     let mut req_iter = reqs.into_iter().enumerate();
@@ -1804,8 +1811,14 @@ async fn run_forum_targets<R: Runtime>(
         if !item_present(app, id) {
             break;
         }
+        let limit = read_concurrency_limit(app);
+        let batch_size = if limit == 0 {
+            usize::MAX
+        } else {
+            limit as usize
+        };
         let mut handles = Vec::new();
-        for _ in 0..FORUM_PARALLEL_CAP {
+        for _ in 0..batch_size {
             let Some((idx, req)) = req_iter.next() else {
                 break;
             };

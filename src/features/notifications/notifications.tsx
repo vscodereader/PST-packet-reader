@@ -445,7 +445,9 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
       );
     };
     refresh();
-    const timer = window.setInterval(refresh, 2000);
+    // 게시/로그인 결과는 작업이 끝나는 즉시 떠야 한다(사용자 지시 2026-06-30: 알림 즉시화).
+    // 기존 2000ms는 완료 후 최대 2초 늦게 떴다 → 게시큐 폴링(400ms)과 같은 체감속도로 당긴다.
+    const timer = window.setInterval(refresh, 400);
     return () => window.clearInterval(timer);
   }, []);
 
