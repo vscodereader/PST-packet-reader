@@ -13,12 +13,15 @@ import {
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { IconDeviceDesktop } from "@tabler/icons-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Icon } from "@/shared/ui/icons";
 
+import { api, isOffline } from "../../api";
+
 // 계정 분배 화면(§10-3). 상단=계정 풀(스테이징), 하단=연결된 하위. 선택 후 분배하면
-// 균등+랜덤(MOVE)으로 나뉘어 전송되고, 보낸 계정은 풀에서 사라진다(미리보기 시연).
+// 균등+랜덤(MOVE)으로 나뉘어 전송되고, 보낸 계정은 풀에서 사라진다.
+// 서버 연결 시 실데이터(스테이징·online 하위·분배), 오프라인 미리보기면 더미로 폴백.
 
 interface Account {
   id: string;
@@ -36,7 +39,7 @@ const INITIAL_ACCOUNTS: Account[] = Array.from({ length: 12 }, (_, i) => ({
   loginId: `stock_id${String(i + 1).padStart(3, "0")}`,
 }));
 
-const ONLINE_DEVICES: OnlineDevice[] = [
+const INITIAL_ONLINE_DEVICES: OnlineDevice[] = [
   { id: "d1", name: "하위-001", ip: "1.2.3.4" },
   { id: "d3", name: "하위-003", ip: "5.6.7.8" },
   { id: "d5", name: "하위-005", ip: "9.10.11.12" },
@@ -63,8 +66,68 @@ function splitCounts(total: number, buckets: number): number[] {
 
 export function AccountDistribute() {
   const [accounts, setAccounts] = useState<Account[]>(INITIAL_ACCOUNTS);
+  const [onlineDevices, setOnlineDevices] = useState<OnlineDevice[]>(
+    INITIAL_ONLINE_DEVICES,
+  );
   const [selAcc, setSelAcc] = useState<Set<string>>(new Set());
   const [selDev, setSelDev] = useState<Set<string>>(new Set());
+
+  // 스테이징 계정·online 하위 로드(서버 연결 시 실데이터, 오프라인이면 더미 유지).
+  const loadAccounts = () => {
+    api.accounts
+      .list()
+      .then((list) =>
+        setAccounts(list.map((a) => ({ id: a.id, loginId: a.loginId }))),
+      )
+      .catch(() => {
+        /* 오프라인 → 더미 유지 */
+      });
+  };
+  useEffect(() => {
+    loadAccounts();
+    // 하단: 등록+online 하위만(§10-3). DeviceDto.connected 필터.
+    api.devices
+      .list()
+      .then((list) =>
+        setOnlineDevices(
+          list
+            .filter((d) => d.connected)
+            .map((d) => ({ id: d.id, name: d.name, ip: d.ip ?? "—" })),
+        ),
+      )
+      .catch(() => {
+        /* 오프라인 → 더미 유지 */
+      });
+  }, []);
+
+  // 계정 추가(스테이징) — 서버 import 엔드포인트로 1건 추가(at-rest 암호화는 서버가 수행, §7).
+  const addAccount = async () => {
+    const loginId = window.prompt("추가할 계정 아이디");
+    if (loginId == null || loginId.trim() === "") return;
+    const pw = window.prompt(`${loginId}의 비밀번호`);
+    if (pw == null || pw === "") return;
+    try {
+      const r = await api.accounts.import([{ loginId: loginId.trim(), pw }]);
+      loadAccounts();
+      notifications.show({
+        message: `계정 추가: ${r.imported}건 (중복 ${r.skipped})`,
+        color: "green",
+      });
+    } catch (e) {
+      if (isOffline(e)) {
+        setAccounts((prev) => [
+          ...prev,
+          { id: `local-${prev.length + 1}`, loginId: loginId.trim() },
+        ]);
+        notifications.show({ message: "계정 추가(미리보기)", color: "green" });
+      } else {
+        notifications.show({
+          message: e instanceof Error ? e.message : "추가 실패",
+          color: "red",
+        });
+      }
+    }
+  };
 
   const allAccChecked = accounts.length > 0 && selAcc.size === accounts.length;
   const someAccChecked = selAcc.size > 0 && !allAccChecked;
@@ -94,16 +157,40 @@ export function AccountDistribute() {
 
   const canDistribute = selAcc.size >= 1 && selDev.size >= 1;
 
-  const distribute = () => {
-    const counts = splitCounts(selAcc.size, selDev.size);
-    notifications.show({
-      message: `계정 ${selAcc.size}개를 ${selDev.size}대에 분배했어요 (${counts.join("·")})`,
-      color: "green",
-    });
-    // MOVE: 보낸 계정은 풀에서 제거(§7).
-    setAccounts((prev) => prev.filter((a) => !selAcc.has(a.id)));
-    setSelAcc(new Set());
-    setSelDev(new Set());
+  const distribute = async () => {
+    const accountIds = [...selAcc];
+    const deviceIds = [...selDev];
+    try {
+      // 서버가 균등+랜덤 분배(겹침 없음) + MOVE(스테이징에서 제거) + 대별 명령 push(§10-3).
+      const r = await api.accounts.distribute(accountIds, deviceIds);
+      const summary = r.assignments
+        .map((a) => `${a.deviceName} ${a.count}`)
+        .join("·");
+      notifications.show({
+        message: `계정 ${r.moved}개를 ${r.assignments.length}대에 분배했어요 (${summary})`,
+        color: "green",
+      });
+      setSelAcc(new Set());
+      setSelDev(new Set());
+      loadAccounts(); // MOVE 반영(서버에서 제거됨 → 풀 갱신)
+    } catch (e) {
+      if (isOffline(e)) {
+        // 오프라인 미리보기: 로컬에서 균등+랜덤 시연 후 풀에서 제거(MOVE, §7).
+        const counts = splitCounts(selAcc.size, selDev.size);
+        notifications.show({
+          message: `계정 ${selAcc.size}개를 ${selDev.size}대에 분배했어요 (${counts.join("·")})`,
+          color: "green",
+        });
+        setAccounts((prev) => prev.filter((a) => !selAcc.has(a.id)));
+        setSelAcc(new Set());
+        setSelDev(new Set());
+      } else {
+        notifications.show({
+          message: e instanceof Error ? e.message : "분배 실패",
+          color: "red",
+        });
+      }
+    }
   };
 
   return (
@@ -137,12 +224,7 @@ export function AccountDistribute() {
               variant="light"
               size="sm"
               leftSection={<Icon.plus size={16} />}
-              onClick={() =>
-                notifications.show({
-                  message: "계정 추가(데모)",
-                  color: "gray",
-                })
-              }
+              onClick={() => void addAccount()}
             >
               계정 추가
             </Button>
@@ -234,7 +316,7 @@ export function AccountDistribute() {
             color="blue"
             disabled={!canDistribute}
             leftSection={<Icon.send size={16} />}
-            onClick={distribute}
+            onClick={() => void distribute()}
           >
             분배하기
           </Button>
@@ -242,7 +324,7 @@ export function AccountDistribute() {
 
         <Box style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
           <Stack gap="xs">
-            {ONLINE_DEVICES.map((d) => (
+            {onlineDevices.map((d) => (
               <Paper key={d.id} withBorder radius="md" p="sm">
                 <Group gap="md" wrap="nowrap">
                   <Checkbox

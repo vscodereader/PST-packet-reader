@@ -8,9 +8,11 @@ import {
   Text,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { Icon } from "@/shared/ui/icons";
+
+import { api } from "../../api";
 
 // 통신 로그 화면 — Admin↔하위 사이의 모든 통신(SSE 명령 / POST 결과 / 하트비트 /
 // 등록 / IP변경)을 콘솔처럼 보여준다. 설계 §7 감사로그(명령/결과 이력)의 조회 화면.
@@ -217,17 +219,49 @@ const LEVEL_COLOR: Record<Level, string> = {
   info: "var(--mantine-color-gray-5)",
 };
 
+const LEVELS: Level[] = ["cmd", "ok", "fail", "info", "warn"];
+
 export function CommLog() {
   const [device, setDevice] = useState<string>("all");
+  // 서버 감사로그(§7) 로드. 연결 시 실데이터, 오프라인 미리보기면 더미 유지. 3초 폴링.
+  const [allLines, setAllLines] = useState<LogLine[]>(LOG_LINES);
+
+  useEffect(() => {
+    const load = () => {
+      api.audit
+        .list()
+        .then((rows) => {
+          if (rows.length === 0) return; // 빈 서버 → 더미 유지(미리보기)
+          setAllLines(
+            rows.map((r) => ({
+              ts: r.ts,
+              tag: r.tag,
+              dir: r.dir,
+              device: r.device || "시스템",
+              msg: r.msg,
+              level: (LEVELS as string[]).includes(r.level)
+                ? (r.level as Level)
+                : "info",
+            })),
+          );
+        })
+        .catch(() => {
+          /* 오프라인 → 더미 유지 */
+        });
+    };
+    load();
+    const id = window.setInterval(load, 3000);
+    return () => window.clearInterval(id);
+  }, []);
 
   const devices = useMemo(
-    () => Array.from(new Set(LOG_LINES.map((l) => l.device))),
-    [],
+    () => Array.from(new Set(allLines.map((l) => l.device))),
+    [allLines],
   );
 
   const lines = useMemo(
-    () => LOG_LINES.filter((l) => device === "all" || l.device === device),
-    [device],
+    () => allLines.filter((l) => device === "all" || l.device === device),
+    [device, allLines],
   );
 
   const toText = (rows: LogLine[]) =>

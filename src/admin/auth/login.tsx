@@ -10,20 +10,23 @@ import {
   TextInput,
   ThemeIcon,
 } from "@mantine/core";
+import { useState } from "react";
 
 import { Icon } from "@/shared/ui/icons";
 
 import type { Screen } from "../screens";
 
 // 운영자 로그인(§5). 비밀번호 찾기/이메일 인증은 제공하지 않는다.
-// onLogin: 로그인 성공 시 다음 화면 결정(첫 로그인=강제 비번변경, 이후=앱). admin-app이 분기.
+// onLogin(loginId, pw): admin-app이 서버 인증 시도 + 다음 화면 분기(첫 로그인=강제 비번변경).
 export function Login({
   go,
   onLogin,
 }: {
   go: (s: Screen) => void;
-  onLogin: () => void;
+  onLogin: (loginId: string, pw: string) => void | Promise<void>;
 }) {
+  const [loginId, setLoginId] = useState("");
+  const [pw, setPw] = useState("");
   return (
     <Center h="100dvh" bg="gray.0" p="md">
       <Paper withBorder radius="md" p="xl" w={380} shadow="sm">
@@ -31,7 +34,7 @@ export function Login({
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            onLogin();
+            void onLogin(loginId, pw);
           }}
         >
           <Stack gap="md">
@@ -52,8 +55,19 @@ export function Login({
               </Text>
             </Stack>
 
-            <TextInput label="아이디" placeholder="아이디" data-autofocus />
-            <PasswordInput label="비밀번호" placeholder="비밀번호" />
+            <TextInput
+              label="아이디"
+              placeholder="아이디"
+              data-autofocus
+              value={loginId}
+              onChange={(e) => setLoginId(e.currentTarget.value)}
+            />
+            <PasswordInput
+              label="비밀번호"
+              placeholder="비밀번호"
+              value={pw}
+              onChange={(e) => setPw(e.currentTarget.value)}
+            />
 
             {/* type=submit → Enter 또는 클릭 둘 다 form onSubmit을 발동 */}
             <Button type="submit" fullWidth>

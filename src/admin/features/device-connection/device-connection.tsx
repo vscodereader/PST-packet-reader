@@ -17,9 +17,33 @@ import { useEffect, useRef, useState } from "react";
 
 import { Icon } from "@/shared/ui/icons";
 
-// 미리보기용 고정값. 실제로는 서버가 자기 공인 주소를 자동으로 내려준다(§6-1).
-const SERVER_ADDRESS = "http://123.45.67.89:8080";
+import { api, isOffline, type DeviceDto } from "../../api";
+
 const CODE_TTL_SECONDS = 600; // 10분 만료(§6)
+
+// 하위에 입력할 서버 주소(§6-1). 서버의 public_server_url은 "배포 전 결정"이라, 비어 있으면
+// 우선 현재 API 주소를 보여준다(운영 배포 시 서버가 자기 공인 주소를 내려줌).
+const DEFAULT_SERVER_ADDRESS = api.baseUrl;
+
+// 서버 DeviceDto → 화면 Device. lastSeen은 상대 시각 문구로.
+function fromDto(d: DeviceDto): Device {
+  return {
+    id: d.id,
+    name: d.name,
+    connected: d.connected,
+    ip: d.ip,
+    lastSeen: relativeTime(d.lastSeen),
+  };
+}
+function relativeTime(iso: string): string {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "—";
+  const sec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (sec < 5) return "방금 전";
+  if (sec < 60) return `${sec}초 전`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}분 전`;
+  return `${Math.floor(sec / 3600)}시간 전`;
+}
 
 interface Device {
   id: string;
@@ -133,9 +157,28 @@ function DeviceRow({
 export function DeviceConnection() {
   const [code, setCode] = useState<string | null>(null);
   const [remaining, setRemaining] = useState(0);
+  const [serverAddress, setServerAddress] = useState(DEFAULT_SERVER_ADDRESS);
   const [devices, setDevices] = useState<Device[]>(INITIAL_DEVICES);
   const [lastRefreshed, setLastRefreshed] = useState("방금 전");
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // 기기 목록 로드(서버 연결 시 실데이터, 오프라인이면 더미 유지). 마운트 + 5초 폴링(§6-3 자동 갱신).
+  const loadDevices = () => {
+    api.devices
+      .list()
+      .then((list) => {
+        setDevices(list.map(fromDto));
+        setLastRefreshed("방금 전");
+      })
+      .catch(() => {
+        /* 오프라인 → 더미 유지 */
+      });
+  };
+  useEffect(() => {
+    loadDevices();
+    const id = window.setInterval(loadDevices, 5000);
+    return () => window.clearInterval(id);
+  }, []);
 
   // 기기코드 만료 카운트다운.
   useEffect(() => {
@@ -148,12 +191,35 @@ export function DeviceConnection() {
     };
   }, [code]);
 
-  const issueCode = () => {
-    // UI 단계: 더미 4자리 코드. 실제로는 POST /admin/device-codes(§10).
-    const next = String(1000 + Math.floor(Math.random() * 9000));
-    setCode(next);
-    setRemaining(CODE_TTL_SECONDS);
-    notifications.show({ message: "기기코드를 발급했어요", color: "blue" });
+  const issueCode = async () => {
+    try {
+      const r = await api.devices.issueCode(); // POST /admin/device-codes(§10)
+      setCode(r.code);
+      setRemaining(r.expiresInSecs);
+      if (r.serverUrl) setServerAddress(r.serverUrl);
+      notifications.show({ message: "기기코드를 발급했어요", color: "blue" });
+    } catch (e) {
+      if (isOffline(e)) {
+        // 오프라인 미리보기: 더미 코드.
+        setCode(
+          crypto
+            .getRandomValues(new Uint32Array(1))[0]!
+            .toString()
+            .slice(0, 6)
+            .padStart(6, "0"),
+        );
+        setRemaining(CODE_TTL_SECONDS);
+        notifications.show({
+          message: "기기코드를 발급했어요(미리보기)",
+          color: "blue",
+        });
+      } else {
+        notifications.show({
+          message: e instanceof Error ? e.message : "발급 실패",
+          color: "red",
+        });
+      }
+    }
   };
 
   const copy = (text: string, label: string) => {
@@ -162,15 +228,24 @@ export function DeviceConnection() {
   };
 
   const refresh = () => {
-    // 수동 새로고침: "안 바뀌는" 경우 대비 안전장치(§6-3).
-    setLastRefreshed("방금 전");
+    // 수동 새로고침(§6-3) — 서버 재조회.
+    loadDevices();
     notifications.show({ message: "목록을 새로고침했어요", color: "gray" });
   };
 
-  const deleteDevice = (id: string, name: string) => {
-    // UI 단계: 목록에서 제거 + 토스트. 실제로는 DELETE /devices/{id} →
-    // 서버가 기기표에서 그 줄을 삭제 → 옛 기기토큰은 매칭되는 기기가 없어 자동 거부(§6).
-    // 그 뒤 [기기코드 발급]으로 새 코드를 만들어 같은 컴퓨터를 다시 등록하면 새 토큰이 발급된다.
+  const deleteDevice = async (id: string, name: string) => {
+    // DELETE /devices/{id} → 서버가 기기표 줄 삭제(옛 토큰 자동 무효, §6-4). 그 뒤 새 코드로 재등록.
+    try {
+      await api.devices.remove(id);
+    } catch (e) {
+      if (!isOffline(e)) {
+        notifications.show({
+          message: e instanceof Error ? e.message : "삭제 실패",
+          color: "red",
+        });
+        return;
+      }
+    }
     setDevices((prev) => prev.filter((d) => d.id !== id));
     notifications.show({
       message: `${name} 기기를 삭제했어요 (등록 해제)`,
@@ -232,13 +307,13 @@ export function DeviceConnection() {
                 서버 주소 (모든 하위 공통) · 미리보기 예시값
               </Text>
               <Text fw={700} ff="monospace">
-                {SERVER_ADDRESS}
+                {serverAddress}
               </Text>
             </Box>
             <Button
               variant="light"
               leftSection={<Icon.copy size={16} />}
-              onClick={() => copy(SERVER_ADDRESS, "서버 주소를")}
+              onClick={() => copy(serverAddress, "서버 주소를")}
             >
               복사
             </Button>
@@ -282,7 +357,10 @@ export function DeviceConnection() {
                   복사
                 </Button>
               )}
-              <Button leftSection={<Icon.plus size={16} />} onClick={issueCode}>
+              <Button
+                leftSection={<Icon.plus size={16} />}
+                onClick={() => void issueCode()}
+              >
                 기기코드 발급
               </Button>
             </Group>
@@ -340,7 +418,7 @@ export function DeviceConnection() {
               <DeviceRow
                 key={d.id}
                 device={d}
-                onDelete={() => deleteDevice(d.id, d.name)}
+                onDelete={() => void deleteDevice(d.id, d.name)}
               />
             ))}
           </Stack>

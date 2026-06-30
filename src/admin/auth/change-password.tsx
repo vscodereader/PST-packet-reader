@@ -9,9 +9,11 @@ import {
   ThemeIcon,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
+import { useState } from "react";
 
 import { Icon } from "@/shared/ui/icons";
 
+import { api, isOffline } from "../api";
 import type { Screen } from "../screens";
 
 // 비밀번호 변경(§5). forced=true면 SuperAdmin 첫 로그인 강제 변경 모드.
@@ -25,13 +27,51 @@ export function ChangePassword({
   go: (s: Screen) => void;
   onDone?: () => void;
 }) {
-  const submit = () => {
-    notifications.show({
-      message: "비밀번호가 변경되었습니다",
-      color: "green",
-    });
-    onDone?.(); // 강제 변경 완료 표시(다음 로그인은 앱으로).
-    go("login"); // 변경 후 재로그인(§5).
+  const [currentPw, setCurrentPw] = useState(forced ? "Superadmin" : "");
+  const [newPw, setNewPw] = useState("");
+  const [confirmPw, setConfirmPw] = useState("");
+
+  const submit = async () => {
+    if (newPw.length < 4) {
+      notifications.show({
+        message: "새 비밀번호가 너무 짧습니다",
+        color: "red",
+      });
+      return;
+    }
+    if (newPw !== confirmPw) {
+      notifications.show({
+        message: "새 비밀번호 확인이 일치하지 않습니다",
+        color: "red",
+      });
+      return;
+    }
+    try {
+      // 서버에 변경 요청(토큰버전 +1 → 옛 토큰 무효 → 재로그인, §5).
+      await api.auth.changePassword(currentPw, newPw);
+      api.auth.logout(); // 옛 토큰 폐기
+      notifications.show({
+        message: "비밀번호가 변경되었습니다",
+        color: "green",
+      });
+      onDone?.();
+      go("login");
+    } catch (e) {
+      if (isOffline(e)) {
+        // 오프라인 미리보기: 데모 동작.
+        notifications.show({
+          message: "비밀번호가 변경되었습니다",
+          color: "green",
+        });
+        onDone?.();
+        go("login");
+      } else {
+        notifications.show({
+          message: e instanceof Error ? e.message : "변경 실패",
+          color: "red",
+        });
+      }
+    }
   };
 
   const body = (
@@ -39,7 +79,7 @@ export function ChangePassword({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          submit();
+          void submit();
         }}
       >
         <Stack gap="md">
@@ -70,17 +110,22 @@ export function ChangePassword({
             입력/재입력하면 된다 — 매번 현재 비번을 다시 타이핑할 필요 없음. */}
           <PasswordInput
             label="현재 비밀번호"
-            defaultValue={forced ? "Superadmin" : ""}
             placeholder={forced ? "Superadmin" : "현재 비밀번호"}
+            value={currentPw}
+            onChange={(e) => setCurrentPw(e.currentTarget.value)}
           />
           <PasswordInput
             label="새 비밀번호"
             placeholder="새 비밀번호"
             data-autofocus
+            value={newPw}
+            onChange={(e) => setNewPw(e.currentTarget.value)}
           />
           <PasswordInput
             label="새 비밀번호 확인"
             placeholder="새 비밀번호 다시 입력"
+            value={confirmPw}
+            onChange={(e) => setConfirmPw(e.currentTarget.value)}
           />
 
           {/* type=submit → 새 비번 입력칸에서 Enter만 쳐도 제출(버튼 클릭 불필요). */}

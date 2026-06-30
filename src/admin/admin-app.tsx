@@ -13,6 +13,7 @@ import { useState } from "react";
 
 import { Icon, type IconName } from "@/shared/ui/icons";
 
+import { api, isOffline } from "./api";
 import { ChangePassword } from "./auth/change-password";
 import { Login } from "./auth/login";
 import { Signup } from "./auth/signup";
@@ -115,7 +116,13 @@ function PreviewSwitcher({
   );
 }
 
-function AppScreen({ screen }: { screen: Screen }) {
+function AppScreen({
+  screen,
+  go,
+}: {
+  screen: Screen;
+  go: (s: Screen) => void;
+}) {
   switch (screen) {
     case "devices":
       return <DeviceConnection />;
@@ -126,7 +133,8 @@ function AppScreen({ screen }: { screen: Screen }) {
     case "operators":
       return <Operators />;
     case "change-pw":
-      return <ChangePassword forced={false} go={() => undefined} />;
+      // 변경 후 재로그인(§5) — 실제 네비게이션 핸들러를 넘겨 로그인 화면으로 이동시킨다.
+      return <ChangePassword forced={false} go={go} />;
     case "comm-log":
       return <CommLog />;
     default:
@@ -141,8 +149,9 @@ export function AdminApp() {
   const [mustChangePw, setMustChangePw] = useState(true);
   const go = (s: Screen) => setScreen(s);
 
-  // [로그인] 클릭 시 분기: 변경 전이면 강제 비번변경, 변경 후면 앱(기기 연결).
-  const handleLogin = () => {
+  // 로그인: 서버 인증 시도 → 성공 시 mustChangePassword면 강제 변경, 아니면 앱(기기 연결).
+  // 서버 미연결(오프라인 미리보기)이면 기존 데모 동작으로 폴백(화면 무손상).
+  const demoBranch = () => {
     if (mustChangePw) {
       notifications.show({
         message: "기본 비밀번호입니다 — 변경이 필요합니다",
@@ -152,6 +161,30 @@ export function AdminApp() {
     } else {
       notifications.show({ message: "로그인되었습니다", color: "blue" });
       go("devices");
+    }
+  };
+  const handleLogin = async (loginId: string, pw: string) => {
+    try {
+      const r = await api.auth.login(loginId, pw);
+      if (r.mustChangePassword) {
+        notifications.show({
+          message: "기본 비밀번호입니다 — 변경이 필요합니다",
+          color: "orange",
+        });
+        go("force-pw");
+      } else {
+        notifications.show({ message: "로그인되었습니다", color: "blue" });
+        go("devices");
+      }
+    } catch (e) {
+      if (isOffline(e)) {
+        demoBranch(); // 서버 없는 미리보기: 데모 분기
+      } else {
+        notifications.show({
+          message: e instanceof Error ? e.message : "로그인 실패",
+          color: "red",
+        });
+      }
     }
   };
 
@@ -231,7 +264,7 @@ export function AdminApp() {
         style={{ display: "flex", flexDirection: "column" }}
       >
         <Box style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-          <AppScreen screen={screen} />
+          <AppScreen screen={screen} go={go} />
         </Box>
       </AppShell.Main>
     </AppShell>

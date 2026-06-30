@@ -1,0 +1,218 @@
+// Admin 웹 → 중앙 서버(`server/`) HTTP 클라이언트. 설계 §8 transport(HttpSse)의 Admin측 구현.
+//
+// 핵심: 서버가 떠 있지 않은 **오프라인 미리보기**에서도 화면이 깨지지 않게, fetch 실패(연결 불가)는
+// `OfflineError`로 던진다. 각 화면은 이를 잡아 기존 더미 데이터로 폴백한다(UI 무손상).
+// 서버 주소는 `VITE_ADMIN_API`로 주입(기본 http://localhost:8080). **배포 전 결정**(주소/포트/TLS).
+
+const BASE =
+  (import.meta.env.VITE_ADMIN_API as string | undefined)?.replace(/\/+$/, "") ??
+  "http://localhost:8080";
+
+const TOKEN_KEY = "pstmacro.admin.token";
+const LOGIN_KEY = "pstmacro.admin.login";
+const ROLE_KEY = "pstmacro.admin.role";
+
+export type Role = "super" | "operator";
+export type DeviceState = "online" | "rotating" | "reconnecting" | "offline";
+
+/** 서버가 4xx/5xx로 거부(사유 메시지 포함). */
+export class ApiError extends Error {}
+/** 서버에 연결 자체가 안 됨(미리보기 오프라인) → 더미 폴백 신호. */
+export class OfflineError extends Error {}
+
+export function getToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY);
+}
+export function getRole(): Role | null {
+  return localStorage.getItem(ROLE_KEY) as Role | null;
+}
+export function getLoginId(): string | null {
+  return localStorage.getItem(LOGIN_KEY);
+}
+export function isLoggedIn(): boolean {
+  return getToken() != null;
+}
+export function logout(): void {
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(LOGIN_KEY);
+  localStorage.removeItem(ROLE_KEY);
+}
+/** 에러가 "서버 연결 불가"인지 — 화면이 더미 폴백할지 판단. */
+export function isOffline(e: unknown): boolean {
+  return e instanceof OfflineError;
+}
+
+async function request<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<T> {
+  const headers: Record<string, string> = {};
+  const token = getToken();
+  if (token != null) headers["Authorization"] = `Bearer ${token}`;
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+
+  // exactOptionalPropertyTypes: body가 undefined면 키 자체를 넣지 않는다.
+  const init: RequestInit = { method, headers };
+  if (body !== undefined) init.body = JSON.stringify(body);
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, init);
+  } catch {
+    // 네트워크 도달 실패(서버 미기동 등) → 오프라인.
+    throw new OfflineError("서버에 연결할 수 없습니다");
+  }
+
+  if (!res.ok) {
+    let msg = `요청 실패 (${res.status})`;
+    try {
+      const j: unknown = await res.json();
+      if (j && typeof j === "object" && "error" in j) {
+        const e = (j as { error?: unknown }).error;
+        if (typeof e === "string") msg = e;
+      }
+    } catch {
+      /* 본문 파싱 실패는 무시 */
+    }
+    throw new ApiError(msg);
+  }
+  if (res.status === 204) return undefined as T;
+  return (await res.json()) as T;
+}
+
+// ── 응답/요청 타입(서버 DTO와 일치, camelCase) ──
+export interface LoginResult {
+  token: string;
+  loginId: string;
+  role: Role;
+  mustChangePassword: boolean;
+}
+export interface OperatorsResp {
+  operators: { loginId: string; role: Role }[];
+  pending: string[];
+}
+export interface DeviceDto {
+  id: string;
+  name: string;
+  connected: boolean;
+  ip: string | null;
+  lastSeen: string;
+  state: DeviceState;
+}
+export interface DeviceCodeResp {
+  code: string;
+  serverUrl: string | null;
+  expiresInSecs: number;
+}
+export interface AccountDto {
+  id: string;
+  loginId: string;
+}
+export interface ImportResult {
+  imported: number;
+  skipped: number;
+  total: number;
+}
+export interface DistributeResult {
+  assignments: { deviceId: string; deviceName: string; count: number }[];
+  moved: number;
+}
+export interface AuditDto {
+  ts: string;
+  tag: string;
+  dir: string;
+  device: string;
+  msg: string;
+  level: string;
+}
+
+export const api = {
+  baseUrl: BASE,
+  auth: {
+    async login(loginId: string, pw: string): Promise<LoginResult> {
+      const r = await request<LoginResult>("POST", "/auth/login", {
+        loginId,
+        pw,
+      });
+      localStorage.setItem(TOKEN_KEY, r.token);
+      localStorage.setItem(LOGIN_KEY, r.loginId);
+      localStorage.setItem(ROLE_KEY, r.role);
+      return r;
+    },
+    signup(loginId: string, pw: string): Promise<unknown> {
+      return request("POST", "/auth/signup", { loginId, pw });
+    },
+    changePassword(currentPw: string, newPw: string): Promise<unknown> {
+      return request("POST", "/auth/change-password", { currentPw, newPw });
+    },
+    logout,
+  },
+  operators: {
+    list(): Promise<OperatorsResp> {
+      return request("GET", "/admin/operators");
+    },
+    approve(id: string): Promise<unknown> {
+      return request(
+        "POST",
+        `/admin/operators/${encodeURIComponent(id)}/approve`,
+      );
+    },
+    reject(id: string): Promise<unknown> {
+      return request(
+        "POST",
+        `/admin/operators/${encodeURIComponent(id)}/reject`,
+      );
+    },
+    remove(id: string): Promise<unknown> {
+      return request("DELETE", `/admin/operators/${encodeURIComponent(id)}`);
+    },
+    resetPassword(id: string, newPw: string): Promise<unknown> {
+      return request(
+        "POST",
+        `/admin/operators/${encodeURIComponent(id)}/reset-password`,
+        {
+          newPw,
+        },
+      );
+    },
+  },
+  devices: {
+    issueCode(): Promise<DeviceCodeResp> {
+      return request("POST", "/admin/device-codes");
+    },
+    list(): Promise<DeviceDto[]> {
+      return request("GET", "/devices");
+    },
+    remove(id: string): Promise<unknown> {
+      return request("DELETE", `/devices/${encodeURIComponent(id)}`);
+    },
+    command(id: string, type: string, commandId?: string): Promise<unknown> {
+      return request("POST", `/devices/${encodeURIComponent(id)}/commands`, {
+        type,
+        commandId,
+      });
+    },
+  },
+  accounts: {
+    list(): Promise<AccountDto[]> {
+      return request("GET", "/admin/accounts");
+    },
+    import(accounts: { loginId: string; pw: string }[]): Promise<ImportResult> {
+      return request("POST", "/admin/accounts/import", { accounts });
+    },
+    distribute(
+      accountIds: string[],
+      deviceIds: string[],
+    ): Promise<DistributeResult> {
+      return request("POST", "/admin/accounts/distribute", {
+        accountIds,
+        deviceIds,
+      });
+    },
+  },
+  audit: {
+    list(): Promise<AuditDto[]> {
+      return request("GET", "/admin/audit-log");
+    },
+  },
+};
