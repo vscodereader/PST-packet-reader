@@ -1,7 +1,6 @@
 mod browser_flow;
 mod cookie_bridge;
 mod devtools_connection;
-mod discussion_room;
 mod packet_client;
 mod post_form;
 pub mod types;
@@ -163,6 +162,14 @@ fn open_discussion_session(
             login_profile.message
         )));
     }
+
+    // 네이버페이 금융서비스 가입(=종목토론방 "동의하기")을 패킷으로 보장한다. 예전엔 브라우저
+    // 이동(ensure_discussion_page)이 약관 페이지를 만나면 처리했는데, #344가 페이지 이동을 없애며
+    // 이 단계가 빠졌다 — 동의가 안 된 계정은 글쓰기 form 발급이 404로 막힌다. "동의하기"는 사실
+    // 가입 URL로 가는 GET 리다이렉트 체인이라(체크박스 아님), 로그인 쿠키를 든 패킷 클라이언트로
+    // 그 URL을 GET 하면 가입이 완료된다. 멱등(이미 가입이면 무해)이고 비치명적(전송 실패해도
+    // 글쓰기는 시도) — 가입 완료 여부는 메서드가 로그로 남긴다.
+    packet_client.ensure_npay_financial_join();
 
     // 종목토론방 URL을 코드로 직접 만들거나(선택 종목) 패킷 API로 랜덤 선택한다. 브라우저를 그 URL로
     // 이동시키지 않는다 — submit_post/submit_comment는 이 URL을 referer·target 파싱용 문자열로만

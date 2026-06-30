@@ -3,7 +3,6 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use super::packet_client::NaverPacketClient;
 use super::{AutomationError, AutomationResult, CdpClient};
 
 impl CdpClient {
@@ -158,43 +157,6 @@ impl CdpClient {
         }
 
         Err(AutomationError::new("댓글 입력란을 찾지 못했습니다."))
-    }
-
-    // Wireshark/F12에서 확인한 POST /front-api/discussion/add 패킷 구조로 글을 등록하는 함수입니다.
-    pub(super) fn submit_post_and_refresh(
-        &mut self,
-        packet_client: &NaverPacketClient,
-        title: &str,
-        body: &str,
-    ) -> AutomationResult<String> {
-        let current_url = self.current_url()?;
-        let post_id = packet_client.submit_post(&current_url, title, body)?;
-        let post_url = packet_client.post_url_from_id(&current_url, &post_id)?;
-
-        self.reload_after_submit()?;
-
-        Ok(post_url)
-    }
-
-    // Wireshark/F12에서 확인한 cbox 토큰 발급/댓글 생성 패킷 구조로 댓글을 등록하는 함수입니다.
-    pub(super) fn submit_comment_and_refresh(
-        &mut self,
-        packet_client: &NaverPacketClient,
-        body: &str,
-    ) -> AutomationResult<()> {
-        let current_url = self.current_url()?;
-        packet_client.submit_comment(&current_url, body)?;
-
-        self.reload_after_submit()
-    }
-
-    // 글쓰기 또는 댓글 등록 후 화면을 새로고침하는 함수입니다.
-    fn reload_after_submit(&mut self) -> AutomationResult<()> {
-        sleep(Duration::from_millis(2500));
-        self.call("Page.reload", json!({ "ignoreCache": false }))?;
-        self.wait_for_ready_state(super::POST_READY_TIMEOUT)?;
-        sleep(Duration::from_secs(2));
-        Ok(())
     }
 
     // 글쓰기 모달 안의 제목 입력란과 본문 에디터를 찾아 값을 넣는 함수입니다.
