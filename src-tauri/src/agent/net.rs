@@ -26,6 +26,12 @@ struct HeartbeatReq<'a> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct StateReq<'a> {
+    state: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ResultReq<'a> {
     level: &'a str,
     msg: &'a str,
@@ -65,6 +71,16 @@ pub async fn heartbeat(
     state: &str,
 ) -> Result<(), String> {
     post_authed(client, base, token, "/agent/heartbeat", &HeartbeatReq { ip, state }).await
+}
+
+/// 상태 전이 보고(ROTATING 등, §4). IP는 heartbeat로 보낸다.
+pub async fn post_state(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    state: &str,
+) -> Result<(), String> {
+    post_authed(client, base, token, "/agent/state", &StateReq { state }).await
 }
 
 /// 명령 결과 회신(§10-4).

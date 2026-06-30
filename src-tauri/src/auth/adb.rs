@@ -81,6 +81,8 @@ pub(crate) struct IpRotation {
 /// 상단 버튼에 불이 안 들어올 수 있으나, IP가 바뀌면 라디오는 실제로 순환한 것.)
 pub async fn toggle_airplane_mode() -> Result<IpRotation, OrchestratorError> {
     let before = fetch_external_ip().await;
+    // 원격제어 에이전트에 IP 회전 시작 신호(§4-2). 등록 안 됐으면 no-op(추가만, 기존 로직 무영향).
+    crate::agent::report_state_change("rotating", None);
     tracing::info!("[ADB] ✈ 비행기모드 ON");
     run_adb_timed(
         airplane_mode_args(true)
@@ -117,6 +119,8 @@ pub async fn toggle_airplane_mode() -> Result<IpRotation, OrchestratorError> {
         tracing::info!("[ADB]   ✓ IP 변경됨!");
     }
     tracing::info!("[ADB] ────────────────────────────────────");
+    // 재연결·새 IP 신호(§4-1) — 에이전트가 서버에 online + 바뀐 IP 보고.
+    crate::agent::report_state_change("online", Some(after.clone()));
     Ok(IpRotation {
         before,
         after,

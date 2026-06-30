@@ -1,19 +1,23 @@
 //! 하위 에이전트 레이어(설계 §9). 기존 pstmacro 앱에 **추가만** 되는 모듈 — 기존 로그인·큐·계정
-//! 코드는 한 줄도 바꾸지 않고, 그 함수/스토어를 호출만 한다.
+//! 코드는 한 줄도 바꾸지 않고, 그 함수/스토어를 호출만 한다(adb.rs의 상태신호는 "추가").
 //!
-//! 하는 일: ① 서버에 SSE로 연결해 명령 수신 ② 받은 계정을 기존 계정 스토어에 등록 +
-//! 기존 로그인 큐로 자동 전체 로그인 enqueue ③ 하트비트(현재 IP)·결과를 서버에 POST
-//! ④ 연결 끊기면 백오프 재연결(§4-1).
+//! 하는 일:
+//! ① 서버에 SSE로 연결해 명령 수신(distribute/login/delete)
+//! ② 받은 계정을 기존 계정 스토어에 등록 + 기존 종토 선택로그인 경로로 자동 전체 로그인 enqueue
+//! ③ 로그인 끝나면 결과 4분류(성공/보류/대기초과/실패) + 누적을 서버에 보고 + 실패 자동삭제(§10-4)
+//! ④ 하트비트(현재 IP)·ROTATING 상태 보고(§4) + 끊기면 백오프 재연결(§4-1)
 
 mod config;
 mod net;
 
 pub use config::AgentConfig;
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Runtime};
+use tokio::sync::mpsc;
 
 use crate::ipc::accounts::{Account, AccountStatus, PlatformId};
 use crate::ipc::posts::ModeValue;
@@ -51,6 +55,12 @@ pub struct AgentStatus {
     pub device_name: String,
 }
 
+/// dispatch가 즉시 응답 후 백그라운드로 이어갈 후속 작업(로그인 결과 보고).
+struct Followup {
+    queue_id: String,
+    login_ids: Vec<String>,
+}
+
 fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -58,21 +68,36 @@ fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
-/// 앱 시작 시 호출(setup, 추가 1줄). 명령 수신 루프 + 하트비트 루프를 백그라운드로 띄운다.
-/// 설정이 없으면 두 루프는 대기만 한다(등록 전까지 무동작).
-pub fn start<R: Runtime>(app: AppHandle<R>) {
-    let cmd_app = app.clone();
-    tauri::async_runtime::spawn(async move { command_loop(cmd_app).await });
-    tauri::async_runtime::spawn(async move { heartbeat_loop(app).await });
+// IP 회전 등 상태신호를 adb.rs(AppHandle 없는 곳)에서 에이전트로 보내는 전역 채널.
+static STATE_TX: OnceLock<mpsc::UnboundedSender<(String, Option<String>)>> = OnceLock::new();
+
+/// 기존 로그인/회전 흐름에서 호출하는 상태신호(추가 전용). 미등록·미기동이면 no-op.
+/// `state`="rotating"|"online", online이면 `ip`=바뀐 공인 IP(§4-1).
+pub fn report_state_change(state: &str, ip: Option<String>) {
+    if let Some(tx) = STATE_TX.get() {
+        let _ = tx.send((state.to_string(), ip));
+    }
 }
 
-/// 명령 수신 루프: 설정 있으면 SSE 연결 → 명령 디스패치, 끊기면 백오프 재연결(§4-1).
+/// 앱 시작 시 호출(setup, 추가 1줄). 명령 수신·하트비트·상태보고 루프를 백그라운드로 띄운다.
+pub fn start<R: Runtime>(app: AppHandle<R>) {
+    let (tx, rx) = mpsc::unbounded_channel::<(String, Option<String>)>();
+    let _ = STATE_TX.set(tx);
+
+    let cmd_app = app.clone();
+    tauri::async_runtime::spawn(async move { command_loop(cmd_app).await });
+    tauri::async_runtime::spawn(async move { heartbeat_loop().await });
+    tauri::async_runtime::spawn(async move { state_report_loop(rx).await });
+}
+
+// ───────────────────────── 명령 수신 루프 ─────────────────────────
+
 async fn command_loop<R: Runtime>(app: AppHandle<R>) {
     let client = reqwest::Client::new();
     let mut backoff = 1u64;
     loop {
         let Some(cfg) = config::load() else {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
             continue;
         };
         match net::open_stream(&client, &cfg.server_url, &cfg.device_token).await {
@@ -86,7 +111,7 @@ async fn command_loop<R: Runtime>(app: AppHandle<R>) {
                             buf.push_str(&String::from_utf8_lossy(&bytes));
                             drain_events(&app, &client, &cfg, &mut buf).await;
                         }
-                        Ok(None) => break, // 스트림 종료 → 재연결
+                        Ok(None) => break,
                         Err(e) => {
                             tracing::warn!("[AGENT] 스트림 끊김: {e}");
                             break;
@@ -96,13 +121,11 @@ async fn command_loop<R: Runtime>(app: AppHandle<R>) {
             }
             Err(e) => tracing::warn!("[AGENT] 연결 실패: {e}"),
         }
-        // 백오프(1→2→4→…→30s) 재시도(§4-1 (4)).
-        tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+        tokio::time::sleep(Duration::from_secs(backoff)).await;
         backoff = (backoff * 2).min(30);
     }
 }
 
-/// 버퍼에서 완성된 SSE `data:` 줄을 꺼내 명령으로 처리한다.
 async fn drain_events<R: Runtime>(
     app: &AppHandle<R>,
     client: &reqwest::Client,
@@ -113,58 +136,66 @@ async fn drain_events<R: Runtime>(
         let line = buf[..nl].trim().to_string();
         buf.drain(..=nl);
         let Some(data) = line.strip_prefix("data:") else {
-            continue; // 주석(keep-alive)·빈 줄 등 무시
+            continue;
         };
         let data = data.trim();
         let Ok(cmd) = serde_json::from_str::<Command>(data) else {
             continue;
         };
         let cid = cmd.command_id.clone().unwrap_or_else(|| format!("c-{}", now_ms()));
-        // ★ 상태 접근은 동기로 끝내고(아래 dispatch), 그 결과 메시지만 await POST한다.
-        let (level, msg) = dispatch(app, &cmd);
+        // 동기 디스패치(기존 스토어/큐 호출) → 즉시 응답.
+        let (level, msg, followup) = dispatch(app, &cmd);
         let _ = net::post_result(client, &cfg.server_url, &cfg.device_token, &cid, level, &msg).await;
+        // 로그인이 걸렸으면 끝날 때까지 지켜보고 §10-4 결과를 같은 commandId로 보고(백그라운드).
+        if let Some(f) = followup {
+            let (app2, client2, cfg2, cid2) =
+                (app.clone(), client.clone(), cfg.clone(), cid.clone());
+            tauri::async_runtime::spawn(async move {
+                report_login_results(app2, client2, cfg2, cid2, f).await;
+            });
+        }
     }
 }
 
-/// 명령 디스패치(동기 — 기존 스토어/큐 함수 호출만). State 가드를 await 너머로 들지 않게 한다.
-fn dispatch<R: Runtime>(app: &AppHandle<R>, cmd: &Command) -> (&'static str, String) {
+/// 명령 디스패치(동기). 반환: (level, 즉시 메시지, 로그인 결과 후속).
+fn dispatch<R: Runtime>(app: &AppHandle<R>, cmd: &Command) -> (&'static str, String, Option<Followup>) {
     match cmd.kind.as_str() {
-        // 분배: 받은 계정을 기존 계정 스토어에 등록 + 기존 로그인 큐로 자동 전체 로그인 enqueue.
         "distribute_accounts" => {
             let added = add_accounts(app, &cmd.accounts);
-            let login_ids: Vec<String> =
-                cmd.accounts.iter().map(|a| a.login_id.clone()).collect();
-            enqueue_login(app, &login_ids);
+            let login_ids: Vec<String> = cmd.accounts.iter().map(|a| a.login_id.clone()).collect();
+            let queue_id = enqueue_login(app, &login_ids);
             (
                 "ok",
                 format!("계정 {added}건 등록 + 자동 로그인 시작(종토)"),
+                queue_id.map(|q| Followup { queue_id: q, login_ids }),
             )
         }
-        // 전체 로그인: 현재 스토어의 모든 계정을 선택 로그인 큐로.
         "import_then_login_all" => {
             let ids = all_login_ids(app);
             let n = ids.len();
-            enqueue_login(app, &ids);
-            ("ok", format!("전체 로그인 시작 — {n}건"))
+            let queue_id = enqueue_login(app, &ids);
+            (
+                "ok",
+                format!("전체 로그인 시작 — {n}건"),
+                queue_id.map(|q| Followup { queue_id: q, login_ids: ids }),
+            )
         }
-        // 계정 삭제: 받은 loginId들을 기존 계정 스토어에서 제거.
         "delete_accounts" => {
             let ids: Vec<String> = cmd.accounts.iter().map(|a| a.login_id.clone()).collect();
             let removed = delete_by_login_ids(app, &ids);
-            ("info", format!("계정 {removed}건 삭제"))
+            ("info", format!("계정 {removed}건 삭제"), None)
         }
-        other => ("fail", format!("알 수 없는 명령: {other}")),
+        other => ("fail", format!("알 수 없는 명령: {other}"), None),
     }
 }
 
-/// 받은 계정을 기존 계정 스토어에 추가(login_id 중복은 건너뜀). 종토(forum) 가정(§10-2).
 fn add_accounts<R: Runtime>(app: &AppHandle<R>, accounts: &[AccountIn]) -> usize {
     let store = app.state::<JsonStore<Account>>();
     let mut added = 0usize;
     store.mutate(|mut list| {
         for a in accounts {
             if list.iter().any(|x| x.login_id == a.login_id) {
-                continue; // 중복 건너뜀(import_accounts 검증과 동일 취지)
+                continue;
             }
             list.push(Account {
                 id: a.login_id.clone(),
@@ -206,11 +237,10 @@ fn delete_by_login_ids<R: Runtime>(app: &AppHandle<R>, login_ids: &[String]) -> 
     removed
 }
 
-/// 선택 로그인(종토) 큐 아이템 1개를 만들어 기존 now 큐에 적재 + 러너 기동.
-/// 프론트 `buildLoginNowItem`과 동일 페이로드(plan.login만 채움, platform=naver, useAdb·force).
-fn enqueue_login<R: Runtime>(app: &AppHandle<R>, login_ids: &[String]) {
+/// 선택 로그인(종토) 큐 아이템 1개를 만들어 기존 now 큐에 적재 + 러너 기동. 큐 아이템 id 반환.
+fn enqueue_login<R: Runtime>(app: &AppHandle<R>, login_ids: &[String]) -> Option<String> {
     if login_ids.is_empty() {
-        return;
+        return None;
     }
     let login: Vec<LoginTarget> = login_ids
         .iter()
@@ -224,15 +254,12 @@ fn enqueue_login<R: Runtime>(app: &AppHandle<R>, login_ids: &[String]) {
         .collect();
     let locs: Vec<QueueLocation> = login_ids
         .iter()
-        .map(|id| QueueLocation {
-            p: PlatformId::Forum,
-            name: id.clone(),
-            code: None,
-        })
+        .map(|id| QueueLocation { p: PlatformId::Forum, name: id.clone(), code: None })
         .collect();
     let title = format!("계정 로그인 {}건", login_ids.len());
+    let id = format!("agent-login-{}", now_ms());
     let item = QueueNowItem {
-        id: format!("agent-login-{}", now_ms()),
+        id: id.clone(),
         title: title.clone(),
         kind: ModeValue::Post,
         state: QueueState::Waiting,
@@ -262,10 +289,160 @@ fn enqueue_login<R: Runtime>(app: &AppHandle<R>, login_ids: &[String]) {
     });
     let runner = app.state::<NowQueueRunner>();
     start_if_idle(runner.inner(), app.clone());
+    Some(id)
 }
 
-/// 하트비트 루프: 30초마다 현재 공인 IP + online 상태 보고(§4-1).
-async fn heartbeat_loop<R: Runtime>(_app: AppHandle<R>) {
+// ───────────────────────── §10-4 로그인 결과 보고 + 실패 자동삭제 ─────────────────────────
+
+/// 분류 결과.
+struct Tally {
+    success: usize,
+    onhold: Vec<(String, String)>,    // (loginId, pw)
+    timedout: Vec<(String, String)>,  // (loginId, pw)
+    failed: Vec<(String, String, String)>, // (loginId, pw, 사유)
+}
+
+/// 큐 아이템이 끝날(Done) 때까지 기다렸다가 계정 상태로 §10-4 분류 → 보고 + 실패 자동삭제 + 누적 갱신.
+async fn report_login_results<R: Runtime>(
+    app: AppHandle<R>,
+    client: reqwest::Client,
+    cfg: AgentConfig,
+    command_id: String,
+    f: Followup,
+) {
+    // 큐 아이템이 Done 될 때까지 폴링(최대 30분 안전장치). 사라지면(치워짐) 완료로 간주.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30 * 60);
+    loop {
+        let done = {
+            let items = app.state::<JsonStore<QueueNowItem>>().snapshot();
+            match items.iter().find(|i| i.id == f.queue_id) {
+                Some(i) => matches!(i.state, QueueState::Done),
+                None => true, // 큐에서 제거됨 → 완료로 봄
+            }
+        };
+        if done || std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+
+    // 완료된 계정 상태를 §10-4 4분류로(동기 스냅샷).
+    let tally = classify_accounts(&app, &f.login_ids);
+    let received = f.login_ids.len();
+    let cum = ledger_add(received, &tally);
+    let report = format_report(&tally, received, &cum);
+    let _ = net::post_result(&client, &cfg.server_url, &cfg.device_token, &command_id, "ok", &report).await;
+
+    // 실패 계정 자동삭제(§10-1 (4)) — 삭제 전 보고가 먼저 나갔다(되돌리기 불가).
+    if !tally.failed.is_empty() {
+        let fail_ids: Vec<String> = tally.failed.iter().map(|(id, _, _)| id.clone()).collect();
+        let removed = delete_by_login_ids(&app, &fail_ids);
+        let del_msg = format!(
+            "delete_accounts(계정 삭제) {removed}건 → {}",
+            tally
+                .failed
+                .iter()
+                .map(|(id, pw, why)| format!("{id}/{pw} (사유: {why})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let _ = net::post_result(&client, &cfg.server_url, &cfg.device_token, &command_id, "info", &del_msg).await;
+    }
+}
+
+fn classify_accounts<R: Runtime>(app: &AppHandle<R>, login_ids: &[String]) -> Tally {
+    let snapshot = app.state::<JsonStore<Account>>().snapshot();
+    let mut t = Tally { success: 0, onhold: vec![], timedout: vec![], failed: vec![] };
+    for id in login_ids {
+        let Some(acct) = snapshot.iter().find(|a| &a.login_id == id) else {
+            continue; // 이미 사라진 계정(드묾)
+        };
+        let pw = acct.pw.clone();
+        let why = acct.status_msg.clone().unwrap_or_default();
+        match acct.status {
+            AccountStatus::Active => t.success += 1,
+            AccountStatus::OnHold => t.onhold.push((id.clone(), pw)),
+            AccountStatus::TimedOut => t.timedout.push((id.clone(), pw)),
+            // 미시도/게시쿨다운 등 로그인 결과 아님 — 삭제·집계 제외.
+            AccountStatus::New | AccountStatus::Waiting => {}
+            // 비번오류·추가인증·차단·에러 = 실패(§10-4)
+            AccountStatus::BadCredentials
+            | AccountStatus::Challenge
+            | AccountStatus::Blocked
+            | AccountStatus::Error => {
+                let reason = if why.is_empty() {
+                    format!("{:?}", acct.status)
+                } else {
+                    why
+                };
+                t.failed.push((id.clone(), pw, reason));
+            }
+        }
+    }
+    t
+}
+
+/// §10-4 보고 본문(통신 로그에 ID/PW 평문 — §10-5). 성공은 개수만, 나머지는 ID/PW(+사유).
+fn format_report(t: &Tally, received: usize, cum: &Cumulative) -> String {
+    let mut s = format!(
+        "성공 {} / 보류 {} / 대기초과 {} / 실패 {}",
+        t.success,
+        t.onhold.len(),
+        t.timedout.len(),
+        t.failed.len()
+    );
+    for (id, pw) in &t.onhold {
+        s.push_str(&format!("\n  보류  {id} / {pw}"));
+    }
+    for (id, pw) in &t.timedout {
+        s.push_str(&format!("\n  대기초과  {id} / {pw}"));
+    }
+    for (id, pw, why) in &t.failed {
+        s.push_str(&format!("\n  실패  {id} / {pw}  사유: {why}"));
+    }
+    s.push_str(&format!(
+        "\n총 받은 계정 {} · 성공 {} / 보류 {} / 대기초과 {} / 실패 {}",
+        cum.received, cum.success, cum.onhold, cum.timedout, cum.failed
+    ));
+    let _ = received;
+    s
+}
+
+// ── 누적 ledger(§10-4) — 작은 json으로 영속화 ──
+#[derive(Default, Serialize, Deserialize, Clone)]
+struct Cumulative {
+    received: usize,
+    success: usize,
+    onhold: usize,
+    timedout: usize,
+    failed: usize,
+}
+
+fn ledger_path() -> Option<std::path::PathBuf> {
+    crate::auth::app_data_root().ok().map(|r| r.join("agent-ledger.json"))
+}
+
+fn ledger_add(received: usize, t: &Tally) -> Cumulative {
+    let mut c: Cumulative = ledger_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    c.received += received;
+    c.success += t.success;
+    c.onhold += t.onhold.len();
+    c.timedout += t.timedout.len();
+    c.failed += t.failed.len();
+    if let Some(p) = ledger_path() {
+        if let Ok(s) = serde_json::to_string_pretty(&c) {
+            let _ = std::fs::write(p, s);
+        }
+    }
+    c
+}
+
+// ───────────────────────── 하트비트 + 상태 보고 루프 ─────────────────────────
+
+async fn heartbeat_loop() {
     let client = reqwest::Client::new();
     loop {
         if let Some(cfg) = config::load() {
@@ -273,13 +450,25 @@ async fn heartbeat_loop<R: Runtime>(_app: AppHandle<R>) {
             let ip_opt = if ip.starts_with('(') { None } else { Some(ip.as_str()) };
             let _ = net::heartbeat(&client, &cfg.server_url, &cfg.device_token, ip_opt, "online").await;
         }
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    }
+}
+
+/// adb.rs가 보낸 상태신호를 서버로 전달(§4). rotating=상태 전이, online=하트비트(바뀐 IP).
+async fn state_report_loop(mut rx: mpsc::UnboundedReceiver<(String, Option<String>)>) {
+    let client = reqwest::Client::new();
+    while let Some((state, ip)) = rx.recv().await {
+        let Some(cfg) = config::load() else { continue };
+        if state == "online" {
+            let _ = net::heartbeat(&client, &cfg.server_url, &cfg.device_token, ip.as_deref(), "online").await;
+        } else {
+            let _ = net::post_state(&client, &cfg.server_url, &cfg.device_token, &state).await;
+        }
     }
 }
 
 // ===================== Tauri 명령(하위 등록 화면 §6-2) =====================
 
-/// 하위 앱 등록: 서버주소 + 기기코드 → 등록 → 토큰 저장. 성공 시 루프가 자동 연결.
 #[tauri::command]
 pub async fn agent_register(server_url: String, code: String) -> Result<AgentStatus, String> {
     let base = server_url.trim().trim_end_matches('/').to_string();
@@ -288,20 +477,15 @@ pub async fn agent_register(server_url: String, code: String) -> Result<AgentSta
     }
     let client = reqwest::Client::new();
     let resp = net::register(&client, &base, code.trim(), None).await?;
-    let device_name = format!("하위-{}", &resp.device_id.chars().take(4).collect::<String>());
+    let device_name = format!("하위-{}", resp.device_id.chars().take(4).collect::<String>());
     config::save(&AgentConfig {
         server_url: base.clone(),
         device_token: resp.device_token,
         device_name: device_name.clone(),
     })?;
-    Ok(AgentStatus {
-        configured: true,
-        server_url: base,
-        device_name,
-    })
+    Ok(AgentStatus { configured: true, server_url: base, device_name })
 }
 
-/// 현재 등록 상태 조회.
 #[tauri::command]
 pub fn agent_status() -> AgentStatus {
     match config::load() {
@@ -318,7 +502,6 @@ pub fn agent_status() -> AgentStatus {
     }
 }
 
-/// 등록 해제(설정 삭제). 서버 쪽 기기 삭제는 Admin이 별도로 수행(§6-4).
 #[tauri::command]
 pub fn agent_unregister() -> Result<(), String> {
     config::clear()
