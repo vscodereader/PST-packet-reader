@@ -101,6 +101,24 @@ impl From<tungstenite::Error> for AutomationError {
     }
 }
 
+/// 에러 메시지가 "연결 중단/끊김"(재접속하면 살릴 수 있는 부류)인지 판별한다(순수 함수, 2026-06-30).
+/// CDP WebSocket(127.0.0.1)이 호스트 소프트웨어(백신/방화벽/원격데스크톱)·망 변화로 끊긴 경우다.
+/// Windows 소켓코드 10053(ECONNABORTED 호스트 SW가 끊음)·10054(ECONNRESET 상대 리셋)·10060
+/// (ETIMEDOUT 연결 시간초과)과, tungstenite의 연결종료 문구를 본다. 타임아웃(읽기/쓰기 초과)은
+/// 소켓이 살아있을 수 있어 제외한다 — 여기선 "끊김"만 재접속 대상으로 본다.
+fn is_connection_lost_message(message: &str) -> bool {
+    const MARKERS: [&str; 7] = [
+        "os error 10053",
+        "os error 10054",
+        "os error 10060",
+        "연결이 닫혔습니다",
+        "Connection reset",
+        "Connection aborted",
+        "ConnectionClosed",
+    ];
+    MARKERS.iter().any(|marker| message.contains(marker))
+}
+
 // 네이버 로그인 확인부터 토론방 선택, 글쓰기/댓글 등록까지 전체 흐름을 실행하는 함수입니다.
 // 글/글+댓글 매크로가 공유하는 진입 셋업 결과(Chrome 연결·패킷 클라이언트·로그인·선택 종목).
 struct ForumDiscussionSession {
@@ -337,20 +355,36 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
 pub(crate) struct CdpClient {
     socket: WebSocket<MaybeTlsStream<TcpStream>>,
     next_id: u64,
+    // 재접속(reconnect)용으로 연결 대상을 보관한다. 폴링 중 소켓이 호스트 소프트웨어/원격끊김
+    // 등으로 중단(10053/10054 등)되면 같은 Chrome 디버그 포트로 다시 붙어 명령을 재시도한다.
+    host: String,
+    port: u16,
 }
 
 impl CdpClient {
     // 이미 실행 중인 Chrome DevTools 탭에 WebSocket으로 연결하는 함수입니다.
     pub(crate) fn connect_to_existing_chrome(host: &str, port: u16) -> AutomationResult<Self> {
+        let socket = Self::establish_socket(host, port)?;
+        Ok(Self {
+            socket,
+            next_id: 0,
+            host: host.to_owned(),
+            port,
+        })
+    }
+
+    // Chrome 디버그 포트로 WebSocket을 새로 맺는다(연결·재접속 공용). 대상 탭을 고르고 TCP·핸드셰이크
+    // 타임아웃을 건다. tungstenite `connect()`는 TCP 연결·핸드셰이크에 타임아웃이 없어, TCP는
+    // connect_timeout으로, 이후 입출력은 read/write 타임아웃으로 묶어 무한 대기를 막는다(#210).
+    fn establish_socket(
+        host: &str,
+        port: u16,
+    ) -> AutomationResult<WebSocket<MaybeTlsStream<TcpStream>>> {
         let target = select_or_create_target(host, port).map_err(|error| {
             AutomationError::new(format!("Chrome DevTools 대상 탭 선택 실패: {error}"))
         })?;
         let url = websocket_url_for_host(&target.web_socket_debugger_url, host, port)?;
 
-        // tungstenite `connect()`는 TCP 연결·핸드셰이크에 타임아웃이 없다. DevTools는
-        // 127.0.0.1의 평문 ws라, TCP는 connect_timeout으로, 핸드셰이크/이후 입출력은
-        // read/write 타임아웃으로 묶어 무한 대기를 막는다(#210). read_message/send_message의
-        // WouldBlock+데드라인 루프가 이 read/write 타임아웃과 맞물려 실제로 동작하게 된다.
         let addr = (host, port)
             .to_socket_addrs()
             .ok()
@@ -378,8 +412,17 @@ impl CdpClient {
                     "Chrome DevTools WebSocket 연결 실패({url}): {error:?}"
                 ))
             })?;
+        Ok(socket)
+    }
 
-        Ok(Self { socket, next_id: 0 })
+    // 끊긴 소켓을 같은 Chrome 디버그 포트로 다시 맺어 교체한다. 성공하면 죽은 소켓을 새 소켓으로
+    // 갈아끼우고, 실패하면(크롬이 정말 죽음) 기존 소켓을 그대로 두고 Err를 돌려준다 — 호출부가
+    // 재시도 상한을 넘기면 그때 최종 실패시킨다. Page/Runtime enable 은 다시 켜지 않는다:
+    // 로그인 폴링이 쓰는 Network.getCookies·Runtime.evaluate 는 enable 없이 동작하는 명령이고,
+    // 재접속 시 enable 을 다시 부르면 같은 끊김에 또 막힐 수 있어 최소 동작만 한다.
+    fn reconnect(&mut self) -> AutomationResult<()> {
+        self.socket = Self::establish_socket(&self.host, self.port)?;
+        Ok(())
     }
 
     // Chrome DevTools의 Runtime/Page 도메인을 활성화하는 함수입니다.
@@ -442,8 +485,43 @@ impl CdpClient {
         Ok(())
     }
 
-    // Chrome DevTools Protocol 메서드를 호출하고 응답을 기다리는 함수입니다.
+    // CDP 메서드를 호출하되, 소켓이 호스트 소프트웨어/원격끊김 등으로 중단(10053/10054 등)되면
+    // 같은 Chrome 디버그 포트로 재접속해 재시도한다(사용자 지시 2026-06-30). 끊긴 그 순간 네이버
+    // 쪽엔 이미 로그인(쿠키 발급)이 됐을 수 있어, 재접속 후 다시 읽으면 성공으로 건질 수 있다.
+    //
+    // - 정상(끊김 없음) 경로엔 영향 0 — 재접속은 "연결 중단" 에러일 때만 발동한다.
+    // - 재시도 가능한 건 **멱등 명령만**이다. `Input.*`(키/마우스 입력)은 재전송하면 중복 입력될 수
+    //   있어 제외한다(끊긴 시점 이미 전달됐을 수 있음). 폴링이 쓰는 Network.getCookies·
+    //   Runtime.evaluate·Page.navigate 등은 재전송해도 안전(읽기/이동은 멱등)하다.
     pub(crate) fn call(&mut self, method: &str, params: Value) -> AutomationResult<Value> {
+        const MAX_RECONNECT: u32 = 2;
+        let retryable = !method.starts_with("Input.");
+        let mut attempt = 0u32;
+        loop {
+            match self.call_once(method, params.clone()) {
+                Ok(value) => return Ok(value),
+                Err(error)
+                    if retryable
+                        && attempt < MAX_RECONNECT
+                        && is_connection_lost_message(error.message()) =>
+                {
+                    attempt += 1;
+                    tracing::info!(
+                        "[CDP] 연결 중단 감지({method}) — 재접속 후 재시도 {attempt}/{MAX_RECONNECT}: {}",
+                        error.message()
+                    );
+                    sleep(Duration::from_millis(500));
+                    // 재접속 실패(크롬이 정말 죽음)면 죽은 소켓이 남아 다음 call_once가 또 연결중단으로
+                    // 떨어지고, 상한을 넘기면 최종 실패한다. best-effort.
+                    let _ = self.reconnect();
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    // Chrome DevTools Protocol 메서드를 호출하고 응답을 기다리는 함수입니다(재접속 없는 1회 호출).
+    fn call_once(&mut self, method: &str, params: Value) -> AutomationResult<Value> {
         self.next_id += 1;
         let id = self.next_id;
         let payload = json!({
@@ -639,6 +717,26 @@ impl CdpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_lost_detects_socket_abort_but_not_plain_timeout() {
+        // 재접속 대상: 소켓 중단(10053/10054/10060)·연결 종료.
+        assert!(is_connection_lost_message(
+            "IO error: ... 호스트 시스템의 소프트웨어에 의해 중단되었습니다. (os error 10053)"
+        ));
+        assert!(is_connection_lost_message("connection reset (os error 10054)"));
+        assert!(is_connection_lost_message(
+            "응답이 없어 연결이 끊어졌습니다. (os error 10060)"
+        ));
+        assert!(is_connection_lost_message("Chrome DevTools 연결이 닫혔습니다."));
+        // 재접속 비대상: 우리 읽기/쓰기 타임아웃(소켓은 살아있을 수 있음)·일반 CDP 오류.
+        assert!(!is_connection_lost_message(
+            "Chrome DevTools WebSocket 읽기 시간이 초과되었습니다."
+        ));
+        assert!(!is_connection_lost_message(
+            "CDP 호출 실패(Runtime.evaluate): {\"code\":-32000}"
+        ));
+    }
 
     #[test]
     fn automation_error_keeps_message_and_records_caller_location() {
