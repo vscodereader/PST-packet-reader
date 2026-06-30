@@ -215,7 +215,7 @@ async fn run_forum_publish_now<R: Runtime>(
             request.host = FORUM_DEVTOOLS_HOST.to_owned();
             request.port = chrome.port;
             // 즉시 게시 경로는 종목별 진행 콜백이 필요 없어 no-op을 넘긴다(#219는 큐 워커 전용).
-            let results = run_forum_publish(request, app_for_job, |_| {}, |_, _| {});
+            let results = run_forum_publish(request, app_for_job, |_| {}, |_, _| {}, |_, _, _| {});
             drop(chrome);
             Ok(results)
         })
