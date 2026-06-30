@@ -63,3 +63,7 @@ src-tauri/.omc/
 
 # Windows(WSL) ADS 메타파일
 *:Zone.Identifier
+
+# 설계 대화 기록·프롬프트 — 로컬 보관, GitHub 미업로드(사용자 지시)
+docs/원격제어_설계_대화기록.md
+docs/*.txt
