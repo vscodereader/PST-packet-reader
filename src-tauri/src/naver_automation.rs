@@ -196,6 +196,10 @@ pub fn run_naver_discussion_macro(
         return Err(AutomationError::new("내용이 비어 있습니다."));
     }
 
+    // 매크로 시작~세션 오픈(크롬 연결·로그인 확인·종목토론방 진입+페이지 로드 대기)까지의 실제
+    // 소요시간을 로그로 남긴다. "게시 시작까지 20초"가 어느 단계에서 새는지 드러내기 위함(사수 지적).
+    let macro_started = Instant::now();
+    tracing::info!(target_kind = ?request.target, "게시 매크로 시작 — 세션 오픈 진입");
     let ForumDiscussionSession {
         mut chrome,
         packet_client,
@@ -207,6 +211,10 @@ pub fn run_naver_discussion_macro(
         request.account_id.as_deref(),
         request.stock.as_ref(),
     )?;
+    tracing::info!(
+        elapsed_secs = macro_started.elapsed().as_secs(),
+        "세션 오픈 완료 — 글/댓글 등록 단계 시작"
+    );
 
     let mut posted_url: Option<String> = None;
     let (register_button_highlighted, submitted) = match request.target {
@@ -359,6 +367,13 @@ pub(crate) struct CdpClient {
     // 등으로 중단(10053/10054 등)되면 같은 Chrome 디버그 포트로 다시 붙어 명령을 재시도한다.
     host: String,
     port: u16,
+    // 페이지 로드 중 *브라우저(크롬)가 직접 던진* 네트워크 요청을 추적한다(대기초과 진단용).
+    // 우리 Rust 패킷이 아니라 브라우저 내부 요청이라, CDP Network 도메인 이벤트로만 "무슨 요청이
+    // 무슨 status로 멈췄나"를 알 수 있다. requestId → (url, 받은 status). loadingFinished면
+    // 제거(정상 완료)하므로, 타임아웃 시 남아있는 항목이 곧 '응답을 못 받고 멈춘 요청'이다.
+    net_inflight: std::collections::HashMap<String, (String, Option<u16>)>,
+    // 최근 끝난 요청 중 *실패/4xx·5xx* 만 요약해 모은다(정상 2xx는 노이즈라 제외, 상한 있음).
+    net_recent: Vec<String>,
 }
 
 impl CdpClient {
@@ -370,6 +385,8 @@ impl CdpClient {
             next_id: 0,
             host: host.to_owned(),
             port,
+            net_inflight: std::collections::HashMap::new(),
+            net_recent: Vec::new(),
         })
     }
 
@@ -431,6 +448,13 @@ impl CdpClient {
             .map_err(|error| AutomationError::new(format!("Runtime.enable 실패: {error}")))?;
         self.call("Page.enable", json!({}))
             .map_err(|error| AutomationError::new(format!("Page.enable 실패: {error}")))?;
+        // Network 도메인을 켜서 브라우저가 던지는 요청/응답/실패 이벤트를 받는다 — 페이지 로드
+        // 대기초과 시 "어떤 브라우저 요청이 무슨 status로 멈췄나"를 로그에 남기기 위함. 게시/댓글
+        // 경로 전용(로그인은 enable_page_only로 Network·Runtime 미활성 — 봇탐지 표면 유지). 실패는
+        // 비치명적으로 둔다 — 이벤트 진단이 안 될 뿐 게시 흐름 자체는 그대로 동작해야 한다.
+        if let Err(error) = self.call("Network.enable", json!({})) {
+            tracing::warn!("Network.enable 실패 — 네트워크 진단 이벤트 없이 계속: {error}");
+        }
         Ok(())
     }
 
@@ -551,6 +575,11 @@ impl CdpClient {
             let value: Value = serde_json::from_str(&text)?;
 
             if value.get("id").and_then(Value::as_u64) != Some(id) {
+                // 우리 명령 응답이 아니면(브라우저가 보낸 method 이벤트) 네트워크 진단용으로 수집하고
+                // 계속 읽는다 — 페이지 로드 멈춤의 진짜 원인(어떤 요청이 멈췄나)을 잡기 위함.
+                if let Some(method) = value.get("method").and_then(Value::as_str) {
+                    self.record_network_event(method, &value);
+                }
                 continue;
             }
 
@@ -562,6 +591,103 @@ impl CdpClient {
 
             return Ok(value.get("result").cloned().unwrap_or(Value::Null));
         }
+    }
+
+    // 브라우저(크롬)가 페이지 로드 중 던진 네트워크 요청/응답/실패 이벤트를 추적한다(대기초과 진단).
+    // 우리 Rust 패킷이 아니라 *브라우저 내부* 요청이라 이 이벤트로만 보인다. Network 도메인이 켜져
+    // 있을 때만 흐른다(게시/댓글 경로의 enable()에서 켠다).
+    fn record_network_event(&mut self, method: &str, value: &Value) {
+        let params = value.get("params");
+        let request_id = params
+            .and_then(|p| p.get("requestId"))
+            .and_then(Value::as_str);
+        let Some(request_id) = request_id else {
+            return;
+        };
+        match method {
+            "Network.requestWillBeSent" => {
+                if let Some(url) = params
+                    .and_then(|p| p.pointer("/request/url"))
+                    .and_then(Value::as_str)
+                {
+                    // 한 페이지에 요청이 폭주해도 메모리를 묶어둔다(상한 초과분은 추적하지 않음).
+                    if self.net_inflight.len() < 500 {
+                        self.net_inflight
+                            .insert(request_id.to_owned(), (url.to_owned(), None));
+                    }
+                }
+            }
+            "Network.responseReceived" => {
+                let status = params
+                    .and_then(|p| p.pointer("/response/status"))
+                    .and_then(Value::as_u64)
+                    .map(|s| s as u16);
+                if let Some(status) = status {
+                    if status >= 400 {
+                        let url = self
+                            .net_inflight
+                            .get(request_id)
+                            .map(|(u, _)| u.clone())
+                            .unwrap_or_default();
+                        self.push_net_recent(format!("HTTP {status} ← {url}"));
+                    }
+                }
+                if let Some(entry) = self.net_inflight.get_mut(request_id) {
+                    entry.1 = status;
+                }
+            }
+            // 정상적으로 로드가 끝난 요청은 추적에서 뺀다 — 타임아웃 때 남은 것만 '멈춘 요청'이다.
+            "Network.loadingFinished" => {
+                self.net_inflight.remove(request_id);
+            }
+            "Network.loadingFailed" => {
+                let url = self
+                    .net_inflight
+                    .remove(request_id)
+                    .map(|(u, _)| u)
+                    .unwrap_or_default();
+                let canceled = params
+                    .and_then(|p| p.get("canceled"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                // 의도된 취소(네비게이션으로 중단 등)는 잡음이라 제외하고, 진짜 실패만 모은다.
+                if !canceled {
+                    let err = params
+                        .and_then(|p| p.get("errorText"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("(원인 불명)");
+                    self.push_net_recent(format!("로드 실패({err}) ← {url}"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 최근 실패/4xx·5xx 요약을 상한 내에서 보관한다(오래된 것부터 버린다).
+    fn push_net_recent(&mut self, line: String) {
+        const MAX_RECENT: usize = 30;
+        if self.net_recent.len() >= MAX_RECENT {
+            self.net_recent.remove(0);
+        }
+        self.net_recent.push(line);
+    }
+
+    // 새 페이지로 이동할 때 직전 페이지의 네트워크 추적을 비운다(이번 navigation 기준으로만 진단).
+    fn reset_network_trace(&mut self) {
+        self.net_inflight.clear();
+        self.net_recent.clear();
+    }
+
+    // 대기초과 시점에 '아직 응답을 못 받았거나 완료 안 된' 브라우저 요청 목록(진단 로그용).
+    fn pending_network_requests(&self) -> Vec<String> {
+        self.net_inflight
+            .values()
+            .take(20)
+            .map(|(url, status)| match status {
+                Some(s) => format!("[status {s} 받았으나 미완료] {url}"),
+                None => format!("[응답 대기중(status 없음)] {url}"),
+            })
+            .collect()
     }
 
     // Chrome DevTools WebSocket으로 메시지를 보내는 함수입니다.
@@ -690,13 +816,20 @@ impl CdpClient {
 
     // Chrome 탭을 지정한 URL로 이동시키는 함수입니다.
     pub(crate) fn navigate(&mut self, url: &str) -> AutomationResult<()> {
+        // 어느 페이지로 이동하는지 로그에 남긴다 — "대기초과"가 났을 때 *어떤 페이지가* 안 열렸는지
+        // 바로 짚을 수 있게(사수 지적: 무슨 호출에서 무슨 문제인지 로그에 보여야 함).
+        tracing::info!(url = %url, "브라우저 페이지 이동(navigate) 시작");
+        // 직전 페이지의 네트워크 추적을 비워, 대기초과 진단이 이번 페이지 요청만 반영하게 한다.
+        self.reset_network_trace();
         self.call("Page.navigate", json!({ "url": url }))?;
         self.wait_for_ready_state(DEFAULT_TIMEOUT)
     }
 
     // 페이지가 interactive 또는 complete 상태가 될 때까지 기다리는 함수입니다.
     pub(crate) fn wait_for_ready_state(&mut self, timeout: Duration) -> AutomationResult<()> {
-        let end = Instant::now() + timeout;
+        let start = Instant::now();
+        let end = start + timeout;
+        let mut last_state = String::new();
 
         while Instant::now() < end {
             let state = self.evaluate_string("document.readyState")?;
@@ -704,13 +837,33 @@ impl CdpClient {
             if state == "interactive" || state == "complete" {
                 return Ok(());
             }
-
+            last_state = state;
             sleep(Duration::from_millis(250));
         }
 
-        Err(AutomationError::new(
-            "페이지 로드 대기 시간이 초과되었습니다.",
-        ))
+        // 페이지 로드가 상한까지 차서 타임아웃 — 이건 *API 호출 실패가 아니라* 브라우저 페이지가
+        // 끝까지 로딩 상태에서 못 벗어난 것이다. 어느 URL이 멈췄는지(best-effort)까지 남겨, 다음에
+        // 어떤 페이지가 문제인지 로그만 보고 알 수 있게 한다(사수 지적). 글쓰기 add 같은 API는 이
+        // 단계를 못 넘으면 *애초에 호출되지 않는다* — 그래서 실패 로그에 API가 안 보이는 것이다.
+        let stuck_url = self
+            .evaluate_string("location.href")
+            .unwrap_or_else(|_| "(URL 확인 실패)".to_owned());
+        // 브라우저가 이 페이지를 로드하다 멈춘 *진짜 원인*: 응답을 못 받고 멈춰있는 요청들과 최근
+        // 실패/4xx·5xx 응답을 함께 남긴다(CDP Network 이벤트 기반). 이게 "무슨 요청이 무슨 status로
+        // 멈췄나"의 답이다 — 우리 Rust API 호출이 아니라 브라우저 내부 요청이라 이 경로로만 보인다.
+        let pending = self.pending_network_requests();
+        tracing::warn!(
+            waited_secs = start.elapsed().as_secs(),
+            last_ready_state = %last_state,
+            url = %stuck_url,
+            pending_count = self.net_inflight.len(),
+            pending_requests = ?pending,
+            recent_failures = ?self.net_recent,
+            "페이지 로드 대기 시간 초과 — 멈춘/실패한 브라우저 요청 포함(우리 API 호출이 아니라 브라우저 페이지 로딩)"
+        );
+        Err(AutomationError::new(format!(
+            "페이지 로드 대기 시간이 초과되었습니다. (멈춘 페이지: {stuck_url})"
+        )))
     }
 }
 
