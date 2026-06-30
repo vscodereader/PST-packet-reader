@@ -148,14 +148,6 @@ pub fn is_blocking_failure(message: &str) -> bool {
 /// 우선이므로, 호출부는 먼저 차단을 보고 그 다음 이걸 본다. 429(요청 과다)는 여기에 넣지 않는다.
 pub fn is_timed_out_failure(message: &str) -> bool {
     let m = message;
-    // "프로필 상태 조회 불가"(네이버가 그 계정의 프로필 상태를 못 돌려줌)는 같은 500이라도
-    // **일시적 서버오류가 아니라 그 계정의 지속적 문제**다(실측 2026-06-30: 한 배치에서 다른
-    // 6계정은 정상인데 jaj 계정만 종목마다 이 500을 맞아, 종목당 30회 헛재시도로 수십 분 배치를
-    // 붙잡았다). 재시도해도 또 실패하므로 대기초과(재시도 대상)로 보지 않고 즉시 실패시킨다
-    // (사용자 지시). 일반 일시 500은 아래에서 그대로 재시도 대상으로 남는다.
-    if is_profile_status_unavailable(m) {
-        return false;
-    }
     // (2) 서버 오류: 메시지에 박힌 HTTP 상태코드가 500이거나, 명시적 서버 오류 문구.
     if server_error_http_status(m)
         || m.contains("서버에 문제")
@@ -173,15 +165,6 @@ pub fn is_timed_out_failure(message: &str) -> bool {
         "timeout",
     ];
     TIMEOUT_MARKERS.iter().any(|marker| m.contains(marker))
-}
-
-/// "프로필 상태 조회 불가" 실패인지 판별한다(순수 함수, 2026-06-30). 네이버가 그 계정의 프로필
-/// 상태를 못 돌려줄 때(본문 `Failed to fetch profile user status`, 보통 HTTP 500) 나온다. 같은
-/// 500이라도 일시적 서버 부하가 아니라 **그 계정의 지속적 문제**(제재·본인인증 미완·잠금 등)일
-/// 가능성이 높아, 재시도해도 또 실패한다. 그래서 일시 서버오류(재시도 대상)와 분리해 즉시 실패로
-/// 처리한다(`is_timed_out_failure`가 이 메시지엔 false를 돌려줘 재시도를 막고, 계정은 Error로 칠해진다).
-pub fn is_profile_status_unavailable(message: &str) -> bool {
-    message.contains("Failed to fetch profile user status")
 }
 
 /// 메시지에 박힌 HTTP 상태코드가 500(서버 오류)인지 본다(순수 함수, #286).
@@ -354,7 +337,11 @@ fn is_retryable_forum_failure(message: &str) -> bool {
 /// 단 "네이버 자체 먹통/세션 사망"처럼 차단 메시지 없이 계속 timeout만 나는 경우엔 차단 감지가
 /// 안 걸려 무한히 돌 수 있어, 넉넉한 시간 상한(`FORUM_RETRY_TOTAL_BUDGET`)을 안전망으로 둔다 —
 /// 이 상한을 넘으면 그때 대기초과로 남겨 글을 잃지 않고 큐도 영영 막지 않는다.
-const FORUM_TIMEOUT_RETRIES: usize = 30;
+// 재시도 횟수(사용자 지시 2026-06-30: 30→9). 대기초과·일시 500은 네이버 일시 부하일 수도,
+// 계정 간 네트워크 선점 경합·우리 프로그램 일시 결함일 수도 있어 "재시도로 풀릴 수 있는" 실패다.
+// 그래서 즉시 실패시키지 않고 9회까지 재시도하고, 9회 내내 같은 실패면 그때 "재시도로 못 고치는
+// 문제"로 확정해 실패로 남긴다(한 계정이 30회로 배치를 수십 분 붙잡던 문제는 9회로 완화).
+const FORUM_TIMEOUT_RETRIES: usize = 9;
 const FORUM_RETRY_BACKOFF_BASE_SECS: u64 = 3;
 const FORUM_RETRY_BACKOFF_MAX_SECS: u64 = 30;
 const FORUM_RETRY_TOTAL_BUDGET: Duration = Duration::from_secs(600);
@@ -1093,22 +1080,22 @@ mod tests {
     }
 
     #[test]
-    fn profile_status_500_is_not_retryable_timeout_but_generic_500_still_is() {
-        // 2026-06-30: "프로필 상태 조회 불가"(Failed to fetch profile user status)는 같은 500이라도
-        // 그 계정의 지속 문제라 재시도 대상(대기초과)이 아니다 → 즉시 실패.
+    fn profile_status_500_is_retryable_like_other_transient_500() {
+        // 2026-06-30(수정): "프로필 상태 조회 불가"(Failed to fetch profile user status) 500도
+        // 네이버 일시 부하·계정 간 네트워크 선점 경합·우리 프로그램 일시 결함일 수 있어 재시도로
+        // 풀릴 수 있다. 따라서 일반 일시 500과 똑같이 재시도 대상으로 둔다(9회까지 시도 후 실패).
         let profile_500 = "프로필 상태 패킷 HTTP 실패: status=500, \
              body={\"message\":\"Failed to fetch profile user status\"}";
-        assert!(is_profile_status_unavailable(profile_500));
-        assert!(!is_timed_out_failure(profile_500), "프로필 상태 500은 대기초과 아님");
-        assert!(
-            !is_retryable_forum_failure(profile_500),
-            "프로필 상태 500은 재시도 대상 아님(즉시 실패)"
-        );
-        // 일반 일시 500(서버 부하)은 그대로 재시도 대상으로 남는다 — regression 방지.
-        let generic_500 = "HTTP status 500 Internal Server Error";
-        assert!(!is_profile_status_unavailable(generic_500));
-        assert!(is_timed_out_failure(generic_500));
-        assert!(is_retryable_forum_failure(generic_500));
+        assert!(is_timed_out_failure(profile_500));
+        assert!(is_retryable_forum_failure(profile_500));
+        // 일반 일시 500도 동일하게 재시도 대상.
+        assert!(is_retryable_forum_failure("HTTP status 500 Internal Server Error"));
+    }
+
+    #[test]
+    fn forum_timeout_retries_capped_at_nine() {
+        // 사용자 지시 2026-06-30: 30 → 9. 한 계정이 30회로 배치를 수십 분 붙잡던 문제 완화.
+        assert_eq!(FORUM_TIMEOUT_RETRIES, 9);
     }
 
     #[test]
