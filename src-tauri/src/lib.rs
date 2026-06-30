@@ -1,3 +1,4 @@
+mod agent;
 mod ipc;
 mod logging;
 mod store;
@@ -703,6 +704,9 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         set_autostart,
         get_now_concurrency_limit,
         set_now_concurrency_limit,
+        agent::agent_register,
+        agent::agent_status,
+        agent::agent_unregister,
     ])
 }
 
@@ -913,6 +917,8 @@ pub fn run() {
         tauri::async_runtime::spawn(async move {
             ipc::queue::scheduler_loop(scheduler_app).await;
         });
+        // 원격제어 에이전트(§9) 기동 — SSE 명령 수신·하트비트 루프. 등록 전이면 대기만 한다.
+        agent::start(app.handle().clone());
         Ok(())
     })
     .run(tauri::generate_context!())

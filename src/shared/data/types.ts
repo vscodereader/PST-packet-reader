@@ -1,6 +1,12 @@
 import type { PublishPlan } from "@/shared/bindings/PublishPlan";
 
-export type ViewId = "dashboard" | "posts" | "queue" | "log" | "accounts";
+export type ViewId =
+  | "dashboard"
+  | "posts"
+  | "queue"
+  | "log"
+  | "accounts"
+  | "device-register";
 
 export interface LogFilter {
   loginId?: string;

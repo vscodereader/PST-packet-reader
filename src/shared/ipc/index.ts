@@ -358,4 +358,18 @@ export const ipc = {
     rotateIp: () =>
       call<{ before: string; after: string; changed: boolean }>("rotate_ip"),
   },
+  // 원격제어 에이전트(§6-2·§9). 하위 앱이 서버주소+기기코드로 등록하면 토큰을 받아 SSE 연결.
+  agent: {
+    register: (serverUrl: string, code: string) =>
+      call<AgentStatus>("agent_register", { serverUrl, code }),
+    status: () => call<AgentStatus>("agent_status"),
+    unregister: () => call<void>("agent_unregister"),
+  },
 };
+
+/** 에이전트 등록 상태(`src-tauri/src/agent`). */
+export interface AgentStatus {
+  configured: boolean;
+  serverUrl: string;
+  deviceName: string;
+}
