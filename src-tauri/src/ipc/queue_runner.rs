@@ -1762,6 +1762,26 @@ async fn run_forum_targets<R: Runtime>(
     // 진행 중→완료/실패로 바꾼다(로그인 화면과 동일 UX, #219 — 완료된 것만 보이던 문제 해결).
     // blocking 스레드의 콜백과 공유하므로 Arc<Mutex>로 들고 다닌다. 인덱스 순서는
     // reqs 순서(=skeleton·outcomes 순서)와 일치한다.
+    // [가시성] 어떤 계정들이 몇 종목씩, 몇 개씩 동시에 게시되는지 시작 시 한 줄로 남긴다 — 묶음
+    // 대기 중이라 아직 글 로그가 없는 계정도 "무엇을 기다리는지" 보이게(사용자 지적 2026-06-30).
+    {
+        let who_list: Vec<String> = reqs
+            .iter()
+            .map(|r| {
+                format!(
+                    "{}({}종목)",
+                    crate::auth::mask_id(&r.account_id),
+                    r.stocks.len()
+                )
+            })
+            .collect();
+        tracing::info!(
+            "[POST] 종목토론방 게시 시작 — {}계정을 묶음당 최대 {}개씩 동시 게시: {}",
+            reqs.len(),
+            FORUM_PARALLEL_CAP,
+            who_list.join(", ")
+        );
+    }
     let forum_live = Arc::new(Mutex::new(forum_skeleton_items(&reqs)));
     {
         let live = lock_or_poisoned(&forum_live);
@@ -1835,6 +1855,14 @@ async fn run_forum_targets<R: Runtime>(
                         let mut req = req;
                         // host는 plan_to_forum_requests에서 이미 127.0.0.1; 포트만 띄운 Chrome 값으로.
                         req.port = chrome.port;
+                        // [가시성] 이 계정의 게시가 "지금 시작됐다"를 남긴다 — 종목 글 로그가 나오기
+                        // 전(전용 Chrome 띄우고 첫 글 여는 동안)에도 어느 계정이 도는지 보이게 한다.
+                        tracing::info!(
+                            "[POST] {} 종목토론방 게시 시작 — 전용 Chrome(포트 {}) · {}종목",
+                            crate::auth::mask_id(&req.account_id),
+                            chrome.port,
+                            req.stocks.len()
+                        );
                         let results = run_forum_publish(req, app_for_job, on_start, on_result);
                         drop(chrome);
                         results
