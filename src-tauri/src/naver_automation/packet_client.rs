@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::process;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::blocking::Client;
 use reqwest::header::{
@@ -404,13 +404,20 @@ impl NaverPacketClient {
             .and_then(Value::as_bool)
             .unwrap_or(false)
         {
+            // 실제 네이버 API(/front-api/discussion/add)의 *실제 실패 응답*을 로그 파일에 그대로
+            // 남긴다(사수 지시: 내가 만든 요약이 아니라 원본 API 성공/실패가 로그에 있어야 함).
+            tracing::warn!(
+                api = "POST /front-api/discussion/add",
+                response = %log_snippet(&response_text),
+                "글쓰기 add API 실패(isSuccess=false)"
+            );
             return Err(AutomationError::new(format!(
                 "글쓰기 add 패킷 API 실패: {}",
                 packet_error_message(&value, &response_text)
             )));
         }
 
-        Ok(value
+        let post_id = value
             .pointer("/result/id")
             .and_then(Value::as_i64)
             .map(|value| value.to_string())
@@ -420,7 +427,14 @@ impl NaverPacketClient {
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned)
             })
-            .unwrap_or_default())
+            .unwrap_or_default();
+        // 실제 API가 글을 받았다는 *원본 성공 응답*을 로그에 남긴다(작성 글 id 포함).
+        tracing::info!(
+            api = "POST /front-api/discussion/add",
+            post_id = %post_id,
+            "글쓰기 add API 성공(isSuccess=true)"
+        );
+        Ok(post_id)
     }
 
     // 글쓰기 add 응답의 post_id를 현재 토론방 기준 토론글 URL로 바꾸는 함수입니다.
@@ -446,12 +460,18 @@ impl NaverPacketClient {
 
     // stock.naver.com JSON API를 공통 헤더로 호출하고 JSON으로 파싱하는 함수입니다.
     fn get_stock_json(&self, path: &str, referer: &str, label: &str) -> AutomationResult<Value> {
+        // 실제로 어떤 API를 호출하는지 경로째 로그에 남긴다(사수 지시: 실제 API 호출이 보여야 함).
+        tracing::info!(label, api = %format!("GET {path}"), "실제 API 호출");
         let response_text = self
             .client
             .get(format!("{STOCK_ORIGIN}{path}"))
             .headers(self.stock_json_headers(STOCK_HOST, referer)?)
             .send()
-            .map_err(|error| AutomationError::new(format!("{label} GET 패킷 전송 실패: {error}")))
+            .map_err(|error| {
+                // 응답 자체가 오지 않은 전송 계층 실패(연결 끊김·타임아웃 등)도 그대로 남긴다.
+                tracing::warn!(label, api = %format!("GET {path}"), error = %error, "실제 API 전송 실패");
+                AutomationError::new(format!("{label} GET 패킷 전송 실패: {error}"))
+            })
             .and_then(|response| response_text(response, label))?;
 
         parse_json(&response_text, label)
@@ -539,12 +559,19 @@ impl NaverPacketClient {
             || value.pointer("/result/commentList").is_some();
 
         if !created {
+            // 실제 cbox 댓글 생성 API의 *원본 실패 응답*을 로그에 남긴다(사수 지시).
+            tracing::warn!(
+                api = "POST cbox web_naver_create_json",
+                response = %log_snippet(&response_text),
+                "댓글 생성 API 실패(success=false)"
+            );
             return Err(AutomationError::new(format!(
                 "댓글 생성 패킷 API 실패: {}",
                 packet_error_message(&value, &response_text)
             )));
         }
 
+        tracing::info!(api = "POST cbox web_naver_create_json", "댓글 생성 API 성공");
         Ok(value
             .pointer("/result/comment/commentNo")
             .and_then(Value::as_i64)
@@ -725,11 +752,18 @@ impl NaverPacketClient {
             if let Some(body) = json_body {
                 builder = builder.json(body);
             }
+            // 실제 HTTP 호출 1건의 소요시간을 잰다 — "게시 시작까지 N초"·"즉시 대기초과"의
+            // 진짜 원인이 어느 단계인지 로그로 드러내기 위함(사수 지적).
+            let started = Instant::now();
             let response = builder.send().map_err(|error| {
+                tracing::warn!(label, attempt, error = %error, "패킷 전송 실패(전송 계층)");
                 AutomationError::new(format!("{label} 패킷 전송 실패: {error}"))
             })?;
             let status = response.status();
+            let elapsed_ms = started.elapsed().as_millis();
             if status.is_success() {
+                // 원본 API 호출의 *실제 성공*을 상태/소요시간과 함께 로그에 남긴다.
+                tracing::info!(label, status = status.as_u16(), elapsed_ms, "패킷 HTTP 응답 OK");
                 return response.text().map_err(|error| {
                     AutomationError::new(format!("{label} 응답 읽기 실패: {error}"))
                 });
@@ -737,9 +771,25 @@ impl NaverPacketClient {
             if is_retryable_status(status.as_u16()) && attempt < POST_RETRY_MAX_ATTEMPTS {
                 let delay =
                     parse_retry_after(response.headers()).unwrap_or_else(|| backoff_delay(attempt));
+                tracing::warn!(
+                    label,
+                    status = status.as_u16(),
+                    attempt,
+                    elapsed_ms,
+                    retry_after_secs = delay.as_secs(),
+                    "패킷 HTTP 일시 실패 — 재시도 예정"
+                );
                 std::thread::sleep(delay);
                 continue;
             }
+            // 원본 API 호출의 *실제 실패*(최종)를 상태와 함께 로그에 남긴다.
+            tracing::warn!(
+                label,
+                status = status.as_u16(),
+                attempt,
+                elapsed_ms,
+                "패킷 HTTP 최종 실패"
+            );
             return Err(AutomationError::new(format!(
                 "{label} 패킷 HTTP 실패: HTTP status {status} for url ({url})"
             )));
@@ -1161,6 +1211,18 @@ fn build_comment_form(object_id: &str, object_url: &str, body: &str, cbox_token:
         .finish()
 }
 
+/// 실제 API 응답 본문을 로그에 남길 때 너무 길지 않게 자른다(원본 성공/실패 응답 기록용).
+/// 쿠키/비밀번호 같은 민감값은 응답 본문에 없으므로 그대로 남겨도 안전하다.
+fn log_snippet(body: &str) -> String {
+    const MAX: usize = 600;
+    let trimmed = body.trim();
+    if trimmed.chars().count() <= MAX {
+        return trimmed.to_owned();
+    }
+    let head: String = trimmed.chars().take(MAX).collect();
+    format!("{head}…(생략)")
+}
+
 // API 응답 문자열을 JSON으로 파싱하고 오류 메시지에 패킷 이름을 붙이는 함수입니다.
 fn parse_json(response_text: &str, label: &str) -> AutomationResult<Value> {
     serde_json::from_str(response_text).map_err(|error| {
@@ -1197,9 +1259,21 @@ fn response_text(response: reqwest::blocking::Response, label: &str) -> Automati
     })?;
 
     if status.is_success() {
+        // 실제로 호출된 GET/POST/PUT API 1건의 성공을 로그에 남긴다(프로필 상태·닉네임·방/글
+        // 선택 등 모든 GET 계열이 이 한 곳을 지난다 — 사수 지시: 실제 API 호출이 로그에 보여야 함).
+        tracing::info!(label, status = status.as_u16(), "실제 API 응답 OK");
         return Ok(text);
     }
 
+    // 실제 API의 *원본 실패 응답*(상태코드+본문)을 그대로 로그 파일에 남긴다. 예) 프로필 상태
+    // status=500, body={"message":"Failed to fetch profile user status"}. 호출부로 올라가며
+    // AutomationError의 백트레이스로도 이어진다(자세히 보기/[POST] 실패 줄의 trace).
+    tracing::warn!(
+        label,
+        status = status.as_u16(),
+        body = %log_snippet(&text),
+        "실제 API HTTP 실패"
+    );
     Err(AutomationError::new(format!(
         "{label} 패킷 HTTP 실패: status={}, body={}",
         status.as_u16(),

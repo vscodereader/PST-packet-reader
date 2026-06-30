@@ -265,11 +265,14 @@ where
             Err(error) => (false, error.message().to_owned(), Some(error.trace()), None),
         };
 
-        // 작업 결과를 pstmacro.log에 기록(가독성·상세화).
+        // 작업 결과를 pstmacro.log에 기록(가독성·상세화). 실패는 *실제 에러 메시지 + 캡처된
+        // 백트레이스*를 함께 남긴다 — 내가 만든 요약("대기초과")만이 아니라 원본 실패 지점이
+        // 로그 파일에 남아야 한다는 사수 지시 반영(백트레이스에 들어가는 내용).
         if ok {
             tracing::info!("[POST] {who}  \"{}\" 종목토론방 {kind} 성공 ✅", stock.name);
         } else {
-            tracing::info!(
+            tracing::warn!(
+                trace = %trace.as_deref().unwrap_or("(트레이스 없음)"),
                 "[POST] {who}  \"{}\" 종목토론방 {kind} 실패 ❌ — {message}",
                 stock.name
             );
