@@ -757,24 +757,18 @@ impl NaverPacketClient {
         headers: HeaderMap,
         label: &str,
     ) -> AutomationResult<reqwest::blocking::Response> {
-        let mut attempt: u32 = 0;
-        loop {
-            attempt += 1;
-            match self.client.get(url).headers(headers.clone()).send() {
-                Ok(response) => return Ok(response),
-                Err(error) => {
-                    let kind = crate::util::reqwest_kind(&error);
-                    if is_retryable_transport_kind(kind) && attempt < TRANSPORT_RETRY_MAX_ATTEMPTS {
-                        std::thread::sleep(transport_backoff_delay(attempt));
-                        continue;
-                    }
-                    return Err(AutomationError::new(format!(
-                        "{label} 패킷 전송 실패: {}",
-                        crate::util::describe_reqwest_error(&error)
-                    )));
-                }
-            }
-        }
+        retry_transient(
+            TRANSPORT_RETRY_MAX_ATTEMPTS,
+            || self.client.get(url).headers(headers.clone()).send(),
+            |error| is_retryable_transport_kind(crate::util::reqwest_kind(error)),
+            |attempt| std::thread::sleep(transport_backoff_delay(attempt)),
+        )
+        .map_err(|error| {
+            AutomationError::new(format!(
+                "{label} 패킷 전송 실패: {}",
+                crate::util::describe_reqwest_error(&error)
+            ))
+        })
     }
 }
 
@@ -788,6 +782,27 @@ fn is_retryable_status(status: u16) -> bool {
 // 리다이렉트 오류는 다시 보내도 같은 결과라 재시도하지 않는다.
 fn is_retryable_transport_kind(kind: &str) -> bool {
     matches!(kind, "연결 실패" | "타임아웃" | "요청 오류" | "전송 오류")
+}
+
+// op를 최대 max_attempts번 시도하되, retryable이 true인 일시적 실패에만 재시도한다(재시도 직전
+// on_retry(attempt) 호출 — 대기/로그를 호출부가 주입). 성공하면 즉시 그 값을, 재시도 불가
+// 실패거나 시도를 소진하면 마지막 에러를 돌려준다. reqwest::Error는 공개 생성자가 없어 직접
+// 만들 수 없으므로, 루프 로직을 send와 분리해 둬 단위 테스트가 가능하게 한다.
+fn retry_transient<T, E>(
+    max_attempts: u32,
+    mut op: impl FnMut() -> Result<T, E>,
+    retryable: impl Fn(&E) -> bool,
+    mut on_retry: impl FnMut(u32),
+) -> Result<T, E> {
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        match op() {
+            Ok(value) => return Ok(value),
+            Err(error) if retryable(&error) && attempt < max_attempts => on_retry(attempt),
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 // 전송 계층 재시도 대기시간(0.5초에서 시작해 2배씩, 상한 3초). POST 429용 backoff_delay와 분리해
@@ -1311,6 +1326,82 @@ mod tests {
         assert!(!is_retryable_transport_kind("디코드 오류"));
         assert!(!is_retryable_transport_kind("본문 오류"));
         assert!(!is_retryable_transport_kind("리다이렉트 오류"));
+    }
+
+    #[test]
+    fn retry_transient_returns_first_success_without_retry() {
+        let mut calls = 0;
+        let retries = std::cell::Cell::new(0);
+        let result: Result<&str, i32> = retry_transient(
+            4,
+            || {
+                calls += 1;
+                Ok("ok")
+            },
+            |_| true,
+            |_| retries.set(retries.get() + 1),
+        );
+        assert_eq!(result, Ok("ok"));
+        assert_eq!(calls, 1, "성공이면 한 번만 호출");
+        assert_eq!(retries.get(), 0, "성공이면 재시도 대기 없음");
+    }
+
+    #[test]
+    fn retry_transient_retries_transient_errors_then_succeeds() {
+        let mut calls = 0;
+        let retries = std::cell::Cell::new(0);
+        let result: Result<&str, i32> = retry_transient(
+            4,
+            || {
+                calls += 1;
+                if calls < 3 {
+                    Err(503)
+                } else {
+                    Ok("ok")
+                }
+            },
+            |_| true, // 모두 일시적
+            |_| retries.set(retries.get() + 1),
+        );
+        assert_eq!(result, Ok("ok"));
+        assert_eq!(calls, 3, "2번 실패 후 3번째 성공");
+        assert_eq!(retries.get(), 2, "성공 전 2번 재시도 대기");
+    }
+
+    #[test]
+    fn retry_transient_stops_immediately_on_non_retryable_error() {
+        let mut calls = 0;
+        let retries = std::cell::Cell::new(0);
+        let result: Result<&str, i32> = retry_transient(
+            4,
+            || {
+                calls += 1;
+                Err(404)
+            },
+            |&e| e >= 500, // 4xx는 재시도 안 함
+            |_| retries.set(retries.get() + 1),
+        );
+        assert_eq!(result, Err(404));
+        assert_eq!(calls, 1, "재시도 불가 에러는 한 번에 중단");
+        assert_eq!(retries.get(), 0);
+    }
+
+    #[test]
+    fn retry_transient_exhausts_attempts_and_returns_last_error() {
+        let mut calls = 0;
+        let retries = std::cell::Cell::new(0);
+        let result: Result<&str, i32> = retry_transient(
+            4,
+            || {
+                calls += 1;
+                Err(500 + calls) // 매번 다른 일시적 에러
+            },
+            |_| true,
+            |_| retries.set(retries.get() + 1),
+        );
+        assert_eq!(result, Err(504), "마지막(4번째) 시도의 에러를 돌려준다");
+        assert_eq!(calls, 4, "max_attempts번까지 시도");
+        assert_eq!(retries.get(), 3, "마지막 시도 빼고 3번 재시도 대기");
     }
 
     #[test]

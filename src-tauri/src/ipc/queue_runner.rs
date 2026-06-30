@@ -5610,6 +5610,32 @@ mod tests {
     }
 
     #[test]
+    fn is_network_transport_failure_recognizes_all_markers_and_excludes_others() {
+        // 우리가 send 실패에 붙이는 한국어 접두어.
+        assert!(is_network_transport_failure("getProfile 패킷 전송 실패: x"));
+        // reqwest/하부가 남기는 영어 표식(대소문자 무관).
+        for marker in [
+            "error sending request for url (x)",
+            "tcp connect error: refused",
+            "dns error: failed to lookup address",
+            "operation timed out",
+            "request Timeout reached",
+            "connection refused (os error 111)",
+        ] {
+            assert!(
+                is_network_transport_failure(marker),
+                "전송 계층 실패여야 함: {marker}"
+            );
+        }
+        // 전송과 무관한 메시지는 네트워크로 오분류하면 안 된다(잠금·HTTP상태·게시 파싱).
+        assert!(!is_network_transport_failure("아이디 잠금조치"));
+        assert!(!is_network_transport_failure("HTTP status 403 Forbidden for url (x)"));
+        assert!(!is_network_transport_failure(
+            "글쓰기 form 응답에서 txId를 찾지 못했습니다."
+        ));
+    }
+
+    #[test]
     fn forum_result_to_item_maps_status_and_preserves_original_in_trace() {
         // 메인은 친절 사유, trace 맨 위엔 원문 기술 메시지 보존(#243).
         let result = ForumPublishResult {
