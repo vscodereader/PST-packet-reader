@@ -55,7 +55,7 @@ pub fn format_transport_detail(display: &str, kind: &str, chain: &[String]) -> S
 
 /// reqwest 전송 오류를 분류(타임아웃/연결실패/본문/디코드/요청)한다. source() 체인이 가린
 /// "왜"를 한눈에 보이게 하는 라벨.
-fn reqwest_kind(e: &reqwest::Error) -> &'static str {
+pub fn reqwest_kind(e: &reqwest::Error) -> &'static str {
     if e.is_timeout() {
         "타임아웃"
     } else if e.is_connect() {
