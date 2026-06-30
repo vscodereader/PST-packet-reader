@@ -216,11 +216,12 @@ fn blocking_http_status(message: &str) -> bool {
 
 // 선택한 종목들에 글/댓글을 게시하고 종목별 성공/실패 결과를 돌려주는 함수입니다.
 // 한 종목이 실패해도 다음 종목을 계속 진행합니다. 종목 사이에는 1분 대기합니다.
-pub fn run_forum_publish<R, FS, FR>(
+pub fn run_forum_publish<R, FS, FR, FRT>(
     request: ForumPublishRequest,
     app: tauri::AppHandle<R>,
     mut on_start: FS,
     mut on_result: FR,
+    mut on_retry: FRT,
 ) -> Vec<ForumPublishResult>
 where
     R: Runtime,
@@ -228,6 +229,10 @@ where
     // 이걸 받아 "진행 전 → 진행 중 → 완료/실패"를 실시간으로 보여준다.
     FS: FnMut(usize),
     FR: FnMut(usize, &ForumPublishResult),
+    // 대기초과로 재시도할 때마다(인덱스, 현재 회차, 최대 회차) 호출한다(2026-06-30). 큐 워커가
+    // 그 종목 칸을 "재시도중 N/M"으로 갱신해, 오래 걸리는 종목이 "게시 중…"으로 멈춘 듯 보이거나
+    // 사라진 것처럼 보이지 않게 한다(사용자 지적).
+    FRT: FnMut(usize, usize, usize),
 {
     let title = request.title.trim();
     let body = request.body.trim();
@@ -270,8 +275,9 @@ where
             continue;
         }
 
-        let outcome =
-            run_one_forum_stock_with_retry(&request, stock, title, body, comment, &app, &who, kind);
+        let outcome = run_one_forum_stock_with_retry(
+            &request, stock, title, body, comment, &app, &who, kind, index, &mut on_retry,
+        );
         // 실패면 사용자용 메시지(message)와 캡처된 스택(trace)을 분리해 들고 간다(#199).
         // 성공 시 작성된 글 URL을 메시지에 함께 실어, 완료 로그에서 올라간 글을 확인할 수 있게 한다.
         let (ok, message, trace, posted) = match outcome {
@@ -373,6 +379,7 @@ fn forum_retry_delay_secs(attempt: usize) -> u64 {
 // 그 밖의 실패는 즉시 반환한다(재시도 무의미). 재시도는 횟수(`FORUM_TIMEOUT_RETRIES`)와 총 누적
 // 시간(`FORUM_RETRY_TOTAL_BUDGET`) 둘 중 하나라도 넘으면 멈춰, 진짜 안 되는 종목이 큐를 무한정
 // 막지 않게 한다. 로그인 경로는 건드리지 않고 게시 종목 단위에서만 재시도한다.
+#[allow(clippy::too_many_arguments)]
 fn run_one_forum_stock_with_retry<R: Runtime>(
     request: &ForumPublishRequest,
     stock: &DiscussionStock,
@@ -382,6 +389,9 @@ fn run_one_forum_stock_with_retry<R: Runtime>(
     app: &tauri::AppHandle<R>,
     who: &str,
     kind: &str,
+    // 이 종목의 스켈레톤 인덱스 + 재시도마다 UI를 "재시도중 N/M"으로 갱신할 콜백(2026-06-30).
+    index: usize,
+    on_retry: &mut impl FnMut(usize, usize, usize),
 ) -> Result<PostedContent, AutomationError> {
     let started = Instant::now();
     let mut attempt = 0usize;
@@ -401,6 +411,9 @@ fn run_one_forum_stock_with_retry<R: Runtime>(
                         stock.name,
                         error.message()
                     );
+                    // UI 갱신: 이 종목 칸을 "재시도중 attempt/max"로 — 백오프 대기 동안 멈춘 듯/
+                    // 사라진 듯 보이지 않게(사용자 지적). 백오프 sleep 전에 호출해 즉시 반영한다.
+                    on_retry(index, attempt, FORUM_TIMEOUT_RETRIES);
                     sleep(Duration::from_secs(delay));
                     continue;
                 }
