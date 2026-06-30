@@ -126,6 +126,10 @@ struct ForumDiscussionSession {
     packet_client: packet_client::NaverPacketClient,
     login_profile: NaverLoginProfile,
     selected: DiscussionSelection,
+    // 종목토론방 URL(선택 종목은 코드로 생성, 랜덤은 패킷 API). 브라우저를 이 URL로 *이동시키지
+    // 않고*, submit_post/submit_comment의 referer·target 파싱용 문자열로만 쓴다(페이지 이동/로드
+    // 제거 — 사수 지시 2026-06-30).
+    room_url: String,
 }
 
 // 글/글+댓글 매크로 공통 셋업: Chrome 연결 → 쿠키 주입 → 토론 페이지 → 패킷 클라이언트 →
@@ -140,38 +144,47 @@ fn open_discussion_session(
     let host = normalize_debug_host(host);
     let mut chrome = CdpClient::connect_to_existing_chrome(&host, port)?;
     chrome.enable()?;
-    // 계정 ID가 지정되면 로그인 자동화가 저장한 쿠키를 Chrome에 주입합니다.
+    // 계정 쿠키를 Chrome에 주입한다. 바로 다음 build_naver_packet_client가 Chrome에서 쿠키를 뽑아
+    // HTTP 패킷 클라이언트를 만든다 — *여기까지만* Chrome이 필요하다. 글쓰기/댓글은 전부 HTTP 패킷
+    // API로 처리하므로, 종목토론방 페이지로의 이동/로드는 하지 않는다(사수 지시 2026-06-30): 페이지
+    // 렌더링이 게시에 불필요하고, 그 페이지 로드 대기가 가짜 "대기초과"의 원인이었다.
     if let Some(account_id) = account_id {
         chrome.inject_account_cookies(account_id)?;
-    }
-    chrome.ensure_discussion_page()?;
-
-    // 게시 직전, 주입한 세션이 서버측에서 이미 죽었으면 네이버가 로그인 페이지(nid.naver.com)로
-    // 리다이렉트시킨다(특히 로그인↔게시 간격이 큰 느린 망). 그대로 두면 뒤의 getCookies가
-    // 엉뚱한 "쿠키 못찾음"으로 떨어지므로, 여기서 "세션 만료=재로그인 필요"로 명확히 구분해
-    // 차단 처리한다("다시 로그인" 마커 → is_blocking_failure → 계정 Blocked). 진단용으로 현재
-    // URL은 로그에만 남긴다(사용자 메시지엔 토큰 가능성이 있는 전체 URL을 넣지 않는다).
-    let current_url = chrome.current_url()?;
-    if current_url.contains("nid.naver.com") {
-        tracing::warn!("[POST] 게시 직전 로그인 페이지로 리다이렉트됨 — 세션 만료 추정. url={current_url}");
-        return Err(AutomationError::new(
-            "네이버 세션이 만료되어 로그인 페이지(nid.naver.com)로 돌아갔습니다. 계정을 다시 로그인한 뒤 시도하세요.",
-        ));
     }
 
     let packet_client = chrome.build_naver_packet_client()?;
     let login_profile = packet_client.read_login_profile()?;
 
+    // 세션 만료(getProfile가 비로그인으로 응답)면 여기서 차단 처리한다 — 예전엔 게시 직전 페이지
+    // 리다이렉트(nid.naver.com)로 감지했으나, 이제 페이지 이동을 안 하므로 getProfile 결과로 본다.
     if !login_profile.logged_in {
         return Err(AutomationError::new(format!(
-            "네이버 로그인이 확인되지 않았습니다. Chrome에서 로그인한 뒤 다시 실행하세요. ({})",
+            "네이버 로그인이 확인되지 않았습니다(세션 만료 추정). 계정을 다시 로그인한 뒤 시도하세요. ({})",
             login_profile.message
         )));
     }
 
-    let selected = match stock {
-        Some(stock) => chrome.open_selected_discussion_room(stock)?,
-        None => chrome.open_random_discussion_room(&packet_client)?,
+    // 종목토론방 URL을 코드로 직접 만들거나(선택 종목) 패킷 API로 랜덤 선택한다. 브라우저를 그 URL로
+    // 이동시키지 않는다 — submit_post/submit_comment는 이 URL을 referer·target 파싱용 문자열로만
+    // 쓰며(예전 current_url()이 돌려주던 값과 동일), 실제 게시는 HTTP 패킷 API가 한다.
+    let (selected, room_url) = match stock {
+        Some(stock) => {
+            let url = format!(
+                "https://stock.naver.com/domestic/stock/{}/discussion?chip=all",
+                stock.code.trim()
+            );
+            let selection = DiscussionSelection {
+                category: "사용자 선택".to_owned(),
+                rank: "-".to_owned(),
+                item_text: format!("{} ({})", stock.name.trim(), stock.code.trim()),
+                method: "ui-selected-stock".to_owned(),
+            };
+            (selection, url)
+        }
+        None => {
+            let room = packet_client.select_random_discussion_room()?;
+            (room.selection, room.discussion_url)
+        }
     };
 
     Ok(ForumDiscussionSession {
@@ -179,6 +192,7 @@ fn open_discussion_session(
         packet_client,
         login_profile,
         selected,
+        room_url,
     })
 }
 
@@ -196,8 +210,7 @@ pub fn run_naver_discussion_macro(
         return Err(AutomationError::new("내용이 비어 있습니다."));
     }
 
-    // 매크로 시작~세션 오픈(크롬 연결·로그인 확인·종목토론방 진입+페이지 로드 대기)까지의 실제
-    // 소요시간을 로그로 남긴다. "게시 시작까지 20초"가 어느 단계에서 새는지 드러내기 위함(사수 지적).
+    // 매크로 시작~세션 오픈(크롬 연결·쿠키 추출·로그인 확인)까지의 실제 소요시간을 로그로 남긴다.
     let macro_started = Instant::now();
     tracing::info!(target_kind = ?request.target, "게시 매크로 시작 — 세션 오픈 진입");
     let ForumDiscussionSession {
@@ -205,6 +218,7 @@ pub fn run_naver_discussion_macro(
         packet_client,
         login_profile,
         selected,
+        room_url,
     } = open_discussion_session(
         &request.host,
         request.port,
@@ -213,51 +227,53 @@ pub fn run_naver_discussion_macro(
     )?;
     tracing::info!(
         elapsed_secs = macro_started.elapsed().as_secs(),
-        "세션 오픈 완료 — 글/댓글 등록 단계 시작"
+        "세션 오픈 완료 — 글/댓글 등록 단계 시작(페이지 이동 없이 패킷 API로 게시)"
     );
 
     let mut posted_url: Option<String> = None;
+    // 결과 보고용 URL — 글이면 종목토론방, 댓글이면 댓글 단 글 URL.
+    let mut report_url = room_url.clone();
     let (register_button_highlighted, submitted) = match request.target {
         AutomationTarget::Post => {
             // 글쓰기 전에 종목토론방 프로필(닉네임+소개 2222)을 보장한다. 프로필이 없으면
             // 글쓰기 토큰 발급(discussion/form)이 404가 난다. 멱등이라 이미 있으면 즉시 통과.
-            let room_url = chrome.current_url()?;
             packet_client.ensure_profile_intro_setup(&room_url)?;
             if request.submit_after_fill {
-                // 작성된 글 URL(add 응답 id 기반)을 보존해 완료 로그에서 확인할 수 있게 한다.
-                posted_url = Some(chrome.submit_post_and_refresh(&packet_client, title, body)?);
+                // 글쓰기 add 패킷 API로 게시하고, 응답 id로 작성 글 URL을 만든다(브라우저 이동 없음).
+                let post_id = packet_client.submit_post(&room_url, title, body)?;
+                posted_url = Some(packet_client.post_url_from_id(&room_url, &post_id)?);
                 (false, true)
             } else {
+                // 수동 확인 모드(CLI)만 브라우저 폼이 필요하므로 이 경로에서만 페이지를 연다.
+                chrome.navigate(&room_url)?;
                 chrome.open_write_modal()?;
                 chrome.fill_post_form(title, body)?;
                 (chrome.highlight_manual_submit_target()?, false)
             }
         }
         AutomationTarget::Comment => {
-            // "특정 게시글" 댓글: 사용자가 넣은 글 URL로 직접 이동해 그 글에 댓글을 단다.
-            // URL이 없으면 기존 동작(선택 종목토론방의 랜덤 글)을 그대로 유지한다.
-            let comment_url = request
+            // 댓글 대상 글 URL을 정한다: "특정 게시글"이면 그 URL, 아니면 종목토론방에서 랜덤 글을
+            // 패킷 API로 고른다(brower 이동 없음).
+            let comment_target_url = match request
                 .comment_url
                 .as_deref()
                 .map(str::trim)
-                .filter(|url| !url.is_empty());
-            match comment_url {
-                Some(url) => {
-                    chrome.navigate(url)?;
-                    chrome.wait_for_ready_state(POST_READY_TIMEOUT)?;
-                    sleep(Duration::from_secs(2));
-                    packet_client.ensure_profile_intro_setup(url)?;
-                }
+                .filter(|url| !url.is_empty())
+            {
+                Some(url) => url.to_owned(),
                 None => {
-                    let selected_url = chrome.current_url()?;
-                    packet_client.ensure_profile_intro_setup(&selected_url)?;
-                    chrome.open_random_discussion_post(&packet_client)?;
+                    packet_client
+                        .select_random_discussion_post(&room_url)?
+                        .post_url
                 }
-            }
+            };
+            report_url = comment_target_url.clone();
+            packet_client.ensure_profile_intro_setup(&comment_target_url)?;
             if request.submit_after_fill {
-                chrome.submit_comment_and_refresh(&packet_client, body)?;
+                packet_client.submit_comment(&comment_target_url, body)?;
                 (false, true)
             } else {
+                chrome.navigate(&comment_target_url)?;
                 chrome.fill_comment_form(body)?;
                 (chrome.highlight_manual_submit_target()?, false)
             }
@@ -265,7 +281,7 @@ pub fn run_naver_discussion_macro(
     };
 
     Ok(AutomationReport {
-        current_url: chrome.current_url()?,
+        current_url: report_url,
         post_url: posted_url,
         login_profile,
         register_button_highlighted,
@@ -300,10 +316,13 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
     }
 
     let ForumDiscussionSession {
-        mut chrome,
+        // Chrome은 쿠키 추출·로그인 확인까지만 쓰였다. 이후 게시는 전부 패킷 API라 더는 쓰지
+        // 않지만, 세션이 끝날 때까지 살려둔다(Drop 시 소켓 정리).
+        chrome: _chrome,
         packet_client,
         login_profile,
         selected,
+        room_url,
     } = open_discussion_session(
         &request.host,
         request.port,
@@ -311,14 +330,14 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
         request.stock.as_ref(),
     )?;
 
-    // 글쓰기 전에 종목토론방 프로필(닉네임+소개 2222)을 보장한다(없으면 글쓰기 form 404).
-    // 멱등이라 이미 있으면 즉시 통과. 글 등록 후 댓글 직전의 셋업 호출은 그대로 둔다.
-    let room_url = chrome.current_url()?;
+    // 글쓰기 전에 종목토론방 프로필(닉네임+소개 2222)을 보장한다(없으면 글쓰기 form 404). 멱등.
     packet_client.ensure_profile_intro_setup(&room_url)?;
 
-    let post_url = chrome.submit_post_and_refresh(&packet_client, title, body)?;
+    // 글쓰기 add 패킷 API로 게시하고, 응답 id로 작성 글 URL을 만든다(페이지 이동 없음).
+    let post_id = packet_client.submit_post(&room_url, title, body)?;
+    let post_url = packet_client.post_url_from_id(&room_url, &post_id)?;
     let post_report = AutomationReport {
-        current_url: chrome.current_url()?,
+        current_url: room_url.clone(),
         post_url: Some(post_url.clone()),
         login_profile: login_profile.clone(),
         register_button_highlighted: false,
@@ -327,19 +346,17 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
         target: AutomationTarget::Post,
     };
 
-    // 글 등록+새로고침 직후: 타이머를 시작하고 댓글 작성에 걸린 시간을 기록합니다.
+    // 글 등록 직후: 타이머를 시작하고 댓글 작성에 걸린 시간을 기록합니다.
     let post_done_at = Instant::now();
     if sleep_after {
         let _ = app.emit("batch-wait-start", serde_json::json!({ "seconds": 60u64 }));
     }
 
-    chrome.navigate(&post_url)?;
-    chrome.wait_for_ready_state(POST_READY_TIMEOUT)?;
-    sleep(Duration::from_secs(2));
+    // 방금 쓴 글에 댓글을 단다 — 페이지 이동 없이 글 URL을 referer로 패킷 API 호출.
     packet_client.ensure_profile_intro_setup(&post_url)?;
-    chrome.submit_comment_and_refresh(&packet_client, comment)?;
+    packet_client.submit_comment(&post_url, comment)?;
     let comment_report = AutomationReport {
-        current_url: chrome.current_url()?,
+        current_url: post_url.clone(),
         post_url: None,
         login_profile,
         register_button_highlighted: false,
