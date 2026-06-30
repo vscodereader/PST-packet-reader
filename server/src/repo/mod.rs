@@ -6,7 +6,9 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::error::AppResult;
-use crate::model::{AuditEntry, Device, DeviceCode, DeviceState, Operator, StagedAccount};
+use crate::model::{
+    AuditEntry, Device, DeviceCode, DeviceState, LoginReport, Operator, PostReport, StagedAccount,
+};
 
 pub mod memory;
 pub mod postgres;
@@ -60,4 +62,14 @@ pub trait Repository: Send + Sync {
     // ── 감사로그(§10-5) ──
     async fn add_audit(&self, entry: AuditEntry) -> AppResult<()>;
     async fn list_audit(&self) -> AppResult<Vec<AuditEntry>>;
+
+    // ── 게시 결과 보고(§10-4-2) ──
+    /// 게시 결과 보고 1건 저장. 같은 (device_id, batch_id)는 멱등(재보고해도 중복 안 쌓임).
+    async fn add_post_report(&self, report: PostReport) -> AppResult<()>;
+    async fn list_post_reports(&self) -> AppResult<Vec<PostReport>>;
+
+    // ── 로그인 결과 보고(§10-4-1) ──
+    /// 로그인 결과 보고 저장. 컴퓨터(device_id)당 **최신 1건**으로 덮어쓴다(누적이 합계를 담음).
+    async fn add_login_report(&self, report: LoginReport) -> AppResult<()>;
+    async fn list_login_reports(&self) -> AppResult<Vec<LoginReport>>;
 }

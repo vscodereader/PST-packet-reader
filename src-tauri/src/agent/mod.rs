@@ -20,6 +20,7 @@ use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::mpsc;
 
 use crate::ipc::accounts::{Account, AccountStatus, PlatformId};
+use crate::ipc::log_batches::LogBatch;
 use crate::ipc::posts::ModeValue;
 use crate::ipc::queue::{
     apply_priority_order, as_fresh_now_item, LoginTarget, PublishPlan, QueueLocation, QueueNowItem,
@@ -85,9 +86,11 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
     let _ = STATE_TX.set(tx);
 
     let cmd_app = app.clone();
+    let post_app = app.clone();
     tauri::async_runtime::spawn(async move { command_loop(cmd_app).await });
     tauri::async_runtime::spawn(async move { heartbeat_loop().await });
     tauri::async_runtime::spawn(async move { state_report_loop(rx).await });
+    tauri::async_runtime::spawn(async move { post_report_loop(post_app).await });
 }
 
 // ───────────────────────── 명령 수신 루프 ─────────────────────────
@@ -297,9 +300,9 @@ fn enqueue_login<R: Runtime>(app: &AppHandle<R>, login_ids: &[String]) -> Option
 /// 분류 결과.
 struct Tally {
     success: usize,
-    onhold: Vec<(String, String)>,    // (loginId, pw)
-    timedout: Vec<(String, String)>,  // (loginId, pw)
-    failed: Vec<(String, String, String)>, // (loginId, pw, 사유)
+    onhold: Vec<(String, String, String)>, // (loginId, pw, 보류사유)
+    timedout: Vec<(String, String)>,        // (loginId, pw)
+    failed: Vec<(String, String, String)>,  // (loginId, pw, 실패사유)
 }
 
 /// 큐 아이템이 끝날(Done) 때까지 기다렸다가 계정 상태로 §10-4 분류 → 보고 + 실패 자동삭제 + 누적 갱신.
@@ -332,6 +335,9 @@ async fn report_login_results<R: Runtime>(
     let cum = ledger_add(received, &tally);
     let report = format_report(&tally, received, &cum);
     let _ = net::post_result(&client, &cfg.server_url, &cfg.device_token, &command_id, "ok", &report).await;
+    // 구조화 로그인 결과도 보고(§10-4-1) → 결과보고 '로그인 결과' 탭이 실데이터로 렌더.
+    let body = login_report_body(&command_id, &tally, &cum);
+    let _ = net::post_login_report(&client, &cfg.server_url, &cfg.device_token, &body).await;
 
     // 실패 계정 자동삭제(§10-1 (4)) — 삭제 전 보고가 먼저 나갔다(되돌리기 불가).
     if !tally.failed.is_empty() {
@@ -361,7 +367,10 @@ fn classify_accounts<R: Runtime>(app: &AppHandle<R>, login_ids: &[String]) -> Ta
         let why = acct.status_msg.clone().unwrap_or_default();
         match acct.status {
             AccountStatus::Active => t.success += 1,
-            AccountStatus::OnHold => t.onhold.push((id.clone(), pw)),
+            AccountStatus::OnHold => {
+                let reason = if why.is_empty() { "보류".to_string() } else { why };
+                t.onhold.push((id.clone(), pw, reason));
+            }
             AccountStatus::TimedOut => t.timedout.push((id.clone(), pw)),
             // 미시도/게시쿨다운 등 로그인 결과 아님 — 삭제·집계 제외.
             AccountStatus::New | AccountStatus::Waiting => {}
@@ -391,8 +400,8 @@ fn format_report(t: &Tally, received: usize, cum: &Cumulative) -> String {
         t.timedout.len(),
         t.failed.len()
     );
-    for (id, pw) in &t.onhold {
-        s.push_str(&format!("\n  보류  {id} / {pw}"));
+    for (id, pw, why) in &t.onhold {
+        s.push_str(&format!("\n  보류  {id} / {pw}  사유: {why}"));
     }
     for (id, pw) in &t.timedout {
         s.push_str(&format!("\n  대기초과  {id} / {pw}"));
@@ -406,6 +415,37 @@ fn format_report(t: &Tally, received: usize, cum: &Cumulative) -> String {
     ));
     let _ = received;
     s
+}
+
+/// §10-4-1 구조화 로그인 결과 본문(서버 `LoginReportReq` 모양). 성공은 개수만, 보류/실패는
+/// ID/PW+사유, 대기초과는 ID/PW만. 누적 합계 동봉. 순수함수(테스트 대상).
+fn login_report_body(command_id: &str, t: &Tally, cum: &Cumulative) -> serde_json::Value {
+    let line3 = |v: &[(String, String, String)]| -> Vec<serde_json::Value> {
+        v.iter()
+            .map(|(id, pw, why)| serde_json::json!({ "loginId": id, "pw": pw, "reason": why }))
+            .collect()
+    };
+    let line2 = |v: &[(String, String)]| -> Vec<serde_json::Value> {
+        v.iter()
+            .map(|(id, pw)| serde_json::json!({ "loginId": id, "pw": pw }))
+            .collect()
+    };
+    serde_json::json!({
+        "commandId": command_id,
+        "batch": {
+            "success": t.success,
+            "onhold": line3(&t.onhold),
+            "timedout": line2(&t.timedout),
+            "failed": line3(&t.failed),
+        },
+        "cumulative": {
+            "received": cum.received,
+            "success": cum.success,
+            "onhold": cum.onhold,
+            "timedout": cum.timedout,
+            "failed": cum.failed,
+        }
+    })
 }
 
 // ── 누적 ledger(§10-4) — 작은 json으로 영속화 ──
@@ -438,6 +478,87 @@ fn ledger_add(received: usize, t: &Tally) -> Cumulative {
         }
     }
     c
+}
+
+// ───────────────────────── §10-4-2 게시 결과 보고 루프 ─────────────────────────
+//
+// 하위는 게시가 끝날 때마다 자기 로컬 게시 완료 로그(`LogBatch`)를 이미 만들어 둔다
+// (데스크톱 앱과 동일, `queue_runner.rs::store_log_batch`). 에이전트는 그 스토어를 폴링해
+// **아직 안 올린 완료 배치**를 그대로 서버에 보고한다 → Admin '게시 결과' 탭이 같은 모델로 렌더.
+// 로그인 결과(§10-4)와 달리 commandId·명령에 묶이지 않는 별도 흐름이다(게시는 로컬 큐가 돌림).
+
+/// 보고 완료한 배치 id(중복 방지). 스토어는 최대 MAX_LOG_BATCHES(500)건만 유지하므로 이 목록은
+/// 그보다 넉넉히만 들고 있으면 된다(스토어에서 빠진 배치는 다시 안 보임).
+const MAX_REPORTED_IDS: usize = 2000;
+
+fn reported_path() -> Option<std::path::PathBuf> {
+    crate::auth::app_data_root()
+        .ok()
+        .map(|r| r.join("agent-reported-batches.json"))
+}
+
+fn load_reported() -> Vec<String> {
+    reported_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_reported(ids: &[String]) {
+    if let Some(p) = reported_path() {
+        if let Ok(s) = serde_json::to_string(ids) {
+            let _ = std::fs::write(p, s);
+        }
+    }
+}
+
+/// 스토어 배치 중 **아직 안 올린 완료 배치**를 오래된 것부터(시간순) 고른다. 스토어는 최신순
+/// (insert(0))이라 뒤집고, 진행 중(state=running)은 제외, 이미 보고한 id는 제외(순수함수).
+fn unreported_oldest_first(batches: &[LogBatch], reported: &[String]) -> Vec<LogBatch> {
+    batches
+        .iter()
+        .rev()
+        .filter(|b| b.state.is_none() && !reported.contains(&b.id))
+        .cloned()
+        .collect()
+}
+
+/// 보고 완료 id를 누적하되 상한(MAX_REPORTED_IDS)을 넘으면 오래된 것부터 버린다(순수함수).
+fn push_reported(reported: &mut Vec<String>, id: String) {
+    reported.push(id);
+    if reported.len() > MAX_REPORTED_IDS {
+        let drop = reported.len() - MAX_REPORTED_IDS;
+        reported.drain(0..drop);
+    }
+}
+
+/// 게시 완료 로그(`LogBatch`) 스토어를 폴링해 미보고 완료 배치를 서버에 올린다(§10-4-2).
+async fn post_report_loop<R: Runtime>(app: AppHandle<R>) {
+    let client = reqwest::Client::new();
+    let mut reported: Vec<String> = load_reported();
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let Some(cfg) = config::load() else {
+            continue; // 미등록이면 보고 안 함(단독 동작 무영향)
+        };
+        let batches = app.state::<JsonStore<LogBatch>>().snapshot();
+        for batch in unreported_oldest_first(&batches, &reported) {
+            let Ok(body) = serde_json::to_value(&batch) else {
+                continue;
+            };
+            match net::post_report(&client, &cfg.server_url, &cfg.device_token, &body).await {
+                Ok(()) => {
+                    push_reported(&mut reported, batch.id.clone());
+                    save_reported(&reported);
+                }
+                Err(e) => {
+                    // 서버 미연결 등 → 다음 틱에 재시도(보고 안 됨으로 남김).
+                    tracing::warn!("[AGENT] 게시 결과 보고 실패(batch={}): {e}", batch.id);
+                    break; // 연결 문제면 이번 틱 나머지도 어차피 실패 → 다음 틱에.
+                }
+            }
+        }
+    }
 }
 
 // ───────────────────────── 하트비트 + 상태 보고 루프 ─────────────────────────
@@ -505,4 +626,84 @@ pub fn agent_status() -> AgentStatus {
 #[tauri::command]
 pub fn agent_unregister() -> Result<(), String> {
     config::clear()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::log_batches::BatchState;
+
+    fn batch(id: &str, running: bool) -> LogBatch {
+        LogBatch {
+            id: id.into(),
+            title: "게시".into(),
+            body: None,
+            comment: None,
+            kind: ModeValue::Post,
+            at: 1,
+            state: if running { Some(BatchState::Running) } else { None },
+            items: vec![],
+        }
+    }
+
+    #[test]
+    fn unreported_skips_running_and_already_reported_oldest_first() {
+        // 스토어는 최신순(insert(0)): [c(최신), b, a(오래된)]. b는 진행 중, a는 이미 보고됨.
+        let batches = vec![batch("c", false), batch("b", true), batch("a", false)];
+        let reported = vec!["a".to_string()];
+        let picked: Vec<String> = unreported_oldest_first(&batches, &reported)
+            .into_iter()
+            .map(|b| b.id)
+            .collect();
+        // a=보고됨 제외, b=진행 중 제외 → c만, 그리고 오래된 것부터(여기선 c 하나).
+        assert_eq!(picked, vec!["c".to_string()]);
+    }
+
+    #[test]
+    fn unreported_returns_oldest_first_order() {
+        // 완료·미보고 둘: 스토어 [y(최신), x(오래된)] → 시간순 [x, y]로 보고해야 함.
+        let batches = vec![batch("y", false), batch("x", false)];
+        let picked: Vec<String> = unreported_oldest_first(&batches, &[])
+            .into_iter()
+            .map(|b| b.id)
+            .collect();
+        assert_eq!(picked, vec!["x".to_string(), "y".to_string()]);
+    }
+
+    #[test]
+    fn push_reported_caps_at_max_dropping_oldest() {
+        let mut reported: Vec<String> = (0..MAX_REPORTED_IDS).map(|i| format!("b{i}")).collect();
+        push_reported(&mut reported, "new".into());
+        assert_eq!(reported.len(), MAX_REPORTED_IDS);
+        assert_eq!(reported.last().unwrap(), "new"); // 새 id는 남고
+        assert_eq!(reported.first().unwrap(), "b1"); // 가장 오래된 b0은 밀려남
+    }
+
+    #[test]
+    fn login_report_body_shapes_batch_and_cumulative() {
+        let t = Tally {
+            success: 3,
+            onhold: vec![("aaa".into(), "pw1".into(), "캡차".into())],
+            timedout: vec![("bbb".into(), "pw2".into())],
+            failed: vec![("ccc".into(), "pw3".into(), "비번오류".into())],
+        };
+        let cum = Cumulative {
+            received: 20,
+            success: 6,
+            onhold: 3,
+            timedout: 5,
+            failed: 6,
+        };
+        let v = login_report_body("c-1", &t, &cum);
+        assert_eq!(v["commandId"], "c-1");
+        assert_eq!(v["batch"]["success"], 3);
+        // 보류·실패는 ID/PW+사유, 대기초과는 사유 없음.
+        assert_eq!(v["batch"]["onhold"][0]["loginId"], "aaa");
+        assert_eq!(v["batch"]["onhold"][0]["reason"], "캡차");
+        assert!(v["batch"]["timedout"][0].get("reason").is_none());
+        assert_eq!(v["batch"]["failed"][0]["reason"], "비번오류");
+        // 누적 합계 동봉.
+        assert_eq!(v["cumulative"]["received"], 20);
+        assert_eq!(v["cumulative"]["failed"], 6);
+    }
 }

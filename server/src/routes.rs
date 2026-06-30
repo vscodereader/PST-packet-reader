@@ -54,6 +54,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/agent/heartbeat", post(agent_heartbeat))
         .route("/agent/state", post(agent_state))
         .route("/agent/commands/:command_id/result", post(command_result))
+        .route("/agent/post-report", post(post_report))
+        .route("/admin/post-reports", get(list_post_reports))
+        .route("/agent/login-report", post(login_report))
+        .route("/admin/login-reports", get(list_login_reports))
         .layer(cors)
         .with_state(state)
 }
@@ -630,6 +634,129 @@ async fn command_result(
     )
     .await;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ───────────────────────── 게시 결과 보고(§10-4-2) ─────────────────────────
+
+/// 하위 에이전트 → 게시 결과 보고. 하위가 만든 로컬 게시 완료 로그(`LogBatch`)를 그대로 받아
+/// device 컨텍스트를 붙여 보관(보고 사본) + 통신 로그에 요약 1줄(§10-5).
+async fn post_report(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<PostReportReq>,
+) -> AppResult<Json<serde_json::Value>> {
+    let device = st.auth_device(&headers).await?;
+    let total = req.items.len();
+    let ok = req.items.iter().filter(|i| i.status == "success").count();
+    let report = PostReport {
+        device_id: device.id,
+        device_name: device.name.clone(),
+        batch_id: req.id.clone(),
+        title: req.title.clone(),
+        at: req.at,
+        received_at: Utc::now(),
+        items: req.items,
+    };
+    st.repo.add_post_report(report).await?;
+    // 통신 로그(§10-5)에도 배치 단위 요약을 남긴다(게시 내용·백트레이스는 결과 보고 화면에서).
+    let level = if ok == total {
+        "ok"
+    } else if ok == 0 {
+        "fail"
+    } else {
+        "info"
+    };
+    st.audit(
+        "[RESULT]",
+        &format!("{} → Admin", device.name),
+        &device.id.to_string(),
+        &format!(
+            "게시 결과: '{}' — {ok}/{total}곳 성공 (batch={})",
+            req.title, req.id
+        ),
+        level,
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Admin '게시 결과' 탭 — 모든 하위의 게시 결과 보고(최신순).
+async fn list_post_reports(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<Vec<PostReportDto>>> {
+    st.auth_operator(&headers).await?;
+    let reports = st.repo.list_post_reports().await?;
+    Ok(Json(
+        reports
+            .into_iter()
+            .map(|r| PostReportDto {
+                device: r.device_name,
+                device_id: r.device_id.to_string(),
+                batch_id: r.batch_id,
+                title: r.title,
+                at: r.at,
+                received_at: r.received_at.to_rfc3339(),
+                items: r.items,
+            })
+            .collect(),
+    ))
+}
+
+// ───────────────────────── 로그인 결과 보고(§10-4-1) ─────────────────────────
+
+/// 하위 에이전트 → 로그인 결과 보고. 4분류 + 누적을 device당 최신으로 보관 + 통신 로그 요약 1줄.
+async fn login_report(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<LoginReportReq>,
+) -> AppResult<Json<serde_json::Value>> {
+    let device = st.auth_device(&headers).await?;
+    let b = &req.batch;
+    let summary = format!(
+        "로그인 결과: 성공 {} / 보류 {} / 대기초과 {} / 실패 {}{}",
+        b.success,
+        b.onhold.len(),
+        b.timedout.len(),
+        b.failed.len(),
+        req.command_id
+            .as_deref()
+            .map(|c| format!(" (commandId={c})"))
+            .unwrap_or_default(),
+    );
+    let level = if b.failed.is_empty() { "ok" } else { "fail" };
+    let report = LoginReport {
+        device_id: device.id,
+        device_name: device.name.clone(),
+        batch: req.batch,
+        cumulative: req.cumulative,
+        received_at: Utc::now(),
+    };
+    st.repo.add_login_report(report).await?;
+    st.audit("[RESULT]", &format!("{} → Admin", device.name), &device.id.to_string(), &summary, level)
+        .await;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Admin '로그인 결과' 탭 — 모든 하위의 로그인 결과(컴퓨터당 최신 1건, 최신순).
+async fn list_login_reports(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<Vec<LoginReportDto>>> {
+    st.auth_operator(&headers).await?;
+    let reports = st.repo.list_login_reports().await?;
+    Ok(Json(
+        reports
+            .into_iter()
+            .map(|r| LoginReportDto {
+                device: r.device_name,
+                device_id: r.device_id.to_string(),
+                received_at: r.received_at.to_rfc3339(),
+                batch: r.batch,
+                cumulative: r.cumulative,
+            })
+            .collect(),
+    ))
 }
 
 use futures::StreamExt;

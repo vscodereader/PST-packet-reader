@@ -125,6 +125,55 @@ export interface AuditDto {
   msg: string;
   level: string;
 }
+// 게시 결과 보고(§10-4-2) — 하위 LogBatch/BatchItem 모델 그대로(서버 DTO와 일치, camelCase).
+export interface PostedDto {
+  title: string;
+  body: string;
+  comment?: string;
+  url?: string;
+}
+export interface PostItemDto {
+  platform: string;
+  target: string;
+  loginId: string;
+  status: string; // success | fail | skip | …(데스크톱 모델)
+  msg: string;
+  trace?: string;
+  posted?: PostedDto;
+}
+export interface PostReportDto {
+  device: string;
+  deviceId: string;
+  batchId: string;
+  title: string;
+  at: number; // 게시 완료 epoch ms
+  receivedAt: string;
+  items: PostItemDto[];
+}
+// 로그인 결과 보고(§10-4-1) — 4분류 + 누적(서버 DTO와 일치, camelCase).
+export interface LoginLineDto {
+  loginId: string;
+  pw: string;
+  reason?: string; // 보류사유·실패사유. 대기초과는 없음.
+}
+export interface LoginReportDto {
+  device: string;
+  deviceId: string;
+  receivedAt: string;
+  batch: {
+    success: number;
+    onhold: LoginLineDto[];
+    timedout: LoginLineDto[];
+    failed: LoginLineDto[];
+  };
+  cumulative: {
+    received: number;
+    success: number;
+    onhold: number;
+    timedout: number;
+    failed: number;
+  };
+}
 
 export const api = {
   baseUrl: BASE,
@@ -213,6 +262,18 @@ export const api = {
   audit: {
     list(): Promise<AuditDto[]> {
       return request("GET", "/admin/audit-log");
+    },
+  },
+  postReports: {
+    // 게시 결과 보고(§10-4-2) — 모든 하위의 게시 완료 로그(최신순).
+    list(): Promise<PostReportDto[]> {
+      return request("GET", "/admin/post-reports");
+    },
+  },
+  loginReports: {
+    // 로그인 결과 보고(§10-4-1) — 컴퓨터당 최신 1건(최신순).
+    list(): Promise<LoginReportDto[]> {
+      return request("GET", "/admin/login-reports");
     },
   },
 };

@@ -8,7 +8,10 @@ use uuid::Uuid;
 
 use super::Repository;
 use crate::error::{AppError, AppResult};
-use crate::model::{AuditEntry, Device, DeviceCode, DeviceState, Operator, Role, StagedAccount};
+use crate::model::{
+    AuditEntry, Device, DeviceCode, DeviceState, LoginBatchDto, LoginCumulativeDto, LoginReport,
+    Operator, PostItemDto, PostReport, Role, StagedAccount,
+};
 
 /// 스키마(멱등). `server/migrations/0001_init.sql`과 동일 내용.
 const SCHEMA: &str = r#"
@@ -45,6 +48,23 @@ CREATE TABLE IF NOT EXISTS audit_log (
   device TEXT NOT NULL,
   msg TEXT NOT NULL,
   level TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS post_reports (
+  device_id UUID NOT NULL,
+  batch_id TEXT NOT NULL,
+  device_name TEXT NOT NULL,
+  title TEXT NOT NULL,
+  at BIGINT NOT NULL,
+  received_at TIMESTAMPTZ NOT NULL,
+  items JSONB NOT NULL,
+  PRIMARY KEY (device_id, batch_id)
+);
+CREATE TABLE IF NOT EXISTS login_reports (
+  device_id UUID PRIMARY KEY,
+  device_name TEXT NOT NULL,
+  received_at TIMESTAMPTZ NOT NULL,
+  batch JSONB NOT NULL,
+  cumulative JSONB NOT NULL
 );
 "#;
 
@@ -390,5 +410,100 @@ impl Repository for PostgresRepo {
                 level: r.get("level"),
             })
             .collect())
+    }
+
+    async fn add_post_report(&self, report: PostReport) -> AppResult<()> {
+        // items는 JSONB로 저장. (device_id, batch_id) 멱등 — 재보고 시 UPSERT.
+        let items = serde_json::to_value(&report.items)
+            .map_err(|e| AppError::Internal(format!("게시 결과 직렬화 실패: {e}")))?;
+        sqlx::query(
+            "INSERT INTO post_reports (device_id, batch_id, device_name, title, at, received_at, items)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (device_id, batch_id) DO UPDATE SET
+               device_name = EXCLUDED.device_name,
+               title = EXCLUDED.title,
+               at = EXCLUDED.at,
+               received_at = EXCLUDED.received_at,
+               items = EXCLUDED.items",
+        )
+        .bind(report.device_id)
+        .bind(&report.batch_id)
+        .bind(&report.device_name)
+        .bind(&report.title)
+        .bind(report.at)
+        .bind(report.received_at)
+        .bind(items)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+    async fn list_post_reports(&self) -> AppResult<Vec<PostReport>> {
+        let rows = sqlx::query("SELECT * FROM post_reports ORDER BY received_at DESC")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_err)?;
+        rows.into_iter()
+            .map(|r| {
+                let items: Vec<PostItemDto> = serde_json::from_value(r.get("items"))
+                    .map_err(|e| AppError::Internal(format!("게시 결과 역직렬화 실패: {e}")))?;
+                Ok(PostReport {
+                    device_id: r.get("device_id"),
+                    device_name: r.get("device_name"),
+                    batch_id: r.get("batch_id"),
+                    title: r.get("title"),
+                    at: r.get("at"),
+                    received_at: r.get("received_at"),
+                    items,
+                })
+            })
+            .collect()
+    }
+
+    async fn add_login_report(&self, report: LoginReport) -> AppResult<()> {
+        let batch = serde_json::to_value(&report.batch)
+            .map_err(|e| AppError::Internal(format!("로그인 결과 직렬화 실패: {e}")))?;
+        let cumulative = serde_json::to_value(&report.cumulative)
+            .map_err(|e| AppError::Internal(format!("로그인 누적 직렬화 실패: {e}")))?;
+        // device_id당 최신 1건(UPSERT).
+        sqlx::query(
+            "INSERT INTO login_reports (device_id, device_name, received_at, batch, cumulative)
+             VALUES ($1,$2,$3,$4,$5)
+             ON CONFLICT (device_id) DO UPDATE SET
+               device_name = EXCLUDED.device_name,
+               received_at = EXCLUDED.received_at,
+               batch = EXCLUDED.batch,
+               cumulative = EXCLUDED.cumulative",
+        )
+        .bind(report.device_id)
+        .bind(&report.device_name)
+        .bind(report.received_at)
+        .bind(batch)
+        .bind(cumulative)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+    async fn list_login_reports(&self) -> AppResult<Vec<LoginReport>> {
+        let rows = sqlx::query("SELECT * FROM login_reports ORDER BY received_at DESC")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_err)?;
+        rows.into_iter()
+            .map(|r| {
+                let batch: LoginBatchDto = serde_json::from_value(r.get("batch"))
+                    .map_err(|e| AppError::Internal(format!("로그인 결과 역직렬화 실패: {e}")))?;
+                let cumulative: LoginCumulativeDto = serde_json::from_value(r.get("cumulative"))
+                    .map_err(|e| AppError::Internal(format!("로그인 누적 역직렬화 실패: {e}")))?;
+                Ok(LoginReport {
+                    device_id: r.get("device_id"),
+                    device_name: r.get("device_name"),
+                    received_at: r.get("received_at"),
+                    batch,
+                    cumulative,
+                })
+            })
+            .collect()
     }
 }

@@ -13,11 +13,22 @@ import {
   ThemeIcon,
 } from "@mantine/core";
 import { IconDeviceDesktop } from "@tabler/icons-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import type { PlatformId } from "@/shared/data/types";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo } from "@/shared/ui/platform-logo";
+
+import { api } from "../../api";
+
+import {
+  toDeviceReport,
+  toPostBatch,
+  type DeviceReport,
+  type Line,
+  type PostBatch,
+  type PostItem,
+  type Posted,
+} from "./mapping";
 
 // 결과 보고 화면(§10-4). Admin은 하위에서 일어난 일을 전부 본다:
 //  ① 로그인 결과(성공/보류/대기초과/실패 + 누적)
@@ -25,29 +36,7 @@ import { PlatformLogo } from "@/shared/ui/platform-logo";
 // 기존 데스크톱 앱 알림(notifications.tsx의 BatchItem/SubLog)과 같은 모델을 그대로 쓴다.
 
 // ───────────────────────── 로그인 결과 ─────────────────────────
-
-interface Line {
-  loginId: string;
-  pw: string;
-  reason?: string;
-}
-
-interface DeviceReport {
-  device: string;
-  batch: {
-    success: number;
-    onhold: Line[];
-    timedout: Line[];
-    failed: Line[];
-  };
-  cumulative: {
-    received: number;
-    success: number;
-    onhold: number;
-    timedout: number;
-    failed: number;
-  };
-}
+// 모델·매핑(Line/DeviceReport, toDeviceReport)은 `./mapping`에 분리(테스트 대상).
 
 // §10-4 예시를 그대로 더미화. pw는 실제처럼 두고 화면에서 마스킹(앞 2글자만 노출).
 const REPORTS: DeviceReport[] = [
@@ -209,30 +198,7 @@ function LoginReportCard({ r }: { r: DeviceReport }) {
 // 데스크톱 앱 알림(notifications.tsx)의 BatchItem/PostedContent/SubLog 모델 그대로.
 //  - 성공: posted(제목/본문/댓글/URL) → [게시 내용] 펼치면 내용 + 글 링크.
 //  - 실패: trace(백트레이스) → [자세히 보기] 펼치면 어두운 콘솔 박스에 그대로.
-
-interface Posted {
-  title: string;
-  body: string;
-  comment?: string;
-  url?: string;
-}
-
-interface PostItem {
-  platform: PlatformId;
-  target: string; // 어디에 게시했는지(종목토론방·카페 이름 등)
-  loginId: string;
-  status: "success" | "fail";
-  msg: string; // 메인 사유(친절한 한국어)
-  trace?: string; // 실패 시 "자세히 보기"용 백트레이스(util.rs transport_error_message! 형식)
-  posted?: Posted; // 성공 시 실제 게시 내용 + 링크
-}
-
-interface PostBatch {
-  device: string;
-  title: string;
-  at: string;
-  items: PostItem[];
-}
+// 모델·매핑(Posted/PostItem/PostBatch, toPostBatch, fmtAt)은 `./mapping`에 분리(테스트 대상).
 
 // 더미 게시 결과 — 실제로는 하위가 자기 로컬 LogBatch(게시 완료 로그)를 Admin에 보고한 것.
 // trace는 실제 백트레이스 형식(원인 체인 + at 함수(파일:줄) + 스택)을 그대로 재현.
@@ -569,6 +535,35 @@ function PostBatchCard({ b }: { b: PostBatch }) {
 
 export function ResultReport() {
   const [view, setView] = useState<"login" | "post">("login");
+  // 결과 보고(§10-4): 서버에서 하위들의 로그인·게시 결과를 받아 렌더. 연결되면 실데이터,
+  // 오프라인 미리보기/빈 서버면 더미 유지(통신 로그 화면과 동일 폴백). 3초 폴링(즉시 반영).
+  const [loginReports, setLoginReports] = useState<DeviceReport[]>(REPORTS);
+  const [postBatches, setPostBatches] = useState<PostBatch[]>(POST_BATCHES);
+  useEffect(() => {
+    const load = () => {
+      api.loginReports
+        .list()
+        .then((rows) => {
+          if (rows.length === 0) return; // 빈 서버 → 더미 유지(미리보기)
+          setLoginReports(rows.map(toDeviceReport));
+        })
+        .catch(() => {
+          /* 오프라인 → 더미 유지 */
+        });
+      api.postReports
+        .list()
+        .then((rows) => {
+          if (rows.length === 0) return; // 빈 서버 → 더미 유지(미리보기)
+          setPostBatches(rows.map(toPostBatch));
+        })
+        .catch(() => {
+          /* 오프라인 → 더미 유지 */
+        });
+    };
+    load();
+    const id = window.setInterval(load, 3000);
+    return () => window.clearInterval(id);
+  }, []);
   return (
     <Box p="lg">
       <Group justify="space-between" mb="md">
@@ -592,7 +587,7 @@ export function ResultReport() {
 
       {view === "login" ? (
         <Stack gap="md">
-          {REPORTS.map((r) => (
+          {loginReports.map((r) => (
             <LoginReportCard key={r.device} r={r} />
           ))}
         </Stack>
@@ -602,7 +597,7 @@ export function ResultReport() {
             어디에 게시했는지 + 성공 시 [게시 내용]·링크 / 실패 시 사유 +
             [자세히 보기] 백트레이스. (데스크톱 앱 알림과 동일 모델)
           </Text>
-          {POST_BATCHES.map((b, i) => (
+          {postBatches.map((b, i) => (
             <PostBatchCard key={i} b={b} />
           ))}
         </Stack>

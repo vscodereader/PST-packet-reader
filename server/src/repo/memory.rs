@@ -9,8 +9,12 @@ use uuid::Uuid;
 use super::Repository;
 use crate::error::AppResult;
 use crate::model::{
-    AuditEntry, Device, DeviceCode, DeviceState, Operator, Role, StagedAccount,
+    AuditEntry, Device, DeviceCode, DeviceState, LoginReport, Operator, PostReport, Role,
+    StagedAccount,
 };
+
+/// 게시 결과 보고 누적 상한(감사로그처럼 무한 증가 방지).
+const MAX_POST_REPORTS: usize = 1000;
 
 #[derive(Default)]
 struct Inner {
@@ -19,6 +23,8 @@ struct Inner {
     codes: HashMap<String, DeviceCode>,
     accounts: HashMap<Uuid, StagedAccount>,
     audit: Vec<AuditEntry>,
+    post_reports: Vec<PostReport>,
+    login_reports: HashMap<Uuid, LoginReport>, // device_id당 최신 1건
 }
 
 #[derive(Default)]
@@ -166,5 +172,138 @@ impl Repository for MemoryRepo {
         let mut v = self.inner.lock().unwrap().audit.clone();
         v.sort_by_key(|e| e.ts);
         Ok(v)
+    }
+
+    async fn add_post_report(&self, report: PostReport) -> AppResult<()> {
+        let mut g = self.inner.lock().unwrap();
+        // (device_id, batch_id) 멱등 — 재보고/재연결로 같은 배치가 또 와도 갱신만.
+        if let Some(existing) = g
+            .post_reports
+            .iter_mut()
+            .find(|r| r.device_id == report.device_id && r.batch_id == report.batch_id)
+        {
+            *existing = report;
+        } else {
+            g.post_reports.push(report);
+            let len = g.post_reports.len();
+            if len > MAX_POST_REPORTS {
+                g.post_reports.drain(0..len - MAX_POST_REPORTS);
+            }
+        }
+        Ok(())
+    }
+    async fn list_post_reports(&self) -> AppResult<Vec<PostReport>> {
+        let mut v = self.inner.lock().unwrap().post_reports.clone();
+        // 최신(received_at) 먼저.
+        v.sort_by_key(|r| std::cmp::Reverse(r.received_at));
+        Ok(v)
+    }
+
+    async fn add_login_report(&self, report: LoginReport) -> AppResult<()> {
+        // device_id당 최신 1건으로 덮어쓴다(누적이 합계를 담으므로 배치 이력은 보관 안 함).
+        self.inner
+            .lock()
+            .unwrap()
+            .login_reports
+            .insert(report.device_id, report);
+        Ok(())
+    }
+    async fn list_login_reports(&self) -> AppResult<Vec<LoginReport>> {
+        let mut v: Vec<LoginReport> = self
+            .inner
+            .lock()
+            .unwrap()
+            .login_reports
+            .values()
+            .cloned()
+            .collect();
+        v.sort_by_key(|r| std::cmp::Reverse(r.received_at));
+        Ok(v)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+    use crate::model::PostItemDto;
+
+    fn report(device: Uuid, batch: &str, title: &str, secs: i64) -> PostReport {
+        PostReport {
+            device_id: device,
+            device_name: "하위-001".into(),
+            batch_id: batch.into(),
+            title: title.into(),
+            at: 1,
+            received_at: Utc.timestamp_opt(secs, 0).unwrap(),
+            items: vec![PostItemDto {
+                platform: "forum".into(),
+                target: "삼성전자 종목토론방".into(),
+                login_id: "chol_invest".into(),
+                status: "success".into(),
+                msg: "게시 완료".into(),
+                trace: None,
+                posted: None,
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn post_report_dedup_by_device_and_batch() {
+        let repo = MemoryRepo::new();
+        let dev = Uuid::new_v4();
+        // 같은 (device, batch)를 두 번 보고 → 1건만, 마지막 내용으로 갱신.
+        repo.add_post_report(report(dev, "lb-q-1", "첫 제목", 10))
+            .await
+            .unwrap();
+        repo.add_post_report(report(dev, "lb-q-1", "갱신 제목", 20))
+            .await
+            .unwrap();
+        let all = repo.list_post_reports().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].title, "갱신 제목");
+    }
+
+    #[tokio::test]
+    async fn post_report_lists_newest_first() {
+        let repo = MemoryRepo::new();
+        let dev = Uuid::new_v4();
+        repo.add_post_report(report(dev, "lb-q-1", "오래된", 10))
+            .await
+            .unwrap();
+        repo.add_post_report(report(dev, "lb-q-2", "최신", 20))
+            .await
+            .unwrap();
+        let all = repo.list_post_reports().await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].title, "최신"); // received_at 큰 것이 앞.
+    }
+
+    fn login_report(device: Uuid, success: usize, secs: i64) -> crate::model::LoginReport {
+        use crate::model::{LoginBatchDto, LoginCumulativeDto, LoginReport};
+        LoginReport {
+            device_id: device,
+            device_name: "하위-001".into(),
+            received_at: Utc.timestamp_opt(secs, 0).unwrap(),
+            batch: LoginBatchDto { success, onhold: vec![], timedout: vec![], failed: vec![] },
+            cumulative: LoginCumulativeDto::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn login_report_keeps_latest_per_device() {
+        let repo = MemoryRepo::new();
+        let dev = Uuid::new_v4();
+        // 같은 device를 두 번 보고 → 1건만, 최신(나중) 배치로 덮어씀.
+        repo.add_login_report(login_report(dev, 1, 10))
+            .await
+            .unwrap();
+        repo.add_login_report(login_report(dev, 5, 20))
+            .await
+            .unwrap();
+        let all = repo.list_login_reports().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].batch.success, 5);
     }
 }

@@ -96,6 +96,27 @@ pub async fn post_result(
     post_authed(client, base, token, &path, &ResultReq { level, msg }).await
 }
 
+/// 게시 결과 보고(§10-4-2). 하위 로컬 게시 완료 로그(`LogBatch`) 1건을 그대로 올린다.
+/// body는 `LogBatch`를 직렬화한 JSON(서버는 id/title/at/items만 읽고 나머지는 무시).
+pub async fn post_report(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    body: &serde_json::Value,
+) -> Result<(), String> {
+    post_authed(client, base, token, "/agent/post-report", body).await
+}
+
+/// 로그인 결과 보고(§10-4-1). 4분류 + 누적을 구조화 JSON으로 올린다(결과보고 '로그인 결과' 탭).
+pub async fn post_login_report(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    body: &serde_json::Value,
+) -> Result<(), String> {
+    post_authed(client, base, token, "/agent/login-report", body).await
+}
+
 /// SSE 스트림 열기(`GET /agent/stream?token=`). 브라우저가 아니므로 토큰을 쿼리로 싣는다.
 /// 반환된 Response를 `chunk()`로 읽어 `data:` 줄을 파싱한다(호출부).
 pub async fn open_stream(
