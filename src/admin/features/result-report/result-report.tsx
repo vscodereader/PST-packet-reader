@@ -140,6 +140,9 @@ function LoginReportCard({ r }: { r: DeviceReport }) {
           </Text>
         </Group>
         <Group gap={6}>
+          <Text size="xs" c="dimmed" fw={600}>
+            이번 배치
+          </Text>
           <Badge color="green" variant="light">
             성공 {batch.success}
           </Badge>
@@ -156,8 +159,10 @@ function LoginReportCard({ r }: { r: DeviceReport }) {
       </Group>
 
       <Text size="xs" c="dimmed" mb="sm">
-        이번 배치 — 성공은 개수만, 보류·대기초과·실패만 ID·PW(앞 2글자만
-        노출)+사유 표시. 실패는 보고 후 자동 삭제됨.
+        이번 배치(최신 1건) — 성공은 개수만, 보류·대기초과·실패만 ID·PW(앞
+        2글자만 노출)+사유 표시. 실패 중 <b>비밀번호 오류만</b> 자동 삭제되고,
+        일시적·인프라성 실패(네트워크·타임아웃·account not found 등)는 보존된다.
+        맨 아래 누적 값은 여러 배치의 합계라 이번 배치 수치와 다를 수 있다.
       </Text>
 
       {/* 결과가 누적돼 길어지면 일정 높이까지만 보여주고 나머지는 스크롤(드래그바). */}

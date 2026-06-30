@@ -214,6 +214,40 @@ fn add_accounts<R: Runtime>(app: &AppHandle<R>, accounts: &[AccountIn]) -> usize
         }
         list
     });
+
+    // ⚠️ 로그인 엔진은 위 IPC 스토어가 아니라 *별도 파일* accounts.json(auth::Account)을 읽는다
+    // (auth::load_accounts_file). 분배된 계정을 거기에 안 쓰면 자동 로그인이 "account not found"로
+    // 떨어지고, 그 실패가 자동삭제까지 이어져 멀쩡한 계정이 파괴된다. 그래서 프론트 save_accounts와
+    // 동일하게 같은 계정을 accounts.json에도 기록한다(save_accounts_file이 id로 병합: 기존 갱신·신규 추가).
+    let auth_accounts: Vec<crate::auth::Account> = accounts
+        .iter()
+        .map(|a| crate::auth::Account {
+            id: a.login_id.clone(),
+            password: a.pw.clone(),
+            label: a.login_id.clone(),
+        })
+        .collect();
+    match crate::auth::save_accounts_file(&auth_accounts) {
+        Ok(merged) => {
+            // 진단: 방금 등록한 계정이 로그인 엔진이 읽는 파일에서 실제로 보이는지 확인.
+            let visible = auth_accounts
+                .iter()
+                .filter(|a| merged.iter().any(|m| m.id == a.id))
+                .count();
+            tracing::info!(
+                ipc_added = added,
+                login_visible = visible,
+                total = auth_accounts.len(),
+                "[AGENT] 분배 계정 등록 — IPC 스토어 + accounts.json(로그인 엔진) 양쪽 기록"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                "[AGENT] accounts.json 기록 실패 — 자동 로그인이 'account not found'로 실패할 수 있음: {error}"
+            );
+        }
+    }
+
     added
 }
 
@@ -339,21 +373,55 @@ async fn report_login_results<R: Runtime>(
     let body = login_report_body(&command_id, &tally, &cum);
     let _ = net::post_login_report(&client, &cfg.server_url, &cfg.device_token, &body).await;
 
-    // 실패 계정 자동삭제(§10-1 (4)) — 삭제 전 보고가 먼저 나갔다(되돌리기 불가).
+    // 실패 계정 자동삭제(§10-1 (4)) — 단, *비밀번호 오류(BadCredentials)*처럼 계정 자체가 무효인
+    // 경우만 삭제한다. account not found·네트워크·타임아웃·추가인증·차단 같은 일시적·인프라성
+    // 실패까지 삭제하면 멀쩡한 계정이 사라진다(사용자 지시 2026-06-30). 삭제 대상 status를 지금
+    // 스냅샷에서 다시 확인해 BadCredentials만 고르고, 나머지 실패는 보존하고 로그로 남긴다.
     if !tally.failed.is_empty() {
-        let fail_ids: Vec<String> = tally.failed.iter().map(|(id, _, _)| id.clone()).collect();
-        let removed = delete_by_login_ids(&app, &fail_ids);
-        let del_msg = format!(
-            "delete_accounts(계정 삭제) {removed}건 → {}",
-            tally
-                .failed
+        let snapshot = app.state::<JsonStore<Account>>().snapshot();
+        let failed_ids: Vec<String> = tally.failed.iter().map(|(id, _, _)| id.clone()).collect();
+        let (delete_ids, retained_ids) = partition_auto_delete(&failed_ids, |id| {
+            snapshot
                 .iter()
-                .map(|(id, pw, why)| format!("{id}/{pw} (사유: {why})"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        let _ = net::post_result(&client, &cfg.server_url, &cfg.device_token, &command_id, "info", &del_msg).await;
+                .find(|a| a.login_id == id)
+                .map(|a| a.status.clone())
+        });
+
+        if !retained_ids.is_empty() {
+            tracing::info!(
+                retained = ?retained_ids,
+                "[AGENT] 실패했지만 보존 — 일시적·인프라성 실패(비번오류 아님)는 자동삭제하지 않음"
+            );
+        }
+        if !delete_ids.is_empty() {
+            let removed = delete_by_login_ids(&app, &delete_ids);
+            let del_msg = format!(
+                "delete_accounts(계정 삭제) {removed}건(비밀번호 오류만) → {}",
+                tally
+                    .failed
+                    .iter()
+                    .filter(|(id, _, _)| delete_ids.contains(id))
+                    .map(|(id, pw, why)| format!("{id}/{pw} (사유: {why})"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let _ = net::post_result(&client, &cfg.server_url, &cfg.device_token, &command_id, "info", &del_msg).await;
+        }
     }
+}
+
+/// 실패 계정 중 *자동삭제 대상*(비밀번호 오류 = 계정 자체가 무효)과 *보존 대상*(나머지: account
+/// not found·네트워크·타임아웃·추가인증·차단 같은 일시적·인프라성 실패)을 가른다. 순수 함수.
+/// 반환 = (삭제할 id, 보존할 id). status_of가 None(스토어에 없음)이면 보존한다(account not found
+/// 류는 일시적이라 삭제하지 않는다 — 사용자 지시 2026-06-30).
+fn partition_auto_delete(
+    failed_ids: &[String],
+    status_of: impl Fn(&str) -> Option<AccountStatus>,
+) -> (Vec<String>, Vec<String>) {
+    failed_ids
+        .iter()
+        .cloned()
+        .partition(|id| matches!(status_of(id), Some(AccountStatus::BadCredentials)))
 }
 
 fn classify_accounts<R: Runtime>(app: &AppHandle<R>, login_ids: &[String]) -> Tally {
@@ -361,7 +429,14 @@ fn classify_accounts<R: Runtime>(app: &AppHandle<R>, login_ids: &[String]) -> Ta
     let mut t = Tally { success: 0, onhold: vec![], timedout: vec![], failed: vec![] };
     for id in login_ids {
         let Some(acct) = snapshot.iter().find(|a| &a.login_id == id) else {
-            continue; // 이미 사라진 계정(드묾)
+            // 보낸 계정이 스토어에 없음(중복 스킵·삭제 등). 조용히 빼면 "보낸 N개"와 "보고된 N개"가
+            // 어긋난다(사용자: 2개 보냈는데 1개만 나옴). 빼지 말고 실패로 명시해 누락 0을 보장한다.
+            t.failed.push((
+                id.clone(),
+                String::new(),
+                "계정이 스토어에 없음(중복/삭제 추정)".to_string(),
+            ));
+            continue;
         };
         let pw = acct.pw.clone();
         let why = acct.status_msg.clone().unwrap_or_default();
@@ -705,5 +780,32 @@ mod tests {
         // 누적 합계 동봉.
         assert_eq!(v["cumulative"]["received"], 20);
         assert_eq!(v["cumulative"]["failed"], 6);
+    }
+
+    #[test]
+    fn partition_auto_delete_removes_only_bad_credentials() {
+        use std::collections::HashMap;
+        // 비번오류만 삭제 대상, 차단·에러·추가인증·"스토어에 없음(account not found)"은 보존.
+        let status: HashMap<&str, AccountStatus> = HashMap::from([
+            ("bad", AccountStatus::BadCredentials),
+            ("blocked", AccountStatus::Blocked),
+            ("error", AccountStatus::Error),
+            ("challenge", AccountStatus::Challenge),
+        ]);
+        let failed = vec![
+            "bad".to_string(),
+            "blocked".to_string(),
+            "error".to_string(),
+            "challenge".to_string(),
+            "gone".to_string(), // 스토어에 없음 → status_of None
+        ];
+        let (delete_ids, retained_ids) =
+            partition_auto_delete(&failed, |id| status.get(id).cloned());
+        assert_eq!(delete_ids, vec!["bad"], "비밀번호 오류만 삭제");
+        assert_eq!(
+            retained_ids,
+            vec!["blocked", "error", "challenge", "gone"],
+            "차단·에러·추가인증·account not found는 보존(삭제 금지)"
+        );
     }
 }
