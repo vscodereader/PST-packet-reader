@@ -35,6 +35,12 @@ const POST_RETRY_MAX_ATTEMPTS: u32 = 4;
 const POST_RETRY_BASE: Duration = Duration::from_secs(70);
 const POST_RETRY_MAX_DELAY: Duration = Duration::from_secs(70);
 
+// 전송 계층(연결/DNS/타임아웃) 실패 재시도용. POST의 70초 백오프와 달리, 일시적 망 끊김(IP
+// 교체 직후 등)은 곧 복구되므로 짧게(0.5→1→2초, 상한 3초) 몇 번만 다시 보낸다.
+const TRANSPORT_RETRY_MAX_ATTEMPTS: u32 = 4;
+const TRANSPORT_RETRY_BASE: Duration = Duration::from_millis(500);
+const TRANSPORT_RETRY_MAX_DELAY: Duration = Duration::from_secs(3);
+
 // Chrome에서 수거한 쿠키 한 개(도메인까지 보존). 이름만으로 합치면 서브도메인별
 // host-scoped 동일 이름 쿠키(NNB, 서비스별 세션/CSRF 등)가 last-write-wins로 뭉개져
 // 호스트 간에 누출되므로, (domain, name)으로 구분해 둔다.
@@ -149,11 +155,11 @@ impl NaverPacketClient {
         let callback = format!("pstmacroProfile_{}", timestamp_nanos());
         let url = format!("{STATIC_NID_ORIGIN}/getProfile?svc=my&callback={callback}");
         let response_text = self
-            .client
-            .get(url)
-            .headers(self.static_headers(STATIC_NID_HOST, DEFAULT_REFERER)?)
-            .send()
-            .map_err(|error| AutomationError::new(format!("getProfile 패킷 전송 실패: {error}")))
+            .get_with_transport_retry(
+                &url,
+                self.static_headers(STATIC_NID_HOST, DEFAULT_REFERER)?,
+                "getProfile",
+            )
             .and_then(|response| response_text(response, "getProfile"))?;
         let json_text = strip_jsonp(&response_text)?;
         let value = parse_json(json_text, "getProfile")?;
@@ -739,11 +745,57 @@ impl NaverPacketClient {
             )));
         }
     }
+
+    // 전송 계층(연결/타임아웃) 실패를 짧은 백오프로 재시도하며 GET을 보낸다. IP 교체 직후 등
+    // 일시적 망 끊김이 흐름의 첫 HTTP 호출(getProfile)을 그대로 터뜨려 게시 전체가 실패하던 것을
+    // 막는다(#330 후속). 응답이 도착하면(HTTP 상태 무관) 그대로 돌려주고, 상태 단계 실패는
+    // 호출부/response_text가 다룬다. 마지막까지 전송이 실패하면 describe_reqwest_error로 source
+    // 체인(연결 거부/타임아웃/DNS)까지 드러낸 메시지를 만들어 원인 진단이 가능하게 한다.
+    fn get_with_transport_retry(
+        &self,
+        url: &str,
+        headers: HeaderMap,
+        label: &str,
+    ) -> AutomationResult<reqwest::blocking::Response> {
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            match self.client.get(url).headers(headers.clone()).send() {
+                Ok(response) => return Ok(response),
+                Err(error) => {
+                    let kind = crate::util::reqwest_kind(&error);
+                    if is_retryable_transport_kind(kind) && attempt < TRANSPORT_RETRY_MAX_ATTEMPTS {
+                        std::thread::sleep(transport_backoff_delay(attempt));
+                        continue;
+                    }
+                    return Err(AutomationError::new(format!(
+                        "{label} 패킷 전송 실패: {}",
+                        crate::util::describe_reqwest_error(&error)
+                    )));
+                }
+            }
+        }
+    }
 }
 
 // 429·5xx 처럼 재시도해 볼 만한(일시적) 상태코드인지 판별하는 함수입니다.
 fn is_retryable_status(status: u16) -> bool {
     status == 429 || (500..=599).contains(&status)
+}
+
+// 전송 오류 분류 라벨(util::reqwest_kind)이 일시적 재시도 대상인지 판별한다. 연결 실패·타임아웃·
+// 요청/전송 오류는 망이 잠깐 끊긴 경우가 많아 재시도하지만, 응답이 도착한 뒤의 디코드/본문/
+// 리다이렉트 오류는 다시 보내도 같은 결과라 재시도하지 않는다.
+fn is_retryable_transport_kind(kind: &str) -> bool {
+    matches!(kind, "연결 실패" | "타임아웃" | "요청 오류" | "전송 오류")
+}
+
+// 전송 계층 재시도 대기시간(0.5초에서 시작해 2배씩, 상한 3초). POST 429용 backoff_delay와 분리해
+// 짧게 유지한다.
+fn transport_backoff_delay(attempt: u32) -> Duration {
+    let shift = attempt.saturating_sub(1).min(5);
+    let scaled = TRANSPORT_RETRY_BASE.saturating_mul(1u32 << shift);
+    scaled.min(TRANSPORT_RETRY_MAX_DELAY)
 }
 
 // 재시도 대기시간을 계산하는 함수입니다. POST_RETRY_BASE=POST_RETRY_MAX_DELAY=70초이므로
@@ -1246,6 +1298,31 @@ mod tests {
         assert!(!is_retryable_status(200));
         assert!(!is_retryable_status(404));
         assert!(!is_retryable_status(401));
+    }
+
+    #[test]
+    fn is_retryable_transport_kind_covers_transient_send_failures() {
+        // 연결/타임아웃/요청/전송 오류는 일시적 망 끊김(IP 교체 직후 등)일 때가 많아 재시도.
+        assert!(is_retryable_transport_kind("연결 실패"));
+        assert!(is_retryable_transport_kind("타임아웃"));
+        assert!(is_retryable_transport_kind("요청 오류"));
+        assert!(is_retryable_transport_kind("전송 오류"));
+        // 응답이 도착한 뒤의 디코드/본문/리다이렉트 오류는 재시도해도 의미 없다.
+        assert!(!is_retryable_transport_kind("디코드 오류"));
+        assert!(!is_retryable_transport_kind("본문 오류"));
+        assert!(!is_retryable_transport_kind("리다이렉트 오류"));
+    }
+
+    #[test]
+    fn transport_backoff_delay_is_short_and_capped() {
+        // POST 429용 70초 백오프와 달리, 전송 계층 재시도는 짧게(잠깐 끊긴 망이 곧 복구).
+        assert_eq!(transport_backoff_delay(1), Duration::from_millis(500));
+        assert_eq!(transport_backoff_delay(2), Duration::from_millis(1000));
+        assert_eq!(transport_backoff_delay(3), Duration::from_millis(2000));
+        // 상한 3초로 캡.
+        assert_eq!(transport_backoff_delay(4), TRANSPORT_RETRY_MAX_DELAY);
+        assert_eq!(transport_backoff_delay(99), TRANSPORT_RETRY_MAX_DELAY);
+        assert_eq!(TRANSPORT_RETRY_MAX_DELAY, Duration::from_secs(3));
     }
 
     #[test]

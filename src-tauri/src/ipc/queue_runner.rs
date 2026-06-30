@@ -2739,6 +2739,12 @@ fn forum_failure_reason(message: &str) -> String {
     if let Some(status) = parse_http_status(trimmed) {
         return status_reason(status).to_owned();
     }
+    // 전송 계층(연결/DNS/타임아웃) 실패는 HTTP 상태가 없어 위 매핑에 안 걸린다. 이를 잠금 폴백으로
+    // 흘리면 "로그인·잠금 확인"이라는 틀린 안내가 떠(잠긴 게 아니라 망이 끊긴 것) — #330과 같은
+    // 부류의 오안내. 네트워크 끊김으로 명확히 분류해 "잠시 후 재시도" 안내를 준다(재시도로 풀린다).
+    if is_network_transport_failure(trimmed) {
+        return "잠시 인터넷 연결이 끊겨 게시에 실패했습니다. 잠시 후 다시 시도해 주세요".to_owned();
+    }
     // 개발 용어가 섞이지 않은 순수 안내문이면 사용자 친화로 보고 그대로 노출한다.
     if contains_tech_jargon(trimmed) {
         "게시에 실패했습니다. 계정 로그인·잠금 상태를 확인한 뒤 다시 시도해 주세요".to_owned()
@@ -2762,6 +2768,26 @@ fn parse_http_status(message: &str) -> Option<u16> {
         .parse::<u16>()
         .ok()
         .filter(|n| (100..=599).contains(n))
+}
+
+/// 메시지가 HTTP 전송 계층(연결/DNS/타임아웃) 실패인지 식별한다(#330 후속). packet_client가
+/// send 실패에 붙이는 한국어 접두어("전송 실패")와, reqwest가 남기는 영어 표식(connect/dns/
+/// timeout 등)을 함께 본다. HTTP status가 붙는 응답 단계 실패와 달리 상태코드가 없어, 잠금
+/// 폴백으로 새기 전에 여기서 '네트워크 끊김'으로 분리한다.
+fn is_network_transport_failure(message: &str) -> bool {
+    if message.contains("전송 실패") {
+        return true;
+    }
+    let lower = message.to_ascii_lowercase();
+    const MARKERS: [&str; 6] = [
+        "error sending request",
+        "tcp connect",
+        "dns error",
+        "timed out",
+        "timeout",
+        "connection refused",
+    ];
+    MARKERS.iter().any(|m| lower.contains(m))
 }
 
 /// 사용자에게 그대로 보여주면 안 되는 개발 용어가 들어 있는지(#243). 종토방 매크로/패킷
@@ -5556,6 +5582,30 @@ mod tests {
         assert_eq!(
             forum_failure_reason("글쓰기 form 응답에서 txId를 찾지 못했습니다."),
             "게시에 실패했습니다. 계정 로그인·잠금 상태를 확인한 뒤 다시 시도해 주세요"
+        );
+    }
+
+    #[test]
+    fn forum_failure_reason_maps_transport_failure_to_network_not_lock() {
+        // 전송 계층(연결/DNS/타임아웃) 실패는 로그인·잠금이 아니라 '네트워크 끊김'이다(#330 후속).
+        // getProfile send 실패가 "패킷" 단어 때문에 잠금 폴백으로 새던 버그를 막는다.
+        let network = "잠시 인터넷 연결이 끊겨 게시에 실패했습니다. 잠시 후 다시 시도해 주세요";
+        // reqwest 전송 실패 원문(우리가 "전송 실패" 접두어를 붙임).
+        assert_eq!(
+            forum_failure_reason(
+                "getProfile 패킷 전송 실패: error sending request for url (https://static.nid.naver.com/getProfile)"
+            ),
+            network
+        );
+        // 타임아웃 source가 붙은 형태도 잠금이 아니라 네트워크로.
+        assert_eq!(
+            forum_failure_reason("getProfile 패킷 전송 실패: operation timed out"),
+            network
+        );
+        // 잠금 폴백과 헷갈리지 않게: HTTP 상태가 있으면 여전히 상태 매핑이 우선.
+        assert_eq!(
+            forum_failure_reason("글쓰기 form 패킷 HTTP 실패: HTTP status 403 for url (x)"),
+            "권한이 없거나 로그인이 만료되었습니다"
         );
     }
 
