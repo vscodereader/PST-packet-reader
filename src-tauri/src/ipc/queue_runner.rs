@@ -341,6 +341,10 @@ async fn worker_loop<R: Runtime>(app: AppHandle<R>, runner: NowQueueRunner) {
 async fn finish_item<R: Runtime>(app: &AppHandle<R>, job: &QueueNowItem) {
     match execute_item(app, job).await {
         ItemOutcome::Completed => {
+            // 진단(#6): 어떤 ID가 "완료"로 큐에서 빠지는지 남긴다 — "post 0인데 사라졌다"가 다시
+            // 보이면, 이 로그가 찍힌 ID와 알림의 결과(성공/실패 0건)를 대조해 정상 완료인지
+            // 충돌로 증발한 건지 가를 수 있다.
+            tracing::info!(id = %job.id, "[QUEUE] 아이템 완료 처리 — 큐에서 제거(결과는 알림에서 확인)");
             // 완료/일반 실패/도중 차단을 가리지 않고 큐에서 **제거한다**(사용자 지시: 게시큐엔
             // 돌아가는 작업만 보이고, 성공/실패 결과는 알림에서 확인). 결과(성공·실패·도중 차단
             // 종목)는 실행 중 set_progress_and_items가 알림 로그(log_batches)·계정 상태에 이미
@@ -350,6 +354,9 @@ async fn finish_item<R: Runtime>(app: &AppHandle<R>, job: &QueueNowItem) {
                 .mutate(|items| apply_cancel_now(items, &job.id));
         }
         ItemOutcome::Yielded(remaining) => {
+            // 진단(#6): 양보(대기 복귀)는 삭제가 아님을 ID로 남긴다 — "양보하며 대기하던 계정이
+            // 증발"과 구분된다(양보면 큐에 남아야 정상).
+            tracing::info!(id = %job.id, "[QUEUE] 아이템 양보 — 잔여 작업 보존하고 대기열 복귀(삭제 아님)");
             // 삭제가 아니라 중지(#232): 잔여 plan(아직 안 한 그룹만)으로 Waiting 복귀 후 재정렬.
             // 완료 그룹은 plan에서 빠져 재개 시 중복게시 0.
             app.state::<JsonStore<QueueNowItem>>()
@@ -4598,6 +4605,28 @@ mod tests {
         assert_eq!(next[0].progress, Some((0, 4)));
     }
 
+    #[test]
+    fn duplicate_ids_collapse_siblings_documents_why_ids_must_be_unique() {
+        // #6 회귀 문서화: 같은 ID가 둘이면 mark_running이 둘 다 Running으로 만들고, 그 ID로
+        // apply_cancel_now 한 번에 둘 다 사라진다 — 워커는 하나만 실행하므로 다른 하나는 실행도
+        // 못 하고 post 0으로 증발한다("나눠서 게시한 7계정 중 1개 증발"의 정체). 그래서 프론트
+        // freshIdSuffix + 백엔드 add_queue_now 중복방지로 ID 고유성을 강제한다.
+        let items = vec![
+            now_item("qn-dup", QueueState::Waiting, None),
+            now_item("qn-dup", QueueState::Waiting, None),
+        ];
+        let running = mark_running(items, "qn-dup");
+        assert!(
+            running.iter().all(|i| i.state == QueueState::Running),
+            "충돌 ID는 둘 다 Running이 된다"
+        );
+        let after = apply_cancel_now(running, "qn-dup");
+        assert!(
+            after.is_empty(),
+            "한 번의 완료가 충돌 쌍둥이를 모두 지운다 — 증발의 정체"
+        );
+    }
+
     // #2: 도중 차단(blocking failure)이 하나라도 있으면 그 계정은 차단으로 본다 —
     // 성공·일반 실패·건너뜀만이면 차단이 아니다. execute_item이 계정 상태를 Blocked로
     // 바꾸는(apply_waiting_for_successful_posts) 판정과 동일한 함수를 검증한다.
@@ -5625,9 +5654,11 @@ mod tests {
     }
 
     #[test]
-    fn timed_out_login_ids_collect_only_timeout_and_server_500() {
-        // #7: 페이지 대기시간 초과·네이버 서버 오류(HTTP 500)만 대기초과로 모은다. 차단·일반
-        // 엔진 오류·skip·성공은 제외.
+    fn timed_out_login_ids_collect_only_timeout_not_server_500() {
+        // #342: 페이지 대기시간 초과(+일시적 네트워크 끊김)만 대기초과(재시도)로 모은다. HTTP
+        // 500/403 같은 "네이버 서버의 판정"은 사용자가 통제할 수 없어 재시도해도 또 실패하므로
+        // 빨리 실패시킨다 — 대기초과(재시도) 대상이 아니다(is_timed_out_failure 참고). 차단·일반
+        // 엔진 오류·skip·성공도 제외.
         let forum = vec![
             forum_timed_out(
                 "acc_to1",
@@ -5636,7 +5667,7 @@ mod tests {
                 "페이지 로드 대기 시간이 초과되었습니다.",
             ),
             forum_timed_out(
-                "acc_to2",
+                "acc_500",
                 "SK하이닉스",
                 "000660",
                 "네이버 서버에 문제가 발생했습니다 (REGISTER_HTTP_ERROR)",
@@ -5646,8 +5677,11 @@ mod tests {
             forum_ok("acc_ok", "LG", "066570"),
         ];
         let ids = timed_out_post_login_ids(&forum);
-        assert!(ids.contains("acc_to1"), "대기시간 초과는 대기초과 대상");
-        assert!(ids.contains("acc_to2"), "HTTP 500 서버 오류는 대기초과 대상");
+        assert!(ids.contains("acc_to1"), "대기시간 초과는 대기초과(재시도) 대상");
+        assert!(
+            !ids.contains("acc_500"),
+            "HTTP 500 서버 오류는 빠른 실패 — 대기초과(재시도) 아님(#342)"
+        );
         assert!(!ids.contains("acc_block"), "차단(403)은 대기초과 아님");
         assert!(!ids.contains("acc_skip"), "건너뜀(skip)은 대기초과 아님");
         assert!(!ids.contains("acc_ok"), "성공은 대기초과 아님");
@@ -5679,15 +5713,16 @@ mod tests {
 
     #[test]
     fn timed_out_takes_precedence_over_waiting() {
-        // #7: 한 계정이 1글 성공 후 다른 글에서 타임아웃/500이면 — 대기가 아니라 대기초과로
-        // 분류돼 게시 목록에서 숨겨진다(같은 계정의 성공이 있어도 대기초과 우선).
+        // #7: 한 계정이 1글 성공 후 다른 글에서 대기시간 초과면 — 대기가 아니라 대기초과로
+        // 분류돼 게시 목록에서 숨겨진다(같은 계정의 성공이 있어도 대기초과 우선). (HTTP 500은
+        // #342로 대기초과가 아니라 즉시 실패이므로, 여기선 실제 타임아웃 문구로 검증한다.)
         let forum = vec![
             forum_ok("acc_mixed", "삼성전자", "005930"),
             forum_timed_out(
                 "acc_mixed",
                 "SK하이닉스",
                 "000660",
-                "네이버 서버에 문제가 발생했습니다",
+                "페이지 로드 대기 시간이 초과되었습니다.",
             ),
         ];
         let blocked = blocked_post_login_ids(&forum);

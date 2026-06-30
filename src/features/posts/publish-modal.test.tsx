@@ -1656,5 +1656,13 @@ describe("PublishModal", () => {
     const codes = plans.flatMap((p) => p.forum.map((f) => f.code));
     expect(codes.length).toBe(2);
     expect(new Set(codes).size).toBe(2);
+    // [회귀 #6] 두 큐 아이템의 id는 반드시 고유해야 한다. 같은 동기 tick에 만들어지므로 예전
+    // "qn"+Date.now()는 밀리초가 같아 동일 id가 됐고, 백엔드가 한 아이템처럼 다뤄 1계정이
+    // post 0으로 증발했다. freshIdSuffix(카운터)로 같은 tick에도 달라야 한다.
+    const ids = ipcBackend.mock.calls
+      .filter((c) => c[0] === "add_queue_now")
+      .map((c) => (c[1] as { item: { id: string } }).item.id);
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(2);
   });
 });
