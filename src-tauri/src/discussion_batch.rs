@@ -149,19 +149,15 @@ pub fn is_blocking_failure(message: &str) -> bool {
 /// 우선이므로, 호출부는 먼저 차단을 보고 그 다음 이걸 본다. 429(요청 과다)는 여기에 넣지 않는다.
 pub fn is_timed_out_failure(message: &str) -> bool {
     let m = message;
-    // (3) 일시적 네트워크 끊김도 잠시 후 풀릴 수 있어 대기초과로 본다(재시도 대상).
+    // (2) 일시적 네트워크 끊김(소켓 10053/54/60)은 우리 망/원격이 잠깐 끊긴 것이라 재시도하면
+    // 풀릴 여지가 있다(사용자 지시: 일시적 네트워크 불안정은 재시도 타협).
     if is_transient_network_failure(m) {
         return true;
     }
-    // (2) 서버 오류: 메시지에 박힌 HTTP 상태코드가 500이거나, 명시적 서버 오류 문구.
-    if server_error_http_status(m)
-        || m.contains("서버에 문제")
-        || m.contains("네이버 서버")
-        || m.contains("Internal Server")
-    {
-        return true;
-    }
-    // (1) 대기시간 초과: 페이지/응답이 자리잡기 전에 시간이 다한 경우.
+    // (1) 대기시간 초과: 페이지/응답이 자리잡기 전에 시간이 다한 경우(로딩 지연 — 재시도하면
+    // 자리잡는 경우가 많다). HTTP 500/403 같은 "네이버 서버의 판정"은 여기에 넣지 않는다 —
+    // 사용자가 통제할 수 없는 서버 문제라 재시도해도 또 실패하므로 빨리 실패시킨다(2026-06-30,
+    // 사용자 지시: 내가 컨트롤 못 하는 500/403은 빨리 실패). 500은 errored로 떨어져 즉시 실패한다.
     const TIMEOUT_MARKERS: [&str; 5] = [
         "대기시간 초과",
         "시간이 초과",
@@ -180,22 +176,6 @@ pub fn is_timed_out_failure(message: &str) -> bool {
 fn is_transient_network_failure(message: &str) -> bool {
     const NET_MARKERS: [&str; 3] = ["os error 10060", "os error 10053", "os error 10054"];
     NET_MARKERS.iter().any(|marker| message.contains(marker))
-}
-
-/// 메시지에 박힌 HTTP 상태코드가 500(서버 오류)인지 본다(순수 함수, #286).
-/// `blocking_http_status`와 같은 "status 토큰 뒤 첫 3자리" 규칙을 따른다.
-fn server_error_http_status(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    let Some(idx) = lower.find("status") else {
-        return false;
-    };
-    let after = &message[idx + "status".len()..];
-    let digits: String = after
-        .chars()
-        .skip_while(|c| !c.is_ascii_digit())
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    matches!(digits.parse::<u16>(), Ok(500))
 }
 
 /// 메시지에 박힌 HTTP 상태코드가 401/403(차단 계열)인지 본다(순수 함수, #267-9).
@@ -1086,24 +1066,24 @@ mod tests {
     }
 
     #[test]
-    fn timed_out_failure_detects_timeout_and_server_500_not_others() {
-        // #286: 페이지/응답 대기시간 초과 → 대기초과.
+    fn timed_out_failure_detects_timeout_not_server_500() {
+        // 페이지/응답 대기시간 초과(로딩 지연) → 재시도 대상(대기초과).
         assert!(is_timed_out_failure("페이지 대기시간 초과로 글 실패"));
         assert!(is_timed_out_failure("응답 시간이 초과되었습니다"));
         assert!(is_timed_out_failure("request timed out"));
-        // #286: 네이버 서버 오류(HTTP 500) → 대기초과.
-        assert!(is_timed_out_failure("HTTP status 500 Internal Server Error"));
-        assert!(is_timed_out_failure(
+        // 2026-06-30(사용자 지시): HTTP 500/서버오류는 네이버 서버의 판정(통제 불가)이라 재시도해도
+        // 또 실패 → 대기초과가 아니다(빨리 실패시킨다). 일시 네트워크 끊김(소켓)만 재시도한다.
+        assert!(!is_timed_out_failure("HTTP status 500 Internal Server Error"));
+        assert!(!is_timed_out_failure(
             "네이버 서버에 문제가 발생했습니다"
         ));
-        // 차단/비번오류/요청과다/일반실패는 대기초과가 아니다(다른 상태로 처리).
+        // 차단/비번오류/요청과다/일반실패도 대기초과가 아니다(다른 상태로 처리).
         assert!(!is_timed_out_failure("HTTP status 403 Forbidden"));
         assert!(!is_timed_out_failure("HTTP status 401 Unauthorized"));
         assert!(!is_timed_out_failure("HTTP status 429 Too Many Requests"));
         assert!(!is_timed_out_failure(
             "글 내용을 구성하는 중 문제가 발생했습니다"
         ));
-        // 차단(401/403)이 동시에 잡히는 메시지는 호출부에서 차단을 먼저 보므로 여기선 500만 검사.
         assert!(!is_timed_out_failure("HTTP status 404 Not Found"));
     }
 
@@ -1124,16 +1104,14 @@ mod tests {
     }
 
     #[test]
-    fn profile_status_500_is_retryable_like_other_transient_500() {
-        // 2026-06-30(수정): "프로필 상태 조회 불가"(Failed to fetch profile user status) 500도
-        // 네이버 일시 부하·계정 간 네트워크 선점 경합·우리 프로그램 일시 결함일 수 있어 재시도로
-        // 풀릴 수 있다. 따라서 일반 일시 500과 똑같이 재시도 대상으로 둔다(9회까지 시도 후 실패).
+    fn server_500_fails_fast_not_retried() {
+        // 2026-06-30(사용자 지시): 500은 네이버 서버의 문제(통제 불가)라 재시도해도 또 실패한다 →
+        // 대기초과/재시도 대상이 아니라 빨리 실패시킨다. 프로필 상태 500도, 일반 500도 동일.
         let profile_500 = "프로필 상태 패킷 HTTP 실패: status=500, \
              body={\"message\":\"Failed to fetch profile user status\"}";
-        assert!(is_timed_out_failure(profile_500));
-        assert!(is_retryable_forum_failure(profile_500));
-        // 일반 일시 500도 동일하게 재시도 대상.
-        assert!(is_retryable_forum_failure("HTTP status 500 Internal Server Error"));
+        assert!(!is_timed_out_failure(profile_500));
+        assert!(!is_retryable_forum_failure(profile_500));
+        assert!(!is_retryable_forum_failure("HTTP status 500 Internal Server Error"));
     }
 
     #[test]
@@ -1144,10 +1122,12 @@ mod tests {
 
     #[test]
     fn retryable_forum_failure_only_for_timed_out_not_blocking_or_other() {
-        // 대기초과(일시적 시간초과/서버오류)만 재시도한다.
+        // 대기초과(로딩 지연)·일시 네트워크 끊김만 재시도한다.
         assert!(is_retryable_forum_failure("페이지 로드 대기 시간이 초과되었습니다."));
-        assert!(is_retryable_forum_failure("네이버 서버에 문제가 발생했습니다"));
-        assert!(is_retryable_forum_failure("HTTP status 500 Internal Server Error"));
+        assert!(is_retryable_forum_failure("connection reset (os error 10054)"));
+        // 500/서버오류는 네이버 판정(통제 불가) → 재시도 금지(빨리 실패, 2026-06-30 사용자 지시).
+        assert!(!is_retryable_forum_failure("네이버 서버에 문제가 발생했습니다"));
+        assert!(!is_retryable_forum_failure("HTTP status 500 Internal Server Error"));
         // 차단(401/403/쿠키)은 재시도해도 또 실패 → 재시도 금지.
         assert!(!is_retryable_forum_failure("HTTP status 403 Forbidden"));
         assert!(!is_retryable_forum_failure("쿠키를 찾지 못했습니다"));
