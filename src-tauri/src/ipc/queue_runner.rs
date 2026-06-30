@@ -1838,6 +1838,10 @@ async fn run_forum_targets<R: Runtime>(
             let base_done_items = base_items.clone();
             let account_done = account_id.clone();
             let live_done = Arc::clone(&forum_live);
+            let app_retry = app.clone();
+            let id_retry = id.to_owned();
+            let base_retry = base_items.clone();
+            let live_retry = Arc::clone(&forum_live);
             let handle = tauri::async_runtime::spawn_blocking(move || {
                 // 종목 게시 시작 직전: 그 종목을 "게시 중"으로(진행률은 그대로 — 완료분만 센다).
                 let on_start = move |local: usize| {
@@ -1863,6 +1867,16 @@ async fn run_forum_targets<R: Runtime>(
                         total,
                     );
                 };
+                // 종목 재시도마다: 그 칸을 "재시도중 N/M (대기초과)"으로 — 오래 걸리는 종목이
+                // "게시 중…"으로 멈춘 듯/사라진 듯 보이지 않게 한다(사용자 지적 2026-06-30).
+                let on_retry = move |local: usize, attempt: usize, max: usize| {
+                    let mut live = lock_or_poisoned(&live_retry);
+                    if let Some(it) = live.get_mut(off + local) {
+                        it.status = BatchItemStatus::Running;
+                        it.msg = format!("재시도중 {attempt}/{max} (대기초과)");
+                    }
+                    write_live_phase(&app_retry, &id_retry, &base_retry, &live, base_done, total);
+                };
                 match crate::auth::launch_debug_chrome(true) {
                     Ok(chrome) => {
                         let mut req = req;
@@ -1876,7 +1890,8 @@ async fn run_forum_targets<R: Runtime>(
                             chrome.port,
                             req.stocks.len()
                         );
-                        let results = run_forum_publish(req, app_for_job, on_start, on_result);
+                        let results =
+                            run_forum_publish(req, app_for_job, on_start, on_result, on_retry);
                         drop(chrome);
                         results
                     }
