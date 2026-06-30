@@ -142,12 +142,17 @@ pub fn is_blocking_failure(message: &str) -> bool {
 }
 
 /// 게시 실패 메시지가 "대기초과"(일시적 서버/타이밍 문제)를 뜻하는지 판별한다(#286, 순수 함수).
-/// 두 부류를 잡는다: (1) 페이지/응답 **대기시간 초과**, (2) 네이버 **서버 오류(HTTP 500)**. 이런
-/// 실패는 계정·자격증명 문제가 아니라 잠시 후 풀릴 수 있는 일시 상태라, 차단(Blocked)이나 비번
-/// 오류와 구분해 계정을 `TimedOut`(대기초과)으로 표시한다. 차단 계열(`is_blocking_failure`)이
+/// 세 부류를 잡는다: (1) 페이지/응답 **대기시간 초과**, (2) 네이버 **서버 오류(HTTP 500)**,
+/// (3) **일시적 네트워크 끊김**(소켓 10060/10053/10054, 2026-06-30 추가). 이런 실패는 계정·자격증명
+/// 문제가 아니라 잠시 후 풀릴 수 있는 일시 상태라, 차단(Blocked)이나 비번 오류와 구분해 계정을
+/// `TimedOut`(대기초과)으로 표시하고 재시도 대상으로 둔다. 차단 계열(`is_blocking_failure`)이
 /// 우선이므로, 호출부는 먼저 차단을 보고 그 다음 이걸 본다. 429(요청 과다)는 여기에 넣지 않는다.
 pub fn is_timed_out_failure(message: &str) -> bool {
     let m = message;
+    // (3) 일시적 네트워크 끊김도 잠시 후 풀릴 수 있어 대기초과로 본다(재시도 대상).
+    if is_transient_network_failure(m) {
+        return true;
+    }
     // (2) 서버 오류: 메시지에 박힌 HTTP 상태코드가 500이거나, 명시적 서버 오류 문구.
     if server_error_http_status(m)
         || m.contains("서버에 문제")
@@ -165,6 +170,16 @@ pub fn is_timed_out_failure(message: &str) -> bool {
         "timeout",
     ];
     TIMEOUT_MARKERS.iter().any(|marker| m.contains(marker))
+}
+
+/// 일시적 네트워크/연결 실패인지 판별한다(순수 함수, 2026-06-30). CDP WebSocket·HTTP 연결이 망
+/// 끊김/무응답으로 끊어진 경우다. Windows 소켓 오류코드로 식별한다: 10060(WSAETIMEDOUT 연결
+/// 시간초과)·10053(WSAECONNABORTED 호스트 SW가 끊음)·10054(WSAECONNRESET 상대가 리셋). 계정·
+/// 자격증명 문제가 아니라 잠시 후 풀릴 수 있는 일시 상태라, 대기초과처럼 재시도 대상으로 본다
+/// (사용자 지시: 풀릴 수 있는 건 재시도 — 모바일 IP 전환·원격 끊김 등으로 흔히 발생).
+fn is_transient_network_failure(message: &str) -> bool {
+    const NET_MARKERS: [&str; 3] = ["os error 10060", "os error 10053", "os error 10054"];
+    NET_MARKERS.iter().any(|marker| message.contains(marker))
 }
 
 /// 메시지에 박힌 HTTP 상태코드가 500(서버 오류)인지 본다(순수 함수, #286).
@@ -1077,6 +1092,22 @@ mod tests {
         ));
         // 차단(401/403)이 동시에 잡히는 메시지는 호출부에서 차단을 먼저 보므로 여기선 500만 검사.
         assert!(!is_timed_out_failure("HTTP status 404 Not Found"));
+    }
+
+    #[test]
+    fn transient_network_failures_are_retryable_timeouts() {
+        // 2026-06-30: 일시적 소켓 끊김(10060/10053/10054)도 대기초과처럼 재시도 대상이다.
+        let e10060 = "IO error: 연결된 구성원으로부터 응답이 없어 연결하지 못했거나, \
+             호스트로부터 응답이 없어 연결이 끊어졌습니다. (os error 10060)";
+        let e10053 = "IO error: 현재 연결은 사용자의 호스트 시스템의 소프트웨어에 의해 중단되었습니다. (os error 10053)";
+        for m in [e10060, e10053, "connection reset (os error 10054)"] {
+            assert!(is_transient_network_failure(m), "네트워크 끊김 감지: {m}");
+            assert!(is_timed_out_failure(m), "대기초과로 분류: {m}");
+            assert!(is_retryable_forum_failure(m), "재시도 대상: {m}");
+        }
+        // 차단/비번오류 등 비-네트워크는 영향 없음(regression 방지).
+        assert!(!is_transient_network_failure("HTTP status 403 Forbidden"));
+        assert!(!is_transient_network_failure("동의하기 버튼이 아직 비활성화 상태입니다."));
     }
 
     #[test]
