@@ -129,7 +129,7 @@ impl CdpClient {
     fn reload_after_profile_setup(&mut self) -> AutomationResult<()> {
         sleep(Duration::from_millis(2500));
         self.call("Page.reload", json!({ "ignoreCache": false }))?;
-        self.wait_for_ready_state(Duration::from_secs(30))?;
+        self.wait_for_ready_state(super::POST_READY_TIMEOUT)?;
         sleep(Duration::from_secs(4));
         Ok(())
     }
@@ -192,7 +192,7 @@ impl CdpClient {
     fn reload_after_submit(&mut self) -> AutomationResult<()> {
         sleep(Duration::from_millis(2500));
         self.call("Page.reload", json!({ "ignoreCache": false }))?;
-        self.wait_for_ready_state(Duration::from_secs(30))?;
+        self.wait_for_ready_state(super::POST_READY_TIMEOUT)?;
         sleep(Duration::from_secs(2));
         Ok(())
     }

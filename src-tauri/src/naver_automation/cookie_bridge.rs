@@ -1,5 +1,21 @@
 use serde_json::{json, Value};
 
+/// 네이버 쿠키의 도메인을 와일드카드(`.naver.com`)로 정규화한다(순수 함수). 로그인 시 `nid.naver.com`
+/// 에서 발급된 NID_AUT/NID_SES가 **host-only**(`nid.naver.com`, 앞 점 없음)로 저장되면, 게시 시점에
+/// `stock.naver.com`으로는 그 쿠키가 전송되지 않아 서버가 미로그인으로 보고 로그인 페이지로
+/// 리다이렉트한다(→ "쿠키 못찾음"). 그래서 naver.com 계열 host-only 도메인을 `.naver.com`으로 넓혀
+/// 모든 네이버 서브도메인(stock 포함)에 전송되게 한다. 이미 점으로 시작하거나 naver.com이 아니면
+/// 그대로 둔다.
+fn normalize_naver_domain(domain: &str) -> String {
+    let trimmed = domain.trim();
+    let bare = trimmed.strip_prefix('.').unwrap_or(trimmed);
+    if !trimmed.starts_with('.') && (bare == "naver.com" || bare.ends_with(".naver.com")) {
+        ".naver.com".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 // 로그인 자동화(CDP)가 저장한 쿠키 하나를 Chrome DevTools Protocol의
 // Network.setCookie 파라미터로 변환하는 순수 함수입니다.
 // name/value가 없으면 주입할 수 없으므로 None을 반환합니다.
@@ -16,7 +32,7 @@ pub(super) fn cookie_to_cdp_param(cookie: &Value) -> Option<Value> {
     params.insert("value".to_owned(), json!(value));
 
     if let Some(domain) = cookie.get("domain").and_then(Value::as_str) {
-        params.insert("domain".to_owned(), json!(domain));
+        params.insert("domain".to_owned(), json!(normalize_naver_domain(domain)));
     }
 
     // path는 없으면 "/"로 둡니다.
@@ -136,5 +152,25 @@ mod tests {
         assert_eq!(params.len(), 2);
         assert_eq!(params[0]["name"], json!("NID_AUT"));
         assert_eq!(params[1]["name"], json!("NID_SES"));
+    }
+
+    #[test]
+    fn normalizes_host_only_naver_domain_to_wildcard() {
+        // host-only nid.naver.com → .naver.com (stock.naver.com에도 전송되게).
+        assert_eq!(normalize_naver_domain("nid.naver.com"), ".naver.com");
+        assert_eq!(normalize_naver_domain("naver.com"), ".naver.com");
+        assert_eq!(normalize_naver_domain("www.naver.com"), ".naver.com");
+        // 이미 와일드카드면 그대로.
+        assert_eq!(normalize_naver_domain(".naver.com"), ".naver.com");
+        // 네이버가 아니면 그대로(과확장 금지).
+        assert_eq!(normalize_naver_domain(".pstatic.net"), ".pstatic.net");
+        assert_eq!(normalize_naver_domain("evil-naver.com.attacker.io"), "evil-naver.com.attacker.io");
+    }
+
+    #[test]
+    fn cookie_to_cdp_param_widens_host_only_nid_domain() {
+        let cookie = json!({ "name": "NID_SES", "value": "v", "domain": "nid.naver.com" });
+        let param = cookie_to_cdp_param(&cookie).expect("should convert");
+        assert_eq!(param["domain"], json!(".naver.com"));
     }
 }

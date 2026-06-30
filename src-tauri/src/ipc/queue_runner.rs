@@ -890,16 +890,24 @@ fn apply_waiting_for_successful_posts<R: Runtime>(app: &AppHandle<R>, forum: &[F
         .into_iter()
         .filter(|id| !blocked.contains(id))
         .collect();
-    // 대기 후보(성공)에서 차단·대기초과 계정은 뺀다 — 종료성/일시 실패가 대기보다 우선한다(#2/#7).
-    let waiting: Vec<String> = successful_post_login_ids(forum)
+    // 차단도 대기초과도 아닌 "그 밖의 실패"(약관 동의하기 비활성·버튼 못찾음, 응답 읽기 IO 실패
+    // 등)는 전부 `Error`로 칠한다(사용자 지시: 대기초과·보류·활성 기준이 아니면 전부 에러 —
+    // 오류가 떠도 계정이 활성으로 남지 않게). 차단·대기초과는 각자 전용 상태가 우선이라 뺀다.
+    let errored: std::collections::BTreeSet<String> = errored_post_login_ids(forum)
         .into_iter()
         .filter(|id| !blocked.contains(id) && !timed_out.contains(id))
         .collect();
-    if blocked.is_empty() && timed_out.is_empty() && waiting.is_empty() {
+    // 대기 후보(성공)에서 차단·대기초과·에러 계정은 뺀다 — 종료성/일시/그밖의 실패가 대기보다
+    // 우선한다(#2/#7 + 후속). 같은 계정에 성공과 실패가 섞이면 실패를 표면화한다(기존 #7과 동일 철학).
+    let waiting: Vec<String> = successful_post_login_ids(forum)
+        .into_iter()
+        .filter(|id| !blocked.contains(id) && !timed_out.contains(id) && !errored.contains(id))
+        .collect();
+    if blocked.is_empty() && timed_out.is_empty() && errored.is_empty() && waiting.is_empty() {
         return;
     }
     app.state::<JsonStore<Account>>().mutate(|list| {
-        // 우선순위로 칠한다: 차단(종료) → 대기초과(일시 실패) → 대기(성공).
+        // 우선순위로 칠한다: 차단(종료) → 대기초과(일시 실패) → 에러(그밖의 실패) → 대기(성공).
         let list = blocked.iter().fold(list, |acc, id| {
             apply_status_by_login_id(
                 acc,
@@ -918,6 +926,17 @@ fn apply_waiting_for_successful_posts<R: Runtime>(app: &AppHandle<R>, forum: &[F
                 AccountStatus::TimedOut,
                 Some(
                     "페이지 대기시간 초과 또는 네이버 서버 오류(HTTP 500)로 게시가 실패했습니다. 잠시 후 다시 시도하세요."
+                        .to_owned(),
+                ),
+            )
+        });
+        let list = errored.iter().fold(list, |acc, id| {
+            apply_status_by_login_id(
+                acc,
+                id,
+                AccountStatus::Error,
+                Some(
+                    "글 게시에 실패해 '에러' 상태로 전환했습니다(약관 동의·세션 등). 자세한 원인은 완료 로그의 '자세히 보기'에서 확인한 뒤, 상태를 눌러 다시 시도하세요."
                         .to_owned(),
                 ),
             )
@@ -975,6 +994,26 @@ fn timed_out_post_login_ids(forum: &[ForumOutcome]) -> std::collections::BTreeSe
 fn successful_post_login_ids(forum: &[ForumOutcome]) -> std::collections::BTreeSet<String> {
     let mut ids = std::collections::BTreeSet::new();
     for o in forum.iter().filter(|o| o.result.ok && !o.result.skipped) {
+        ids.insert(o.account_id.clone());
+    }
+    ids
+}
+
+/// 종목토론방(forum) 게시가 **차단도 대기초과도 아닌 "그 밖의 실패"**로 끝난 계정(loginId)
+/// 집합(순수). 약관 동의하기 비활성/버튼 못찾음, 약관 동의 처리 실패, CDP 응답 읽기 IO 실패처럼
+/// `is_blocking_failure`·`is_timed_out_failure` 어느 마커에도 안 걸리는 실패가 대상이다. 사용자
+/// 지시(후속): 대기초과·보류·활성(성공) 기준이 아닌 실패는 전부 `Error`로 칠해 계정이 활성으로
+/// 남지 않게 한다. skip(앞 글 차단으로 건너뜀)은 그 자체가 실패 사유가 아니므로 제외한다. 차단·
+/// 대기초과는 전용 상태가 우선이므로 호출부에서 그 계정을 뺀다(차단 > 대기초과 > 에러 > 대기).
+fn errored_post_login_ids(forum: &[ForumOutcome]) -> std::collections::BTreeSet<String> {
+    use crate::discussion_batch::{is_blocking_failure, is_timed_out_failure};
+    let mut ids = std::collections::BTreeSet::new();
+    for o in forum.iter().filter(|o| {
+        !o.result.ok
+            && !o.result.skipped
+            && !is_blocking_failure(&o.result.message)
+            && !is_timed_out_failure(&o.result.message)
+    }) {
         ids.insert(o.account_id.clone());
     }
     ids
@@ -2700,6 +2739,12 @@ fn forum_failure_reason(message: &str) -> String {
     if let Some(status) = parse_http_status(trimmed) {
         return status_reason(status).to_owned();
     }
+    // 전송 계층(연결/DNS/타임아웃) 실패는 HTTP 상태가 없어 위 매핑에 안 걸린다. 이를 잠금 폴백으로
+    // 흘리면 "로그인·잠금 확인"이라는 틀린 안내가 떠(잠긴 게 아니라 망이 끊긴 것) — #330과 같은
+    // 부류의 오안내. 네트워크 끊김으로 명확히 분류해 "잠시 후 재시도" 안내를 준다(재시도로 풀린다).
+    if is_network_transport_failure(trimmed) {
+        return "잠시 인터넷 연결이 끊겨 게시에 실패했습니다. 잠시 후 다시 시도해 주세요".to_owned();
+    }
     // 개발 용어가 섞이지 않은 순수 안내문이면 사용자 친화로 보고 그대로 노출한다.
     if contains_tech_jargon(trimmed) {
         "게시에 실패했습니다. 계정 로그인·잠금 상태를 확인한 뒤 다시 시도해 주세요".to_owned()
@@ -2723,6 +2768,26 @@ fn parse_http_status(message: &str) -> Option<u16> {
         .parse::<u16>()
         .ok()
         .filter(|n| (100..=599).contains(n))
+}
+
+/// 메시지가 HTTP 전송 계층(연결/DNS/타임아웃) 실패인지 식별한다(#330 후속). packet_client가
+/// send 실패에 붙이는 한국어 접두어("전송 실패")와, reqwest가 남기는 영어 표식(connect/dns/
+/// timeout 등)을 함께 본다. HTTP status가 붙는 응답 단계 실패와 달리 상태코드가 없어, 잠금
+/// 폴백으로 새기 전에 여기서 '네트워크 끊김'으로 분리한다.
+fn is_network_transport_failure(message: &str) -> bool {
+    if message.contains("전송 실패") {
+        return true;
+    }
+    let lower = message.to_ascii_lowercase();
+    const MARKERS: [&str; 6] = [
+        "error sending request",
+        "tcp connect",
+        "dns error",
+        "timed out",
+        "timeout",
+        "connection refused",
+    ];
+    MARKERS.iter().any(|m| lower.contains(m))
 }
 
 /// 사용자에게 그대로 보여주면 안 되는 개발 용어가 들어 있는지(#243). 종토방 매크로/패킷
@@ -5434,6 +5499,62 @@ mod tests {
     }
 
     #[test]
+    fn errored_collects_unclassified_failures_only() {
+        // 사용자 지시(후속): 차단도 대기초과도 아닌 게시 실패(약관 동의하기 비활성·버튼 못찾음,
+        // 응답 읽기 IO 실패 등 "엔진 오류" 계열)는 전부 'Error'로 칠해 계정이 활성으로 안 남게 한다.
+        let forum = vec![
+            forum_fail("acc_err", "삼성전자", "005930", "trace-x"), // message "엔진 오류" — 미분류
+            forum_blocked("acc_block", "카카오", "035720"),         // 차단(403)
+            forum_timed_out("acc_to", "LG", "066570", "페이지 로드 대기 시간이 초과되었습니다."),
+            forum_skipped("acc_skip", "네이버", "035420"),
+            forum_ok("acc_ok", "SK하이닉스", "000660"),
+        ];
+        let ids = errored_post_login_ids(&forum);
+        assert!(ids.contains("acc_err"), "미분류 실패는 에러 대상");
+        assert!(!ids.contains("acc_block"), "차단은 에러 아님(전용 상태가 우선)");
+        assert!(!ids.contains("acc_to"), "대기초과는 에러 아님(전용 상태가 우선)");
+        assert!(!ids.contains("acc_skip"), "건너뜀(skip)은 에러 아님");
+        assert!(!ids.contains("acc_ok"), "성공은 에러 아님");
+    }
+
+    #[test]
+    fn error_takes_precedence_over_waiting_but_not_blocked_or_timed_out() {
+        // 한 계정이 1글 성공 + 다른 글 미분류 실패면 — 대기가 아니라 에러로 표면화한다(#7과 동일
+        // 철학). 같은 계정에 차단/대기초과가 있으면 그 전용 상태가 우선이라 에러에서 빠진다.
+        let forum = vec![
+            forum_ok("acc_mix", "삼성전자", "005930"),
+            forum_fail("acc_mix", "SK하이닉스", "000660", "trace-y"),
+            forum_blocked("acc_block_err", "카카오", "035720"),
+            forum_fail("acc_block_err", "네이버", "035420", "trace-z"),
+        ];
+        let blocked = blocked_post_login_ids(&forum);
+        let timed_out: std::collections::BTreeSet<String> = timed_out_post_login_ids(&forum)
+            .into_iter()
+            .filter(|id| !blocked.contains(id))
+            .collect();
+        let errored: std::collections::BTreeSet<String> = errored_post_login_ids(&forum)
+            .into_iter()
+            .filter(|id| !blocked.contains(id) && !timed_out.contains(id))
+            .collect();
+        let waiting: Vec<String> = successful_post_login_ids(&forum)
+            .into_iter()
+            .filter(|id| {
+                !blocked.contains(id) && !timed_out.contains(id) && !errored.contains(id)
+            })
+            .collect();
+        assert!(errored.contains("acc_mix"), "성공+미분류실패 계정은 에러");
+        assert!(
+            waiting.is_empty(),
+            "에러 계정은 부분 성공이 있어도 대기로 두지 않는다"
+        );
+        assert!(blocked.contains("acc_block_err"), "차단이 잡혀야 한다");
+        assert!(
+            !errored.contains("acc_block_err"),
+            "차단 계정은 에러에서 빠진다(차단 우선)"
+        );
+    }
+
+    #[test]
     fn forum_failure_reason_maps_http_status_to_korean() {
         // packet_client가 만드는 "… 패킷 HTTP 실패: HTTP status 403 …"를 비개발자용 사유로(#243).
         let msg = "글쓰기 form 패킷 HTTP 실패: HTTP status 403 Forbidden for url (https://m.stock.naver.com/x)";
@@ -5462,6 +5583,56 @@ mod tests {
             forum_failure_reason("글쓰기 form 응답에서 txId를 찾지 못했습니다."),
             "게시에 실패했습니다. 계정 로그인·잠금 상태를 확인한 뒤 다시 시도해 주세요"
         );
+    }
+
+    #[test]
+    fn forum_failure_reason_maps_transport_failure_to_network_not_lock() {
+        // 전송 계층(연결/DNS/타임아웃) 실패는 로그인·잠금이 아니라 '네트워크 끊김'이다(#330 후속).
+        // getProfile send 실패가 "패킷" 단어 때문에 잠금 폴백으로 새던 버그를 막는다.
+        let network = "잠시 인터넷 연결이 끊겨 게시에 실패했습니다. 잠시 후 다시 시도해 주세요";
+        // reqwest 전송 실패 원문(우리가 "전송 실패" 접두어를 붙임).
+        assert_eq!(
+            forum_failure_reason(
+                "getProfile 패킷 전송 실패: error sending request for url (https://static.nid.naver.com/getProfile)"
+            ),
+            network
+        );
+        // 타임아웃 source가 붙은 형태도 잠금이 아니라 네트워크로.
+        assert_eq!(
+            forum_failure_reason("getProfile 패킷 전송 실패: operation timed out"),
+            network
+        );
+        // 잠금 폴백과 헷갈리지 않게: HTTP 상태가 있으면 여전히 상태 매핑이 우선.
+        assert_eq!(
+            forum_failure_reason("글쓰기 form 패킷 HTTP 실패: HTTP status 403 for url (x)"),
+            "권한이 없거나 로그인이 만료되었습니다"
+        );
+    }
+
+    #[test]
+    fn is_network_transport_failure_recognizes_all_markers_and_excludes_others() {
+        // 우리가 send 실패에 붙이는 한국어 접두어.
+        assert!(is_network_transport_failure("getProfile 패킷 전송 실패: x"));
+        // reqwest/하부가 남기는 영어 표식(대소문자 무관).
+        for marker in [
+            "error sending request for url (x)",
+            "tcp connect error: refused",
+            "dns error: failed to lookup address",
+            "operation timed out",
+            "request Timeout reached",
+            "connection refused (os error 111)",
+        ] {
+            assert!(
+                is_network_transport_failure(marker),
+                "전송 계층 실패여야 함: {marker}"
+            );
+        }
+        // 전송과 무관한 메시지는 네트워크로 오분류하면 안 된다(잠금·HTTP상태·게시 파싱).
+        assert!(!is_network_transport_failure("아이디 잠금조치"));
+        assert!(!is_network_transport_failure("HTTP status 403 Forbidden for url (x)"));
+        assert!(!is_network_transport_failure(
+            "글쓰기 form 응답에서 txId를 찾지 못했습니다."
+        ));
     }
 
     #[test]

@@ -60,3 +60,6 @@ src-tauri/.omc/
 
 # husky 로컬 생성 디렉토리(워크트리에선 심볼릭링크) — 추적 안 함
 .husky/_
+
+# Windows(WSL) ADS 메타파일
+*:Zone.Identifier
