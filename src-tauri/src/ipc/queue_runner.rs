@@ -506,6 +506,18 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
         if should_yield(app, id) {
             let (rem_naver, rem_band) = account_sets(&groups[gi..]);
             let (done_naver, done_band) = account_sets(&groups[..gi]);
+            // [가시성] 양보로 뒤로 밀린 계정을 한 줄로 남긴다 — "증발"처럼 보이지 않게(사용자
+            // 지적 2026-06-30). 이 계정들은 잔여 plan으로 Waiting 복귀해 제 차례에 다시 게시된다.
+            let bumped: Vec<String> = rem_naver
+                .iter()
+                .chain(rem_band.iter())
+                .map(|a| crate::auth::mask_id(a))
+                .collect();
+            tracing::info!(
+                "[POST] 더 높은 우선순위 작업에 양보 — 밀린 계정 {}건은 잔여 plan으로 재대기: {}",
+                bumped.len(),
+                bumped.join(", ")
+            );
             let completed = retain_plan_accounts(plan, &done_naver, &done_band);
             flush_completion_log(
                 app,
@@ -870,6 +882,24 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
         &all_clip,
         &all_fetch_failures,
     );
+
+    // 종목토론방(#양보누락): 선점 양보·취소 경계로 **게시를 시도조차 못 한** 계정(outcome 0건)은
+    // 실패가 아니라 "아직 차례가 안 온" 것이므로 큐에서 빼지(완료하지) 않고 그 계정들의 잔여 종토
+    // plan으로 재대기시킨다 — 한 건이라도 올릴 때까지 대기(사용자 요청 2026-06-30). 시도해서
+    // 실패·대기초과·차단·건너뜀한 계정은 outcome가 있어 여기서 빠지므로(=완료) 무한 재대기는 없다.
+    // 위 flush_completion_log/apply_waiting_for_successful_posts는 *시도된* 계정만 보고하므로
+    // 미시도 계정은 로그·상태에 남지 않아(=활성 유지) 중복 보고가 없다. id가 이미 큐에서 빠졌으면
+    // (사용자 취소) apply_yield_now가 no-op이라 되살아나지 않는다.
+    let unattempted = forum_unattempted_accounts(plan, &all_forum);
+    if !unattempted.is_empty() {
+        let who: Vec<String> = unattempted.iter().map(|a| crate::auth::mask_id(a)).collect();
+        tracing::info!(
+            "[POST] 종목토론방 미시도 계정 {}건 — 큐에서 빼지 않고 차례 올 때까지 재대기: {}",
+            unattempted.len(),
+            who.join(", ")
+        );
+        return ItemOutcome::Yielded(Box::new(retain_forum_only(plan, &unattempted)));
+    }
     ItemOutcome::Completed
 }
 
@@ -1474,6 +1504,61 @@ fn retain_plan_accounts(
             .cloned()
             .collect(),
         login,
+    }
+}
+
+/// plan.forum의 종목토론방 게시 대상 계정(account_id) 집합 — 중복 제거(순수). 어떤 계정이
+/// 종토방 게시 대상인지 가려, 시도조차 못 한 계정을 찾는 데 쓴다(`forum_unattempted_accounts`).
+fn forum_target_accounts(plan: &PublishPlan) -> std::collections::BTreeSet<String> {
+    plan.forum.iter().map(|f| f.account_id.clone()).collect()
+}
+
+/// 종목토론방 게시 대상 계정 중 **결과(`ForumOutcome`)가 하나도 없는 계정** 집합(순수, #양보누락).
+/// `run_forum_targets`는 게시를 *시작한* 계정엔 성공·실패·차단·건너뜀·대기초과 어느 경우든
+/// (spawn_blocking 패닉 시 합성 실패까지) outcome을 반드시 남긴다. 따라서 outcome이 0건인
+/// 계정은 선점 양보(#232)나 취소 경계(`item_present`로 `run_forum_targets`가 break)로 **게시를
+/// 시작조차 못 한** 계정이다 — 실패가 아니라 "아직 차례가 안 온" 것이므로 `execute_item`이
+/// 큐에서 빼지(완료하지) 않고 이 계정들의 잔여 종토 plan으로 재대기시킨다(사용자 요청 2026-06-30).
+fn forum_unattempted_accounts(
+    plan: &PublishPlan,
+    all_forum: &[ForumOutcome],
+) -> std::collections::BTreeSet<String> {
+    let attempted: std::collections::BTreeSet<&str> =
+        all_forum.iter().map(|o| o.account_id.as_str()).collect();
+    forum_target_accounts(plan)
+        .into_iter()
+        .filter(|acc| !attempted.contains(acc.as_str()))
+        .collect()
+}
+
+/// plan을 **그 계정들의 종목토론방 타깃만** 담은 축소 plan으로 만든다(순수, #양보누락). 카페·
+/// 밴드·블로그·클립 타깃과 login은 모두 비운다 — 종토방은 저장 쿠키로 게시하므로(#234) login
+/// 없이 재대기해도 무방하고(login=None이라도 forum이 있어 우선순위는 종토(1)로 유지돼 대기 중
+/// 로그인(0) 뒤에서 제 차례를 기다린다), 이미 끝났거나 다른 레인의 카페·밴드 작업을 재대기로
+/// 다시 돌려 **중복 게시하지 않게** 한다(사수 지침: 카페·밴드 무손상). 스칼라(제목/본문/댓글/
+/// 링크)는 종토 게시에 그대로 쓰므로 보존한다.
+fn retain_forum_only(
+    plan: &PublishPlan,
+    accounts: &std::collections::BTreeSet<String>,
+) -> PublishPlan {
+    PublishPlan {
+        post_id: plan.post_id.clone(),
+        kind: plan.kind.clone(),
+        title: plan.title.clone(),
+        body_text: plan.body_text.clone(),
+        comments: plan.comments.clone(),
+        link_override: plan.link_override.clone(),
+        naver: Vec::new(),
+        forum: plan
+            .forum
+            .iter()
+            .filter(|t| accounts.contains(&t.account_id))
+            .cloned()
+            .collect(),
+        band: Vec::new(),
+        blog: Vec::new(),
+        clip: Vec::new(),
+        login: None,
     }
 }
 
@@ -4389,6 +4474,73 @@ mod tests {
         // 스칼라 필드는 보존.
         assert_eq!(rest.title, p.title);
         assert_eq!(rest.body_text, p.body_text);
+    }
+
+    #[test]
+    fn forum_unattempted_accounts_keeps_only_zero_outcome_accounts() {
+        // 종토 게시 대상 3계정. a=성공·b=대기초과(시도함)는 outcome가 있고, c는 outcome 0건
+        // (선점 양보/취소로 시도조차 못 함) → c만 미시도로 잡힌다.
+        let mut p = plan(ModeValue::Post, vec![]);
+        p.forum = vec![
+            forum_target("a", "삼성", "1"),
+            forum_target("b", "엘지", "2"),
+            forum_target("c", "현대", "3"),
+        ];
+        let all_forum = vec![
+            forum_ok("a", "삼성", "1"),
+            forum_timed_out("b", "엘지", "2", "페이지 로드 대기 시간이 초과되었습니다."),
+        ];
+        let missing = forum_unattempted_accounts(&p, &all_forum);
+        assert_eq!(missing.into_iter().collect::<Vec<_>>(), vec!["c".to_owned()]);
+    }
+
+    #[test]
+    fn forum_unattempted_empty_when_every_account_attempted() {
+        // 시도 후 실패(outcome 있음)는 미시도가 아니다 → 빈 집합 → execute_item이 Completed로 뺀다
+        // (무한 재대기 방지). 차단·건너뜀도 outcome가 있어 마찬가지.
+        let mut p = plan(ModeValue::Post, vec![]);
+        p.forum = vec![forum_target("a", "삼성", "1"), forum_target("b", "엘지", "2")];
+        let all_forum = vec![
+            forum_fail("a", "삼성", "1", "trace"),
+            forum_blocked("b", "엘지", "2"),
+        ];
+        assert!(forum_unattempted_accounts(&p, &all_forum).is_empty());
+    }
+
+    #[test]
+    fn retain_forum_only_keeps_just_those_forum_targets_and_clears_other_lanes() {
+        // 카페(a) + 종토(a,b) + 로그인이 섞인 plan에서 b의 종토만 남긴다 — 카페·login은 비워져
+        // 재대기 시 카페 중복게시·재로그인이 없다(사수 지침: 카페·밴드 무손상).
+        let mut p = plan(ModeValue::Post, vec![naver_target("a")]);
+        p.forum = vec![forum_target("a", "삼성", "1"), forum_target("b", "엘지", "2")];
+        p.login = Some(vec![login_target("a", PlatformId::Naver)]);
+        let keep: std::collections::BTreeSet<String> = ["b".to_owned()].into_iter().collect();
+
+        let sub = retain_forum_only(&p, &keep);
+        assert!(sub.naver.is_empty(), "카페 비움 → 중복게시 없음");
+        assert!(sub.band.is_empty());
+        assert!(sub.blog.is_empty());
+        assert!(sub.clip.is_empty());
+        assert_eq!(sub.login, None, "login 비움 → 재로그인·IP회전 없음(저장 쿠키 게시)");
+        assert_eq!(sub.forum.len(), 1);
+        assert_eq!(sub.forum[0].account_id, "b");
+        // 스칼라(제목/본문/댓글/링크)는 종토 게시에 그대로 쓰므로 보존.
+        assert_eq!(sub.title, p.title);
+        assert_eq!(sub.body_text, p.body_text);
+        assert_eq!(sub.comments, p.comments);
+    }
+
+    #[test]
+    fn retain_forum_only_item_stays_forum_priority_and_concurrent_lane() {
+        // 재대기된 forum-only 아이템은 종토(우선순위 1)라 대기 중 로그인(0) 뒤에서 제 차례를
+        // 기다리고, is_forum_only_item=true라 동시 종토 레인으로 흐른다.
+        let mut p = plan(ModeValue::Post, vec![]);
+        p.forum = vec![forum_target("a", "삼성", "1")];
+        p.login = Some(vec![login_target("a", PlatformId::Naver)]);
+        let keep: std::collections::BTreeSet<String> = ["a".to_owned()].into_iter().collect();
+        let item = now_item("re", QueueState::Waiting, Some(retain_forum_only(&p, &keep)));
+        assert_eq!(item_priority(&item), 1, "종토 우선순위 유지");
+        assert!(is_forum_only_item(&item), "동시 종토 레인으로 처리");
     }
 
     #[test]
