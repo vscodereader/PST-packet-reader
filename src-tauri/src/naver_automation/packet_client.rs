@@ -365,11 +365,10 @@ impl NaverPacketClient {
         // 추천·소개 검증·생성/수정 POST)는 stock.naver.com/discussion. 호출부가 넘긴 종목 URL은 안 쓴다.
         let _ = referer;
         let referer = DEFAULT_REFERER;
-        let status = self.get_stock_json(
-            "/api/community/profile/users/status",
-            STOCK_ROOT_REFERER,
-            "프로필 상태",
-        )?;
+        // npay 가입 직후엔 네이버 서버 반영 지연으로 이 status가 잠깐 500("Failed to fetch profile
+        // user status")을 준다 — 가입 실패가 아니라 반영 대기다(실측 2026-07-01: 방금 가입한 fresh
+        // 계정 첫 조회 500 → 잠시 후 200). 짧은 백오프로 재시도해 반영될 때까지 기다린다.
+        let status = self.read_profile_status_with_retry(STOCK_ROOT_REFERER)?;
         let status_text = status
             .get("status")
             .and_then(Value::as_str)
@@ -473,12 +472,12 @@ impl NaverPacketClient {
     // 계정은 성공 콜백으로 리다이렉트되어 무해(멱등). 비치명적 — 전송이 실패해도 글쓰기는
     // 시도하게 두고(이미 가입돼 있으면 글쓰기는 성공), 최종 URL·status를 로그로 남겨 가입 완료
     // 여부를 사용자가 로그에서 확인할 수 있게 한다.
-    pub(super) fn ensure_npay_financial_join(&self) -> NpayJoinStatus {
+    pub(super) fn ensure_npay_financial_join(&mut self) -> NpayJoinStatus {
         tracing::info!(
             api = "GET /financial-service/join",
             "실제 API 호출 label=\"네이버페이 가입(동의하기)\""
         );
-        let (status, final_url) = match self.financial_join_follow() {
+        let (status, final_url, rotated_cookies) = match self.financial_join_follow() {
             Ok(result) => result,
             Err(error) => {
                 // 전송 실패는 비치명적: 이미 가입된 계정이면 뒤의 글쓰기는 그대로 성공한다.
@@ -488,6 +487,29 @@ impl NaverPacketClient {
                 return NpayJoinStatus::Unknown;
             }
         };
+        // npay 가입이 회전시킨 세션 쿠키(NID_AUT/NID_SES 재발급 등)를 본 클라이언트에 반영한다.
+        // 이걸 안 하면 이후 프로필 status/게시가 로그인 시점의 옛 토큰으로 나가, 서버가 "금융회원
+        // 미반영 세션"으로 보고 프로필 status 500을 준다(실측 2026-07-01 yeh: npay는 됐는데 status만 500).
+        let peek_c = |cookies: &[NaverCookie], name: &str| -> String {
+            cookies
+                .iter()
+                .find(|c| c.name == name)
+                .map(|c| c.value.chars().take(12).collect::<String>())
+                .unwrap_or_else(|| "(없음)".to_owned())
+        };
+        let aut_before = peek_c(&self.cookies, "NID_AUT");
+        let ses_before = peek_c(&self.cookies, "NID_SES");
+        self.cookies = rotated_cookies;
+        let aut_after = peek_c(&self.cookies, "NID_AUT");
+        let ses_after = peek_c(&self.cookies, "NID_SES");
+        tracing::info!(
+            rotated = aut_before != aut_after || ses_before != ses_after,
+            nid_aut_before = %aut_before,
+            nid_aut_after = %aut_after,
+            nid_ses_before = %ses_before,
+            nid_ses_after = %ses_after,
+            "[npay] 가입 후 회전된 세션 쿠키를 클라이언트에 반영"
+        );
         if financial_join_completed(&final_url) {
             tracing::info!(
                 status,
@@ -527,7 +549,10 @@ impl NaverPacketClient {
     /// 로 실어 따라간다 — 이 누적이 미가입 계정의 commonTermAgree를 200으로 통과시키는 핵심이다(실측
     /// 패킷 `동의+프로필까지`). 최종 (status, url)을 돌려준다. best-effort — 호출부가 실패를 삼키고
     /// 글쓰기를 계속한다.
-    fn financial_join_follow(&self) -> AutomationResult<(u16, String)> {
+    // 반환: (최종 status, 최종 url, 홉마다 누적된 쿠키 jar). jar에는 npay 가입이 회전시킨 세션
+    // 쿠키(NID_AUT/NID_SES 재발급 등)가 들어있어, 호출부가 self.cookies에 반영해야 이후 프로필
+    // status/게시가 "금융회원 반영된 새 세션"으로 나간다(안 하면 옛 토큰으로 status 500 — 실측 yeh).
+    fn financial_join_follow(&self) -> AutomationResult<(u16, String, Vec<NaverCookie>)> {
         const MAX_HOPS: u32 = 15;
         let client = Client::builder()
             .timeout(Duration::from_secs(20))
@@ -577,6 +602,24 @@ impl NaverPacketClient {
                 &host,
             );
             let status = response.status();
+            // [진단·로컬테스트] 가입 GET 체인을 홉마다 한 줄씩 추적한다 — 우리 체인이 성공 캡쳐
+            // (agreement→join→commonTermAgree→callback→success)와 어디서 갈리는지 눈으로 확인용.
+            // status/Location을 남겨, ①agreement 누락 여부·③commonTermAgree 200 여부·④callback의
+            // 리다이렉트 대상을 실측한다.
+            let hop_location = response
+                .headers()
+                .get(LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("")
+                .to_owned();
+            tracing::info!(
+                hop = _hop,
+                host = %host,
+                status = status.as_u16(),
+                location = %hop_location,
+                url = %url,
+                "[npay][hop] 가입 체인 추적"
+            );
             if !status.is_redirection() {
                 // 필수약관 페이지(commonTermAgree termcd=40)는 HTTP 3xx가 아니라 200 HTML을 주고,
                 // 그 안의 JS `location.href = Base64.decode(<콜백URL>)`로 약관동의 콜백으로 이동한다
@@ -603,7 +646,7 @@ impl NaverPacketClient {
                     naver_body = %log_snippet(&body),
                     "[npay] 계정상태 확인 — 네이버 최종 응답 원문(가입 리다이렉트가 멈춘 지점)"
                 );
-                return Ok((final_status, url));
+                return Ok((final_status, url, jar));
             }
             // 리다이렉트: Location을 절대/상대 모두 처리해 다음 홉 URL로 삼는다.
             let Some(location) = response
@@ -613,7 +656,7 @@ impl NaverPacketClient {
                 .map(ToOwned::to_owned)
             else {
                 // 3xx인데 Location이 없으면 더 따라갈 수 없다 — 현재 URL을 최종으로 본다.
-                return Ok((status.as_u16(), url));
+                return Ok((status.as_u16(), url, jar));
             };
             url = url::Url::parse(&url)
                 .and_then(|base| base.join(&location))
@@ -621,7 +664,7 @@ impl NaverPacketClient {
                 .unwrap_or(location);
         }
         // 리다이렉트 상한 초과 — 미완료로 판정되게 현재 URL을 돌려준다(status는 0으로 표시).
-        Ok((0, url))
+        Ok((0, url, jar))
     }
 
     // 약관/가입 페이지가 아닌 곳(가입 성공 콜백·토론 페이지)으로 리다이렉트됐으면 가입 완료로 본다.
@@ -867,6 +910,61 @@ impl NaverPacketClient {
             .and_then(|response| response_text(response, label))?;
 
         parse_json(&response_text, label)
+    }
+
+    // 프로필 상태 조회를 짧은 백오프로 재시도한다. npay 가입 직후 네이버 서버 반영 지연으로 나는
+    // 일시적 500("Failed to fetch profile user status")을 넘기기 위함 — 가입은 됐는데 조회만 아직
+    // 500인 상황(실측 2026-07-01 yeajuyun). 성공하면 즉시 반환하고, 끝까지 실패하면 마지막 오류를 낸다.
+    fn read_profile_status_with_retry(&self, referer: &str) -> AutomationResult<Value> {
+        const MAX_ATTEMPTS: u32 = 5;
+        const BACKOFF: Duration = Duration::from_millis(500);
+        // [진단·1:1] 프로필 status에 실제로 실어보내는 세션 쿠키(NID_AUT/NID_SES) 앞부분을 찍는다.
+        // npay가 회전시킨 새 토큰이 반영됐는지 캡쳐(성공본: NID_AUT=lBTtey…, NID_SES=AAABjb01…)와
+        // 대조하기 위함. 500이 계속 나면 여기 값이 npay-후 값인지 로그인-시점 옛 값인지로 원인이 갈린다.
+        // 프로필 status에 실제로 나가는 쿠키를 전부(stock.naver.com 적용분, 값 앞 8자) 찍는다 —
+        // 성공 캡쳐의 status 요청 쿠키(NID_AUT/NID_SES/BUC + NNB/NAC/nid_inf…)와 1:1로 대조하기 위함.
+        // 회전 토큰이 반영됐는지, 캡쳐에 있던 쿠키 중 우리가 빠뜨린 게 있는지 한 줄로 드러난다.
+        let stock_cookies: Vec<String> = self
+            .cookies
+            .iter()
+            .filter(|c| cookie_applies_to_host(&c.domain, STOCK_HOST))
+            .map(|c| format!("{}={}", c.name, c.value.chars().take(8).collect::<String>()))
+            .collect();
+        tracing::info!(
+            cookies = %stock_cookies.join(" "),
+            "[진단] 프로필 status 요청 쿠키 전체(stock.naver.com 적용분, 값 앞 8자)"
+        );
+        let mut last_err: Option<AutomationError> = None;
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self.get_stock_json(
+                "/api/community/profile/users/status",
+                referer,
+                "프로필 상태",
+            ) {
+                Ok(value) => {
+                    if attempt > 1 {
+                        tracing::info!(
+                            attempt,
+                            "프로필 상태 조회 재시도 성공 — npay 가입 서버 반영 확인"
+                        );
+                    }
+                    return Ok(value);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        attempt,
+                        max = MAX_ATTEMPTS,
+                        error = %error.message(),
+                        "프로필 상태 조회 실패 — 백오프 후 재시도(npay 가입 반영 대기)"
+                    );
+                    last_err = Some(error);
+                    if attempt < MAX_ATTEMPTS {
+                        std::thread::sleep(BACKOFF);
+                    }
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| AutomationError::new("프로필 상태 조회 실패(재시도 소진)")))
     }
 
     // 프로필 form에 nickname이 없을 때 네이버 추천 닉네임 패킷을 호출하는 함수입니다.
