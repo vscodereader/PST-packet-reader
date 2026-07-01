@@ -31,7 +31,10 @@ tokio = { version = "1", features = ["full"] }
 thiserror = "1"
 # rustls-tls(순수 Rust TLS)로 Windows 크로스 컴파일 시 openssl 시스템 의존을 피한다.
 # gzip 은 #67 가입 카페 목록 응답 해제용, blocking 은 패킷 게시 엔진용.
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "gzip"] }
+# accept-encoding을 브라우저(gzip, deflate, br, zstd)와 맞춘다 — reqwest가 이 기능들로 인코딩을
+# 광고·자동 해제한다. gzip만 보내면 네이버 봇탐지(UMON)에 지문이 안 맞아 403/500이 날 수 있다
+# (사수 지적: 네이버는 zstd 사용). 실제 디코딩 기능을 켜야 zstd/br 응답을 안 깨고 푼다.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "gzip", "brotli", "deflate", "zstd"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2"

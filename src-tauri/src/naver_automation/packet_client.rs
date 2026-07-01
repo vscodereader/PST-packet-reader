@@ -119,18 +119,10 @@ impl CdpClient {
     pub(super) fn build_naver_packet_client(&mut self) -> AutomationResult<NaverPacketClient> {
         self.call("Network.enable", json!({}))?;
 
-        let result = self.call(
-            "Network.getCookies",
-            json!({
-                "urls": [
-                    "https://stock.naver.com",
-                    "https://m.stock.naver.com",
-                    "https://apis.naver.com",
-                    "https://nid.naver.com",
-                    "https://static.nid.naver.com"
-                ]
-            }),
-        )?;
+        // getAllCookies는 URL/경로 필터 없이 브라우저의 **모든** 쿠키를 준다. getCookies({urls})로
+        // 특정 URL만 조회하면 nid 세션 쿠키(NID_JST 등 `.nid.naver.com` host-only)를 놓쳐 약관/가입
+        // 요청이 인증 실패할 수 있어, 밴드 로그인과 동일하게 전량 수거한다(아래에서 naver 도메인만 필터).
+        let result = self.call("Network.getAllCookies", json!({}))?;
         let mut cookies: Vec<NaverCookie> = Vec::new();
 
         for cookie in result
@@ -361,10 +353,6 @@ impl NaverPacketClient {
 
     // Wireshark 성공 캡처에서 확인한 status/form/validate/PUT 패킷으로 프로필 소개를 설정하는 함수입니다.
     pub(super) fn ensure_profile_intro_setup(&self, referer: &str) -> AutomationResult<bool> {
-        // [진단·임시] 같은 계정이 브라우저에선 200인데 앱에선 프로필 상태 500나는 원인(헤더 vs 쿠키)을
-        // 가르는 프로브. 본 요청 직전에 브라우저와 동일 헤더로 같은 status를 쏴 결과를 로그로 남긴다.
-        // 원인 확인 후 제거 예정.
-        self.debug_probe_profile_status();
         let status = self.get_stock_json(
             "/api/community/profile/users/status",
             referer,
@@ -636,6 +624,9 @@ impl NaverPacketClient {
         headers.insert("sec-fetch-mode", HeaderValue::from_static("navigate"));
         headers.insert("sec-fetch-dest", HeaderValue::from_static("document"));
         headers.insert("sec-fetch-user", HeaderValue::from_static("?1"));
+        // 가입/약관 내비게이션에도 client-hints를 붙인다 — commonTermAgree 튕김도 봇탐지가 원인일 수 있어
+        // 브라우저와 동일하게 맞춘다.
+        self.insert_client_hints(&mut headers);
         headers.insert(
             "upgrade-insecure-requests",
             HeaderValue::from_static("1"),
@@ -806,7 +797,7 @@ impl NaverPacketClient {
         let response_text = self
             .client
             .get(format!("{STOCK_ORIGIN}{path}"))
-            .headers(self.stock_json_headers(STOCK_HOST, referer)?)
+            .headers(self.stock_get_headers(STOCK_HOST, referer)?)
             .send()
             .map_err(|error| {
                 // 응답 자체가 오지 않은 전송 계층 실패(연결 끊김·타임아웃 등)도 그대로 남긴다.
@@ -1019,7 +1010,7 @@ impl NaverPacketClient {
 
     // m.stock.naver.com JSON 요청에 사용하는 공통 헤더를 만드는 함수입니다.
     fn json_headers(&self, host: &str, referer: &str) -> AutomationResult<HeaderMap> {
-        let mut headers = self.base_headers(host, referer, "same-site")?;
+        let mut headers = self.base_headers(host, referer, "same-site", true)?;
         headers.insert(
             ACCEPT,
             HeaderValue::from_static("application/json, text/plain, */*"),
@@ -1029,85 +1020,22 @@ impl NaverPacketClient {
 
     // stock.naver.com JSON API 요청에 사용하는 공통 헤더를 만드는 함수입니다.
     fn stock_json_headers(&self, host: &str, referer: &str) -> AutomationResult<HeaderMap> {
-        let mut headers = self.base_headers(host, referer, "same-origin")?;
+        let mut headers = self.base_headers(host, referer, "same-origin", true)?;
         headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
         Ok(headers)
     }
 
-    /// [진단·임시] 이 host로 전송될 쿠키의 '이름'만 콤마로 나열한다(값은 민감정보라 제외).
-    /// 브라우저 성공 요청의 쿠키 목록과 대조해 우리 추출이 빠뜨린 쿠키가 있는지 보기 위함.
-    fn cookie_names_for(&self, host: &str) -> String {
-        self.cookie_header_for(host)
-            .split("; ")
-            .filter_map(|pair| pair.split('=').next())
-            .filter(|name| !name.is_empty())
-            .collect::<Vec<_>>()
-            .join(",")
-    }
-
-    /// [진단·임시] 같은 계정이 브라우저에선 `GET /profile/users/status`가 200인데 우리 앱은 500나는
-    /// 원인(헤더 vs 쿠키)을 가르기 위한 프로브. 성공한 브라우저 캡처(frame 6700)와 **똑같은 헤더**로
-    /// (origin 제거·sec-ch-ua·referer=stock.naver.com/) 같은 status를 한 번 더 쏴서 결과를 로그로 남긴다.
-    /// - 프로브=200 & 본 요청=500 → 원인은 **헤더**(우리가 붙인 origin이나 빠뜨린 client-hints).
-    /// - 프로브=500 → 원인은 헤더 아님(쿠키/세션/계정) → 쿠키 이름 목록으로 다음 조사.
-    /// best-effort: 실패해도 무시(본 흐름 불변).
-    fn debug_probe_profile_status(&self) {
-        let mut headers = HeaderMap::new();
-        if let Ok(value) = header_value(&self.user_agent, "user-agent") {
-            headers.insert(USER_AGENT, value);
-        }
-        if let Ok(value) = header_value(&self.cookie_header_for(STOCK_HOST), "cookie") {
-            headers.insert(COOKIE, value);
-        }
+    /// stock.naver.com **GET** 조회(프로필 상태/폼 등)용 헤더 — POST와 달리 Origin을 붙이지 않는다.
+    /// 브라우저는 같은 출처 GET에 Origin을 안 보내며(실측 패킷), 우리가 붙이면 봇탐지로 403/500난다.
+    fn stock_get_headers(&self, host: &str, referer: &str) -> AutomationResult<HeaderMap> {
+        let mut headers = self.base_headers(host, referer, "same-origin", false)?;
         headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
-        headers.insert(
-            ACCEPT_LANGUAGE,
-            HeaderValue::from_static("ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"),
-        );
-        // 브라우저 GET /status와 동일: referer는 루트, origin 헤더는 **미전송**.
-        headers.insert(REFERER, HeaderValue::from_static("https://stock.naver.com/"));
-        headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
-        headers.insert("sec-fetch-mode", HeaderValue::from_static("cors"));
-        headers.insert("sec-fetch-dest", HeaderValue::from_static("empty"));
-        headers.insert(
-            "sec-ch-ua",
-            HeaderValue::from_static(
-                "\"Google Chrome\";v=\"149\", \"Chromium\";v=\"149\", \"Not)A;Brand\";v=\"24\"",
-            ),
-        );
-        headers.insert("sec-ch-ua-mobile", HeaderValue::from_static("?0"));
-        headers.insert(
-            "sec-ch-ua-platform",
-            HeaderValue::from_static("\"Windows\""),
-        );
-        headers.insert("priority", HeaderValue::from_static("u=1, i"));
-
-        let names = self.cookie_names_for(STOCK_HOST);
-        match self
-            .client
-            .get(format!("{STOCK_ORIGIN}/api/community/profile/users/status"))
-            .headers(headers)
-            .send()
-        {
-            Ok(response) => {
-                let status = response.status().as_u16();
-                let body = response.text().unwrap_or_default();
-                tracing::warn!(
-                    probe_status = status,
-                    cookies = %names,
-                    body = %log_snippet(&body),
-                    "[진단] 프로필 상태 프로브(브라우저헤더·origin제거) — 이 값이 200이고 본 요청이 500이면 원인=헤더"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(error = %error, "[진단] 프로필 상태 프로브 전송 실패");
-            }
-        }
+        Ok(headers)
     }
 
     // static.nid.naver.com getProfile 요청에 사용하는 공통 헤더를 만드는 함수입니다.
     fn static_headers(&self, host: &str, referer: &str) -> AutomationResult<HeaderMap> {
-        let mut headers = self.base_headers(host, referer, "same-site")?;
+        let mut headers = self.base_headers(host, referer, "same-site", true)?;
         headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
         Ok(headers)
     }
@@ -1128,9 +1056,16 @@ impl NaverPacketClient {
         host: &str,
         referer: &str,
         sec_fetch_site: &'static str,
+        send_origin: bool,
     ) -> AutomationResult<HeaderMap> {
         let mut headers = HeaderMap::new();
-        headers.insert(ORIGIN, HeaderValue::from_static(STOCK_ORIGIN));
+        // Origin은 쓰기(POST/PUT)·CORS 요청에만 붙인다. 브라우저는 같은 출처 GET(프로필 상태/폼 조회
+        // 등)에는 Origin을 **안 보내는데**(실측 패킷 `프로필 생성하기 전`), 우리가 GET에도 Origin을
+        // 붙이면 네이버 봇탐지(UMON)가 비정상으로 보고 403 UMON_*_BANNED(가짜 밴)를 준다 — 계정은
+        // 멀쩡한데(lhs**** 브라우저 200) 우리만 막혔다(실측 2026-07-01).
+        if send_origin {
+            headers.insert(ORIGIN, HeaderValue::from_static(STOCK_ORIGIN));
+        }
         headers.insert(REFERER, header_value(referer, "referer")?);
         headers.insert(USER_AGENT, header_value(&self.user_agent, "user-agent")?);
         headers.insert(
@@ -1144,7 +1079,24 @@ impl NaverPacketClient {
         headers.insert("sec-fetch-site", HeaderValue::from_static(sec_fetch_site));
         headers.insert("sec-fetch-mode", HeaderValue::from_static("cors"));
         headers.insert("sec-fetch-dest", HeaderValue::from_static("empty"));
+        // 브라우저는 모든 요청에 client-hints(sec-ch-ua*)를 보낸다. 우리가 빠뜨리면 봇으로 탐지돼
+        // 403/500이 난다(실측: 우리 403 UMON_BANNED·프로필 500 ↔ 브라우저 200). UA 버전과 맞춰 붙인다.
+        self.insert_client_hints(&mut headers);
+        headers.insert("priority", HeaderValue::from_static("u=1, i"));
         Ok(headers)
+    }
+
+    /// 브라우저가 모든 요청에 붙이는 client-hints(sec-ch-ua 계열)를 넣는다. 값은 UA의 Chrome 메이저
+    /// 버전과 일치시킨다(UA와 sec-ch-ua 버전 불일치도 봇 신호라 실제 UA에서 뽑는다).
+    fn insert_client_hints(&self, headers: &mut HeaderMap) {
+        if let Ok(value) = HeaderValue::from_str(&sec_ch_ua_from_user_agent(&self.user_agent)) {
+            headers.insert("sec-ch-ua", value);
+        }
+        headers.insert("sec-ch-ua-mobile", HeaderValue::from_static("?0"));
+        headers.insert(
+            "sec-ch-ua-platform",
+            HeaderValue::from_static("\"Windows\""),
+        );
     }
 
     // 429(Too Many Requests)·5xx 같은 일시적 실패에 지수 백오프로 재시도하며 POST를 보낸다.
@@ -1852,6 +1804,20 @@ fn term_agree_callback_url(current_url: &str) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
+/// user-agent 문자열의 Chrome 메이저 버전으로 `sec-ch-ua` 헤더 값을 만든다(순수 함수). 브라우저는 모든
+/// 요청에 client-hints를 보내는데 우리가 안 보내면 네이버 봇탐지(UMON)가 막는다(실측: 우리 403
+/// UMON_BANNED·프로필 500 ↔ 브라우저 200). UA의 버전과 sec-ch-ua 버전이 다른 것도 봇 신호라 실제
+/// UA(`Chrome/149...`)에서 버전을 뽑아 맞춘다. 버전을 못 찾으면 최신 안정 버전을 기본값으로 쓴다.
+fn sec_ch_ua_from_user_agent(user_agent: &str) -> String {
+    let major = user_agent
+        .split("Chrome/")
+        .nth(1)
+        .and_then(|rest| rest.split('.').next())
+        .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+        .unwrap_or("149");
+    format!("\"Google Chrome\";v=\"{major}\", \"Chromium\";v=\"{major}\", \"Not)A;Brand\";v=\"24\"")
+}
+
 /// 단일 Set-Cookie 헤더 한 줄을 (도메인·이름·값)으로 파싱한다(순수 함수). `name=value; domain=.naver.com;
 /// path=/; ...` 형태에서 이름/값과 domain 속성만 취한다. domain 속성이 없으면 응답 호스트(host-only)로
 /// 스코프한다(브라우저 규칙). 이름이 비면 `None`. 만료/삭제 속성은 다루지 않는다 — 가입 체인(수초)에선
@@ -2220,6 +2186,18 @@ mod tests {
         let no_rurl =
             term_agree_callback_url("https://nid.naver.com/user2/help/commonTermAgree?termcd=40");
         assert!(no_rurl.is_none());
+    }
+
+    #[test]
+    fn sec_ch_ua_uses_chrome_major_from_user_agent() {
+        // 실제 UA의 Chrome 버전을 sec-ch-ua에 맞춘다(UA와 불일치도 봇 신호).
+        let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36";
+        let hint = sec_ch_ua_from_user_agent(ua);
+        assert!(hint.contains("\"Google Chrome\";v=\"151\""), "{hint}");
+        assert!(hint.contains("\"Chromium\";v=\"151\""), "{hint}");
+        // Chrome 버전을 못 찾으면 기본값(빈 값·봇 탐지 유발 방지).
+        let fallback = sec_ch_ua_from_user_agent("curl/8.0");
+        assert!(fallback.contains("v=\"149\""), "{fallback}");
     }
 
     #[test]
