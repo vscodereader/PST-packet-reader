@@ -1600,11 +1600,20 @@ fn header_value(value: &str, label: &str) -> AutomationResult<HeaderValue> {
 
 // 대상 호스트에 적용되는 쿠키만 골라 "name=value; ..." Cookie 헤더를 만드는 함수입니다.
 // (domain, name)으로 구분하고, 같은 이름이 겹치면 host-only 쿠키가 도메인 쿠키를 이깁니다.
-// 동의하기(가입) GET 리다이렉트 추종 후 최종 URL이 가입 완료 상태인지 판정한다. 약관 페이지
-// (member.pay.naver.com/.../agreement)나 가입 입력 페이지(financial-service/join)에 머물러
-// 있으면 미완료, 그 밖(가입 성공 콜백·토론 페이지로 빠짐)이면 완료로 본다.
+// 동의하기(가입) GET 리다이렉트 추종 후 최종 URL이 가입 완료 상태인지 판정한다. 아래 어느
+// 페이지에 머물러 있으면 **미완료**로 본다(가입 안 됨):
+//  - 약관 페이지(member.pay.naver.com/.../agreement)
+//  - 가입 입력 페이지(financial-service/join)
+//  - 로그인 페이지(nid.naver.com/nidlogin.login) — 미가입 계정은 필수 약관 동의가 없어 여기로
+//    튕긴다. 예전엔 이 URL의 /agreement·/join 부분이 이중 URL인코딩(%252F…)이라 걸러지지 않아
+//    "완료 ✅"로 오판했다(실측 로그 2026-07-01). login 페이지·약관동의 페이지를 명시로 잡는다.
+//  - 공통 약관동의 페이지(commonTermAgree) — 필수 약관 동의를 요구하는 중간 페이지.
+// 그 밖(가입 성공 콜백·토론 페이지로 빠짐)이면 완료로 본다.
 fn financial_join_completed(final_url: &str) -> bool {
-    !final_url.contains("/agreement") && !final_url.contains("/financial-service/join")
+    !final_url.contains("/agreement")
+        && !final_url.contains("/financial-service/join")
+        && !final_url.contains("nidlogin.login")
+        && !final_url.contains("commonTermAgree")
 }
 
 fn build_cookie_header(cookies: &[NaverCookie], host: &str) -> String {
@@ -1890,6 +1899,12 @@ mod tests {
         // 미완료: 가입 입력 페이지(financial-service/join)에서 더 못 빠져나갔으면 미완료.
         assert!(!financial_join_completed(
             "https://member-web.pay.naver.com/financial-service/join?from_pc=Y"
+        ));
+        // 미완료(회귀, 2026-07-01): 미가입 계정은 로그인 페이지로 튕긴다. 예전엔 URL 속 /agreement·
+        // /join 이 이중 URL인코딩(%252F…)이라 안 걸려 "완료"로 오판했다 — 이제 nidlogin.login·
+        // commonTermAgree 를 명시로 잡아 미완료로 본다(실측 로그의 final_url 그대로 검증).
+        assert!(!financial_join_completed(
+            "https://nid.naver.com/nidlogin.login?mode=form&url=https%3A%2F%2Fnid.naver.com%2Fuser2%2Fhelp%2FcommonTermAgree%3Ftermcd%3D40%26cpcd%3D123%26rurl%3Dhttps%253A%252F%252Fmember-web.pay.naver.com%252Ffinancial-service%252Fjoin%252Fnaver-term-consent%252Fcallback%26surl%3Dhttps%253A%252F%252Fmember.pay.naver.com%252Ffinancial-member%252Fagreement"
         ));
     }
 
