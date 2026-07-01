@@ -1,4 +1,6 @@
 import {
+  ActionIcon,
+  Badge,
   Box,
   Button,
   Divider,
@@ -27,23 +29,40 @@ export interface LikeModalProps {
   onClose: () => void;
 }
 
+/** 게시글 링크에서 사람이 읽을 postId(끝의 숫자)를 뽑는다. 칩 라벨용(없으면 링크 자체). */
+function postLabel(url: string): string {
+  const m = url.match(/\/discussion\/(\d+)/);
+  return m ? `글 #${m[1]}` : url;
+}
+
 /** 글 관리 화면의 "좋아요" 버튼이 여는 모달.
  *
- * "특정 게시글 댓글"과 같은 링크 입력 UI를 재사용하되, 아래에는 댓글 대신 로그인된
- * 종목토론방 계정을 체크박스([`AccountRow`] 재사용)로 고르게 한다. 링크(게시글)와 계정을
- * 고른 뒤 "좋아요"를 누르면, 선택한 계정들이 각각 그 글에 좋아요를 누른다(페이지 이동 없이
- * reactions API 전용 — 백엔드 `like_discussion_post`). 계정별 성공/실패를 결과 패널에 보여준다.
+ * "특정 게시글 댓글"처럼 게시글 링크를 여러 개 넣을 수 있다(엔터/추가 → 칩으로 쌓이고 입력칸이
+ * 비워진다). 아래에는 댓글 대신 로그인된 종목토론방 계정을 체크박스([`AccountRow`] 재사용)로
+ * 고른다. "좋아요"를 누르면 선택한 계정들이 넣은 링크 글마다 좋아요를 누른다(페이지 이동 없이
+ * reactions API 전용 — 백엔드 `like_discussion_post`). 완료 시 토스트로 성공/실패 수를 알린다.
  */
 export function LikeModal({ open, onClose }: LikeModalProps) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
-  const [link, setLink] = useState("");
+  const [links, setLinks] = useState<string[]>([]);
+  const [linkInput, setLinkInput] = useState("");
   const [flow, setFlow] = useState<null | "running" | LikeOutcome[]>(null);
 
   useEffect(() => {
     if (!open) return;
     void ipc.accounts.list().then(setAccounts);
   }, [open]);
+
+  // 입력칸의 링크를 목록에 추가한다(중복 제거, trim). 추가 후 입력칸을 비운다.
+  const addLink = () => {
+    const link = linkInput.trim();
+    if (!link) return;
+    setLinks((prev) => (prev.includes(link) ? prev : [...prev, link]));
+    setLinkInput("");
+  };
+  const removeLink = (link: string) =>
+    setLinks((prev) => prev.filter((l) => l !== link));
 
   // 좋아요는 종목토론방(네이버 증권) 로그인 계정으로만 누른다 — 게시 가능한 상태(active/new)만.
   const forumAccounts = accounts.filter(
@@ -71,15 +90,19 @@ export function LikeModal({ open, onClose }: LikeModalProps) {
 
   const running = flow === "running";
   const results = Array.isArray(flow) ? flow : [];
-  const canSubmit =
-    link.trim().length > 0 && selectedLoginIds.length > 0 && !running;
+  const canSubmit = links.length > 0 && selectedLoginIds.length > 0 && !running;
 
   const submit = async () => {
     if (!canSubmit) return;
     setFlow("running");
     try {
-      const outcomes = await ipc.forum.like(link.trim(), selectedLoginIds);
+      const outcomes = await ipc.forum.like(links, selectedLoginIds);
       setFlow(outcomes);
+      const ok = outcomes.filter((o) => o.success).length;
+      notifications.show({
+        message: `좋아요 ${outcomes.length}건 중 ${ok}건 성공`,
+        color: ok === outcomes.length ? "green" : ok === 0 ? "red" : "yellow",
+      });
     } catch (err) {
       notifications.show({
         message:
@@ -92,7 +115,8 @@ export function LikeModal({ open, onClose }: LikeModalProps) {
 
   const close = () => {
     if (running) return;
-    setLink("");
+    setLinks([]);
+    setLinkInput("");
     setSelected([]);
     setFlow(null);
     onClose();
@@ -120,19 +144,68 @@ export function LikeModal({ open, onClose }: LikeModalProps) {
     >
       <Stack gap={16}>
         <Text fz={13} c="dimmed">
-          게시글 링크를 넣고 계정을 고르면, 선택한 계정들이 그 글에 좋아요를
-          누릅니다(페이지 이동 없이 바로 처리).
+          게시글 링크를 넣고(여러 개 가능) 계정을 고르면, 선택한 계정들이 그
+          글들에 좋아요를 누릅니다(페이지 이동 없이 바로 처리).
         </Text>
 
-        {/* "특정 게시글 댓글"과 동일한 링크 입력 UI 재사용. */}
-        <TextInput
-          label="게시글 링크"
-          placeholder="https://stock.naver.com/domestic/stock/005930/discussion/424274129"
-          value={link}
-          onChange={(e) => setLink(e.currentTarget.value)}
-          leftSection={<Icon.link size={14} />}
-          aria-label="좋아요를 누를 게시글 링크"
-        />
+        {/* "특정 게시글 댓글"처럼 링크를 여러 개 추가 — 엔터/추가 → 칩으로 쌓이고 입력칸 비움. */}
+        <Stack gap={8}>
+          <Group gap={8} align="flex-end" wrap="nowrap">
+            <TextInput
+              style={{ flex: 1 }}
+              label="게시글 링크"
+              placeholder="https://stock.naver.com/domestic/stock/005930/discussion/424274129"
+              value={linkInput}
+              onChange={(e) => setLinkInput(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  addLink();
+                }
+              }}
+              leftSection={<Icon.link size={14} />}
+              aria-label="좋아요를 누를 게시글 링크"
+            />
+            <Button
+              variant="light"
+              color="red"
+              onClick={addLink}
+              disabled={!linkInput.trim()}
+            >
+              추가
+            </Button>
+          </Group>
+          {links.length > 0 ? (
+            <Group gap={6}>
+              {links.map((link) => (
+                <Badge
+                  key={link}
+                  color="red"
+                  variant="light"
+                  radius="xl"
+                  size="lg"
+                  rightSection={
+                    <ActionIcon
+                      size={15}
+                      variant="transparent"
+                      color="red"
+                      aria-label={`${link} 제거`}
+                      onClick={() => removeLink(link)}
+                    >
+                      <Icon.x size={11} />
+                    </ActionIcon>
+                  }
+                >
+                  {postLabel(link)}
+                </Badge>
+              ))}
+            </Group>
+          ) : (
+            <Text fz={12} c="orange.7">
+              좋아요를 누를 게시글 링크를 추가하세요.
+            </Text>
+          )}
+        </Stack>
 
         <Divider label="좋아요를 누를 계정" labelPosition="left" />
 
@@ -182,16 +255,16 @@ export function LikeModal({ open, onClose }: LikeModalProps) {
           )}
         </Stack>
 
-        {/* 결과 패널: 좋아요를 누른 뒤 계정별 성공/실패를 보여준다. */}
+        {/* 결과 패널: (계정×링크)별 성공/실패를 보여준다. */}
         {results.length > 0 && (
           <Stack gap={6}>
             <Text fz={13} fw={700}>
               {results.length}개 중 {okCount}개 성공
             </Text>
             <Stack gap={4} style={{ maxHeight: 160, overflowY: "auto" }}>
-              {results.map((r) => (
+              {results.map((r, i) => (
                 <Group
-                  key={r.accountId}
+                  key={`${r.accountId}-${r.postUrl}-${i}`}
                   gap={8}
                   px={10}
                   py={7}
@@ -222,6 +295,9 @@ export function LikeModal({ open, onClose }: LikeModalProps) {
                   >
                     {r.accountId}
                   </Text>
+                  <Badge size="xs" variant="default" radius="sm">
+                    {postLabel(r.postUrl)}
+                  </Badge>
                   <Text fz={11.5} c={r.success ? "dimmed" : "red"} truncate>
                     {r.message}
                   </Text>

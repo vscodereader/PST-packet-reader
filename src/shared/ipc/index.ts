@@ -78,9 +78,10 @@ export interface ForumPublishResult {
   message: string;
 }
 
-/** "좋아요"의 계정별 결과(백엔드 LikeOutcome 미러). accountId는 loginId. */
+/** "좋아요"의 (계정×링크)별 결과(백엔드 LikeOutcome 미러). accountId는 loginId. */
 export interface LikeOutcome {
   accountId: string;
+  postUrl: string;
   success: boolean;
   message: string;
 }
@@ -342,10 +343,10 @@ export const ipc = {
     endpoint: () => call<{ host: string; port: number }>("forum_endpoint"),
     publishNow: (request: ForumPublishRequest) =>
       call<ForumPublishResult[]>("run_forum_publish_now", { request }),
-    /** 특정 게시글 링크에 대해 선택한 계정들이 각각 좋아요를 누른다(페이지 이동 없이 API 전용).
-     * accountIds는 계정의 loginId(쿠키 파일 키). 계정별 성공/실패를 돌려준다. */
-    like: (postUrl: string, accountIds: string[]) =>
-      call<LikeOutcome[]>("like_discussion_post", { postUrl, accountIds }),
+    /** 여러 게시글 링크 × 선택한 계정들의 모든 조합에 좋아요를 누른다(페이지 이동 없이 API 전용).
+     * accountIds는 계정의 loginId(쿠키 파일 키). (계정×링크)별 성공/실패를 돌려준다. */
+    like: (postUrls: string[], accountIds: string[]) =>
+      call<LikeOutcome[]>("like_discussion_post", { postUrls, accountIds }),
   },
   // 엑셀(.xlsx) 내보내기/가져오기 — Rust에서 파일 처리, 프론트에서 경로 공급.
   excel: {
