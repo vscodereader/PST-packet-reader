@@ -84,7 +84,9 @@ export function Login({
             </Group>
 
             <Text size="xs" c="dimmed" ta="center">
-              ※ 비밀번호 찾기는 제공하지 않습니다(§5). 분실 시 운영자에게 문의.
+              ※ 비밀번호 찾기는 제공하지 않습니다.
+              <br />
+              분실 시 운영자에게 문의.
             </Text>
           </Stack>
         </form>

@@ -633,9 +633,6 @@ export function ResultReport() {
         <Text fw={800} size="xl">
           결과 보고
         </Text>
-        <Text size="sm" c="dimmed">
-          하위에서 일어난 일을 Admin이 모두 확인 (§10-4)
-        </Text>
       </Group>
 
       <SegmentedControl

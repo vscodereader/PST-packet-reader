@@ -253,30 +253,6 @@ export function DeviceConnection() {
     });
   };
 
-  // 연결 시 자동 새로고침 + 토스트 시연. 실제로는 admin SSE의 online 이벤트가 트리거(§6-3).
-  const simulateConnect = () => {
-    const target = devices.find((d) => !d.connected);
-    if (!target) {
-      notifications.show({
-        message: "이미 모든 기기가 연결됨(데모)",
-        color: "gray",
-      });
-      return;
-    }
-    setDevices((prev) =>
-      prev.map((d) =>
-        d.id === target.id
-          ? { ...d, connected: true, ip: "10.0.0.9", lastSeen: "방금 전" }
-          : d,
-      ),
-    );
-    setLastRefreshed("방금 전"); // 자동 새로고침
-    notifications.show({
-      message: `${target.name} 기기가 연결되었습니다.`,
-      color: "green",
-    });
-  };
-
   const expired = code != null && remaining === 0;
   const connectedCount = devices.filter((d) => d.connected).length;
 
@@ -392,24 +368,14 @@ export function DeviceConnection() {
               마지막 갱신 {lastRefreshed}
             </Text>
           </Group>
-          <Group gap="xs">
-            <Button
-              variant="default"
-              size="sm"
-              color="green"
-              onClick={simulateConnect}
-            >
-              데모: 기기 연결 시뮬레이션
-            </Button>
-            <Button
-              variant="light"
-              size="sm"
-              leftSection={<Icon.refresh size={16} />}
-              onClick={refresh}
-            >
-              새로고침
-            </Button>
-          </Group>
+          <Button
+            variant="light"
+            size="sm"
+            leftSection={<Icon.refresh size={16} />}
+            onClick={refresh}
+          >
+            새로고침
+          </Button>
         </Group>
 
         <Box style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>

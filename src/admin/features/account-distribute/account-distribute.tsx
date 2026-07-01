@@ -31,8 +31,8 @@ interface Account {
   loginId: string;
 }
 
-// 계정 추가용 인라인 편집 행(모달/prompt 대신). 저장 전까지만 클라이언트에 머무는 임시 행이라
-// 비밀번호도 여기서만 잠깐 들고 있다가 import 성공 시 버린다(서버가 at-rest 암호화, §7).
+// 계정 추가용 인라인 편집 행. 데스크톱 pstmacro와 동일하게, "행 추가 → 그 자리에서 아이디/비밀번호
+// 입력 → 체크박스로 바로 선택"한다. 별도의 "저장" 확정 단계는 없고, 분배 시점에 입력값 그대로 전송한다.
 interface Draft {
   key: string;
   loginId: string;
@@ -85,7 +85,7 @@ export function AccountDistribute() {
   );
   const [selAcc, setSelAcc] = useState<Set<string>>(new Set());
   const [selDev, setSelDev] = useState<Set<string>>(new Set());
-  // 인라인 추가 중인 행들(아직 import 안 된 임시 행). 데스크톱 pstmacro처럼 "행 추가→그 자리에서 입력".
+  // 인라인 추가 중인 행들. 데스크톱 pstmacro처럼 "행 추가→그 자리에서 입력→체크로 바로 선택".
   const [drafts, setDrafts] = useState<Draft[]>([]);
 
   // 스테이징 계정·online 하위 로드(서버 연결 시 실데이터, 오프라인이면 더미 유지).
@@ -117,7 +117,7 @@ export function AccountDistribute() {
   }, []);
 
   // 계정 추가(스테이징) — 모달/prompt 대신 표에 빈 인라인 행을 하나 추가하고, 그 행에서 직접
-  // 아이디·비밀번호를 입력하게 한다(데스크톱 pstmacro와 동일 UX).
+  // 아이디·비밀번호를 입력하게 한다(데스크톱 pstmacro와 동일 UX). 추가 즉시 체크박스로 선택 가능.
   const addDraftRow = () => {
     draftSeq += 1;
     setDrafts((prev) => [
@@ -131,47 +131,25 @@ export function AccountDistribute() {
       prev.map((d) => (d.key === key ? { ...d, ...patch } : d)),
     );
 
-  const removeDraft = (key: string) =>
+  // 인라인 행 삭제. 선택돼 있었으면 선택 집합에서도 함께 뺀다.
+  const removeDraft = (key: string) => {
     setDrafts((prev) => prev.filter((d) => d.key !== key));
-
-  // 인라인 행 저장 — 서버 import 엔드포인트로 1건 추가(at-rest 암호화는 서버가 수행, §7). 성공하면
-  // 임시 행을 지우고 스테이징 풀을 갱신한다. 오프라인 미리보기면 로컬 풀에 바로 반영한다.
-  const saveDraft = async (key: string) => {
-    const draft = drafts.find((d) => d.key === key);
-    if (!draft) return;
-    const loginId = draft.loginId.trim();
-    const pw = draft.pw;
-    if (loginId === "" || pw === "") {
-      notifications.show({
-        message: "아이디와 비밀번호를 모두 입력하세요",
-        color: "red",
-      });
-      return;
-    }
-    try {
-      const r = await api.accounts.import([{ loginId, pw }]);
-      removeDraft(key);
-      loadAccounts();
-      notifications.show({
-        message: `계정 추가: ${r.imported}건 (중복 ${r.skipped})`,
-        color: "green",
-      });
-    } catch (e) {
-      if (isOffline(e)) {
-        draftSeq += 1;
-        setAccounts((prev) => [...prev, { id: `local-${draftSeq}`, loginId }]);
-        removeDraft(key);
-        notifications.show({ message: "계정 추가(미리보기)", color: "green" });
-      } else {
-        notifications.show({
-          message: e instanceof Error ? e.message : "추가 실패",
-          color: "red",
-        });
-      }
-    }
+    setSelAcc((prev) => {
+      if (!prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
   };
 
-  const allAccChecked = accounts.length > 0 && selAcc.size === accounts.length;
+  // 선택 가능한 계정 = 스테이징 계정(id) + 인라인 입력행(key). 입력행도 "저장" 없이 바로 체크로 선택.
+  const selectableAccIds = [
+    ...accounts.map((a) => a.id),
+    ...drafts.map((d) => d.key),
+  ];
+  const allAccChecked =
+    selectableAccIds.length > 0 &&
+    selectableAccIds.every((id) => selAcc.has(id));
   const someAccChecked = selAcc.size > 0 && !allAccChecked;
 
   const toggleAcc = (id: string) =>
@@ -184,9 +162,9 @@ export function AccountDistribute() {
 
   const toggleAllAcc = () =>
     setSelAcc((prev) =>
-      prev.size === accounts.length
+      selectableAccIds.every((id) => prev.has(id))
         ? new Set()
-        : new Set(accounts.map((a) => a.id)),
+        : new Set(selectableAccIds),
     );
 
   const toggleDev = (id: string) =>
@@ -197,14 +175,37 @@ export function AccountDistribute() {
       return next;
     });
 
+  // 연결된 하위 컴퓨터 전체 선택.
+  const allDevChecked =
+    onlineDevices.length > 0 && selDev.size === onlineDevices.length;
+  const someDevChecked = selDev.size > 0 && !allDevChecked;
+  const toggleAllDev = () =>
+    setSelDev((prev) =>
+      prev.size === onlineDevices.length
+        ? new Set()
+        : new Set(onlineDevices.map((d) => d.id)),
+    );
+
   const canDistribute = selAcc.size >= 1 && selDev.size >= 1;
 
   const distribute = async () => {
-    const accountIds = [...selAcc];
+    const selectedAccountIds = accounts
+      .filter((a) => selAcc.has(a.id))
+      .map((a) => a.id);
+    // 인라인 입력행(임시 계정) — "저장" 확정 없이 입력한 값 그대로 함께 전송한다.
+    const selectedDrafts = drafts.filter((d) => selAcc.has(d.key));
+    const total = selectedAccountIds.length + selectedDrafts.length;
     const deviceIds = [...selDev];
     try {
+      // 입력행은 분배 시점에 입력값 그대로 import(at-rest 암호화는 서버, §7)한 뒤 기존 계정과 합쳐
+      // 분배한다. 사용자가 "저장" 버튼을 따로 누르지 않아도 입력 상태 그대로 서버로 전송된다.
+      if (selectedDrafts.length > 0) {
+        await api.accounts.import(
+          selectedDrafts.map((d) => ({ loginId: d.loginId, pw: d.pw })),
+        );
+      }
       // 서버가 균등+랜덤 분배(겹침 없음) + MOVE(스테이징에서 제거) + 대별 명령 push(§10-3).
-      const r = await api.accounts.distribute(accountIds, deviceIds);
+      const r = await api.accounts.distribute(selectedAccountIds, deviceIds);
       const summary = r.assignments
         .map((a) => `${a.deviceName} ${a.count}`)
         .join("·");
@@ -214,16 +215,18 @@ export function AccountDistribute() {
       });
       setSelAcc(new Set());
       setSelDev(new Set());
+      setDrafts((prev) => prev.filter((d) => !selAcc.has(d.key)));
       loadAccounts(); // MOVE 반영(서버에서 제거됨 → 풀 갱신)
     } catch (e) {
       if (isOffline(e)) {
-        // 오프라인 미리보기: 로컬에서 균등+랜덤 시연 후 풀에서 제거(MOVE, §7).
-        const counts = splitCounts(selAcc.size, selDev.size);
+        // 오프라인 미리보기: 로컬에서 균등+랜덤 시연 후 풀에서 제거(MOVE, §7). 입력행도 함께 처리.
+        const counts = splitCounts(total, selDev.size);
         notifications.show({
-          message: `계정 ${selAcc.size}개를 ${selDev.size}대에 분배했어요 (${counts.join("·")})`,
+          message: `계정 ${total}개를 ${selDev.size}대에 분배했어요 (${counts.join("·")})`,
           color: "green",
         });
         setAccounts((prev) => prev.filter((a) => !selAcc.has(a.id)));
+        setDrafts((prev) => prev.filter((d) => !selAcc.has(d.key)));
         setSelAcc(new Set());
         setSelDev(new Set());
       } else {
@@ -299,22 +302,21 @@ export function AccountDistribute() {
                     aria-label="전체 선택"
                   />
                 </Table.Th>
-                <Table.Th>아이디</Table.Th>
-                <Table.Th>비밀번호</Table.Th>
+                {/* 아이디·비밀번호 칸 길이 동일하게(같은 폭) */}
+                <Table.Th w="45%">아이디</Table.Th>
+                <Table.Th w="45%">비밀번호</Table.Th>
+                <Table.Th w={44} />
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
               {drafts.map((d) => (
                 <Table.Tr key={d.key} bg="var(--mantine-color-blue-light)">
                   <Table.Td>
-                    <ActionIcon
-                      variant="subtle"
-                      color="gray"
-                      aria-label="행 취소"
-                      onClick={() => removeDraft(d.key)}
-                    >
-                      <Icon.x size={16} />
-                    </ActionIcon>
+                    <Checkbox
+                      checked={selAcc.has(d.key)}
+                      onChange={() => toggleAcc(d.key)}
+                      aria-label={d.loginId || "새 계정"}
+                    />
                   </Table.Td>
                   <Table.Td>
                     <TextInput
@@ -323,41 +325,40 @@ export function AccountDistribute() {
                       placeholder="아이디"
                       aria-label="새 계정 아이디"
                       value={d.loginId}
+                      style={{ width: "100%" }}
                       onChange={(e) =>
                         updateDraft(d.key, { loginId: e.currentTarget.value })
                       }
                       onKeyDown={(e) => {
-                        if (e.key === "Enter") void saveDraft(d.key);
                         if (e.key === "Escape") removeDraft(d.key);
                       }}
                     />
                   </Table.Td>
                   <Table.Td>
-                    <Group gap={4} wrap="nowrap">
-                      <PasswordInput
-                        size="xs"
-                        placeholder="비밀번호"
-                        aria-label="새 계정 비밀번호"
-                        value={d.pw}
-                        style={{ flex: 1 }}
-                        onChange={(e) =>
-                          updateDraft(d.key, { pw: e.currentTarget.value })
-                        }
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") void saveDraft(d.key);
-                          if (e.key === "Escape") removeDraft(d.key);
-                        }}
-                      />
-                      <ActionIcon
-                        variant="light"
-                        color="blue"
-                        aria-label="계정 저장"
-                        disabled={d.loginId.trim() === "" || d.pw === ""}
-                        onClick={() => void saveDraft(d.key)}
-                      >
-                        <Icon.check size={16} />
-                      </ActionIcon>
-                    </Group>
+                    <PasswordInput
+                      size="xs"
+                      placeholder="비밀번호"
+                      aria-label="새 계정 비밀번호"
+                      value={d.pw}
+                      style={{ width: "100%" }}
+                      onChange={(e) =>
+                        updateDraft(d.key, { pw: e.currentTarget.value })
+                      }
+                      onKeyDown={(e) => {
+                        if (e.key === "Escape") removeDraft(d.key);
+                      }}
+                    />
+                  </Table.Td>
+                  {/* 삭제 버튼은 우측 */}
+                  <Table.Td>
+                    <ActionIcon
+                      variant="subtle"
+                      color="red"
+                      aria-label="행 삭제"
+                      onClick={() => removeDraft(d.key)}
+                    >
+                      <Icon.trash size={16} />
+                    </ActionIcon>
                   </Table.Td>
                 </Table.Tr>
               ))}
@@ -374,11 +375,12 @@ export function AccountDistribute() {
                   <Table.Td>
                     <Text c="dimmed">••••••</Text>
                   </Table.Td>
+                  <Table.Td />
                 </Table.Tr>
               ))}
               {accounts.length === 0 && drafts.length === 0 && (
                 <Table.Tr>
-                  <Table.Td colSpan={3}>
+                  <Table.Td colSpan={4}>
                     <Text c="dimmed" ta="center" py="md">
                       계정이 비었습니다 — 분배(MOVE)로 모두 하위에 보냈어요.
                     </Text>
@@ -410,6 +412,20 @@ export function AccountDistribute() {
             <Text size="xs" c="dimmed">
               (online 만 표시)
             </Text>
+            {onlineDevices.length > 0 && (
+              <Checkbox
+                size="xs"
+                label="전체 선택"
+                checked={allDevChecked}
+                indeterminate={someDevChecked}
+                onChange={toggleAllDev}
+              />
+            )}
+            {selDev.size > 0 && (
+              <Badge variant="light" color="blue" radius="sm">
+                {selDev.size}개 선택
+              </Badge>
+            )}
           </Group>
           <Button
             color="blue"
