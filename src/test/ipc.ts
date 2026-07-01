@@ -1369,18 +1369,23 @@ export const invoke = vi.fn(
         );
       }
 
-      // --- 좋아요(reactions) — 계정별 성공 결과 모킹 ------------------------
+      // --- 좋아요(reactions) — (계정×링크)별 성공 결과 모킹 -----------------
       case "like_discussion_post": {
         const ids = Array.isArray(args?.accountIds)
           ? (args!.accountIds as string[])
           : [];
-        return clone(
-          ids.map((accountId) => ({
+        const urls = Array.isArray(args?.postUrls)
+          ? (args!.postUrls as string[])
+          : [];
+        const outcomes = ids.flatMap((accountId) =>
+          urls.map((postUrl) => ({
             accountId,
+            postUrl,
             success: true,
             message: "좋아요 완료",
           })),
         );
+        return clone(outcomes);
       }
 
       // --- 엑셀 내보내기 (모킹 — 실제 파일 쓰기 없이 성공 반환) -----------

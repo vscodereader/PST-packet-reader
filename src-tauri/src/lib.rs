@@ -76,48 +76,60 @@ fn parse_template_csv(csv_text: String) -> Result<TemplateColumns, String> {
     parse_discussion_template_csv(csv_text)
 }
 
-/// 글 관리 화면 "좋아요" 버튼의 한 계정 처리 결과(프론트 표시용).
+/// 글 관리 화면 "좋아요" 버튼의 한 (계정 × 링크) 처리 결과(프론트 표시용).
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LikeOutcome {
     /// 좋아요를 시도한 계정 ID.
     account_id: String,
+    /// 좋아요를 누른 게시글 링크(여러 링크 중 어느 것인지 표시용).
+    post_url: String,
     /// 성공 여부(이미 좋아요 상태여도 성공으로 본다).
     success: bool,
     /// 표시용 메시지(성공 문구 또는 실패 사유).
     message: String,
 }
 
-/// "좋아요" 버튼: 특정 게시글 링크에 대해 **선택한 계정들이 각각 좋아요**를 누른다. 페이지 이동 없이
-/// reactions API로만 처리하고(사수 지시), 계정 사이에 짧은 간격을 둬 연속요청 차단을 피한다. 한
-/// 계정이 실패해도 중단하지 않고 다음 계정으로 넘어가며, 계정별 성공/실패를 모아 돌려준다.
+/// "좋아요" 버튼: **여러 게시글 링크 × 선택한 계정들**의 모든 조합에 좋아요를 누른다. 페이지 이동
+/// 없이 reactions API로만 처리하고(사수 지시), 호출 사이에 짧은 간격을 둬 연속요청 차단을 피한다.
+/// 하나가 실패해도 중단하지 않고 다음으로 넘어가며, (계정×링크)별 성공/실패를 모아 돌려준다.
 #[tauri::command]
 async fn like_discussion_post(
-    post_url: String,
+    post_urls: Vec<String>,
     account_ids: Vec<String>,
 ) -> Result<Vec<LikeOutcome>, String> {
-    if post_url.trim().is_empty() {
-        return Err("좋아요를 누를 게시글 링크를 입력하세요.".to_owned());
+    let post_urls: Vec<String> = post_urls
+        .into_iter()
+        .map(|u| u.trim().to_owned())
+        .filter(|u| !u.is_empty())
+        .collect();
+    if post_urls.is_empty() {
+        return Err("좋아요를 누를 게시글 링크를 한 개 이상 입력하세요.".to_owned());
     }
     if account_ids.is_empty() {
         return Err("좋아요를 누를 계정을 한 개 이상 선택하세요.".to_owned());
     }
     tauri::async_runtime::spawn_blocking(move || {
-        let mut outcomes = Vec::with_capacity(account_ids.len());
-        for (index, account_id) in account_ids.iter().enumerate() {
-            // 연속요청 도배 차단 회피용 간격(첫 계정 제외). 좋아요는 순식간이라 계정마다 텀을 둔다.
-            if index > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(1500));
+        let mut outcomes = Vec::with_capacity(account_ids.len() * post_urls.len());
+        let mut first = true;
+        for account_id in &account_ids {
+            for post_url in &post_urls {
+                // 연속요청 도배 차단 회피용 간격(첫 호출 제외). 좋아요는 순식간이라 호출마다 텀을 둔다.
+                if !first {
+                    std::thread::sleep(std::time::Duration::from_millis(1500));
+                }
+                first = false;
+                let (success, message) = match run_naver_like(account_id, post_url) {
+                    Ok(()) => (true, "좋아요 완료".to_owned()),
+                    Err(error) => (false, error.message().to_owned()),
+                };
+                outcomes.push(LikeOutcome {
+                    account_id: account_id.clone(),
+                    post_url: post_url.clone(),
+                    success,
+                    message,
+                });
             }
-            let (success, message) = match run_naver_like(account_id, &post_url) {
-                Ok(()) => (true, "좋아요 완료".to_owned()),
-                Err(error) => (false, error.message().to_owned()),
-            };
-            outcomes.push(LikeOutcome {
-                account_id: account_id.clone(),
-                success,
-                message,
-            });
         }
         outcomes
     })
