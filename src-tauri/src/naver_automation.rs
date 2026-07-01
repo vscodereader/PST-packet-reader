@@ -226,6 +226,12 @@ pub fn run_naver_like(account_id: &str, post_url: &str) -> AutomationResult<()> 
             ))
         })?;
     let client = packet_client::NaverPacketClient::from_storage_state(&storage)?;
+    // 좋아요(reactions API)도 종목토론방 커뮤니티 참여가 필요하다 — 네이버페이 금융서비스 가입
+    // (=종토방 "동의하기")이 안 된 계정은 '반응 생성'이 400으로 막힌다(실측 2026-07-01: soo****,
+    // 수동 로그인 시 npay 약관동의 팝업 확인 → 좋아요 400). 게시/댓글 경로(open_discussion_session
+    // §172)와 동일하게 좋아요 전에 가입을 보장한다. 멱등(이미 가입이면 무해)·비치명적(전송 실패해도
+    // 좋아요는 시도). Chrome 없이 저장 쿠키만으로 도는 순수 패킷 호출이라 이 API-전용 경로에 맞다.
+    client.ensure_npay_financial_join();
     client.like_post(post_url)
 }
 
