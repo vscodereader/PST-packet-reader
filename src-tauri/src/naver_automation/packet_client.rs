@@ -29,6 +29,11 @@ const STATIC_NID_HOST: &str = "static.nid.naver.com";
 // 리다이렉트 체인의 commonTermAgree에서 처리한다(3xx 아님 → JS 콜백 이동, financial_join_follow가 rurl로
 // 따라감). 성공 시 토론 페이지로, 실패 시 약관 페이지로 보낸다.
 const FINANCIAL_JOIN_URL: &str = "https://member-web.pay.naver.com/financial-service/join?from_pc=Y&nf_personalized_service_consent=Y&naver_personalized_service_consent=Y&optional_ads_and_mydata_usage_consent=Y&moneystory_subscription_consent=Y&join_success_url=https://stock.naver.com/discussion&join_fail_url=https://member.pay.naver.com/financial-member/agreement";
+// npay 약관동의 흐름의 시작 페이지(금융서비스 약관 페이지). 실측 패킷(`동의+프로필까지`)에서 join·
+// commonTermAgree 요청의 referer가 정확히 이 페이지다. nid는 referer로 "정상 가입 흐름에서 온
+// 요청"인지 검사하는데, 우리가 referer를 안 보내 commonTermAgree가 nidlogin.login으로 튕겼다.
+const NPAY_AGREEMENT_REFERER: &str =
+    "https://member.pay.naver.com/financial-member/agreement?rurl=https://stock.naver.com/discussion";
 const DEFAULT_REFERER: &str = "https://stock.naver.com/discussion";
 const DEFAULT_PROFILE_INTRODUCTION: &str = "2222";
 // 신규 계정 프로필 생성 시 기본 아바타(성공 캡처에서 브라우저가 보낸 값).
@@ -532,12 +537,16 @@ impl NaverPacketClient {
         // 순수 GET으로 재현한다.
         let mut jar = self.cookies.clone();
         let mut url = FINANCIAL_JOIN_URL.to_string();
+        // referer는 브라우저와 1:1로 맞춘다: 흐름은 약관 페이지에서 시작하고, 302 리다이렉트는 원래
+        // referer를 그대로 유지하며(실측: join·commonTermAgree 모두 약관 페이지 referer), JS 콜백
+        // 이동(commonTermAgree 200 → callback)만 referer를 그 commonTermAgree 페이지로 바꾼다.
+        let mut referer = NPAY_AGREEMENT_REFERER.to_string();
         for _hop in 0..MAX_HOPS {
             let host = url::Url::parse(&url)
                 .ok()
                 .and_then(|parsed| parsed.host_str().map(ToOwned::to_owned))
                 .unwrap_or_default();
-            let headers = self.navigation_headers(&jar, &host)?;
+            let headers = self.navigation_headers(&jar, &host, &referer)?;
             let response = client.get(&url).headers(headers).send().map_err(|error| {
                 AutomationError::new(format!("가입 GET 전송 실패({host}): {error}"))
             })?;
@@ -556,6 +565,9 @@ impl NaverPacketClient {
                 // 그 콜백 URL은 commonTermAgree의 `rurl` 쿼리에 그대로 들어있으므로(= 브라우저가 JS로
                 // 가던 그 주소), 이어서 GET 하면 콜백이 302로 가입을 완료시킨다.
                 if let Some(callback) = term_agree_callback_url(&url) {
+                    // commonTermAgree 200 HTML의 JS가 콜백으로 이동 → 콜백 요청의 referer는 이
+                    // commonTermAgree 페이지가 된다(실측 패킷 8593의 referer).
+                    referer = url.clone();
                     url = callback;
                     continue;
                 }
@@ -603,6 +615,7 @@ impl NaverPacketClient {
         &self,
         cookies: &[NaverCookie],
         host: &str,
+        referer: &str,
     ) -> AutomationResult<HeaderMap> {
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, header_value(&self.user_agent, "user-agent")?);
@@ -610,17 +623,21 @@ impl NaverPacketClient {
             COOKIE,
             header_value(&build_cookie_header(cookies, host), "cookie")?,
         );
+        // accept / accept-language 는 실측 브라우저 요청과 정확히 일치시킨다(1:1 대조, 2026-07-01).
         headers.insert(
             ACCEPT,
             HeaderValue::from_static(
-                "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
             ),
         );
         headers.insert(
             ACCEPT_LANGUAGE,
-            HeaderValue::from_static("ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"),
+            HeaderValue::from_static("ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7,ja;q=0.6"),
         );
-        headers.insert("sec-fetch-site", HeaderValue::from_static("none"));
+        // 브라우저는 약관 페이지에서 시작한 흐름이라 referer를 싣는다 — nid가 이 referer로 정상 흐름을
+        // 확인한다. referer가 있으니 sec-fetch-site도 none이 아니라 same-site(같은 naver.com 서브도메인)다.
+        headers.insert(REFERER, header_value(referer, "referer")?);
+        headers.insert("sec-fetch-site", HeaderValue::from_static("same-site"));
         headers.insert("sec-fetch-mode", HeaderValue::from_static("navigate"));
         headers.insert("sec-fetch-dest", HeaderValue::from_static("document"));
         headers.insert("sec-fetch-user", HeaderValue::from_static("?1"));
