@@ -128,7 +128,7 @@ pub fn is_blocking_failure(message: &str) -> bool {
         return true;
     }
     // 내부 코드/한국어 안내로 드러나는 로그인·권한·쿠키·세션 만료 계열.
-    const BLOCKING_MARKERS: [&str; 9] = [
+    const BLOCKING_MARKERS: [&str; 10] = [
         "SESSION_INVALID",
         "NO_COOKIES",
         "LOGIN_FAILED",
@@ -138,6 +138,9 @@ pub fn is_blocking_failure(message: &str) -> bool {
         "쿠키를 찾지 못",
         "로그인이 필요",
         "다시 로그인",
+        // 계정 보호조치(잠금)/세션 무효 추정 — npay가 nid 로그인 페이지로 튕긴 계정. 재로그인 필요이며
+        // 남은 글은 어차피 전부 500나므로 차단으로 보아 건너뛴다(2026-07-01, clarify_profile_status_error).
+        "보호조치",
     ];
     BLOCKING_MARKERS.iter().any(|marker| m.contains(marker))
 }
@@ -1131,6 +1134,10 @@ mod tests {
         ));
         assert!(is_blocking_failure(
             "로그인이 만료되었습니다. 다시 로그인해 주세요"
+        ));
+        // 계정 보호조치/세션 무효(npay가 nid 로그인 페이지로 튕김) → 차단으로 본다(2026-07-01).
+        assert!(is_blocking_failure(
+            "계정 세션 무효/보호조치 추정 — 재로그인이 필요합니다. 이 계정의 남은 글은 건너뜁니다."
         ));
         // 요청 과다(429)는 일시적이라 차단이 아니다 — 건너뛰면 안 된다(사수 지침: 요청 과다 제외).
         assert!(!is_blocking_failure(

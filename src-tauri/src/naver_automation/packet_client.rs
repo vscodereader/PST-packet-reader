@@ -63,6 +63,20 @@ pub(super) struct NaverPacketClient {
     user_agent: String,
 }
 
+/// npay 금융서비스 가입(동의) 시도의 최종 판정(2026-07-01). 이후 프로필 상태가 500나면, 그게
+/// "계정 보호조치(nid 인증 거부)" 때문인지 "약관 미완료" 때문인지 가르는 데 쓴다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum NpayJoinStatus {
+    /// 가입 완료(성공 콜백/토론 페이지로 착지) — 이미 가입됐거나 방금 완료.
+    Completed,
+    /// 필수약관 미완료(commonTermAgree에 멈춤) — 로그인 시점 브라우저 가입(#364)이 필요한 상태.
+    TermsPending,
+    /// nid가 로그인 페이지로 튕김(nidlogin.login) — 세션 무효/계정 보호조치 추정. 이 계정은 게시 불가.
+    LoginRequired,
+    /// 전송 실패 등 판정 불가.
+    Unknown,
+}
+
 /// 게시글의 현재 반응(좋아요/싫어요) 상태. `GET /posts/reactions?postIds=` 응답에서 뽑는다.
 /// `reaction_id`가 있으면 내가 이미 어떤 반응을 눌러 둔 것이고(변경은 PUT), 없으면 최초(POST)다.
 pub(super) struct PostReaction {
@@ -458,7 +472,7 @@ impl NaverPacketClient {
     // 계정은 성공 콜백으로 리다이렉트되어 무해(멱등). 비치명적 — 전송이 실패해도 글쓰기는
     // 시도하게 두고(이미 가입돼 있으면 글쓰기는 성공), 최종 URL·status를 로그로 남겨 가입 완료
     // 여부를 사용자가 로그에서 확인할 수 있게 한다.
-    pub(super) fn ensure_npay_financial_join(&self) {
+    pub(super) fn ensure_npay_financial_join(&self) -> NpayJoinStatus {
         tracing::info!(
             api = "GET /financial-service/join",
             "실제 API 호출 label=\"네이버페이 가입(동의하기)\""
@@ -468,7 +482,7 @@ impl NaverPacketClient {
             Err(error) => {
                 // 전송 실패는 비치명적: 이미 가입된 계정이면 뒤의 글쓰기는 그대로 성공한다.
                 tracing::warn!("네이버페이 가입(동의하기) 전송 실패 — 건너뜀(글쓰기는 계속): {error}");
-                return;
+                return NpayJoinStatus::Unknown;
             }
         };
         if financial_join_completed(&final_url) {
@@ -477,12 +491,24 @@ impl NaverPacketClient {
                 final_url = %final_url,
                 "네이버페이 가입(동의하기) 완료 — 가입 콜백으로 리다이렉트됨 ✅"
             );
+            NpayJoinStatus::Completed
+        } else if final_url.contains("nidlogin.login") {
+            // nid가 로그인 페이지로 튕김 = 이 계정의 nid 인증을 거부 = 세션 무효/계정 보호조치 추정.
+            // 이 계정은 프로필 상태 조회도 500나고 글도 전부 실패하므로, 호출부가 "재로그인 필요"
+            // 차단으로 다뤄 남은 글을 건너뛰게 한다(실측 2026-07-01: 보호조치 계정 kkch****).
+            tracing::warn!(
+                status,
+                final_url = %final_url,
+                "네이버페이 가입(동의하기) — nid 로그인 페이지로 튕김. 계정 보호조치/세션 무효 추정 → 재로그인 필요"
+            );
+            NpayJoinStatus::LoginRequired
         } else {
             tracing::warn!(
                 status,
                 final_url = %final_url,
-                "네이버페이 가입(동의하기) 미완료 추정 — 최종 URL이 약관/로그인 페이지. 미가입 계정이면 글쓰기 form이 404로 막힐 수 있음"
+                "네이버페이 가입(동의하기) 미완료 추정 — 최종 URL이 약관 페이지. 미가입 계정이면 로그인 시점 브라우저 가입(#364)이 필요"
             );
+            NpayJoinStatus::TermsPending
         }
     }
 
