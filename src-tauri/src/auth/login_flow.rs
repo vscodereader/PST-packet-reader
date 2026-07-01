@@ -1407,12 +1407,11 @@ fn dump_naver_page(client: &mut CdpClient, reason: &str) {
     );
 }
 
-// Network.getCookies로 .naver.com 쿠키를 수거한다.
+// 브라우저의 모든 쿠키를 수거해 .naver.com 만 남긴다. getAllCookies는 URL/경로 필터 없이 전량을
+// 주므로, 특정 URL만 조회하는 getCookies가 놓치던 nid 세션 쿠키(NID_JST 등 `.nid.naver.com`
+// host-only)까지 담아 이후 약관/가입 요청의 인증 실패를 막는다.
 fn collect_naver_cookies(client: &mut CdpClient) -> Result<Vec<Value>, AutomationError> {
-    let result = client.call(
-        "Network.getCookies",
-        json!({ "urls": ["https://www.naver.com", "https://nid.naver.com"] }),
-    )?;
+    let result = client.call("Network.getAllCookies", json!({}))?;
     let cookies = result
         .get("cookies")
         .and_then(Value::as_array)
