@@ -117,6 +117,21 @@ pub async fn post_login_report(
     post_authed(client, base, token, "/agent/login-report", body).await
 }
 
+/// 앱 로그 스트림 전송(#324). 링버퍼에서 꺼낸 앱 tracing 로그 줄들을 서버로 올려, Admin 로그
+/// 창(통신로그)에 하위의 실제 로그(네이버 원문 응답 등)가 그대로 보이게 한다.
+pub async fn post_log(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    lines: &[String],
+) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct LogReq<'a> {
+        lines: &'a [String],
+    }
+    post_authed(client, base, token, "/agent/log", &LogReq { lines }).await
+}
+
 /// SSE 스트림 열기(`GET /agent/stream?token=`). 브라우저가 아니므로 토큰을 쿼리로 싣는다.
 /// 반환된 Response를 `chunk()`로 읽어 `data:` 줄을 파싱한다(호출부).
 pub async fn open_stream(

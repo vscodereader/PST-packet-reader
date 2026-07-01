@@ -94,6 +94,28 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
     tauri::async_runtime::spawn(async move { heartbeat_loop().await });
     tauri::async_runtime::spawn(async move { state_report_loop(rx).await });
     tauri::async_runtime::spawn(async move { post_report_loop(post_app).await });
+    tauri::async_runtime::spawn(async move { log_forward_loop().await });
+}
+
+// ───────────────────────── 로그 전송 루프(#324) ─────────────────────────
+
+/// 앱 tracing 로그(링버퍼)를 주기적으로 꺼내 서버로 올린다 — 서버는 이를 감사로그에 실어 Admin
+/// 로그 창(통신로그)에 하위의 실제 로그(네이버 원문 응답 등)를 그대로 보여준다. 미등록(서버주소·
+/// 토큰 없음)이면 draining 없이 대기해 링버퍼가 로그를 보존한다(상한까지). 전송 실패는 무음
+/// 처리한다 — 실패 로그를 남기면 그 로그가 다시 링버퍼로 들어가 피드백 루프가 되기 때문.
+async fn log_forward_loop() {
+    let client = reqwest::Client::new();
+    loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let Some(cfg) = config::load() else {
+            continue;
+        };
+        let lines = crate::logging::drain_agent_logs(200);
+        if lines.is_empty() {
+            continue;
+        }
+        let _ = net::post_log(&client, &cfg.server_url, &cfg.device_token, &lines).await;
+    }
 }
 
 // ───────────────────────── 명령 수신 루프 ─────────────────────────

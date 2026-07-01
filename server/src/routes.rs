@@ -53,6 +53,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/agent/stream", get(agent_stream))
         .route("/agent/heartbeat", post(agent_heartbeat))
         .route("/agent/state", post(agent_state))
+        .route("/agent/log", post(agent_log))
         .route("/agent/commands/:command_id/result", post(command_result))
         .route("/agent/post-report", post(post_report))
         .route("/admin/post-reports", get(list_post_reports))
@@ -740,6 +741,36 @@ async fn login_report(
     st.audit("[RESULT]", &format!("{} → Admin", device.name), &device.id.to_string(), &summary, level)
         .await;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// 하위 앱 로그 수신(#324). 하위 에이전트가 링버퍼에서 꺼내 올린 앱 tracing 로그 줄들을 그대로
+/// 감사로그에 실어 Admin 통신로그 창에 하위의 실제 로그(네이버 원문 응답·게시/로그인 등)를 보여준다.
+/// 줄 텍스트에서 레벨(WARN/ERROR)을 읽어 색을 맞춘다.
+async fn agent_log(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<AgentLogReq>,
+) -> AppResult<Json<serde_json::Value>> {
+    let device = st.auth_device(&headers).await?;
+    let dir = format!("{} 로컬", device.name);
+    let dev_id = device.id.to_string();
+    for line in &req.lines {
+        let level = if line.contains(" ERROR ") {
+            "fail"
+        } else if line.contains(" WARN ") {
+            "warn"
+        } else {
+            "info"
+        };
+        st.audit("[하위로그]", &dir, &dev_id, line, level).await;
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct AgentLogReq {
+    #[serde(default)]
+    lines: Vec<String>,
 }
 
 /// Admin '로그인 결과' 탭 — 모든 하위의 로그인 결과(컴퓨터당 최신 1건, 최신순).
