@@ -63,3 +63,9 @@ src-tauri/.omc/
 
 # Windows(WSL) ADS 메타파일
 *:Zone.Identifier
+
+# 로컬 보관용 설계 대화기록·프롬프트·요청 드롭파일 — GitHub 미추적(로컬만).
+# docs/ 하위폴더(adr/·superpowers/ 등 정식 문서)는 계속 추적된다: 루트 직속 파일만 무시.
+/fix_and_request/
+/docs/*.txt
+/docs/*.md
