@@ -124,6 +124,8 @@ struct ForumDiscussionSession {
     chrome: CdpClient,
     packet_client: packet_client::NaverPacketClient,
     login_profile: NaverLoginProfile,
+    // npay 가입 판정 — 프로필 상태 500이 났을 때 "계정 보호조치(nid 인증 거부)"인지 가르는 데 쓴다.
+    npay_status: packet_client::NpayJoinStatus,
     selected: DiscussionSelection,
     // 종목토론방 URL(선택 종목은 코드로 생성, 랜덤은 패킷 API). 브라우저를 이 URL로 *이동시키지
     // 않고*, submit_post/submit_comment의 referer·target 파싱용 문자열로만 쓴다(페이지 이동/로드
@@ -169,7 +171,7 @@ fn open_discussion_session(
     // 가입 URL로 가는 GET 리다이렉트 체인이라(체크박스 아님), 로그인 쿠키를 든 패킷 클라이언트로
     // 그 URL을 GET 하면 가입이 완료된다. 멱등(이미 가입이면 무해)이고 비치명적(전송 실패해도
     // 글쓰기는 시도) — 가입 완료 여부는 메서드가 로그로 남긴다.
-    packet_client.ensure_npay_financial_join();
+    let npay_status = packet_client.ensure_npay_financial_join();
 
     // 종목토론방 URL을 코드로 직접 만들거나(선택 종목) 패킷 API로 랜덤 선택한다. 브라우저를 그 URL로
     // 이동시키지 않는다 — submit_post/submit_comment는 이 URL을 referer·target 파싱용 문자열로만
@@ -198,9 +200,41 @@ fn open_discussion_session(
         chrome,
         packet_client,
         login_profile,
+        npay_status,
         selected,
         room_url,
     })
+}
+
+/// 프로필 상태 조회가 500으로 실패했을 때, 그 원인이 서로 달라도 똑같이 "프로필 상태 500"으로만
+/// 보이던 걸(사용자 지적 2026-07-01) npay 판정에 따라 **상황별 메시지**로 바꾼다. 성공(Ok)이면 그대로.
+/// - `LoginRequired`(nid가 로그인 페이지로 튕김): 세션 무효/계정 보호조치 추정 → **차단성 메시지**로
+///   바꿔(is_blocking_failure) 이 계정의 남은 글을 건너뛴다(어차피 전부 500). "재로그인 필요".
+/// - `TermsPending`(commonTermAgree): npay 필수약관 미완료 → "재로그인하면 자동 가입(#364)" 안내.
+/// - `Completed`/`Unknown` + 500: npay는 됐는데 500 → 원본 메시지 유지(진짜 다른 프로필 문제).
+/// 500이 아닌 실패나 성공은 건드리지 않는다.
+fn clarify_profile_status_error(
+    result: AutomationResult<bool>,
+    npay_status: packet_client::NpayJoinStatus,
+) -> AutomationResult<bool> {
+    let Err(error) = result else {
+        return result;
+    };
+    let msg = error.message();
+    if !(msg.contains("프로필 상태") && msg.contains("500")) {
+        return Err(error);
+    }
+    match npay_status {
+        packet_client::NpayJoinStatus::LoginRequired => Err(AutomationError::new(format!(
+            "계정 세션 무효/보호조치 추정 — 재로그인이 필요합니다. npay 가입이 nid 로그인 페이지로 튕겨(이 계정 인증 거부) 프로필 상태가 500으로 막혔습니다. 재로그인해도 막혀 있으면 계정 보호조치입니다. 이 계정의 남은 글은 건너뜁니다. (원본: {msg})"
+        ))),
+        packet_client::NpayJoinStatus::TermsPending => Err(AutomationError::new(format!(
+            "npay 금융서비스(필수약관) 미완료로 프로필 상태 조회가 500입니다 — 이 계정을 재로그인하면 로그인 시점에 자동 가입을 시도합니다(#364). (원본: {msg})"
+        ))),
+        packet_client::NpayJoinStatus::Completed | packet_client::NpayJoinStatus::Unknown => {
+            Err(error)
+        }
+    }
 }
 
 /// 저장된 로그인 쿠키만으로 종목토론방 게시글에 **좋아요**를 누른다(Chrome·페이지 이동 없이
@@ -256,6 +290,7 @@ pub fn run_naver_discussion_macro(
         mut chrome,
         packet_client,
         login_profile,
+        npay_status,
         selected,
         room_url,
     } = open_discussion_session(
@@ -276,7 +311,10 @@ pub fn run_naver_discussion_macro(
         AutomationTarget::Post => {
             // 글쓰기 전에 종목토론방 프로필(닉네임+소개 2222)을 보장한다. 프로필이 없으면
             // 글쓰기 토큰 발급(discussion/form)이 404가 난다. 멱등이라 이미 있으면 즉시 통과.
-            packet_client.ensure_profile_intro_setup(&room_url)?;
+            clarify_profile_status_error(
+                packet_client.ensure_profile_intro_setup(&room_url),
+                npay_status,
+            )?;
             if request.submit_after_fill {
                 // 글쓰기 add 패킷 API로 게시하고, 응답 id로 작성 글 URL을 만든다(브라우저 이동 없음).
                 let post_id = packet_client.submit_post(&room_url, title, body)?;
@@ -307,7 +345,10 @@ pub fn run_naver_discussion_macro(
                 }
             };
             report_url = comment_target_url.clone();
-            packet_client.ensure_profile_intro_setup(&comment_target_url)?;
+            clarify_profile_status_error(
+                packet_client.ensure_profile_intro_setup(&comment_target_url),
+                npay_status,
+            )?;
             if request.submit_after_fill {
                 packet_client.submit_comment(&comment_target_url, body)?;
                 (false, true)
@@ -360,6 +401,7 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
         chrome: _chrome,
         packet_client,
         login_profile,
+        npay_status,
         selected,
         room_url,
     } = open_discussion_session(
@@ -370,7 +412,10 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
     )?;
 
     // 글쓰기 전에 종목토론방 프로필(닉네임+소개 2222)을 보장한다(없으면 글쓰기 form 404). 멱등.
-    packet_client.ensure_profile_intro_setup(&room_url)?;
+    clarify_profile_status_error(
+        packet_client.ensure_profile_intro_setup(&room_url),
+        npay_status,
+    )?;
 
     // 글쓰기 add 패킷 API로 게시하고, 응답 id로 작성 글 URL을 만든다(페이지 이동 없음).
     let post_id = packet_client.submit_post(&room_url, title, body)?;
@@ -392,7 +437,10 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
     }
 
     // 방금 쓴 글에 댓글을 단다 — 페이지 이동 없이 글 URL을 referer로 패킷 API 호출.
-    packet_client.ensure_profile_intro_setup(&post_url)?;
+    clarify_profile_status_error(
+        packet_client.ensure_profile_intro_setup(&post_url),
+        npay_status,
+    )?;
     packet_client.submit_comment(&post_url, comment)?;
     let comment_report = AutomationReport {
         current_url: post_url.clone(),
@@ -926,6 +974,53 @@ impl CdpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clarify_profile_status_error_differs_by_npay_status() {
+        use packet_client::NpayJoinStatus;
+        // 서로 다른 원인이 똑같이 "프로필 상태 500"으로만 보이던 걸(사용자 지적) npay 판정별로 가른다.
+        let profile_500 =
+            || Err(AutomationError::new("프로필 상태 패킷 HTTP 실패: status=500, body={\"message\":\"Failed to fetch profile user status\"}"));
+
+        // LoginRequired(nid 로그인 튕김) → 보호조치/재로그인 차단성 메시지(is_blocking_failure의 "보호조치").
+        let e = clarify_profile_status_error(profile_500(), NpayJoinStatus::LoginRequired)
+            .expect_err("에러여야");
+        assert!(
+            e.message().contains("보호조치") && e.message().contains("재로그인"),
+            "보호조치/재로그인 안내여야: {}",
+            e.message()
+        );
+
+        // TermsPending(commonTermAgree) → npay 미완료 안내. 차단 마커("다시 로그인")는 피한다.
+        let e = clarify_profile_status_error(profile_500(), NpayJoinStatus::TermsPending)
+            .expect_err("에러여야");
+        assert!(
+            e.message().contains("npay") && e.message().contains("미완료"),
+            "npay 미완료 안내여야: {}",
+            e.message()
+        );
+        assert!(
+            !e.message().contains("다시 로그인") && !e.message().contains("보호조치"),
+            "TermsPending은 차단으로 오분류되면 안 됨: {}",
+            e.message()
+        );
+
+        // Completed/Unknown + 500 → 원본 유지(진짜 다른 프로필 문제).
+        let e = clarify_profile_status_error(profile_500(), NpayJoinStatus::Completed)
+            .expect_err("에러여야");
+        assert!(!e.message().contains("보호조치"), "원본 유지: {}", e.message());
+
+        // 500이 아닌 실패는 npay 판정과 무관하게 원본 그대로.
+        let e = clarify_profile_status_error(
+            Err(AutomationError::new("HTTP status 429 Too Many Requests")),
+            NpayJoinStatus::LoginRequired,
+        )
+        .expect_err("에러여야");
+        assert_eq!(e.message(), "HTTP status 429 Too Many Requests");
+
+        // Ok는 절대 건드리지 않는다.
+        assert!(clarify_profile_status_error(Ok(true), NpayJoinStatus::LoginRequired).is_ok());
+    }
 
     #[test]
     fn connection_lost_detects_socket_abort_but_not_plain_timeout() {
