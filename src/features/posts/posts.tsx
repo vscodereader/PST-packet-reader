@@ -23,6 +23,7 @@ import type { GoFn, LibraryPost, ModeValue } from "@/shared/data/types";
 import { ipc } from "@/shared/ipc";
 import { Icon } from "@/shared/ui/icons";
 
+import { LikeModal } from "./like-modal";
 import { PublishModal } from "./publish-modal";
 import { WriterModal } from "./writer-modal";
 
@@ -44,6 +45,7 @@ export function Posts({ go }: { go: GoFn }) {
   const [writerOpen, setWriterOpen] = useState(false);
   const [writerDoc, setWriterDoc] = useState<LibraryPost | null>(null);
   const [publishDoc, setPublishDoc] = useState<LibraryPost | null>(null);
+  const [likeOpen, setLikeOpen] = useState(false);
 
   const upsert = (doc: LibraryPost) => {
     void ipc.posts.upsert(doc).then(setPosts);
@@ -142,6 +144,15 @@ export function Posts({ go }: { go: GoFn }) {
             }}
           >
             엑셀 가져오기
+          </Button>
+          <Button
+            size="sm"
+            variant="default"
+            color="red"
+            leftSection={<Icon.heart size={16} />}
+            onClick={() => setLikeOpen(true)}
+          >
+            좋아요
           </Button>
           <Button
             size="sm"
@@ -346,6 +357,7 @@ export function Posts({ go }: { go: GoFn }) {
         onClose={() => setPublishDoc(null)}
         go={go}
       />
+      <LikeModal open={likeOpen} onClose={() => setLikeOpen(false)} />
     </Container>
   );
 }

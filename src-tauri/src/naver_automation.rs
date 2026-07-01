@@ -203,6 +203,32 @@ fn open_discussion_session(
     })
 }
 
+/// 저장된 로그인 쿠키만으로 종목토론방 게시글에 **좋아요**를 누른다(Chrome·페이지 이동 없이
+/// reactions API 전용 — 사수 지시). `post_url`은 특정 게시글 링크(예:
+/// `https://stock.naver.com/domestic/stock/005930/discussion/424274129`)이며, 계정별로 호출한다.
+/// 이미 좋아요면 성공으로 본다(멱등). 쿠키 없음/세션 만료 등은 `AutomationError`로 올라간다.
+pub fn run_naver_like(account_id: &str, post_url: &str) -> AutomationResult<()> {
+    let post_url = post_url.trim();
+    if post_url.is_empty() {
+        return Err(AutomationError::new("좋아요를 누를 게시글 링크가 비어 있습니다."));
+    }
+    tracing::info!(
+        account = %crate::auth::mask_id(account_id),
+        "종토방 좋아요 시작(API 전용, 페이지 이동 없음)"
+    );
+    let storage = crate::auth::read_account_cookies(account_id)
+        .map_err(|error| {
+            AutomationError::new(format!("계정 '{account_id}' 쿠키 조회 실패: {error}"))
+        })?
+        .ok_or_else(|| {
+            AutomationError::new(format!(
+                "계정 '{account_id}'의 저장된 로그인 쿠키가 없습니다. 먼저 로그인하세요."
+            ))
+        })?;
+    let client = packet_client::NaverPacketClient::from_storage_state(&storage)?;
+    client.like_post(post_url)
+}
+
 pub fn run_naver_discussion_macro(
     request: NaverDiscussionRequest,
 ) -> AutomationResult<AutomationReport> {

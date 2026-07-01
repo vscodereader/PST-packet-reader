@@ -59,6 +59,18 @@ pub(super) struct NaverPacketClient {
     user_agent: String,
 }
 
+/// 게시글의 현재 반응(좋아요/싫어요) 상태. `GET /posts/reactions?postIds=` 응답에서 뽑는다.
+/// `reaction_id`가 있으면 내가 이미 어떤 반응을 눌러 둔 것이고(변경은 PUT), 없으면 최초(POST)다.
+pub(super) struct PostReaction {
+    /// 내가 이 글에 "좋아요"(recommend)를 눌러 둔 상태인지.
+    recommended: bool,
+    /// 내가 이 글에 "싫어요"(notRecommend)를 눌러 둔 상태인지(현재는 좋아요 기능만 쓰지만 대칭 보존).
+    #[allow(dead_code)]
+    not_recommended: bool,
+    /// 내가 눌러 둔 기존 반응의 id(없으면 `None` — 최초 반응이라 POST로 생성).
+    reaction_id: Option<String>,
+}
+
 struct DiscussionTarget {
     discussion_type: String,
     item_code: String,
@@ -153,6 +165,52 @@ impl CdpClient {
 }
 
 impl NaverPacketClient {
+    /// 저장된 로그인 쿠키(storageState JSON)만으로 패킷 클라이언트를 만든다 — **Chrome 없이 API
+    /// 전용**. 좋아요처럼 페이지 렌더링이 전혀 필요 없는 기능에서 쓴다(사수 지시: 페이지 이동
+    /// 없이 API로만). 쿠키는 카페 경로와 동일하게 파일에서 읽으며(naver.com/pstatic.net 도메인만),
+    /// 네이버 세션 쿠키(NID_AUT/NID_SES)가 없으면 로그인 만료로 보고 명시적으로 실패한다.
+    pub(super) fn from_storage_state(storage: &Value) -> AutomationResult<Self> {
+        let mut cookies: Vec<NaverCookie> = Vec::new();
+        if let Some(arr) = storage.get("cookies").and_then(Value::as_array) {
+            for cookie in arr {
+                let (Some(domain), Some(name), Some(value)) = (
+                    cookie.get("domain").and_then(Value::as_str),
+                    cookie.get("name").and_then(Value::as_str),
+                    cookie.get("value").and_then(Value::as_str),
+                ) else {
+                    continue;
+                };
+                if domain.contains("naver.com") || domain.contains("pstatic.net") {
+                    cookies.push(NaverCookie {
+                        domain: domain.to_owned(),
+                        name: name.to_owned(),
+                        value: value.to_owned(),
+                    });
+                }
+            }
+        }
+        let has = |name: &str| cookies.iter().any(|c| c.name == name);
+        if !has("NID_AUT") || !has("NID_SES") {
+            return Err(AutomationError::new(
+                "저장된 로그인 쿠키에 네이버 세션(NID_AUT/NID_SES)이 없습니다. 계정을 다시 로그인하세요.",
+            ));
+        }
+        let client = Client::builder()
+            .timeout(Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .build()
+            .map_err(|error| {
+                AutomationError::new(format!("Rust HTTP 클라이언트 생성 실패: {error}"))
+            })?;
+        Ok(Self {
+            client,
+            cookies,
+            // Chrome이 없어 navigator.userAgent를 못 읽으므로, 카페 경로와 동일한 데스크톱 크롬 UA를
+            // 재사용한다(네이버 JSON API는 이 UA로 정상 응답).
+            user_agent: crate::naver_cafe::post::client::BROWSER_USER_AGENT.to_owned(),
+        })
+    }
+
     // Wireshark에서 확인한 static.nid.naver.com getProfile 패킷을 Rust HTTP 요청으로 재현하는 함수입니다.
     pub(super) fn read_login_profile(&self) -> AutomationResult<NaverLoginProfile> {
         let callback = format!("pstmacroProfile_{}", timestamp_nanos());
@@ -545,6 +603,85 @@ impl NaverPacketClient {
         ))
     }
 
+    // ---- 좋아요/싫어요(reactions) — 패킷 캡처(2026-07-01)로 재현 ----
+
+    /// 게시글의 현재 반응 상태를 조회한다(`GET /posts/reactions?postIds=`). 내가 좋아요/싫어요를
+    /// 눌러 뒀는지와 기존 reactionId를 돌려준다 — 최초면 POST, 있으면 PUT으로 분기하기 위함.
+    pub(super) fn read_post_reaction(&self, post_id: &str) -> AutomationResult<PostReaction> {
+        let path = format!("/api/community/discussion/posts/reactions?postIds={post_id}");
+        let value = self.get_stock_json(&path, DEFAULT_REFERER, "반응 조회")?;
+        // 응답은 배열(요청 postIds 수만큼). postId 1건만 물었으므로 첫 원소를 본다.
+        let entry = value.as_array().and_then(|arr| arr.first());
+        Ok(PostReaction {
+            recommended: entry
+                .and_then(|e| e.get("recommended"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            not_recommended: entry
+                .and_then(|e| e.get("notRecommended"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            reaction_id: entry
+                .and_then(|e| e.get("reactionId"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
+        })
+    }
+
+    /// 반응을 새로 생성한다(`POST /posts/{id}/reactions`). `reaction_type`: `"good"`=좋아요,
+    /// `"bad"`=싫어요(패킷 캡처 값).
+    fn create_reaction(&self, post_id: &str, reaction_type: &str) -> AutomationResult<()> {
+        let url = format!("{STOCK_ORIGIN}/api/community/discussion/posts/{post_id}/reactions");
+        let body = json!({ "reactionType": reaction_type });
+        self.post_with_retry(
+            &url,
+            self.json_headers(STOCK_HOST, DEFAULT_REFERER)?,
+            Some(&body),
+            "반응 생성",
+        )?;
+        Ok(())
+    }
+
+    /// 기존 반응을 변경한다(`PUT /posts/{id}/reactions/{reactionId}`). 좋아요↔싫어요 전환이며,
+    /// 실동작상 **마지막 누른 상태**가 글에 표시된다.
+    fn update_reaction(
+        &self,
+        post_id: &str,
+        reaction_id: &str,
+        reaction_type: &str,
+    ) -> AutomationResult<()> {
+        let url = format!(
+            "{STOCK_ORIGIN}/api/community/discussion/posts/{post_id}/reactions/{reaction_id}"
+        );
+        let body = json!({ "reactionType": reaction_type });
+        self.put_with_retry(
+            &url,
+            self.json_headers(STOCK_HOST, DEFAULT_REFERER)?,
+            &body,
+            "반응 변경",
+        )?;
+        Ok(())
+    }
+
+    /// 게시글 URL에 **좋아요**를 누른다(페이지 이동 없이 reactions API만 사용). 이미 좋아요면 그대로
+    /// 성공 처리하고, 싫어요/무반응이면 좋아요로 만든다(최초=POST, 기존 반응 있으면=PUT). URL에서
+    /// postId는 기존 [`object_id_from_url`]로 파싱한다(댓글 경로와 동일 규칙 재사용).
+    pub(super) fn like_post(&self, post_url: &str) -> AutomationResult<()> {
+        let post_id = object_id_from_url(post_url)?;
+        let current = self.read_post_reaction(&post_id)?;
+        if current.recommended {
+            tracing::info!(post_id = %post_id, "이미 좋아요 상태 — 건너뜀");
+            return Ok(());
+        }
+        match current.reaction_id {
+            Some(reaction_id) => self.update_reaction(&post_id, &reaction_id, "good")?,
+            None => self.create_reaction(&post_id, "good")?,
+        }
+        tracing::info!(post_id = %post_id, "좋아요 완료");
+        Ok(())
+    }
+
     // stock.naver.com JSON API를 공통 헤더로 호출하고 JSON으로 파싱하는 함수입니다.
     fn get_stock_json(&self, path: &str, referer: &str, label: &str) -> AutomationResult<Value> {
         // 실제로 어떤 API를 호출하는지 경로째 로그에 남긴다(사수 지시: 실제 API 호출이 보여야 함).
@@ -877,6 +1014,48 @@ impl NaverPacketClient {
                 elapsed_ms,
                 "패킷 HTTP 최종 실패"
             );
+            return Err(AutomationError::new(format!(
+                "{label} 패킷 HTTP 실패: HTTP status {status} for url ({url})"
+            )));
+        }
+    }
+
+    // 반응 변경(PUT)처럼 기존 리소스를 갱신하는 JSON 요청을 보낸다. post_with_retry와 같은 429·5xx
+    // 백오프 재시도 정책을 쓰되 메서드만 PUT이다(좋아요↔싫어요 전환용). 실제 API 호출 결과를
+    // 로그로 남겨, 좋아요가 어느 계정에서 무슨 status로 처리/실패했는지 로그 파일에서 확인케 한다.
+    fn put_with_retry(
+        &self,
+        url: &str,
+        headers: HeaderMap,
+        json_body: &Value,
+        label: &str,
+    ) -> AutomationResult<String> {
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            let response = self
+                .client
+                .put(url)
+                .headers(headers.clone())
+                .json(json_body)
+                .send()
+                .map_err(|error| {
+                    AutomationError::new(format!("{label} 패킷 전송 실패: {error}"))
+                })?;
+            let status = response.status();
+            if status.is_success() {
+                tracing::info!(label, status = status.as_u16(), "반응 API 응답 OK");
+                return response.text().map_err(|error| {
+                    AutomationError::new(format!("{label} 응답 읽기 실패: {error}"))
+                });
+            }
+            if is_retryable_status(status.as_u16()) && attempt < POST_RETRY_MAX_ATTEMPTS {
+                let delay =
+                    parse_retry_after(response.headers()).unwrap_or_else(|| backoff_delay(attempt));
+                std::thread::sleep(delay);
+                continue;
+            }
+            tracing::warn!(label, status = status.as_u16(), attempt, "반응 API HTTP 실패");
             return Err(AutomationError::new(format!(
                 "{label} 패킷 HTTP 실패: HTTP status {status} for url ({url})"
             )));
@@ -1470,6 +1649,36 @@ mod tests {
             name: name.to_owned(),
             value: value.to_owned(),
         }
+    }
+
+    #[test]
+    fn from_storage_state_builds_with_naver_session_cookies() {
+        // NID_AUT/NID_SES가 있으면 파일 쿠키만으로 클라이언트가 만들어진다(Chrome 없이 좋아요).
+        let storage = json!({
+            "cookies": [
+                { "domain": ".naver.com", "name": "NID_AUT", "value": "aut-token" },
+                { "domain": ".naver.com", "name": "NID_SES", "value": "ses-token" },
+                { "domain": "example.com", "name": "OTHER", "value": "ignored" },
+            ]
+        });
+        let client =
+            NaverPacketClient::from_storage_state(&storage).expect("세션 쿠키 있으면 성공");
+        // naver 도메인 쿠키만 수집되고, 무관 도메인(example.com)은 제외된다.
+        let header = client.cookie_header_for(STOCK_HOST);
+        assert!(header.contains("NID_AUT=aut-token"));
+        assert!(header.contains("NID_SES=ses-token"));
+        assert!(!header.contains("OTHER"));
+    }
+
+    #[test]
+    fn from_storage_state_errors_without_session_cookies() {
+        // 세션 쿠키(NID_AUT/NID_SES)가 없으면 로그인 만료로 보고 실패한다.
+        let storage = json!({
+            "cookies": [
+                { "domain": ".naver.com", "name": "NNB", "value": "x" },
+            ]
+        });
+        assert!(NaverPacketClient::from_storage_state(&storage).is_err());
     }
 
     #[test]
