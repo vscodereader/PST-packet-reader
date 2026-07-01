@@ -153,7 +153,7 @@ fn open_discussion_session(
         chrome.inject_account_cookies(account_id)?;
     }
 
-    let packet_client = chrome.build_naver_packet_client()?;
+    let mut packet_client = chrome.build_naver_packet_client()?;
     let login_profile = packet_client.read_login_profile()?;
 
     // 세션 만료(getProfile가 비로그인으로 응답)면 여기서 차단 처리한다 — 예전엔 게시 직전 페이지
@@ -259,7 +259,7 @@ pub fn run_naver_like(account_id: &str, post_url: &str) -> AutomationResult<()> 
                 "계정 '{account_id}'의 저장된 로그인 쿠키가 없습니다. 먼저 로그인하세요."
             ))
         })?;
-    let client = packet_client::NaverPacketClient::from_storage_state(&storage)?;
+    let mut client = packet_client::NaverPacketClient::from_storage_state(&storage)?;
     // 좋아요(reactions API)도 종목토론방 커뮤니티 참여가 필요하다 — 네이버페이 금융서비스 가입
     // (=종토방 "동의하기")이 안 된 계정은 '반응 생성'이 400으로 막힌다(실측 2026-07-01: soo****,
     // 수동 로그인 시 npay 약관동의 팝업 확인 → 좋아요 400). 게시/댓글 경로(open_discussion_session
