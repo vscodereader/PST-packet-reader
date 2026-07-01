@@ -4,8 +4,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::blocking::Client;
 use reqwest::header::{
-    HeaderMap, HeaderValue, ACCEPT, ACCEPT_LANGUAGE, CONTENT_TYPE, COOKIE, ORIGIN, REFERER,
-    RETRY_AFTER, USER_AGENT,
+    HeaderMap, HeaderValue, ACCEPT, ACCEPT_LANGUAGE, CONTENT_TYPE, COOKIE, LOCATION, ORIGIN,
+    REFERER, RETRY_AFTER, USER_AGENT,
 };
 use serde_json::{json, Value};
 use url::form_urlencoded::Serializer;
@@ -22,9 +22,10 @@ const STOCK_HOST: &str = "stock.naver.com";
 const M_STOCK_HOST: &str = "m.stock.naver.com";
 const CBOX_HOST: &str = "apis.naver.com";
 const STATIC_NID_HOST: &str = "static.nid.naver.com";
-// 네이버페이 금융서비스 가입(동의하기) GET 대상 호스트. NID_AUT/NID_SES(.naver.com 도메인)가
-// 쿠키로 붙는다(cookie_applies_to_host가 .naver.com → *.pay.naver.com 매칭).
-const NPAY_JOIN_HOST: &str = "member-web.pay.naver.com";
+// 네이버페이 금융서비스 가입(동의하기) 시작 URL. 선택 동의(마케팅/마이데이터/광고/머니스토리)는
+// 전부 N으로 거절한다(사용자 지시: 필수만). 필수 약관(termcd=40)은 리다이렉트 체인의
+// commonTermAgree에서 로그인 쿠키로 통과한다. 성공 시 토론 페이지로, 실패 시 약관 페이지로 보낸다.
+const FINANCIAL_JOIN_URL: &str = "https://member-web.pay.naver.com/financial-service/join?from_pc=Y&nf_personalized_service_consent=N&naver_personalized_service_consent=N&optional_ads_and_mydata_usage_consent=N&moneystory_subscription_consent=N&join_success_url=https://stock.naver.com/discussion&join_fail_url=https://member.pay.naver.com/financial-member/agreement";
 const DEFAULT_REFERER: &str = "https://stock.naver.com/discussion";
 const DEFAULT_PROFILE_INTRODUCTION: &str = "2222";
 // 신규 계정 프로필 생성 시 기본 아바타(성공 캡처에서 브라우저가 보낸 값).
@@ -451,31 +452,18 @@ impl NaverPacketClient {
     // 시도하게 두고(이미 가입돼 있으면 글쓰기는 성공), 최종 URL·status를 로그로 남겨 가입 완료
     // 여부를 사용자가 로그에서 확인할 수 있게 한다.
     pub(super) fn ensure_npay_financial_join(&self) {
-        // 선택 동의를 모두 N으로 거절하고, 성공 시 토론 페이지로·실패 시 약관 페이지로 보낸다.
-        const FINANCIAL_JOIN_URL: &str = "https://member-web.pay.naver.com/financial-service/join?from_pc=Y&nf_personalized_service_consent=N&naver_personalized_service_consent=N&optional_ads_and_mydata_usage_consent=N&moneystory_subscription_consent=N&join_success_url=https://stock.naver.com/discussion&join_fail_url=https://member.pay.naver.com/financial-member/agreement";
-
         tracing::info!(
             api = "GET /financial-service/join",
             "실제 API 호출 label=\"네이버페이 가입(동의하기)\""
         );
-        let headers = match self.navigation_headers(NPAY_JOIN_HOST) {
-            Ok(headers) => headers,
+        let (status, final_url) = match self.financial_join_follow() {
+            Ok(result) => result,
             Err(error) => {
-                tracing::warn!("네이버페이 가입(동의하기) 헤더 구성 실패 — 건너뜀: {error}");
+                // 전송 실패는 비치명적: 이미 가입된 계정이면 뒤의 글쓰기는 그대로 성공한다.
+                tracing::warn!("네이버페이 가입(동의하기) 전송 실패 — 건너뜀(글쓰기는 계속): {error}");
                 return;
             }
         };
-        let response =
-            match self.get_with_transport_retry(FINANCIAL_JOIN_URL, headers, "네이버페이 가입(동의하기)") {
-                Ok(response) => response,
-                Err(error) => {
-                    // 전송 실패는 비치명적: 이미 가입된 계정이면 뒤의 글쓰기는 그대로 성공한다.
-                    tracing::warn!("네이버페이 가입(동의하기) 전송 실패 — 건너뜀(글쓰기는 계속): {error}");
-                    return;
-                }
-            };
-        let status = response.status().as_u16();
-        let final_url = response.url().to_string();
         if financial_join_completed(&final_url) {
             tracing::info!(
                 status,
@@ -486,9 +474,62 @@ impl NaverPacketClient {
             tracing::warn!(
                 status,
                 final_url = %final_url,
-                "네이버페이 가입(동의하기) 미완료 추정 — 최종 URL이 약관/가입 페이지. 미가입 계정이면 글쓰기 form이 404로 막힐 수 있음"
+                "네이버페이 가입(동의하기) 미완료 추정 — 최종 URL이 약관/로그인 페이지. 미가입 계정이면 글쓰기 form이 404로 막힐 수 있음"
             );
         }
+    }
+
+    /// 가입 GET의 리다이렉트 체인을 **직접** 따라가며, 매 홉마다 그 홉의 호스트 쿠키를 붙인다.
+    ///
+    /// reqwest의 자동 리다이렉트 추종은 보안상 **크로스-호스트 리다이렉트에서 Cookie 헤더를 제거**한다.
+    /// 그래서 `member-web.pay.naver.com/join` → `nid.naver.com/commonTermAgree`(필수 약관) 리다이렉트
+    /// 에서 우리 로그인 쿠키가 사라져, nid가 인증 실패로 보고 `nidlogin.login`(로그인 페이지)으로
+    /// 튕겼다 — 미가입 계정 가입 실패의 실제 원인(실측 패킷·로그 2026-07-01). 브라우저는 쿠키 자를
+    /// 써서 호스트마다 그 호스트 쿠키를 자동 첨부하므로 통과한다. 여기서도 자동 추종을 끄고
+    /// (`redirect::none`), 홉마다 `navigation_headers(host)`로 그 호스트 스코프 쿠키를 실어 따라간다.
+    /// 최종 (status, url)을 돌려준다. best-effort — 호출부가 실패를 삼키고 글쓰기를 계속한다.
+    fn financial_join_follow(&self) -> AutomationResult<(u16, String)> {
+        const MAX_HOPS: u32 = 15;
+        let client = Client::builder()
+            .timeout(Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| {
+                AutomationError::new(format!("가입 HTTP 클라이언트 생성 실패: {error}"))
+            })?;
+        let mut url = FINANCIAL_JOIN_URL.to_string();
+        for _hop in 0..MAX_HOPS {
+            let host = url::Url::parse(&url)
+                .ok()
+                .and_then(|parsed| parsed.host_str().map(ToOwned::to_owned))
+                .unwrap_or_default();
+            let headers = self.navigation_headers(&host)?;
+            let response = client
+                .get(&url)
+                .headers(headers)
+                .send()
+                .map_err(|error| AutomationError::new(format!("가입 GET 전송 실패({host}): {error}")))?;
+            let status = response.status();
+            if !status.is_redirection() {
+                return Ok((status.as_u16(), url));
+            }
+            // 리다이렉트: Location을 절대/상대 모두 처리해 다음 홉 URL로 삼는다.
+            let Some(location) = response
+                .headers()
+                .get(LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned)
+            else {
+                // 3xx인데 Location이 없으면 더 따라갈 수 없다 — 현재 URL을 최종으로 본다.
+                return Ok((status.as_u16(), url));
+            };
+            url = url::Url::parse(&url)
+                .and_then(|base| base.join(&location))
+                .map(|joined| joined.to_string())
+                .unwrap_or(location);
+        }
+        // 리다이렉트 상한 초과 — 미완료로 판정되게 현재 URL을 돌려준다(status는 0으로 표시).
+        Ok((0, url))
     }
 
     // 약관/가입 페이지가 아닌 곳(가입 성공 콜백·토론 페이지)으로 리다이렉트됐으면 가입 완료로 본다.
@@ -1600,11 +1641,20 @@ fn header_value(value: &str, label: &str) -> AutomationResult<HeaderValue> {
 
 // 대상 호스트에 적용되는 쿠키만 골라 "name=value; ..." Cookie 헤더를 만드는 함수입니다.
 // (domain, name)으로 구분하고, 같은 이름이 겹치면 host-only 쿠키가 도메인 쿠키를 이깁니다.
-// 동의하기(가입) GET 리다이렉트 추종 후 최종 URL이 가입 완료 상태인지 판정한다. 약관 페이지
-// (member.pay.naver.com/.../agreement)나 가입 입력 페이지(financial-service/join)에 머물러
-// 있으면 미완료, 그 밖(가입 성공 콜백·토론 페이지로 빠짐)이면 완료로 본다.
+// 동의하기(가입) GET 리다이렉트 추종 후 최종 URL이 가입 완료 상태인지 판정한다. 아래 어느
+// 페이지에 머물러 있으면 **미완료**로 본다(가입 안 됨):
+//  - 약관 페이지(member.pay.naver.com/.../agreement)
+//  - 가입 입력 페이지(financial-service/join)
+//  - 로그인 페이지(nid.naver.com/nidlogin.login) — 미가입 계정은 필수 약관 동의가 없어 여기로
+//    튕긴다. 예전엔 이 URL의 /agreement·/join 부분이 이중 URL인코딩(%252F…)이라 걸러지지 않아
+//    "완료 ✅"로 오판했다(실측 로그 2026-07-01). login 페이지·약관동의 페이지를 명시로 잡는다.
+//  - 공통 약관동의 페이지(commonTermAgree) — 필수 약관 동의를 요구하는 중간 페이지.
+// 그 밖(가입 성공 콜백·토론 페이지로 빠짐)이면 완료로 본다.
 fn financial_join_completed(final_url: &str) -> bool {
-    !final_url.contains("/agreement") && !final_url.contains("/financial-service/join")
+    !final_url.contains("/agreement")
+        && !final_url.contains("/financial-service/join")
+        && !final_url.contains("nidlogin.login")
+        && !final_url.contains("commonTermAgree")
 }
 
 fn build_cookie_header(cookies: &[NaverCookie], host: &str) -> String {
@@ -1861,13 +1911,13 @@ mod tests {
     fn login_cookies_apply_to_npay_join_host() {
         // 동의하기(가입) GET은 member-web.pay.naver.com 으로 가는데, .naver.com 도메인 로그인
         // 쿠키가 거기에도 붙어야 한다(안 붙으면 비로그인으로 처리돼 가입이 안 됨).
-        assert!(cookie_applies_to_host(".naver.com", NPAY_JOIN_HOST));
+        assert!(cookie_applies_to_host(".naver.com", "member-web.pay.naver.com"));
         let cookies = vec![
             cookie(".naver.com", "NID_AUT", "aut"),
             cookie(".naver.com", "NID_SES", "ses"),
             cookie("stock.naver.com", "NNB", "stockonly"),
         ];
-        let pay = build_cookie_header(&cookies, NPAY_JOIN_HOST);
+        let pay = build_cookie_header(&cookies, "member-web.pay.naver.com");
         assert!(pay.contains("NID_AUT=aut"), "pay 호스트에 로그인 쿠키가 붙어야 한다");
         assert!(pay.contains("NID_SES=ses"));
         // stock host-only 쿠키는 pay 호스트로 새지 않는다.
@@ -1890,6 +1940,12 @@ mod tests {
         // 미완료: 가입 입력 페이지(financial-service/join)에서 더 못 빠져나갔으면 미완료.
         assert!(!financial_join_completed(
             "https://member-web.pay.naver.com/financial-service/join?from_pc=Y"
+        ));
+        // 미완료(회귀, 2026-07-01): 미가입 계정은 로그인 페이지로 튕긴다. 예전엔 URL 속 /agreement·
+        // /join 이 이중 URL인코딩(%252F…)이라 안 걸려 "완료"로 오판했다 — 이제 nidlogin.login·
+        // commonTermAgree 를 명시로 잡아 미완료로 본다(실측 로그의 final_url 그대로 검증).
+        assert!(!financial_join_completed(
+            "https://nid.naver.com/nidlogin.login?mode=form&url=https%3A%2F%2Fnid.naver.com%2Fuser2%2Fhelp%2FcommonTermAgree%3Ftermcd%3D40%26cpcd%3D123%26rurl%3Dhttps%253A%252F%252Fmember-web.pay.naver.com%252Ffinancial-service%252Fjoin%252Fnaver-term-consent%252Fcallback%26surl%3Dhttps%253A%252F%252Fmember.pay.naver.com%252Ffinancial-member%252Fagreement"
         ));
     }
 
