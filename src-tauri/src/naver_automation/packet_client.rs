@@ -554,6 +554,19 @@ impl NaverPacketClient {
                 .and_then(|parsed| parsed.host_str().map(ToOwned::to_owned))
                 .unwrap_or_default();
             let headers = self.navigation_headers(&jar, &host, &referer)?;
+            // [진단] nid 홉(commonTermAgree)에 실제로 나가는 Cookie에 로그인 세션 쿠키(NID_JST 등 nid
+            // host-only)가 실렸는지 한 줄로 남긴다 — nidlogin.login 튕김이 "쿠키 누락"인지 "계정
+            // 보호조치"인지 가른다(실측 성공패킷: nid 요청만 NID_JST/nid_buk/nid_slevel 3개를 더 실음).
+            if host.contains("nid.naver.com") {
+                let cookie_line = build_cookie_header(&jar, &host);
+                tracing::info!(
+                    hop = %host,
+                    has_nid_jst = cookie_line.contains("NID_JST"),
+                    has_nid_buk = cookie_line.contains("nid_buk"),
+                    has_nid_slevel = cookie_line.contains("nid_slevel"),
+                    "[npay] nid 요청 쿠키 점검 — NID_JST 유무"
+                );
+            }
             let response = client.get(&url).headers(headers).send().map_err(|error| {
                 AutomationError::new(format!("가입 GET 전송 실패({host}): {error}"))
             })?;
