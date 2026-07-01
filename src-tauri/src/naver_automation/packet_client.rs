@@ -641,9 +641,32 @@ impl NaverPacketClient {
         headers.insert("sec-fetch-mode", HeaderValue::from_static("navigate"));
         headers.insert("sec-fetch-dest", HeaderValue::from_static("document"));
         headers.insert("sec-fetch-user", HeaderValue::from_static("?1"));
-        // 가입/약관 내비게이션에도 client-hints를 붙인다 — commonTermAgree 튕김도 봇탐지가 원인일 수 있어
-        // 브라우저와 동일하게 맞춘다.
+        // 실측 브라우저 commonTermAgree 요청(frame 8567)의 **모든 client-hints를 하나도 빠짐없이** 채운다
+        // (1:1 완전 대조, 2026-07-01). sec-ch-ua 3종은 insert_client_hints가, 나머지 고엔트로피/네트워크
+        // 힌트는 아래에서 채운다. 하나라도 빠지면 봇 지문이 안 맞아 nid가 로그인 페이지로 튕긴다.
         self.insert_client_hints(&mut headers);
+        let major = chrome_major_from_user_agent(&self.user_agent);
+        if let Ok(v) = HeaderValue::from_str(&format!("\"{major}.0.0.0\"")) {
+            headers.insert("sec-ch-ua-full-version", v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&format!(
+            "\"Google Chrome\";v=\"{major}.0.0.0\", \"Chromium\";v=\"{major}.0.0.0\", \"Not)A;Brand\";v=\"24.0.0.0\""
+        )) {
+            headers.insert("sec-ch-ua-full-version-list", v);
+        }
+        headers.insert("sec-ch-ua-arch", HeaderValue::from_static("\"x86\""));
+        headers.insert(
+            "sec-ch-ua-platform-version",
+            HeaderValue::from_static("\"19.0.0\""),
+        );
+        headers.insert("sec-ch-ua-model", HeaderValue::from_static("\"\""));
+        headers.insert("device-memory", HeaderValue::from_static("8"));
+        headers.insert("dpr", HeaderValue::from_static("1"));
+        headers.insert("viewport-width", HeaderValue::from_static("1920"));
+        headers.insert("rtt", HeaderValue::from_static("50"));
+        headers.insert("downlink", HeaderValue::from_static("10"));
+        headers.insert("ect", HeaderValue::from_static("4g"));
+        headers.insert("priority", HeaderValue::from_static("u=0, i"));
         headers.insert(
             "upgrade-insecure-requests",
             HeaderValue::from_static("1"),
@@ -1825,13 +1848,17 @@ fn term_agree_callback_url(current_url: &str) -> Option<String> {
 /// 요청에 client-hints를 보내는데 우리가 안 보내면 네이버 봇탐지(UMON)가 막는다(실측: 우리 403
 /// UMON_BANNED·프로필 500 ↔ 브라우저 200). UA의 버전과 sec-ch-ua 버전이 다른 것도 봇 신호라 실제
 /// UA(`Chrome/149...`)에서 버전을 뽑아 맞춘다. 버전을 못 찾으면 최신 안정 버전을 기본값으로 쓴다.
-fn sec_ch_ua_from_user_agent(user_agent: &str) -> String {
-    let major = user_agent
+fn chrome_major_from_user_agent(user_agent: &str) -> &str {
+    user_agent
         .split("Chrome/")
         .nth(1)
         .and_then(|rest| rest.split('.').next())
         .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
-        .unwrap_or("149");
+        .unwrap_or("149")
+}
+
+fn sec_ch_ua_from_user_agent(user_agent: &str) -> String {
+    let major = chrome_major_from_user_agent(user_agent);
     format!("\"Google Chrome\";v=\"{major}\", \"Chromium\";v=\"{major}\", \"Not)A;Brand\";v=\"24\"")
 }
 
