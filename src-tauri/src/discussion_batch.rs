@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{LazyLock, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -406,6 +407,45 @@ fn run_one_forum_stock_with_retry<R: Runtime>(
     }
 }
 
+// 종목토론방 댓글 사이 최소 간격(사용자 요청 2026-07-01: 댓글 하나 달고 3초 텀). "특정 게시글"
+// 댓글은 URL마다 별도 요청(plan_to_forum_requests)이라 같은 계정이 병렬로 동시에 댓글을 달면
+// 네이버가 도배방지(code 5010)·"In process"(code 8001)로 막는다. 아래 스로틀로 같은 계정 댓글을
+// 3초 간격으로 직렬화해 그 차단을 피한다(다른 계정은 서로 독립적으로 진행).
+const COMMENT_MIN_GAP: Duration = Duration::from_secs(3);
+
+// 계정별 "다음 댓글 허용 시각" 예약대장. 병렬 요청(계정별 Chrome, 각자 스레드)이 이 전역 대장을
+// 공유해, 같은 계정의 댓글이 서로 최소 COMMENT_MIN_GAP 간격이 되게 슬롯을 잡는다.
+static COMMENT_NEXT_ALLOWED: LazyLock<Mutex<HashMap<String, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 이 계정의 댓글 슬롯을 예약하고, 그 시각까지 대기한다. 같은 계정 댓글 N건이 동시에 들어와도
+/// 각자 now, now+3s, now+6s… 슬롯을 잡아 3초 간격으로 직렬화된다. 락은 슬롯 계산 동안만 잡고
+/// 실제 대기(sleep)는 락 밖에서 하므로, 다른 계정은 막히지 않는다.
+fn throttle_account_comment(account_id: &str) {
+    let now = Instant::now();
+    let scheduled = {
+        let mut map = COMMENT_NEXT_ALLOWED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        reserve_comment_slot(&mut map, account_id, now)
+    };
+    if scheduled > now {
+        sleep(scheduled - now);
+    }
+}
+
+/// 이 계정의 이번 댓글 시각(슬롯)을 정하고, 대장의 "다음 허용 시각"을 +COMMENT_MIN_GAP로 민다
+/// (순수 로직, 테스트 대상). 예약이 없거나 과거면 now, 있으면 그 예약 시각(≥now)을 쓴다.
+fn reserve_comment_slot(
+    map: &mut HashMap<String, Instant>,
+    account_id: &str,
+    now: Instant,
+) -> Instant {
+    let slot = map.get(account_id).copied().unwrap_or(now).max(now);
+    map.insert(account_id.to_owned(), slot + COMMENT_MIN_GAP);
+    slot
+}
+
 // 한 종목에 글/댓글을 게시하는 함수입니다(kind에 따라 엔진 함수를 고릅니다).
 fn run_one_forum_stock<R: Runtime>(
     request: &ForumPublishRequest,
@@ -417,6 +457,11 @@ fn run_one_forum_stock<R: Runtime>(
     // AutomationError를 그대로 돌려준다(메시지+캡처된 스택). 호출부가 message/backtrace로
     // 나눠 ForumPublishResult에 싣는다(#199).
 ) -> Result<PostedContent, AutomationError> {
+    // 댓글이 포함된 작업이면(특정 게시글 댓글·글+댓글), 같은 계정 댓글을 3초 간격으로 직렬화해
+    // 도배방지 차단을 피한다(사용자 요청). 글만 올리는 작업은 영향 없다(스로틀 안 탐).
+    if request.run_comment {
+        throttle_account_comment(&request.account_id);
+    }
     // 종목별로 변수 토큰을 치환한다(미리보기 resolveTemplate와 동일 결과).
     // #{종목명}/#{종목코드}는 이 종목 값으로, #{링크}는 링크값(있으면) 또는 종목 시세 링크로.
     let link = crate::template_tokens::resolve_link(&request.link_override, &stock.code);
@@ -987,6 +1032,30 @@ fn pseudo_index(len: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comment_slots_space_same_account_by_gap_but_not_across_accounts() {
+        // 같은 계정 댓글 3건이 같은 순간(now)에 들어와도 now, now+3s, now+6s로 3초씩 벌어지고,
+        // 다른 계정은 서로 영향 없이 각자 now에 시작한다(도배방지 회피 + 병렬성 유지).
+        let mut map: HashMap<String, Instant> = HashMap::new();
+        let now = Instant::now();
+
+        let a1 = reserve_comment_slot(&mut map, "acc-A", now);
+        let a2 = reserve_comment_slot(&mut map, "acc-A", now);
+        let a3 = reserve_comment_slot(&mut map, "acc-A", now);
+        assert_eq!(a1, now);
+        assert_eq!(a2, now + COMMENT_MIN_GAP);
+        assert_eq!(a3, now + COMMENT_MIN_GAP * 2);
+
+        // 다른 계정 B는 A의 예약과 무관하게 now에 시작한다.
+        let b1 = reserve_comment_slot(&mut map, "acc-B", now);
+        assert_eq!(b1, now);
+
+        // 예약 시각이 이미 지난(과거) 계정은 다시 now부터 시작한다(불필요한 대기 없음).
+        let later = now + COMMENT_MIN_GAP * 10;
+        let a_after = reserve_comment_slot(&mut map, "acc-A", later);
+        assert_eq!(a_after, later);
+    }
 
     #[test]
     fn comment_detail_url_prefers_specific_post_url_then_falls_back() {
