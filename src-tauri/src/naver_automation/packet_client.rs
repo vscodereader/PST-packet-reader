@@ -35,6 +35,9 @@ const FINANCIAL_JOIN_URL: &str = "https://member-web.pay.naver.com/financial-ser
 const NPAY_AGREEMENT_REFERER: &str =
     "https://member.pay.naver.com/financial-member/agreement?rurl=https://stock.naver.com/discussion";
 const DEFAULT_REFERER: &str = "https://stock.naver.com/discussion";
+// 실측 브라우저 referer 1:1: 프로필 상태(/status)는 루트, getProfile은 네이버 홈에서 온다.
+const STOCK_ROOT_REFERER: &str = "https://stock.naver.com/";
+const NAVER_HOME_REFERER: &str = "https://www.naver.com/";
 const DEFAULT_PROFILE_INTRODUCTION: &str = "2222";
 // 신규 계정 프로필 생성 시 기본 아바타(성공 캡처에서 브라우저가 보낸 값).
 const DEFAULT_PROFILE_AVATAR: &str =
@@ -234,7 +237,7 @@ impl NaverPacketClient {
         let response_text = self
             .get_with_transport_retry(
                 &url,
-                self.static_headers(STATIC_NID_HOST, DEFAULT_REFERER)?,
+                self.static_headers(STATIC_NID_HOST, NAVER_HOME_REFERER)?,
                 "getProfile",
             )
             .and_then(|response| response_text(response, "getProfile"))?;
@@ -358,9 +361,13 @@ impl NaverPacketClient {
 
     // Wireshark 성공 캡처에서 확인한 status/form/validate/PUT 패킷으로 프로필 소개를 설정하는 함수입니다.
     pub(super) fn ensure_profile_intro_setup(&self, referer: &str) -> AutomationResult<bool> {
+        // referer를 실측 브라우저와 1:1로 맞춘다: 프로필 상태(/status)는 stock 루트, 나머지(/form·닉네임
+        // 추천·소개 검증·생성/수정 POST)는 stock.naver.com/discussion. 호출부가 넘긴 종목 URL은 안 쓴다.
+        let _ = referer;
+        let referer = DEFAULT_REFERER;
         let status = self.get_stock_json(
             "/api/community/profile/users/status",
-            referer,
+            STOCK_ROOT_REFERER,
             "프로필 상태",
         )?;
         let status_text = status
@@ -441,7 +448,7 @@ impl NaverPacketClient {
 
         let updated = self.get_stock_json(
             "/api/community/profile/users/status",
-            referer,
+            STOCK_ROOT_REFERER,
             "프로필 상태 재확인",
         )?;
         let updated_status = updated
@@ -686,7 +693,7 @@ impl NaverPacketClient {
         let payload = build_post_payload(title, body, &target, &tx_id);
         let response_text = self.post_with_retry(
             &format!("{M_STOCK_ORIGIN}/front-api/discussion/add"),
-            self.json_headers(M_STOCK_HOST, page_url)?,
+            self.json_headers(M_STOCK_HOST, DEFAULT_REFERER)?,
             Some(&payload),
             "글쓰기 add",
         )?;
@@ -969,7 +976,7 @@ impl NaverPacketClient {
         );
         let response_text = self.post_with_retry(
             &form_url,
-            self.json_headers(M_STOCK_HOST, page_url)?,
+            self.json_headers(M_STOCK_HOST, DEFAULT_REFERER)?,
             None,
             "글쓰기 form",
         )?;
@@ -1073,10 +1080,14 @@ impl NaverPacketClient {
         Ok(headers)
     }
 
-    // static.nid.naver.com getProfile 요청에 사용하는 공통 헤더를 만드는 함수입니다.
+    // static.nid.naver.com getProfile 요청 헤더. 실측 브라우저와 1:1: JSONP <script> 로드라 origin을
+    // 안 보내고 sec-fetch-mode=no-cors·dest=script이며 priority는 안 붙는다(다른 XHR과 다름).
     fn static_headers(&self, host: &str, referer: &str) -> AutomationResult<HeaderMap> {
-        let mut headers = self.base_headers(host, referer, "same-site", true)?;
+        let mut headers = self.base_headers(host, referer, "same-site", false)?;
         headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+        headers.insert("sec-fetch-mode", HeaderValue::from_static("no-cors"));
+        headers.insert("sec-fetch-dest", HeaderValue::from_static("script"));
+        headers.remove("priority");
         Ok(headers)
     }
 
