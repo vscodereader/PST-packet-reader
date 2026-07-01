@@ -137,7 +137,7 @@ function bandNoFromLink(link: string): string {
   return m ? m[1]! : t;
 }
 
-function AccountRow({
+export function AccountRow({
   a,
   selected,
   onToggle,
