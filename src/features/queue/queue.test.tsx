@@ -303,6 +303,33 @@ describe("Queue", () => {
     ).toBeInTheDocument();
   });
 
+  it("빈 id의 진행 중 아이템이 여러 개여도 안 누르면 펼쳐지지 않고, 하나 눌러도 하나만 펼쳐진다", async () => {
+    // 회귀(2026-07-01): 예전엔 펼침을 id만 비교(expandedId === q.id)해, id가 비면
+    // 초기 expandedId=null 과 매칭돼 안 눌러도 여러 개가 함께 펼쳐졌다. 이제 행 고유 키로
+    // 판정하므로 (1) 초기엔 아무것도 안 펼쳐지고 (2) 하나 클릭 시 그 하나만 펼쳐진다.
+    setQueueNow([
+      { ...RUNNING_ITEM, id: "", title: "진행 A", items: [] },
+      { ...RUNNING_ITEM, id: "", title: "진행 B", items: [] },
+    ]);
+    render(
+      <MantineProvider>
+        <Queue go={vi.fn()} />
+      </MantineProvider>,
+    );
+    await screen.findByText("진행 A");
+    // (1) 클릭 전엔 어떤 준비 안내도 안 보인다(자동 펼침 없음).
+    expect(
+      screen.queryByText("진행 상태를 준비하고 있어요…"),
+    ).not.toBeInTheDocument();
+    // (2) A만 클릭 → 준비 안내는 정확히 1개만.
+    await userEvent.click(screen.getByText("진행 A"));
+    await waitFor(() =>
+      expect(screen.getAllByText("진행 상태를 준비하고 있어요…")).toHaveLength(
+        1,
+      ),
+    );
+  });
+
   it("loads the current 최대 작동가능 작업 수 into the field (#284)", async () => {
     // 마운트 시 get_now_concurrency_limit으로 저장값을 읽어 입력란에 채운다. 먼저 3으로
     // 저장해 두고 새로 렌더하면, 입력란이 3을 보여줘야 한다.
