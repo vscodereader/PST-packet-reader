@@ -360,6 +360,10 @@ fn run_inner(
         ));
     }
 
+    // '로그인 상태 유지'를 켠다 — 이걸 켜야 브라우저가 npay 약관동의(commonTermAgree)에 싣는 nid
+    // 세션 쿠키(NID_JST·NID_SAUTO)가 발급된다(실측 성공 패킷은 이 쿠키를 실어 통과). best-effort.
+    enable_keep_signed_in(client);
+
     // 비밀번호 입력 후 사람처럼 잠깐 멈췄다가 로그인 버튼을 누른다(2초→0.8초, #14).
     sleep(FIELD_PAUSE);
     // 로그인 버튼을 사람처럼 좌표 마우스 클릭(JS .click() 대신 진짜 mouse 이벤트). 좌표를 못
@@ -983,6 +987,33 @@ fn mouse_click_selector(client: &mut CdpClient, selector: &str) -> Result<bool, 
         return Ok(true);
     }
     Ok(false)
+}
+
+/// 로그인 직전에 '로그인 상태 유지' 토글을 켠다. 이걸 켜야 브라우저가 npay 약관동의
+/// (commonTermAgree)에 싣는 nid 세션 쿠키(NID_JST·NID_SAUTO 등, 만료가 긴 keep-login 쿠키)가
+/// 발급된다 — 실측 성공 패킷(`동의+프로필까지`)은 이 쿠키를 실어 통과하는데, 우리 로그인이 이걸
+/// 안 켜서 그 쿠키가 아예 안 생겼다. 여러 선택자를 방어적으로 시도하고, 못 찾아도 로그인은
+/// 그대로 진행한다(best-effort, 결과는 로그로 남긴다).
+fn enable_keep_signed_in(client: &mut CdpClient) {
+    const JS: &str = "(()=>{\
+         const el=document.querySelector('#keep')\
+             ||document.querySelector('input[name=\"nvlong\"]')\
+             ||document.querySelector('.keep_check input[type=checkbox]')\
+             ||document.querySelector('#switch');\
+         if(!el)return 'not-found';\
+         if(!el.checked){el.checked=true;\
+             el.dispatchEvent(new Event('click',{bubbles:true}));\
+             el.dispatchEvent(new Event('change',{bubbles:true}));}\
+         const nv=document.querySelector('input[name=\"nvlong\"]');if(nv)nv.value='on';\
+         return el.checked?'on':'off';})()";
+    match client.evaluate_string(JS) {
+        Ok(result) => {
+            tracing::info!(result = %result, "[LOGIN][상태유지] 로그인 상태 유지 설정 시도")
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "[LOGIN][상태유지] 설정 실패 — 건너뜀(로그인은 계속)")
+        }
+    }
 }
 
 // 로그인 버튼을 사람처럼 좌표 클릭한다. 좌표를 못 구하면 .click()으로 폴백(클릭 실패가

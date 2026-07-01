@@ -1114,7 +1114,7 @@ impl NaverPacketClient {
         );
         headers.insert(
             ACCEPT_LANGUAGE,
-            HeaderValue::from_static("ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"),
+            HeaderValue::from_static("ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7,ja;q=0.6"),
         );
         headers.insert("sec-fetch-site", HeaderValue::from_static(sec_fetch_site));
         headers.insert("sec-fetch-mode", HeaderValue::from_static("cors"));
