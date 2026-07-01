@@ -406,7 +406,8 @@ fn run_inner(
         // 착지 페이지(naver.com)의 광고 iframe 로딩을 기다리느라 정상 로그인을 늦추거나 놓치지
         // 않는다. 보류 캡차 직접 입력 중에 사용자가 풀어 로그인돼도 여기서 즉시 성공 확정된다.
         if signals.logged_in {
-            let cookies = harvest_cookies_after_npay(client)?;
+            dump_naver_page(client, "로그인 성공(Ok)");
+            let cookies = collect_naver_cookies(client)?;
             return Ok(LoginOutcome::Ok { cookies });
         }
 
@@ -468,7 +469,8 @@ fn run_inner(
 
         match decide_loop_step(classify(&signals), wait_for_human, manual_captcha) {
             LoopDecision::Success => {
-                let cookies = harvest_cookies_after_npay(client)?;
+                dump_naver_page(client, "로그인 성공(Ok)");
+                let cookies = collect_naver_cookies(client)?;
                 return Ok(LoginOutcome::Ok { cookies });
             }
             LoopDecision::PromoteChallenge(kind) => {
@@ -483,7 +485,10 @@ fn run_inner(
                 pending_deadline = None;
             }
             // 첫 로그인(일반 계정) 캡차: grace 없이 즉시 실패시키고 계정을 보류(OnHold)로 둔다.
-            LoopDecision::FailCaptchaToHold => return Ok(LoginOutcome::CaptchaUnsolved),
+            LoopDecision::FailCaptchaToHold => {
+                dump_naver_page(client, "캡차/보안문자(CaptchaUnsolved→보류)");
+                return Ok(LoginOutcome::CaptchaUnsolved);
+            }
             // 본인확인(휴대전화 번호) 화면(전화번호 패킷분석). ID가 010+8자리면 그 번호를
             // #phone_value에 입력하고 #oab.submit(확인)을 눌러 1회 시도한다(앞 +82 select는 안 건드림).
             // 그 뒤 PHONE_VERIFY_GRACE 안에 로그인되면 위 logged_in에서 성공 확정, 안 되면 보류
@@ -508,15 +513,28 @@ fn run_inner(
             }
             // 캡차가 아닌 추가 인증(본인인증 OTP/새 기기 인증) — 캡차 외라 즉시 실패(#267-13).
             LoopDecision::FailUnsupportedChallenge(kind) => {
+                dump_naver_page(client, "미지원 추가인증(OTP/새기기)");
                 return Ok(LoginOutcome::Error(format!(
                     "{} 화면이 떠 자동 로그인을 중단했습니다(캡차 외 즉시 실패).",
                     challenge_kind_label(kind)
                 )));
             }
-            LoopDecision::ConfirmedBad => return Ok(LoginOutcome::BadCredentials),
-            LoopDecision::ConfirmedBlocked => return Ok(LoginOutcome::Blocked),
-            LoopDecision::ConfirmedProtected => return Ok(LoginOutcome::Protected),
-            LoopDecision::ConfirmedLocked => return Ok(LoginOutcome::Locked),
+            LoopDecision::ConfirmedBad => {
+                dump_naver_page(client, "비번오류(BadCredentials)");
+                return Ok(LoginOutcome::BadCredentials);
+            }
+            LoopDecision::ConfirmedBlocked => {
+                dump_naver_page(client, "차단(Blocked)");
+                return Ok(LoginOutcome::Blocked);
+            }
+            LoopDecision::ConfirmedProtected => {
+                dump_naver_page(client, "보호조치(Protected)");
+                return Ok(LoginOutcome::Protected);
+            }
+            LoopDecision::ConfirmedLocked => {
+                dump_naver_page(client, "잠금(Locked)");
+                return Ok(LoginOutcome::Locked);
+            }
             // 중간 상태(성공·캡차·명시오류 아님) — 인식 못 한 추가 인증 화면일 수 있다.
             // PENDING_STALL을 넘기면 즉시 실패(크롬 종료)시킨다.
             LoopDecision::KeepWaiting => {
@@ -1213,6 +1231,31 @@ fn type_into(
         Some(0) => Some(false),
         _ => None,
     };
+    // [로그인 실패 시 네이버 페이지·필드 DOM 원문 그대로 덤프] (사용자·사수 지시 2026-07-01: 우리
+    // 요약이 아니라 네이버가 실제로 준 것을 그대로). 특히 document.hasFocus()=false 면 "창(OS)
+    // 포커스 없음"이라 합성 키 입력이 value에 조합되지 않는 원인이다(렌더러 activeElement는 #id로
+    // 잡혀도 창 포커스가 없으면 타이핑이 안 먹는다). 필드 outerHTML·상단 겹침요소·iframe여부·페이지
+    // 본문 텍스트(잠금/오류 안내 원문 포함)를 한 덩어리로 남긴다.
+    let raw_dump = client
+        .evaluate_string(&format!(
+            "(()=>{{const el=document.querySelector('{selector}');\
+             const r=el?el.getBoundingClientRect():null;\
+             const top=r?document.elementFromPoint(r.left+r.width/2,r.top+r.height/2):null;\
+             return JSON.stringify({{\
+               hasFocus:document.hasFocus(),url:location.href,title:document.title,\
+               inIframe:window.top!==window.self,\
+               fieldHtml:el?el.outerHTML.slice(0,300):'(field 없음)',\
+               topElem:top?(top.tagName+'#'+(top.id||'')+'.'+(top.className||'')).slice(0,120):'(없음)',\
+               topIsField:!!(top&&el&&(top===el||el.contains(top))),\
+               bodyText:(document.body?document.body.innerText:'').replace(/\\s+/g,' ').slice(0,400)\
+             }});}})()"
+        ))
+        .unwrap_or_default();
+    tracing::warn!(
+        selector,
+        raw = %raw_dump,
+        "[LOGIN][원문덤프] 자동입력 실패 — 네이버 로그인 페이지·필드 DOM 원문(hasFocus·필드HTML·겹침·본문)"
+    );
     let diag = format_fill_diag(&FillDiag {
         selector,
         expected,
@@ -1344,46 +1387,24 @@ pub(crate) fn id_is_phone_format(id: &str) -> bool {
     t.len() == 11 && t.starts_with("010") && t.bytes().all(|b| b.is_ascii_digit())
 }
 
-// npay 금융서비스 가입(종토방 필수약관 "동의하기") URL. 게시 경로의 패킷 상수와 동일한 파라미터
-// (동의 4종 Y)지만, 여기서는 **브라우저**로 연다. 패킷만으론 nid가 재로그인을 요구해
-// (join→commonTermAgree→nidlogin.login) 미가입 계정 가입이 안 되지만(실측 2026-07-01: 프로필 상태
-// 500), 로그인 직후 이 브라우저는 방금 로그인한 신선한 nid 세션이라 commonTermAgree의 JS
-// (location.href) 리다이렉트까지 자동 통과한다.
-const NPAY_JOIN_URL: &str = "https://member-web.pay.naver.com/financial-service/join?from_pc=Y&nf_personalized_service_consent=Y&naver_personalized_service_consent=Y&optional_ads_and_mydata_usage_consent=Y&moneystory_subscription_consent=Y&join_success_url=https://stock.naver.com/discussion&join_fail_url=https://member.pay.naver.com/financial-member/agreement";
-// npay 가입 리다이렉트(join→commonTermAgree JS→콜백→성공)가 끝나길 기다리는 상한/간격.
-const NPAY_JOIN_TIMEOUT: Duration = Duration::from_secs(20);
-const NPAY_JOIN_POLL: Duration = Duration::from_millis(400);
-
-/// 로그인 성공이 확정된 순간에만 부른다: 신선한 nid 세션이 살아있는 이 브라우저로 npay 가입을
-/// 완료한 뒤 쿠키를 수거한다. 폴링 중 세션 확인(`read_signals`)에는 쓰지 말 것 — 로그인 페이지를
-/// 이탈시켜 로그인을 깨뜨린다. 게시(posting)는 그대로 100% 패킷이며, 브라우저는 로그인 단계만 쓴다.
-fn harvest_cookies_after_npay(client: &mut CdpClient) -> Result<Vec<Value>, AutomationError> {
-    ensure_npay_agreement_in_browser(client);
-    collect_naver_cookies(client)
-}
-
-/// 로그인 직후(신선 세션·브라우저 열림) npay 금융서비스 가입(종토 필수약관)을 브라우저로 완료한다.
-/// 이미 가입된 계정은 즉시 성공으로 리다이렉트되어 무해(멱등). best-effort: 이동 실패/타임아웃이어도
-/// 로그인·쿠키 저장은 그대로 계속한다(이 단계가 로그인 자체를 실패시키지 않는다).
-fn ensure_npay_agreement_in_browser(client: &mut CdpClient) {
-    if let Err(error) = client.navigate(NPAY_JOIN_URL) {
-        tracing::warn!(error = %error, "[LOGIN][npay] 가입 URL 이동 실패 — 건너뜀(쿠키 저장은 계속)");
-        return;
-    }
-    // join→commonTermAgree(JS)→콜백→성공 리다이렉트가 끝나 stock/finance로 착지하면 완료로 본다.
-    let deadline = Instant::now() + NPAY_JOIN_TIMEOUT;
-    loop {
-        sleep(NPAY_JOIN_POLL);
-        let url = client.current_url().unwrap_or_default();
-        if url.contains("stock.naver.com") || url.contains("finance.naver.com") {
-            tracing::info!(final_url = %url, "[LOGIN][npay] 금융서비스 가입(동의) 완료 ✅");
-            return;
-        }
-        if Instant::now() >= deadline {
-            tracing::warn!(final_url = %url, "[LOGIN][npay] 가입 확인 타임아웃 — 건너뜀(이미 가입이면 무해)");
-            return;
-        }
-    }
+/// [사수·사용자 지시: 네이버 실제 본문 그대로] 로그인이 실패로 종결되는 순간(보호조치·잠금·차단·
+/// 비번오류·미지원 인증) 현재 네이버 페이지의 **원문**(착지 URL·제목·본문 텍스트)을 그대로 로그로
+/// 남긴다. 우리 판정 문구가 아니라 네이버가 실제로 준 내용을 눈으로 확인하기 위함(예: 보호조치
+/// 페이지의 실제 안내 문구). best-effort — 읽기 실패해도 로그인 결과 처리엔 영향 없다.
+fn dump_naver_page(client: &mut CdpClient, reason: &str) {
+    let raw = client
+        .evaluate_string(
+            "(()=>{try{return JSON.stringify({\
+             url:location.href,title:document.title,\
+             bodyText:(document.body?document.body.innerText:'').replace(/\\s+/g,' ').slice(0,1200)\
+             });}catch(e){return '(원문 읽기 실패)';}})()",
+        )
+        .unwrap_or_default();
+    tracing::warn!(
+        reason,
+        raw = %raw,
+        "[LOGIN][원문] 네이버 로그인 실패 페이지 원문(착지 URL·제목·본문 텍스트 그대로)"
+    );
 }
 
 // Network.getCookies로 .naver.com 쿠키를 수거한다.

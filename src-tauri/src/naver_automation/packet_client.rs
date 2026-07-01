@@ -554,7 +554,19 @@ impl NaverPacketClient {
                     url = callback;
                     continue;
                 }
-                return Ok((status.as_u16(), url));
+                // [사수 지시: 네이버 실제 응답 그대로 로그 / 로컬 진단] 가입 리다이렉트가 멈춘 최종
+                // 페이지(예: nidlogin.login=보호조치·재로그인 요구, commonTermAgree=약관, discussion=성공)의
+                // **원본 body를 그대로** 남긴다 — 우리 "보호조치 추정" 해석이 아니라 네이버가 실제로 준
+                // 내용을 눈으로 확인하기 위함. 계정이 막혔으면 이 body에 네이버의 실제 안내 문구가 있다.
+                let final_status = status.as_u16();
+                let body = response.text().unwrap_or_default();
+                tracing::warn!(
+                    status = final_status,
+                    final_url = %url,
+                    naver_body = %log_snippet(&body),
+                    "[npay] 계정상태 확인 — 네이버 최종 응답 원문(가입 리다이렉트가 멈춘 지점)"
+                );
+                return Ok((final_status, url));
             }
             // 리다이렉트: Location을 절대/상대 모두 처리해 다음 홉 URL로 삼는다.
             let Some(location) = response
@@ -1141,11 +1153,18 @@ impl NaverPacketClient {
             let status = response.status();
             let elapsed_ms = started.elapsed().as_millis();
             if status.is_success() {
-                // 원본 API 호출의 *실제 성공*을 상태/소요시간과 함께 로그에 남긴다.
-                tracing::info!(label, status = status.as_u16(), elapsed_ms, "패킷 HTTP 응답 OK");
-                return response.text().map_err(|error| {
+                // 성공도 네이버 원본 응답 body를 그대로 남긴다(사용자·사수 지시: 성공/실패 전부 원문).
+                let text = response.text().map_err(|error| {
                     AutomationError::new(format!("{label} 응답 읽기 실패: {error}"))
-                });
+                })?;
+                tracing::info!(
+                    label,
+                    status = status.as_u16(),
+                    elapsed_ms,
+                    body = %log_snippet(&text),
+                    "패킷 HTTP 응답 OK — 네이버 원문"
+                );
+                return Ok(text);
             }
             if is_retryable_status(status.as_u16()) && attempt < POST_RETRY_MAX_ATTEMPTS {
                 let delay =
@@ -1161,16 +1180,19 @@ impl NaverPacketClient {
                 std::thread::sleep(delay);
                 continue;
             }
-            // 원본 API 호출의 *실제 실패*(최종)를 상태와 함께 로그에 남긴다.
+            // 원본 API 호출의 *실제 실패*(최종)를 상태 + 네이버 원본 body와 함께 남긴다(원문 그대로).
+            let body = response.text().unwrap_or_default();
             tracing::warn!(
                 label,
                 status = status.as_u16(),
                 attempt,
                 elapsed_ms,
-                "패킷 HTTP 최종 실패"
+                body = %log_snippet(&body),
+                "패킷 HTTP 최종 실패 — 네이버 원문"
             );
             return Err(AutomationError::new(format!(
-                "{label} 패킷 HTTP 실패: HTTP status {status} for url ({url})"
+                "{label} 패킷 HTTP 실패: HTTP status {status} for url ({url}) body={}",
+                log_snippet(&body)
             )));
         }
     }
@@ -1199,10 +1221,17 @@ impl NaverPacketClient {
                 })?;
             let status = response.status();
             if status.is_success() {
-                tracing::info!(label, status = status.as_u16(), "반응 API 응답 OK");
-                return response.text().map_err(|error| {
+                // 성공도 네이버 원본 body 그대로(좋아요/싫어요 전환 결과).
+                let text = response.text().map_err(|error| {
                     AutomationError::new(format!("{label} 응답 읽기 실패: {error}"))
-                });
+                })?;
+                tracing::info!(
+                    label,
+                    status = status.as_u16(),
+                    body = %log_snippet(&text),
+                    "반응 API 응답 OK — 네이버 원문"
+                );
+                return Ok(text);
             }
             if is_retryable_status(status.as_u16()) && attempt < POST_RETRY_MAX_ATTEMPTS {
                 let delay =
@@ -1210,9 +1239,17 @@ impl NaverPacketClient {
                 std::thread::sleep(delay);
                 continue;
             }
-            tracing::warn!(label, status = status.as_u16(), attempt, "반응 API HTTP 실패");
+            let body = response.text().unwrap_or_default();
+            tracing::warn!(
+                label,
+                status = status.as_u16(),
+                attempt,
+                body = %log_snippet(&body),
+                "반응 API HTTP 실패 — 네이버 원문"
+            );
             return Err(AutomationError::new(format!(
-                "{label} 패킷 HTTP 실패: HTTP status {status} for url ({url})"
+                "{label} 패킷 HTTP 실패: HTTP status {status} for url ({url}) body={}",
+                log_snippet(&body)
             )));
         }
     }
@@ -1680,9 +1717,14 @@ fn response_text(response: reqwest::blocking::Response, label: &str) -> Automati
     })?;
 
     if status.is_success() {
-        // 실제로 호출된 GET/POST/PUT API 1건의 성공을 로그에 남긴다(프로필 상태·닉네임·방/글
-        // 선택 등 모든 GET 계열이 이 한 곳을 지난다 — 사수 지시: 실제 API 호출이 로그에 보여야 함).
-        tracing::info!(label, status = status.as_u16(), "실제 API 응답 OK");
+        // 성공도 네이버 **원본 응답 body를 그대로** 남긴다(사용자·사수 지시 2026-07-01: 성공/실패
+        // 가리지 말고 전부 네이버 원문). 프로필 상태·닉네임·방/글 선택·조회 등 모든 GET 계열이 여기 지난다.
+        tracing::info!(
+            label,
+            status = status.as_u16(),
+            body = %log_snippet(&text),
+            "실제 API 응답 OK — 네이버 원문"
+        );
         return Ok(text);
     }
 

@@ -186,6 +186,11 @@ impl BlogCommentClient {
             .text()
             .await
             .map_err(|e| BlogError::new(format!("응답 본문 읽기 오류: {e}")))?;
+        {
+            // [사용자·사수 지시: 성공/실패 전부 네이버 원문] 블로그 API 실제 응답 status+body 그대로.
+            let snippet: String = raw.chars().take(800).collect();
+            tracing::info!(status = status.as_u16(), body = %snippet, "[BLOG] 실제 API 응답 — 네이버 원문");
+        }
         if !status.is_success() {
             return Err(BlogError::new(format!(
                 "블로그 댓글 등록 요청이 실패했습니다(HTTP status {})",
@@ -248,6 +253,11 @@ impl BlogCommentClient {
             .text()
             .await
             .map_err(|e| BlogError::new(format!("응답 본문 읽기 오류: {e}")))?;
+        {
+            // [사용자·사수 지시: 성공/실패 전부 네이버 원문] 블로그 API 실제 응답 status+body 그대로.
+            let snippet: String = raw.chars().take(800).collect();
+            tracing::info!(status = status.as_u16(), body = %snippet, "[BLOG] 실제 API 응답 — 네이버 원문");
+        }
         if !status.is_success() {
             return Err(BlogError::new(format!(
                 "요청이 실패했습니다(HTTP status {})",
