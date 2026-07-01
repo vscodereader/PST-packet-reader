@@ -147,9 +147,18 @@ pub fn is_blocking_failure(message: &str) -> bool {
 /// (3) **일시적 네트워크 끊김**(소켓 10060/10053/10054, 2026-06-30 추가). 이런 실패는 계정·자격증명
 /// 문제가 아니라 잠시 후 풀릴 수 있는 일시 상태라, 차단(Blocked)이나 비번 오류와 구분해 계정을
 /// `TimedOut`(대기초과)으로 표시하고 재시도 대상으로 둔다. 차단 계열(`is_blocking_failure`)이
-/// 우선이므로, 호출부는 먼저 차단을 보고 그 다음 이걸 본다. 429(요청 과다)는 여기에 넣지 않는다.
+/// 우선이므로, 호출부는 먼저 차단을 보고 그 다음 이걸 본다. **429(요청 과다)도 여기 포함**한다
+/// (2026-07-01, 사용자 지시): 429는 계정이 죽은 게 아니라 잠깐 요청이 몰린 것이라 재시도로 풀린다.
 pub fn is_timed_out_failure(message: &str) -> bool {
     let m = message;
+    // (3) 429(Too Many Requests, 요청 과다): 계정 차단이 아니라 레이트리밋(일시). 실측 2026-07-01:
+    // 429로 한 종목 실패한 계정(jwy****)이 직후 다른 3종목을 정상 게시 = 계정 살아있음. 이런 계정을
+    // Error로 죽이지 말고 대기초과(TimedOut·재시도)로 둔다(사용자 지시: "최종결과로 판단 — 뒤에
+    // 성공하면 살아있는 것"). 차단(is_blocking_failure)은 429를 false로 두므로, 차단 우선 규칙과
+    // 충돌하지 않는다(재시도 끝에 진짜 차단되면 그때 Blocked로 확정).
+    if m.contains("429") || m.contains("요청이 너무 많") || m.contains("요청 과다") {
+        return true;
+    }
     // (2) 일시적 네트워크 끊김(소켓 10053/54/60)은 우리 망/원격이 잠깐 끊긴 것이라 재시도하면
     // 풀릴 여지가 있다(사용자 지시: 일시적 네트워크 불안정은 재시도 타협).
     if is_transient_network_failure(m) {
@@ -1149,14 +1158,23 @@ mod tests {
         assert!(!is_timed_out_failure(
             "네이버 서버에 문제가 발생했습니다"
         ));
-        // 차단/비번오류/요청과다/일반실패도 대기초과가 아니다(다른 상태로 처리).
+        // 차단/비번오류/일반실패는 대기초과가 아니다(다른 상태로 처리).
         assert!(!is_timed_out_failure("HTTP status 403 Forbidden"));
         assert!(!is_timed_out_failure("HTTP status 401 Unauthorized"));
-        assert!(!is_timed_out_failure("HTTP status 429 Too Many Requests"));
         assert!(!is_timed_out_failure(
             "글 내용을 구성하는 중 문제가 발생했습니다"
         ));
         assert!(!is_timed_out_failure("HTTP status 404 Not Found"));
+        // 2026-07-01(사용자 지시): 429(요청 과다)는 계정 죽은 게 아니라 레이트리밋(일시) → 대기초과로
+        // 재시도한다(실측: 429 실패 계정이 직후 다른 종목 정상 게시). 실제 로그 메시지 형태로도 검증.
+        assert!(is_timed_out_failure(
+            "글쓰기 form 패킷 HTTP 실패: HTTP status 429 Too Many Requests for url (https://m.stock.naver.com/…)"
+        ));
+        assert!(is_timed_out_failure(
+            "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요"
+        ));
+        // 429는 차단이 아니어야(is_blocking_failure=false) 대기초과 규칙과 충돌하지 않는다.
+        assert!(!is_blocking_failure("HTTP status 429 Too Many Requests"));
     }
 
     #[test]
@@ -1207,8 +1225,12 @@ mod tests {
         assert!(!is_retryable_forum_failure(
             "동의하기 버튼이 아직 비활성화 상태입니다."
         ));
-        // 요청 과다(429)는 차단도 대기초과도 아니라 재시도 대상이 아니다.
-        assert!(!is_retryable_forum_failure("HTTP status 429 Too Many Requests"));
+        // 요청 과다(429)는 2026-07-01(사용자 지시)부터 대기초과(일시)로 보아 재시도 대상이다 —
+        // 계정이 죽은 게 아니라 레이트리밋이므로 재시도로 풀린다(차단은 아니라 blocking=false 유지).
+        assert!(is_retryable_forum_failure("HTTP status 429 Too Many Requests"));
+        assert!(is_retryable_forum_failure(
+            "글쓰기 form 패킷 HTTP 실패: HTTP status 429 Too Many Requests for url (https://x)"
+        ));
     }
 
     #[test]
