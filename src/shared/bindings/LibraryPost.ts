@@ -3,4 +3,4 @@ import type { CommentTarget } from "./CommentTarget";
 import type { ModeValue } from "./ModeValue";
 import type { PostStatus } from "./PostStatus";
 
-export type LibraryPost = { id: string, title: string, kind: ModeValue, updated: string, words: number, status: PostStatus, excerpt: string, body?: string, comments?: Array<string>, commentTarget?: CommentTarget, commentUrl?: string, commentCount?: number, };
+export type LibraryPost = { id: string, title: string, kind: ModeValue, updated: string, words: number, status: PostStatus, excerpt: string, body?: string, comments?: Array<string>, commentTarget?: CommentTarget, commentUrl?: string, commentUrls?: Array<string>, commentCount?: number, };

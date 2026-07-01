@@ -61,6 +61,13 @@ pub struct LibraryPost {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub comment_url: Option<String>,
+    /// 특정 게시글(url) 댓글의 대상 링크들(여러 개). 프론트에서 여러 링크를 넣으면 각 링크의
+    /// 글마다 댓글을 단다. 예전엔 이 필드가 백엔드 구조체에 없어 저장 시 serde가 버렸고, 다시
+    /// 열면 `comment_url`(단수) 1개로 줄어들었다(2026-07-01 버그). `comment_url`은 하위호환으로
+    /// 유지하며 항상 `comment_urls[0]`과 같은 값을 담는다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub comment_urls: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub comment_count: Option<u32>,
@@ -97,6 +104,7 @@ pub fn seed() -> Vec<LibraryPost> {
             comments: None,
             comment_target: None,
             comment_url: None,
+            comment_urls: None,
             comment_count: None,
         },
         LibraryPost {
@@ -115,6 +123,7 @@ pub fn seed() -> Vec<LibraryPost> {
             ]),
             comment_target: Some(CommentTarget::Latest),
             comment_url: None,
+            comment_urls: None,
             comment_count: None,
         },
         LibraryPost {
@@ -129,6 +138,7 @@ pub fn seed() -> Vec<LibraryPost> {
             comments: Some(vec!["분할 매수 관점 동의합니다".into()]),
             comment_target: None,
             comment_url: None,
+            comment_urls: None,
             comment_count: None,
         },
         LibraryPost {
@@ -146,6 +156,7 @@ pub fn seed() -> Vec<LibraryPost> {
             ]),
             comment_target: Some(CommentTarget::Popular),
             comment_url: None,
+            comment_urls: None,
             comment_count: None,
         },
     ]
@@ -222,6 +233,35 @@ mod tests {
         assert_eq!(deleted_msg("실적 정리"), "게시글 '실적 정리' 삭제됨");
     }
 
+    #[test]
+    fn comment_urls_survive_serde_round_trip() {
+        // 프론트가 보내는 여러 링크(commentUrls)가 저장(역직렬화→직렬화)에서 유지돼야 한다.
+        // 예전엔 백엔드 구조체에 comment_urls 필드가 없어 3개 넣어도 1개(commentUrl)로 줄었다.
+        let incoming = serde_json::json!({
+            "id": "p1",
+            "title": "특정 게시글 댓글",
+            "kind": "comment",
+            "updated": "방금 전",
+            "words": 3,
+            "status": "ready",
+            "excerpt": "x",
+            "commentTarget": "url",
+            "commentUrl": "https://stock.naver.com/a/discussion/1",
+            "commentUrls": [
+                "https://stock.naver.com/a/discussion/1",
+                "https://stock.naver.com/b/discussion/2",
+                "https://stock.naver.com/c/discussion/3",
+            ],
+        });
+        let post: LibraryPost = serde_json::from_value(incoming).expect("역직렬화 성공");
+        assert_eq!(post.comment_urls.as_ref().map(Vec::len), Some(3));
+        // 저장 후 다시 읽어도 3개 그대로여야 한다(라운드트립).
+        let json = serde_json::to_string(&post).expect("직렬화 성공");
+        let restored: LibraryPost = serde_json::from_str(&json).expect("재역직렬화 성공");
+        assert_eq!(restored.comment_urls, post.comment_urls);
+        assert_eq!(restored.comment_urls.map(|v| v.len()), Some(3));
+    }
+
     fn post(id: &str, title: &str) -> LibraryPost {
         LibraryPost {
             id: id.into(),
@@ -235,6 +275,7 @@ mod tests {
             comments: None,
             comment_target: None,
             comment_url: None,
+            comment_urls: None,
             comment_count: None,
         }
     }

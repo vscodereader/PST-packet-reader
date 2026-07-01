@@ -246,6 +246,7 @@ pub fn import_posts(
                 comments: None,
                 comment_target: None,
                 comment_url: None,
+                comment_urls: None,
                 comment_count: None,
             },
         );
@@ -586,6 +587,7 @@ mod tests {
             comments: None,
             comment_target: None,
             comment_url: None,
+            comment_urls: None,
             comment_count: None,
         }];
         let (next, summary) = import_posts(path.to_str().unwrap(), existing).unwrap();
