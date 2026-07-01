@@ -406,7 +406,7 @@ fn run_inner(
         // 착지 페이지(naver.com)의 광고 iframe 로딩을 기다리느라 정상 로그인을 늦추거나 놓치지
         // 않는다. 보류 캡차 직접 입력 중에 사용자가 풀어 로그인돼도 여기서 즉시 성공 확정된다.
         if signals.logged_in {
-            let cookies = collect_naver_cookies(client)?;
+            let cookies = harvest_cookies_after_npay(client)?;
             return Ok(LoginOutcome::Ok { cookies });
         }
 
@@ -468,7 +468,7 @@ fn run_inner(
 
         match decide_loop_step(classify(&signals), wait_for_human, manual_captcha) {
             LoopDecision::Success => {
-                let cookies = collect_naver_cookies(client)?;
+                let cookies = harvest_cookies_after_npay(client)?;
                 return Ok(LoginOutcome::Ok { cookies });
             }
             LoopDecision::PromoteChallenge(kind) => {
@@ -1342,6 +1342,48 @@ fn read_signals(client: &mut CdpClient) -> Result<PageSignals, AutomationError> 
 pub(crate) fn id_is_phone_format(id: &str) -> bool {
     let t = id.trim();
     t.len() == 11 && t.starts_with("010") && t.bytes().all(|b| b.is_ascii_digit())
+}
+
+// npay 금융서비스 가입(종토방 필수약관 "동의하기") URL. 게시 경로의 패킷 상수와 동일한 파라미터
+// (동의 4종 Y)지만, 여기서는 **브라우저**로 연다. 패킷만으론 nid가 재로그인을 요구해
+// (join→commonTermAgree→nidlogin.login) 미가입 계정 가입이 안 되지만(실측 2026-07-01: 프로필 상태
+// 500), 로그인 직후 이 브라우저는 방금 로그인한 신선한 nid 세션이라 commonTermAgree의 JS
+// (location.href) 리다이렉트까지 자동 통과한다.
+const NPAY_JOIN_URL: &str = "https://member-web.pay.naver.com/financial-service/join?from_pc=Y&nf_personalized_service_consent=Y&naver_personalized_service_consent=Y&optional_ads_and_mydata_usage_consent=Y&moneystory_subscription_consent=Y&join_success_url=https://stock.naver.com/discussion&join_fail_url=https://member.pay.naver.com/financial-member/agreement";
+// npay 가입 리다이렉트(join→commonTermAgree JS→콜백→성공)가 끝나길 기다리는 상한/간격.
+const NPAY_JOIN_TIMEOUT: Duration = Duration::from_secs(20);
+const NPAY_JOIN_POLL: Duration = Duration::from_millis(400);
+
+/// 로그인 성공이 확정된 순간에만 부른다: 신선한 nid 세션이 살아있는 이 브라우저로 npay 가입을
+/// 완료한 뒤 쿠키를 수거한다. 폴링 중 세션 확인(`read_signals`)에는 쓰지 말 것 — 로그인 페이지를
+/// 이탈시켜 로그인을 깨뜨린다. 게시(posting)는 그대로 100% 패킷이며, 브라우저는 로그인 단계만 쓴다.
+fn harvest_cookies_after_npay(client: &mut CdpClient) -> Result<Vec<Value>, AutomationError> {
+    ensure_npay_agreement_in_browser(client);
+    collect_naver_cookies(client)
+}
+
+/// 로그인 직후(신선 세션·브라우저 열림) npay 금융서비스 가입(종토 필수약관)을 브라우저로 완료한다.
+/// 이미 가입된 계정은 즉시 성공으로 리다이렉트되어 무해(멱등). best-effort: 이동 실패/타임아웃이어도
+/// 로그인·쿠키 저장은 그대로 계속한다(이 단계가 로그인 자체를 실패시키지 않는다).
+fn ensure_npay_agreement_in_browser(client: &mut CdpClient) {
+    if let Err(error) = client.navigate(NPAY_JOIN_URL) {
+        tracing::warn!(error = %error, "[LOGIN][npay] 가입 URL 이동 실패 — 건너뜀(쿠키 저장은 계속)");
+        return;
+    }
+    // join→commonTermAgree(JS)→콜백→성공 리다이렉트가 끝나 stock/finance로 착지하면 완료로 본다.
+    let deadline = Instant::now() + NPAY_JOIN_TIMEOUT;
+    loop {
+        sleep(NPAY_JOIN_POLL);
+        let url = client.current_url().unwrap_or_default();
+        if url.contains("stock.naver.com") || url.contains("finance.naver.com") {
+            tracing::info!(final_url = %url, "[LOGIN][npay] 금융서비스 가입(동의) 완료 ✅");
+            return;
+        }
+        if Instant::now() >= deadline {
+            tracing::warn!(final_url = %url, "[LOGIN][npay] 가입 확인 타임아웃 — 건너뜀(이미 가입이면 무해)");
+            return;
+        }
+    }
 }
 
 // Network.getCookies로 .naver.com 쿠키를 수거한다.
