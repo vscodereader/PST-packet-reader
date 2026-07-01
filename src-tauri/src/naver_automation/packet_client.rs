@@ -5,7 +5,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use reqwest::blocking::Client;
 use reqwest::header::{
     HeaderMap, HeaderValue, ACCEPT, ACCEPT_LANGUAGE, CONTENT_TYPE, COOKIE, LOCATION, ORIGIN,
-    REFERER, RETRY_AFTER, USER_AGENT,
+    REFERER, RETRY_AFTER, SET_COOKIE, USER_AGENT,
 };
 use serde_json::{json, Value};
 use url::form_urlencoded::Serializer;
@@ -51,6 +51,7 @@ const TRANSPORT_RETRY_MAX_DELAY: Duration = Duration::from_secs(3);
 // Chrome에서 수거한 쿠키 한 개(도메인까지 보존). 이름만으로 합치면 서브도메인별
 // host-scoped 동일 이름 쿠키(NNB, 서비스별 세션/CSRF 등)가 last-write-wins로 뭉개져
 // 호스트 간에 누출되므로, (domain, name)으로 구분해 둔다.
+#[derive(Clone)]
 struct NaverCookie {
     domain: String,
     name: String,
@@ -481,7 +482,9 @@ impl NaverPacketClient {
             Ok(result) => result,
             Err(error) => {
                 // 전송 실패는 비치명적: 이미 가입된 계정이면 뒤의 글쓰기는 그대로 성공한다.
-                tracing::warn!("네이버페이 가입(동의하기) 전송 실패 — 건너뜀(글쓰기는 계속): {error}");
+                tracing::warn!(
+                    "네이버페이 가입(동의하기) 전송 실패 — 건너뜀(글쓰기는 계속): {error}"
+                );
                 return NpayJoinStatus::Unknown;
             }
         };
@@ -518,9 +521,12 @@ impl NaverPacketClient {
     /// 그래서 `member-web.pay.naver.com/join` → `nid.naver.com/commonTermAgree`(필수 약관) 리다이렉트
     /// 에서 우리 로그인 쿠키가 사라져, nid가 인증 실패로 보고 `nidlogin.login`(로그인 페이지)으로
     /// 튕겼다 — 미가입 계정 가입 실패의 실제 원인(실측 패킷·로그 2026-07-01). 브라우저는 쿠키 자를
-    /// 써서 호스트마다 그 호스트 쿠키를 자동 첨부하므로 통과한다. 여기서도 자동 추종을 끄고
-    /// (`redirect::none`), 홉마다 `navigation_headers(host)`로 그 호스트 스코프 쿠키를 실어 따라간다.
-    /// 최종 (status, url)을 돌려준다. best-effort — 호출부가 실패를 삼키고 글쓰기를 계속한다.
+    /// 써서 호스트마다 그 호스트 쿠키를 자동 첨부하고 **홉마다 Set-Cookie를 누적**하므로 통과한다.
+    /// 여기서도 자동 추종을 끄고(`redirect::none`), 로그인 쿠키에서 출발한 jar에 홉마다 `merge_set_cookies`
+    /// 로 응답 Set-Cookie를 병합해(회전된 BUC·재발급된 NID_AUT/NID_SES) 다음 홉에 `navigation_headers`
+    /// 로 실어 따라간다 — 이 누적이 미가입 계정의 commonTermAgree를 200으로 통과시키는 핵심이다(실측
+    /// 패킷 `동의+프로필까지`). 최종 (status, url)을 돌려준다. best-effort — 호출부가 실패를 삼키고
+    /// 글쓰기를 계속한다.
     fn financial_join_follow(&self) -> AutomationResult<(u16, String)> {
         const MAX_HOPS: u32 = 15;
         let client = Client::builder()
@@ -530,18 +536,29 @@ impl NaverPacketClient {
             .map_err(|error| {
                 AutomationError::new(format!("가입 HTTP 클라이언트 생성 실패: {error}"))
             })?;
+        // 브라우저처럼 홉마다 Set-Cookie를 이어받는 쿠키 자(jar). 로그인 쿠키에서 출발해, 가입
+        // 리다이렉트 체인이 중간에 회전시키는 쿠키(실측 패킷 `동의+프로필까지` 2026-07-01: 홉 사이
+        // BUC 회전, commonTermAgree가 200으로 재발급하는 NID_AUT/NID_SES)를 누적해 다음 홉에 실어
+        // 보낸다. 이 누적이 없으면 미가입 계정의 commonTermAgree가 200이 아니라 nidlogin.login으로
+        // 302 튕겨(옛 로그의 실패 원인) 가입이 안 끝났다 — 브라우저 쿠키 자 동작을 페이지 이동 없이
+        // 순수 GET으로 재현한다.
+        let mut jar = self.cookies.clone();
         let mut url = FINANCIAL_JOIN_URL.to_string();
         for _hop in 0..MAX_HOPS {
             let host = url::Url::parse(&url)
                 .ok()
                 .and_then(|parsed| parsed.host_str().map(ToOwned::to_owned))
                 .unwrap_or_default();
-            let headers = self.navigation_headers(&host)?;
-            let response = client
-                .get(&url)
-                .headers(headers)
-                .send()
-                .map_err(|error| AutomationError::new(format!("가입 GET 전송 실패({host}): {error}")))?;
+            let headers = self.navigation_headers(&jar, &host)?;
+            let response = client.get(&url).headers(headers).send().map_err(|error| {
+                AutomationError::new(format!("가입 GET 전송 실패({host}): {error}"))
+            })?;
+            // 이 홉이 준 Set-Cookie를 jar에 병합해 다음 홉이 회전된 쿠키를 쓰게 한다(브라우저와 동일).
+            merge_set_cookies(
+                &mut jar,
+                response.headers().get_all(SET_COOKIE).iter(),
+                &host,
+            );
             let status = response.status();
             if !status.is_redirection() {
                 // 필수약관 페이지(commonTermAgree termcd=40)는 HTTP 3xx가 아니라 200 HTML을 주고,
@@ -594,12 +611,16 @@ impl NaverPacketClient {
     // 네이버페이 가입(동의하기) GET — 톱레벨 내비게이션처럼 보이는 헤더를 만든다(JSON API 헤더와
     // 달리 ORIGIN/CORS가 아니라 sec-fetch navigate/document). 쿠키는 host 기준으로 .naver.com
     // 로그인 쿠키(NID_AUT/NID_SES)가 붙는다.
-    fn navigation_headers(&self, host: &str) -> AutomationResult<HeaderMap> {
+    fn navigation_headers(
+        &self,
+        cookies: &[NaverCookie],
+        host: &str,
+    ) -> AutomationResult<HeaderMap> {
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, header_value(&self.user_agent, "user-agent")?);
         headers.insert(
             COOKIE,
-            header_value(&self.cookie_header_for(host), "cookie")?,
+            header_value(&build_cookie_header(cookies, host), "cookie")?,
         );
         headers.insert(
             ACCEPT,
@@ -1831,6 +1852,53 @@ fn term_agree_callback_url(current_url: &str) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
+/// 단일 Set-Cookie 헤더 한 줄을 (도메인·이름·값)으로 파싱한다(순수 함수). `name=value; domain=.naver.com;
+/// path=/; ...` 형태에서 이름/값과 domain 속성만 취한다. domain 속성이 없으면 응답 호스트(host-only)로
+/// 스코프한다(브라우저 규칙). 이름이 비면 `None`. 만료/삭제 속성은 다루지 않는다 — 가입 체인(수초)에선
+/// 서버가 재발급하는 쿠키를 이어받는 것만 중요하고, 만료 마커 쿠키는 서버가 무시한다.
+fn parse_set_cookie(line: &str, response_host: &str) -> Option<NaverCookie> {
+    let mut parts = line.split(';');
+    let (name, value) = parts.next()?.trim().split_once('=')?;
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let domain = parts
+        .filter_map(|attr| attr.trim().split_once('='))
+        .find(|(key, _)| key.trim().eq_ignore_ascii_case("domain"))
+        .map(|(_, v)| v.trim().to_owned())
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| response_host.to_owned());
+    Some(NaverCookie {
+        domain,
+        name: name.to_owned(),
+        value: value.trim().to_owned(),
+    })
+}
+
+/// 응답의 Set-Cookie들을 jar에 병합한다(같은 `(이름, 도메인)`은 값 갱신, 없으면 추가) — 브라우저 쿠키
+/// 자와 동일하게, 가입 리다이렉트 체인이 회전시킨 쿠키를 다음 홉이 이어 쓰게 한다. 같은 이름이 한
+/// 응답에서 여러 번(마지막이 최종값) 오면 순서대로 적용해 마지막 값이 남는다(브라우저 last-wins).
+fn merge_set_cookies<'a>(
+    jar: &mut Vec<NaverCookie>,
+    headers: impl Iterator<Item = &'a HeaderValue>,
+    response_host: &str,
+) {
+    for header in headers {
+        let Ok(line) = header.to_str() else { continue };
+        let Some(parsed) = parse_set_cookie(line, response_host) else {
+            continue;
+        };
+        match jar
+            .iter_mut()
+            .find(|c| c.name == parsed.name && c.domain == parsed.domain)
+        {
+            Some(existing) => existing.value = parsed.value,
+            None => jar.push(parsed),
+        }
+    }
+}
+
 fn build_cookie_header(cookies: &[NaverCookie], host: &str) -> String {
     let mut applicable: Vec<&NaverCookie> = cookies
         .iter()
@@ -2085,14 +2153,20 @@ mod tests {
     fn login_cookies_apply_to_npay_join_host() {
         // 동의하기(가입) GET은 member-web.pay.naver.com 으로 가는데, .naver.com 도메인 로그인
         // 쿠키가 거기에도 붙어야 한다(안 붙으면 비로그인으로 처리돼 가입이 안 됨).
-        assert!(cookie_applies_to_host(".naver.com", "member-web.pay.naver.com"));
+        assert!(cookie_applies_to_host(
+            ".naver.com",
+            "member-web.pay.naver.com"
+        ));
         let cookies = vec![
             cookie(".naver.com", "NID_AUT", "aut"),
             cookie(".naver.com", "NID_SES", "ses"),
             cookie("stock.naver.com", "NNB", "stockonly"),
         ];
         let pay = build_cookie_header(&cookies, "member-web.pay.naver.com");
-        assert!(pay.contains("NID_AUT=aut"), "pay 호스트에 로그인 쿠키가 붙어야 한다");
+        assert!(
+            pay.contains("NID_AUT=aut"),
+            "pay 호스트에 로그인 쿠키가 붙어야 한다"
+        );
         assert!(pay.contains("NID_SES=ses"));
         // stock host-only 쿠키는 pay 호스트로 새지 않는다.
         assert!(!pay.contains("stockonly"));
@@ -2146,6 +2220,89 @@ mod tests {
         let no_rurl =
             term_agree_callback_url("https://nid.naver.com/user2/help/commonTermAgree?termcd=40");
         assert!(no_rurl.is_none());
+    }
+
+    #[test]
+    fn parse_set_cookie_reads_name_value_and_domain() {
+        // 실측 패킷(`동의+프로필까지`)의 Set-Cookie 그대로: domain 속성이 있으면 그 도메인으로 스코프.
+        let c = parse_set_cookie(
+            "BUC=C1K-rII1UeFTKv4C-A8Z2R02ppXk5gDPnL3idqKQJ2k=; expires=Sat, 01 Jan 2050 09:00:00 GMT; path=/; domain=.naver.com; SameSite=None; Secure; HttpOnly",
+            "member-web.pay.naver.com",
+        )
+        .expect("BUC를 파싱해야 한다");
+        assert_eq!(c.name, "BUC");
+        assert_eq!(c.value, "C1K-rII1UeFTKv4C-A8Z2R02ppXk5gDPnL3idqKQJ2k=");
+        assert_eq!(c.domain, ".naver.com");
+    }
+
+    #[test]
+    fn parse_set_cookie_without_domain_scopes_to_response_host() {
+        // domain 속성이 없으면 host-only — 응답 호스트로 스코프(브라우저 규칙).
+        let c = parse_set_cookie("JSESSIONID=6C20E5E5; Path=/; HttpOnly", "finance.naver.com")
+            .expect("host-only 쿠키를 파싱해야 한다");
+        assert_eq!(c.name, "JSESSIONID");
+        assert_eq!(c.domain, "finance.naver.com");
+        // 이름이 비면 None.
+        assert!(parse_set_cookie("=orphan; path=/", "nid.naver.com").is_none());
+    }
+
+    #[test]
+    fn merge_set_cookies_rotates_existing_and_adds_new() {
+        // 로그인 jar에서 출발 — 가입 체인이 회전시키는 쿠키를 이어받는 게 핵심(실측: BUC 회전,
+        // commonTermAgree가 NID_AUT/NID_SES 재발급). 같은 (이름,도메인)은 값 갱신, 새 이름은 추가.
+        let mut jar = vec![
+            NaverCookie {
+                domain: ".naver.com".to_owned(),
+                name: "NID_AUT".to_owned(),
+                value: "OLD_AUT".to_owned(),
+            },
+            NaverCookie {
+                domain: ".naver.com".to_owned(),
+                name: "BUC".to_owned(),
+                value: "OLD_BUC".to_owned(),
+            },
+        ];
+        let headers = [
+            HeaderValue::from_static("BUC=NEW_BUC; path=/; domain=.naver.com; Secure"),
+            HeaderValue::from_static(
+                "NID_AUT=NEW_AUT; path=/; domain=.naver.com; Secure; HttpOnly",
+            ),
+            HeaderValue::from_static("NID_SES=NEW_SES; path=/; domain=.naver.com; Secure"),
+        ];
+        merge_set_cookies(&mut jar, headers.iter(), "nid.naver.com");
+
+        let get = |name: &str| {
+            jar.iter()
+                .find(|c| c.name == name)
+                .map(|c| c.value.as_str())
+        };
+        assert_eq!(get("BUC"), Some("NEW_BUC"), "회전된 BUC로 갱신돼야 한다");
+        assert_eq!(
+            get("NID_AUT"),
+            Some("NEW_AUT"),
+            "재발급 NID_AUT로 갱신돼야 한다"
+        );
+        assert_eq!(
+            get("NID_SES"),
+            Some("NEW_SES"),
+            "새 NID_SES가 추가돼야 한다"
+        );
+        // 갱신은 새 항목을 만들지 않는다(중복 방지) — BUC/NID_AUT는 각각 하나만.
+        assert_eq!(jar.iter().filter(|c| c.name == "BUC").count(), 1);
+        assert_eq!(jar.iter().filter(|c| c.name == "NID_AUT").count(), 1);
+    }
+
+    #[test]
+    fn merge_set_cookies_last_value_wins_for_repeated_name() {
+        // 한 응답에서 같은 이름이 여러 번(실측 commonTermAgree 응답은 NID_SES를 두 번 준다) → 마지막이 최종.
+        let mut jar: Vec<NaverCookie> = Vec::new();
+        let headers = [
+            HeaderValue::from_static("NID_SES=FIRST; domain=.naver.com; path=/"),
+            HeaderValue::from_static("NID_SES=SECOND; domain=.naver.com; path=/"),
+        ];
+        merge_set_cookies(&mut jar, headers.iter(), "nid.naver.com");
+        assert_eq!(jar.iter().filter(|c| c.name == "NID_SES").count(), 1);
+        assert_eq!(jar[0].value, "SECOND", "마지막 Set-Cookie 값이 남아야 한다");
     }
 
     #[test]
