@@ -22,10 +22,13 @@ const STOCK_HOST: &str = "stock.naver.com";
 const M_STOCK_HOST: &str = "m.stock.naver.com";
 const CBOX_HOST: &str = "apis.naver.com";
 const STATIC_NID_HOST: &str = "static.nid.naver.com";
-// 네이버페이 금융서비스 가입(동의하기) 시작 URL. 선택 동의(마케팅/마이데이터/광고/머니스토리)는
-// 전부 N으로 거절한다(사용자 지시: 필수만). 필수 약관(termcd=40)은 리다이렉트 체인의
-// commonTermAgree에서 로그인 쿠키로 통과한다. 성공 시 토론 페이지로, 실패 시 약관 페이지로 보낸다.
-const FINANCIAL_JOIN_URL: &str = "https://member-web.pay.naver.com/financial-service/join?from_pc=Y&nf_personalized_service_consent=N&naver_personalized_service_consent=N&optional_ads_and_mydata_usage_consent=N&moneystory_subscription_consent=N&join_success_url=https://stock.naver.com/discussion&join_fail_url=https://member.pay.naver.com/financial-member/agreement";
+// 네이버페이 금융서비스 가입(동의하기) 시작 URL. 동의 4종(nf/naver_personalized_service·광고마이데이터·
+// 머니스토리)을 **전부 Y**로 보낸다 — 성공한 브라우저 캡처(`npay 약관동의`)와 100% 동일(사용자 지시
+// 2026-07-01). 예전엔 전부 N이었는데, N이면 미가입 fresh 계정의 가입이 필수약관(termcd=40)에서 완료
+// 안 돼 `commonTermAgree`에 갇히고 이후 `/profile/users/status`가 500으로 막혔다(추정). 필수 약관은
+// 리다이렉트 체인의 commonTermAgree에서 처리한다(3xx 아님 → JS 콜백 이동, financial_join_follow가 rurl로
+// 따라감). 성공 시 토론 페이지로, 실패 시 약관 페이지로 보낸다.
+const FINANCIAL_JOIN_URL: &str = "https://member-web.pay.naver.com/financial-service/join?from_pc=Y&nf_personalized_service_consent=Y&naver_personalized_service_consent=Y&optional_ads_and_mydata_usage_consent=Y&moneystory_subscription_consent=Y&join_success_url=https://stock.naver.com/discussion&join_fail_url=https://member.pay.naver.com/financial-member/agreement";
 const DEFAULT_REFERER: &str = "https://stock.naver.com/discussion";
 const DEFAULT_PROFILE_INTRODUCTION: &str = "2222";
 // 신규 계정 프로필 생성 시 기본 아바타(성공 캡처에서 브라우저가 보낸 값).
@@ -343,6 +346,10 @@ impl NaverPacketClient {
 
     // Wireshark 성공 캡처에서 확인한 status/form/validate/PUT 패킷으로 프로필 소개를 설정하는 함수입니다.
     pub(super) fn ensure_profile_intro_setup(&self, referer: &str) -> AutomationResult<bool> {
+        // [진단·임시] 같은 계정이 브라우저에선 200인데 앱에선 프로필 상태 500나는 원인(헤더 vs 쿠키)을
+        // 가르는 프로브. 본 요청 직전에 브라우저와 동일 헤더로 같은 status를 쏴 결과를 로그로 남긴다.
+        // 원인 확인 후 제거 예정.
+        self.debug_probe_profile_status();
         let status = self.get_stock_json(
             "/api/community/profile/users/status",
             referer,
@@ -511,6 +518,16 @@ impl NaverPacketClient {
                 .map_err(|error| AutomationError::new(format!("가입 GET 전송 실패({host}): {error}")))?;
             let status = response.status();
             if !status.is_redirection() {
+                // 필수약관 페이지(commonTermAgree termcd=40)는 HTTP 3xx가 아니라 200 HTML을 주고,
+                // 그 안의 JS `location.href = Base64.decode(<콜백URL>)`로 약관동의 콜백으로 이동한다
+                // (실측 패킷 `npay 약관동의`). reqwest는 JS를 못 도니 여기서 멈춰, 미가입 fresh 계정이
+                // 가입 미완료로 갇히고 이후 `/profile/users/status`가 500난다(2026-07-01 zip****, 추정).
+                // 그 콜백 URL은 commonTermAgree의 `rurl` 쿼리에 그대로 들어있으므로(= 브라우저가 JS로
+                // 가던 그 주소), 이어서 GET 하면 콜백이 302로 가입을 완료시킨다.
+                if let Some(callback) = term_agree_callback_url(&url) {
+                    url = callback;
+                    continue;
+                }
                 return Ok((status.as_u16(), url));
             }
             // 리다이렉트: Location을 절대/상대 모두 처리해 다음 홉 URL로 삼는다.
@@ -956,6 +973,77 @@ impl NaverPacketClient {
         let mut headers = self.base_headers(host, referer, "same-origin")?;
         headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
         Ok(headers)
+    }
+
+    /// [진단·임시] 이 host로 전송될 쿠키의 '이름'만 콤마로 나열한다(값은 민감정보라 제외).
+    /// 브라우저 성공 요청의 쿠키 목록과 대조해 우리 추출이 빠뜨린 쿠키가 있는지 보기 위함.
+    fn cookie_names_for(&self, host: &str) -> String {
+        self.cookie_header_for(host)
+            .split("; ")
+            .filter_map(|pair| pair.split('=').next())
+            .filter(|name| !name.is_empty())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// [진단·임시] 같은 계정이 브라우저에선 `GET /profile/users/status`가 200인데 우리 앱은 500나는
+    /// 원인(헤더 vs 쿠키)을 가르기 위한 프로브. 성공한 브라우저 캡처(frame 6700)와 **똑같은 헤더**로
+    /// (origin 제거·sec-ch-ua·referer=stock.naver.com/) 같은 status를 한 번 더 쏴서 결과를 로그로 남긴다.
+    /// - 프로브=200 & 본 요청=500 → 원인은 **헤더**(우리가 붙인 origin이나 빠뜨린 client-hints).
+    /// - 프로브=500 → 원인은 헤더 아님(쿠키/세션/계정) → 쿠키 이름 목록으로 다음 조사.
+    /// best-effort: 실패해도 무시(본 흐름 불변).
+    fn debug_probe_profile_status(&self) {
+        let mut headers = HeaderMap::new();
+        if let Ok(value) = header_value(&self.user_agent, "user-agent") {
+            headers.insert(USER_AGENT, value);
+        }
+        if let Ok(value) = header_value(&self.cookie_header_for(STOCK_HOST), "cookie") {
+            headers.insert(COOKIE, value);
+        }
+        headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+        headers.insert(
+            ACCEPT_LANGUAGE,
+            HeaderValue::from_static("ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"),
+        );
+        // 브라우저 GET /status와 동일: referer는 루트, origin 헤더는 **미전송**.
+        headers.insert(REFERER, HeaderValue::from_static("https://stock.naver.com/"));
+        headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+        headers.insert("sec-fetch-mode", HeaderValue::from_static("cors"));
+        headers.insert("sec-fetch-dest", HeaderValue::from_static("empty"));
+        headers.insert(
+            "sec-ch-ua",
+            HeaderValue::from_static(
+                "\"Google Chrome\";v=\"149\", \"Chromium\";v=\"149\", \"Not)A;Brand\";v=\"24\"",
+            ),
+        );
+        headers.insert("sec-ch-ua-mobile", HeaderValue::from_static("?0"));
+        headers.insert(
+            "sec-ch-ua-platform",
+            HeaderValue::from_static("\"Windows\""),
+        );
+        headers.insert("priority", HeaderValue::from_static("u=1, i"));
+
+        let names = self.cookie_names_for(STOCK_HOST);
+        match self
+            .client
+            .get(format!("{STOCK_ORIGIN}/api/community/profile/users/status"))
+            .headers(headers)
+            .send()
+        {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                let body = response.text().unwrap_or_default();
+                tracing::warn!(
+                    probe_status = status,
+                    cookies = %names,
+                    body = %log_snippet(&body),
+                    "[진단] 프로필 상태 프로브(브라우저헤더·origin제거) — 이 값이 200이고 본 요청이 500이면 원인=헤더"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "[진단] 프로필 상태 프로브 전송 실패");
+            }
+        }
     }
 
     // static.nid.naver.com getProfile 요청에 사용하는 공통 헤더를 만드는 함수입니다.
@@ -1657,6 +1745,24 @@ fn financial_join_completed(final_url: &str) -> bool {
         && !final_url.contains("commonTermAgree")
 }
 
+/// 필수약관 페이지(commonTermAgree)면 그 `rurl`(=약관동의 콜백 URL)을 꺼낸다(순수 함수).
+///
+/// commonTermAgree는 HTTP 3xx가 아니라 200 HTML을 주고 JS `location.href = Base64.decode(<콜백>)`로
+/// 콜백에 이동한다 — 리다이렉트만 따라가는 GET-follow는 여기서 멈춘다. 다행히 그 콜백 URL은
+/// commonTermAgree의 `rurl` 쿼리에 그대로 들어있어(브라우저 JS가 가던 그 주소), 이 값을 이어서 GET
+/// 하면 약관 콜백이 가입을 완료시킨다. commonTermAgree가 아니거나 rurl이 없으면 `None`.
+fn term_agree_callback_url(current_url: &str) -> Option<String> {
+    let parsed = url::Url::parse(current_url).ok()?;
+    if !parsed.path().contains("commonTermAgree") {
+        return None;
+    }
+    parsed
+        .query_pairs()
+        .find(|(key, _)| key == "rurl")
+        .map(|(_, value)| value.into_owned())
+        .filter(|value| !value.trim().is_empty())
+}
+
 fn build_cookie_header(cookies: &[NaverCookie], host: &str) -> String {
     let mut applicable: Vec<&NaverCookie> = cookies
         .iter()
@@ -1947,6 +2053,31 @@ mod tests {
         assert!(!financial_join_completed(
             "https://nid.naver.com/nidlogin.login?mode=form&url=https%3A%2F%2Fnid.naver.com%2Fuser2%2Fhelp%2FcommonTermAgree%3Ftermcd%3D40%26cpcd%3D123%26rurl%3Dhttps%253A%252F%252Fmember-web.pay.naver.com%252Ffinancial-service%252Fjoin%252Fnaver-term-consent%252Fcallback%26surl%3Dhttps%253A%252F%252Fmember.pay.naver.com%252Ffinancial-member%252Fagreement"
         ));
+    }
+
+    #[test]
+    fn term_agree_callback_url_extracts_rurl() {
+        // commonTermAgree(200 HTML·JS 콜백 이동)에 갇혔을 때, rurl에서 약관동의 콜백 URL을 꺼낸다.
+        // 실측 패킷(npay 약관동의)의 commonTermAgree URL 그대로 — rurl 안의 session_id는 %3D 인코딩.
+        let common_term = "https://nid.naver.com/user2/help/commonTermAgree?termcd=40&cpcd=123&rurl=https://member-web.pay.naver.com/financial-service/join/naver-term-consent/callback?session_id%3D1938f359-6ac3-460a-98af-4c4dc742df20&surl=https://member.pay.naver.com/financial-member/agreement";
+        let callback = term_agree_callback_url(common_term).expect("rurl 콜백을 꺼내야 한다");
+        assert!(
+            callback.starts_with(
+                "https://member-web.pay.naver.com/financial-service/join/naver-term-consent/callback"
+            ),
+            "콜백 URL이어야 한다: {callback}"
+        );
+        assert!(
+            callback.contains("session_id=1938f359-6ac3-460a-98af-4c4dc742df20"),
+            "session_id가 디코드돼 실려야 한다: {callback}"
+        );
+        // commonTermAgree가 아니면 None(성공 콜백·토론 페이지 등에선 이어가지 않는다).
+        let not_term = term_agree_callback_url("https://stock.naver.com/discussion");
+        assert!(not_term.is_none());
+        // rurl이 없으면 None.
+        let no_rurl =
+            term_agree_callback_url("https://nid.naver.com/user2/help/commonTermAgree?termcd=40");
+        assert!(no_rurl.is_none());
     }
 
     #[test]
