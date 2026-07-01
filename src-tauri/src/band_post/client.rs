@@ -132,7 +132,15 @@ impl BandHttpClient {
         let resp = req.send().await.map_err(transport)?;
         let status = resp.status();
         let text = resp.text().await.map_err(transport)?;
-        tracing::info!("[BAND] POST {} → status={}", base_path, status.as_u16());
+        {
+            // [사용자·사수 지시: 성공/실패 전부 원문] 밴드 게시 API 실제 응답 status+body 그대로.
+            let snippet: String = text.chars().take(800).collect();
+            tracing::info!(
+                status = status.as_u16(),
+                body = %snippet,
+                "[BAND] POST {base_path} 응답 — 밴드 원문"
+            );
+        }
         if !status.is_success() {
             return Err(BandPostError::http(status.as_u16(), text));
         }
@@ -243,6 +251,11 @@ impl BandHttpClient {
         let resp = req.send().await.map_err(transport)?;
         let status = resp.status();
         let text = resp.text().await.map_err(transport)?;
+        {
+            // [사용자·사수 지시: 성공/실패 전부 원문] 밴드 가입 API 실제 응답 status+body 그대로.
+            let snippet: String = text.chars().take(800).collect();
+            tracing::info!(status = status.as_u16(), body = %snippet, "[BAND] 가입 응답 — 밴드 원문");
+        }
         if !status.is_success() {
             return Err(BandPostError::http(status.as_u16(), text));
         }
