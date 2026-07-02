@@ -659,8 +659,11 @@ const GATE_NET_SNAPSHOT_JS: &str = "(()=>{try{\
     const hits=[];for(const p of pats){const m=res.find(e=>p[1].test(e.name));\
         if(m)hits.push(p[0]+'@'+Math.round(m.responseEnd)+'ms');}\
     const frames=document.querySelectorAll('iframe').length;\
+    const c=navigator.connection||{};\
+    const conn={effectiveType:c.effectiveType,downlinkMbps:c.downlink,\
+        downlinkMaxMbps:c.downlinkMax,rttMs:c.rtt,saveData:c.saveData,type:c.type};\
     return JSON.stringify({rs:document.readyState,resCount:res.length,\
-        sinceLastNetMs:since,antibot:hits,iframes:frames});\
+        sinceLastNetMs:since,antibot:hits,iframes:frames,conn:conn});\
 }catch(e){return '{\"err\":\"'+String(e)+'\"}';}})()";
 
 // [진단·임시] 자동화/CDP 지문 스냅샷 — naver 봇탐지(wtm)가 읽는 클라이언트 신호가 정상 크롬과
@@ -1162,7 +1165,7 @@ const READ_KEY_STATS_JS: &str = "(()=>{const b={vis:document.visibilityState,has
 fn parse_throttle_ms(raw: Option<&str>) -> u64 {
     raw.and_then(|s| s.trim().parse::<u64>().ok())
         .map(|ms| ms.min(500))
-        .unwrap_or(150)
+        .unwrap_or(0)
 }
 
 fn login_throttle_ms() -> u64 {

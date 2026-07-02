@@ -117,11 +117,37 @@ pub async fn toggle_airplane_mode() -> Result<IpRotation, OrchestratorError> {
         tracing::info!("[ADB]   ✓ IP 변경됨!");
     }
     tracing::info!("[ADB] ────────────────────────────────────");
+    // 회전 직후 폰의 실제 네트워크 세대·통신사·DNS를 원문 그대로 남긴다(LTE→3G 변경 시 비교용).
+    log_phone_network_state().await;
     Ok(IpRotation {
         before,
         after,
         changed,
     })
+}
+
+/// 회전 직후 폰의 실제 네트워크 상태를 **원문 그대로** 로그에 남긴다(사수의 "네트워크(3G)로 바꾸면
+/// 캡차가 더 뜬다"를 검증하려면, 각 로그인이 실제로 어떤 세대·통신사로 붙었는지 로그에 있어야
+/// 비교가 된다). getprop 값을 가공 없이 그대로 찍는다. best-effort — 실패해도 회전 결과엔 영향 없음.
+async fn log_phone_network_state() {
+    // 네트워크 세대(LTE/UMTS/HSPA…)·데이터 세대·통신사·국가·DNS. 순서대로 라벨을 붙여 원문 값을 남긴다.
+    const PROPS: [&str; 6] = [
+        "gsm.network.type",
+        "gsm.data.network.type",
+        "gsm.operator.alpha",
+        "gsm.sim.operator.alpha",
+        "gsm.operator.iso.country",
+        "net.dns1",
+    ];
+    tracing::info!("[ADB][NET] ─────────── 폰 네트워크 상태(원문) ───────────");
+    for prop in PROPS {
+        match run_adb_timed(vec!["shell".to_string(), "getprop".to_string(), prop.to_string()]).await
+        {
+            Ok(v) => tracing::info!("[ADB][NET]   {prop} = {}", v.trim()),
+            Err(error) => tracing::warn!("[ADB][NET]   {prop} 조회 실패: {error}"),
+        }
+    }
+    tracing::info!("[ADB][NET] ──────────────────────────────────────────");
 }
 
 /// `adb devices` 출력에 인증된(`device`) 디바이스가 하나라도 있는지 판별한다.
