@@ -138,6 +138,11 @@ impl ClipCommentClient {
             .text()
             .await
             .map_err(|e| ClipError::new(format!("응답 본문 읽기 오류: {e}")))?;
+        {
+            // [사용자·사수 지시: 성공/실패 전부 네이버 원문] 클립 API 실제 응답 status+body 그대로.
+            let snippet: String = raw.chars().take(800).collect();
+            tracing::info!(status = status.as_u16(), body = %snippet, "[CLIP] 실제 API 응답 — 네이버 원문");
+        }
         if !status.is_success() {
             return Err(ClipError::new(format!(
                 "클립 댓글 등록 요청이 실패했습니다(HTTP status {})",
@@ -190,6 +195,11 @@ impl ClipCommentClient {
             .text()
             .await
             .map_err(|e| ClipError::new(format!("응답 본문 읽기 오류: {e}")))?;
+        {
+            // [사용자·사수 지시: 성공/실패 전부 네이버 원문] 클립 API 실제 응답 status+body 그대로.
+            let snippet: String = raw.chars().take(800).collect();
+            tracing::info!(status = status.as_u16(), body = %snippet, "[CLIP] 실제 API 응답 — 네이버 원문");
+        }
         if !status.is_success() {
             return Err(ClipError::new(format!(
                 "요청이 실패했습니다(HTTP status {})",

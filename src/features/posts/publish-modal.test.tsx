@@ -561,6 +561,53 @@ describe("PublishModal", () => {
     ]);
   });
 
+  it("forum '특정 게시글' 댓글: 여러 글 URL을 넣으면 각 글마다 댓글 잡이 만들어진다(다중 url)", async () => {
+    // 종토방 글 URL 2개 → plan.forum에 글마다 잡 1개(총 2개), 각자 자신의 URL·종목코드로 동결돼
+    // 두 글 모두 댓글이 달려야 한다(카페 다중 url과 대칭, #특정게시글 다중링크).
+    const url1 =
+      "https://stock.naver.com/domestic/stock/035720/discussion/421063210?chip=all";
+    const url2 =
+      "https://stock.naver.com/domestic/stock/005930/discussion/421099999?chip=all";
+    const commentDoc: LibraryPost = {
+      id: "lfm",
+      title: "종토방 다중 URL 댓글",
+      kind: "comment",
+      updated: "방금 전",
+      words: 20,
+      status: "ready",
+      excerpt: "요약",
+      commentTarget: "url",
+      commentUrls: [url1, url2],
+      comments: ["댓글1"],
+    };
+    renderPublish({ doc: commentDoc });
+    // 기본 forum 계정(invest_king7)이 선택돼 있다. 두 URL이 곧 대상이라 종목 선택 없이 잡 2개.
+    const publishBtn = await screen.findByRole(
+      "button",
+      { name: /^게시 \(2\)/ },
+      { timeout: 3000 },
+    );
+    expect(publishBtn).toBeEnabled();
+
+    await userEvent.click(await screen.findByText("예약 게시"));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^예약 \(2\)/ }),
+    );
+    const call = ipcBackend.mock.calls.find(
+      (c) => c[0] === "add_queue_scheduled",
+    );
+    expect(call).toBeDefined();
+    const plan = (
+      call?.[1] as {
+        item: { plan: { forum: { commentUrl?: string; code?: string }[] } };
+      }
+    ).item.plan;
+    expect(plan.forum).toHaveLength(2);
+    // 링크별로 자신의 URL·종목코드가 동결돼야 한다(둘 다 댓글이 달리도록).
+    expect(plan.forum.map((t) => t.commentUrl)).toEqual([url1, url2]);
+    expect(plan.forum.map((t) => t.code)).toEqual(["035720", "005930"]);
+  });
+
   it("band '특정 게시글' 댓글: 밴드 선택 없이 게시 버튼이 활성화되고 plan.band에 글 URL+url 스펙이 동결된다", async () => {
     const bandUrl = "https://www.band.us/band/103043410/post/57";
     const commentDoc: LibraryPost = {
@@ -1656,5 +1703,13 @@ describe("PublishModal", () => {
     const codes = plans.flatMap((p) => p.forum.map((f) => f.code));
     expect(codes.length).toBe(2);
     expect(new Set(codes).size).toBe(2);
+    // [회귀 #6] 두 큐 아이템의 id는 반드시 고유해야 한다. 같은 동기 tick에 만들어지므로 예전
+    // "qn"+Date.now()는 밀리초가 같아 동일 id가 됐고, 백엔드가 한 아이템처럼 다뤄 1계정이
+    // post 0으로 증발했다. freshIdSuffix(카운터)로 같은 tick에도 달라야 한다.
+    const ids = ipcBackend.mock.calls
+      .filter((c) => c[0] === "add_queue_now")
+      .map((c) => (c[1] as { item: { id: string } }).item.id);
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(2);
   });
 });

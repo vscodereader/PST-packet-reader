@@ -323,6 +323,14 @@ fn run_inner(
         ));
     }
 
+    // [캡차 완화] CDP 자동화는 렌더러 DOM의 activeElement만 바꿀 뿐 브라우저(창) 포커스는
+    // omnibox(주소창)에 남겨, document.hasFocus()=false 가 로그인 내내 유지된다. 그러면
+    // 네이버 wtm 안티봇이 "한 번도 포커스되지 않은 페이지"를 봇 신호로 읽어 캡차를 더 띄운다
+    // (사용자 관측: 빈 화면을 한 번 클릭하면 주소창 선택이 풀리고 캡차 빈도가 급감). 타이핑 전에
+    // 창 포커스를 웹 컨텐츠로 옮겨(=실클릭과 같은 효과) 그 봇 신호를 없앤다. Page 도메인은 이미
+    // enable_page_only 로 켜져 있고 Input 도 이미 쓰므로 탐지표면 증가는 사실상 없다.
+    focus_web_contents(client);
+
     // [진단·임시] 수동입력 모드(PSTMACRO_LOGIN_MANUAL): 자동 타이핑을 생략하고 사용자가 이 CDP
     // 크롬 창에서 직접 입력하게 둔다. 같은 환경(CDP·플래그)에서 손입력=성공이면 원인은 합성 입력
     // (행동데이터), 손입력에도 캡차면 원인은 환경(CDP/플래그)임을 가른다(폼은 위에서 이미 준비됨).
@@ -351,6 +359,10 @@ fn run_inner(
                 .to_owned(),
         ));
     }
+
+    // '로그인 상태 유지'를 켠다 — 이걸 켜야 브라우저가 npay 약관동의(commonTermAgree)에 싣는 nid
+    // 세션 쿠키(NID_JST·NID_SAUTO)가 발급된다(실측 성공 패킷은 이 쿠키를 실어 통과). best-effort.
+    enable_keep_signed_in(client);
 
     // 비밀번호 입력 후 사람처럼 잠깐 멈췄다가 로그인 버튼을 누른다(2초→0.8초, #14).
     sleep(FIELD_PAUSE);
@@ -398,6 +410,7 @@ fn run_inner(
         // 착지 페이지(naver.com)의 광고 iframe 로딩을 기다리느라 정상 로그인을 늦추거나 놓치지
         // 않는다. 보류 캡차 직접 입력 중에 사용자가 풀어 로그인돼도 여기서 즉시 성공 확정된다.
         if signals.logged_in {
+            dump_naver_page(client, "로그인 성공(Ok)");
             let cookies = collect_naver_cookies(client)?;
             return Ok(LoginOutcome::Ok { cookies });
         }
@@ -460,6 +473,7 @@ fn run_inner(
 
         match decide_loop_step(classify(&signals), wait_for_human, manual_captcha) {
             LoopDecision::Success => {
+                dump_naver_page(client, "로그인 성공(Ok)");
                 let cookies = collect_naver_cookies(client)?;
                 return Ok(LoginOutcome::Ok { cookies });
             }
@@ -475,7 +489,10 @@ fn run_inner(
                 pending_deadline = None;
             }
             // 첫 로그인(일반 계정) 캡차: grace 없이 즉시 실패시키고 계정을 보류(OnHold)로 둔다.
-            LoopDecision::FailCaptchaToHold => return Ok(LoginOutcome::CaptchaUnsolved),
+            LoopDecision::FailCaptchaToHold => {
+                dump_naver_page(client, "캡차/보안문자(CaptchaUnsolved→보류)");
+                return Ok(LoginOutcome::CaptchaUnsolved);
+            }
             // 본인확인(휴대전화 번호) 화면(전화번호 패킷분석). ID가 010+8자리면 그 번호를
             // #phone_value에 입력하고 #oab.submit(확인)을 눌러 1회 시도한다(앞 +82 select는 안 건드림).
             // 그 뒤 PHONE_VERIFY_GRACE 안에 로그인되면 위 logged_in에서 성공 확정, 안 되면 보류
@@ -500,15 +517,28 @@ fn run_inner(
             }
             // 캡차가 아닌 추가 인증(본인인증 OTP/새 기기 인증) — 캡차 외라 즉시 실패(#267-13).
             LoopDecision::FailUnsupportedChallenge(kind) => {
+                dump_naver_page(client, "미지원 추가인증(OTP/새기기)");
                 return Ok(LoginOutcome::Error(format!(
                     "{} 화면이 떠 자동 로그인을 중단했습니다(캡차 외 즉시 실패).",
                     challenge_kind_label(kind)
                 )));
             }
-            LoopDecision::ConfirmedBad => return Ok(LoginOutcome::BadCredentials),
-            LoopDecision::ConfirmedBlocked => return Ok(LoginOutcome::Blocked),
-            LoopDecision::ConfirmedProtected => return Ok(LoginOutcome::Protected),
-            LoopDecision::ConfirmedLocked => return Ok(LoginOutcome::Locked),
+            LoopDecision::ConfirmedBad => {
+                dump_naver_page(client, "비번오류(BadCredentials)");
+                return Ok(LoginOutcome::BadCredentials);
+            }
+            LoopDecision::ConfirmedBlocked => {
+                dump_naver_page(client, "차단(Blocked)");
+                return Ok(LoginOutcome::Blocked);
+            }
+            LoopDecision::ConfirmedProtected => {
+                dump_naver_page(client, "보호조치(Protected)");
+                return Ok(LoginOutcome::Protected);
+            }
+            LoopDecision::ConfirmedLocked => {
+                dump_naver_page(client, "잠금(Locked)");
+                return Ok(LoginOutcome::Locked);
+            }
             // 중간 상태(성공·캡차·명시오류 아님) — 인식 못 한 추가 인증 화면일 수 있다.
             // PENDING_STALL을 넘기면 즉시 실패(크롬 종료)시킨다.
             LoopDecision::KeepWaiting => {
@@ -887,6 +917,51 @@ fn element_center(
     Ok(parse_xy(&client.evaluate(&expr)?))
 }
 
+// 브라우저(창) 포커스를 omnibox(주소창)에서 웹 컨텐츠로 옮긴다. CDP 입력은 렌더러
+// activeElement만 바꿔 주소창 select-all/창 미포커스 상태가 안 풀리는데, 그 미포커스가
+// wtm 안티봇의 봇 신호라 캡차를 키운다(사용자가 빈 화면을 손으로 클릭하면 풀리던 그 상태).
+// ①Page.bringToFront 로 탭/창을 앞으로 가져와 포커스를 웹 컨텐츠로 옮기고 ②폼·링크를 피한
+// 중립 body 좌표를 진짜 마우스로 클릭해 in-document 포커스 + 포인터 엔트로피를 만든다. 전부
+// best-effort — 어느 단계가 실패해도 로그인은 그대로 진행한다. 적용 전후 document.hasFocus()
+// 를 로그로 남겨, 이 조치가 실제로 포커스를 옮겼는지 사용자가 로그에서 검증할 수 있게 한다.
+fn focus_web_contents(client: &mut CdpClient) {
+    let before = client.evaluate_bool("document.hasFocus()").unwrap_or(false);
+
+    // ① 탭/창을 앞으로: 포커스를 웹 컨텐츠로 옮겨 주소창 select-all 을 푼다.
+    if let Err(error) = client.call("Page.bringToFront", json!({})) {
+        tracing::warn!("[LOGIN] Page.bringToFront 실패 — 포커스 이동 일부만 적용: {error}");
+    }
+
+    // ② 폼·버튼·링크와 겹치지 않는 빈 지점을 골라 진짜 마우스로 클릭(없으면 건너뜀).
+    let clicked = match neutral_body_point(client) {
+        Ok(Some((x, y))) => mouse_click(client, x, y).is_ok(),
+        _ => false,
+    };
+
+    let after = client.evaluate_bool("document.hasFocus()").unwrap_or(false);
+    tracing::info!(
+        has_focus_before = before,
+        has_focus_after = after,
+        body_clicked = clicked,
+        "[LOGIN] 웹 컨텐츠 포커스 이동(주소창 선택 해제·캡차 완화 시도)"
+    );
+}
+
+// 클릭 가능한 요소(a/button/input/select/textarea/label/onclick)와 겹치지 않는 viewport 내
+// 빈 좌표를 하나 고른다. 후보 지점을 훑어 elementFromPoint 가 상호작용 요소가 아닌 첫 지점을
+// 반환한다(없으면 None). 임의 좌표를 클릭해 링크/버튼을 잘못 누르는 사고를 막기 위함.
+fn neutral_body_point(client: &mut CdpClient) -> Result<Option<(f64, f64)>, AutomationError> {
+    const JS: &str = "(()=>{\
+        const w=innerWidth,h=innerHeight;\
+        const cand=[[w*0.5,h*0.12],[w*0.5,h*0.06],[w*0.12,h*0.5],[w*0.88,h*0.5],[w*0.5,h*0.92],[8,8]];\
+        const bad=el=>{for(let n=el;n&&n!==document.body;n=n.parentElement){const t=n.tagName;\
+            if(t==='A'||t==='BUTTON'||t==='INPUT'||t==='SELECT'||t==='TEXTAREA'||t==='LABEL')return true;\
+            if(typeof n.onclick==='function')return true;}return false;};\
+        for(const [x,y] of cand){const el=document.elementFromPoint(x,y);if(el&&!bad(el))return [x,y];}\
+        return null;})()";
+    Ok(parse_xy(&client.evaluate(JS)?))
+}
+
 // (x,y)로 마우스를 옮겨 좌클릭한다 — JS .click()/.focus()가 아니라 진짜 mouse 이벤트라
 // 행동 기반 봇탐지(움직임 0)를 완화한다.
 fn mouse_click(client: &mut CdpClient, x: f64, y: f64) -> Result<(), AutomationError> {
@@ -912,6 +987,33 @@ fn mouse_click_selector(client: &mut CdpClient, selector: &str) -> Result<bool, 
         return Ok(true);
     }
     Ok(false)
+}
+
+/// 로그인 직전에 '로그인 상태 유지' 토글을 켠다. 이걸 켜야 브라우저가 npay 약관동의
+/// (commonTermAgree)에 싣는 nid 세션 쿠키(NID_JST·NID_SAUTO 등, 만료가 긴 keep-login 쿠키)가
+/// 발급된다 — 실측 성공 패킷(`동의+프로필까지`)은 이 쿠키를 실어 통과하는데, 우리 로그인이 이걸
+/// 안 켜서 그 쿠키가 아예 안 생겼다. 여러 선택자를 방어적으로 시도하고, 못 찾아도 로그인은
+/// 그대로 진행한다(best-effort, 결과는 로그로 남긴다).
+fn enable_keep_signed_in(client: &mut CdpClient) {
+    const JS: &str = "(()=>{\
+         const el=document.querySelector('#keep')\
+             ||document.querySelector('input[name=\"nvlong\"]')\
+             ||document.querySelector('.keep_check input[type=checkbox]')\
+             ||document.querySelector('#switch');\
+         if(!el)return 'not-found';\
+         if(!el.checked){el.checked=true;\
+             el.dispatchEvent(new Event('click',{bubbles:true}));\
+             el.dispatchEvent(new Event('change',{bubbles:true}));}\
+         const nv=document.querySelector('input[name=\"nvlong\"]');if(nv)nv.value='on';\
+         return el.checked?'on':'off';})()";
+    match client.evaluate_string(JS) {
+        Ok(result) => {
+            tracing::info!(result = %result, "[LOGIN][상태유지] 로그인 상태 유지 설정 시도")
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "[LOGIN][상태유지] 설정 실패 — 건너뜀(로그인은 계속)")
+        }
+    }
 }
 
 // 로그인 버튼을 사람처럼 좌표 클릭한다. 좌표를 못 구하면 .click()으로 폴백(클릭 실패가
@@ -1160,6 +1262,31 @@ fn type_into(
         Some(0) => Some(false),
         _ => None,
     };
+    // [로그인 실패 시 네이버 페이지·필드 DOM 원문 그대로 덤프] (사용자·사수 지시 2026-07-01: 우리
+    // 요약이 아니라 네이버가 실제로 준 것을 그대로). 특히 document.hasFocus()=false 면 "창(OS)
+    // 포커스 없음"이라 합성 키 입력이 value에 조합되지 않는 원인이다(렌더러 activeElement는 #id로
+    // 잡혀도 창 포커스가 없으면 타이핑이 안 먹는다). 필드 outerHTML·상단 겹침요소·iframe여부·페이지
+    // 본문 텍스트(잠금/오류 안내 원문 포함)를 한 덩어리로 남긴다.
+    let raw_dump = client
+        .evaluate_string(&format!(
+            "(()=>{{const el=document.querySelector('{selector}');\
+             const r=el?el.getBoundingClientRect():null;\
+             const top=r?document.elementFromPoint(r.left+r.width/2,r.top+r.height/2):null;\
+             return JSON.stringify({{\
+               hasFocus:document.hasFocus(),url:location.href,title:document.title,\
+               inIframe:window.top!==window.self,\
+               fieldHtml:el?el.outerHTML.slice(0,300):'(field 없음)',\
+               topElem:top?(top.tagName+'#'+(top.id||'')+'.'+(top.className||'')).slice(0,120):'(없음)',\
+               topIsField:!!(top&&el&&(top===el||el.contains(top))),\
+               bodyText:(document.body?document.body.innerText:'').replace(/\\s+/g,' ').slice(0,400)\
+             }});}})()"
+        ))
+        .unwrap_or_default();
+    tracing::warn!(
+        selector,
+        raw = %raw_dump,
+        "[LOGIN][원문덤프] 자동입력 실패 — 네이버 로그인 페이지·필드 DOM 원문(hasFocus·필드HTML·겹침·본문)"
+    );
     let diag = format_fill_diag(&FillDiag {
         selector,
         expected,
@@ -1291,12 +1418,31 @@ pub(crate) fn id_is_phone_format(id: &str) -> bool {
     t.len() == 11 && t.starts_with("010") && t.bytes().all(|b| b.is_ascii_digit())
 }
 
-// Network.getCookies로 .naver.com 쿠키를 수거한다.
+/// [사수·사용자 지시: 네이버 실제 본문 그대로] 로그인이 실패로 종결되는 순간(보호조치·잠금·차단·
+/// 비번오류·미지원 인증) 현재 네이버 페이지의 **원문**(착지 URL·제목·본문 텍스트)을 그대로 로그로
+/// 남긴다. 우리 판정 문구가 아니라 네이버가 실제로 준 내용을 눈으로 확인하기 위함(예: 보호조치
+/// 페이지의 실제 안내 문구). best-effort — 읽기 실패해도 로그인 결과 처리엔 영향 없다.
+fn dump_naver_page(client: &mut CdpClient, reason: &str) {
+    let raw = client
+        .evaluate_string(
+            "(()=>{try{return JSON.stringify({\
+             url:location.href,title:document.title,\
+             bodyText:(document.body?document.body.innerText:'').replace(/\\s+/g,' ').slice(0,1200)\
+             });}catch(e){return '(원문 읽기 실패)';}})()",
+        )
+        .unwrap_or_default();
+    tracing::warn!(
+        reason,
+        raw = %raw,
+        "[LOGIN][원문] 네이버 로그인 실패 페이지 원문(착지 URL·제목·본문 텍스트 그대로)"
+    );
+}
+
+// 브라우저의 모든 쿠키를 수거해 .naver.com 만 남긴다. getAllCookies는 URL/경로 필터 없이 전량을
+// 주므로, 특정 URL만 조회하는 getCookies가 놓치던 nid 세션 쿠키(NID_JST 등 `.nid.naver.com`
+// host-only)까지 담아 이후 약관/가입 요청의 인증 실패를 막는다.
 fn collect_naver_cookies(client: &mut CdpClient) -> Result<Vec<Value>, AutomationError> {
-    let result = client.call(
-        "Network.getCookies",
-        json!({ "urls": ["https://www.naver.com", "https://nid.naver.com"] }),
-    )?;
+    let result = client.call("Network.getAllCookies", json!({}))?;
     let cookies = result
         .get("cookies")
         .and_then(Value::as_array)

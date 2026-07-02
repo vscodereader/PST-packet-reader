@@ -300,6 +300,17 @@ impl CafeHttpClient {
             Err(e) => return Err(transport_error(e)),
         };
 
+        // [사용자·사수 지시 2026-07-01: 성공/실패 전부 네이버 원문] 카페 API의 실제 응답 status+body를
+        // 그대로 남긴다(Cookie 헤더는 위에서 로그 금지, 응답 body는 네이버가 준 것이라 원문 그대로).
+        {
+            let snippet: String = raw_body.chars().take(800).collect();
+            tracing::info!(
+                status = status_code,
+                body = %snippet,
+                "[CAFE] 실제 API 응답 — 네이버 원문"
+            );
+        }
+
         if !status.is_success() {
             let retryable = status_code >= 500;
             return Err(make_non_2xx_error(

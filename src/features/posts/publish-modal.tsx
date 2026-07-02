@@ -137,7 +137,7 @@ function bandNoFromLink(link: string): string {
   return m ? m[1]! : t;
 }
 
-function AccountRow({
+export function AccountRow({
   a,
   selected,
   onToggle,
@@ -905,14 +905,30 @@ function PublishFlow({
   );
 }
 
+// 큐 아이템 ID 일련번호. "나눠서 게시"는 계정마다 큐 아이템을 같은 동기 tick에 만드는데,
+// 예전 "qn"+Date.now()는 밀리초 해상도라 그것들이 *전부 같은 ID*가 됐다 — 백엔드가 ID로
+// 일괄 처리(mark_running/apply_cancel_now가 같은 ID 전부에 적용)하므로 N개 계정 중 1개만
+// 살고 나머지는 post 0으로 증발했다(#6). 모듈 전역 카운터로 같은 tick에도 반드시 달라지게 한다.
+let queueIdSeq = 0;
+
+/** 충돌 불가능한 큐 아이템 ID 접미사. 같은 tick에도 카운터로 항상 고유하고, 시간+랜덤을
+ *  섞어 앱 재시작 뒤에도 겹치지 않는다(crypto.randomUUID 있으면 그걸 섞는다). */
+function freshIdSuffix(): string {
+  queueIdSeq += 1;
+  const rand =
+    globalThis.crypto?.randomUUID?.() ??
+    Math.random().toString(36).slice(2, 10);
+  return `${Date.now()}-${queueIdSeq}-${rand}`;
+}
+
 /** Fresh id for a newly scheduled queue item (kept out of render per purity). */
 function newScheduledId(): string {
-  return "qs" + Date.now();
+  return "qs" + freshIdSuffix();
 }
 
 /** Fresh id for an item appended to the immediate-processing queue (now 큐). */
 function newNowId(): string {
-  return "qn" + Date.now();
+  return "qn" + freshIdSuffix();
 }
 
 function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
@@ -1839,13 +1855,23 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       });
       return locs;
     };
+    // 계정마다 1개씩, 충돌 불가능한 ID를 미리 만든다(같은 tick이라도 freshIdSuffix가 고유 보장).
+    const itemIds = groups.map(() => newNowId());
+    // [SPLIT] 진단: 선택 계정 수·계정별 종목 분배 결과·생성된 큐 ID를 남긴다 — "7계정 선택했는데
+    // 6개만 받고 1개 증발"이 다시 나면 로그에서 즉시 원인(ID 중복/빈 버킷)을 가릴 수 있게 한다(#6).
+    console.info(
+      "[SPLIT] distinctLogins=%d perAccountStocks=%o itemIds=%o",
+      order.length,
+      groups.map((g) => g.length),
+      itemIds,
+    );
     setFlow("running");
     void persistCredentials(jobs)
       .then(() =>
         Promise.all(
-          groups.map((gjobs) =>
+          groups.map((gjobs, i) =>
             ipc.queue.addNow({
-              id: newNowId(),
+              id: itemIds[i]!,
               title: doc.title,
               kind: doc.kind,
               state: "waiting",

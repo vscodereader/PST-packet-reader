@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{LazyLock, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -127,7 +128,7 @@ pub fn is_blocking_failure(message: &str) -> bool {
         return true;
     }
     // 내부 코드/한국어 안내로 드러나는 로그인·권한·쿠키·세션 만료 계열.
-    const BLOCKING_MARKERS: [&str; 9] = [
+    const BLOCKING_MARKERS: [&str; 10] = [
         "SESSION_INVALID",
         "NO_COOKIES",
         "LOGIN_FAILED",
@@ -137,6 +138,9 @@ pub fn is_blocking_failure(message: &str) -> bool {
         "쿠키를 찾지 못",
         "로그인이 필요",
         "다시 로그인",
+        // 계정 보호조치(잠금)/세션 무효 추정 — npay가 nid 로그인 페이지로 튕긴 계정. 재로그인 필요이며
+        // 남은 글은 어차피 전부 500나므로 차단으로 보아 건너뛴다(2026-07-01, clarify_profile_status_error).
+        "보호조치",
     ];
     BLOCKING_MARKERS.iter().any(|marker| m.contains(marker))
 }
@@ -146,9 +150,18 @@ pub fn is_blocking_failure(message: &str) -> bool {
 /// (3) **일시적 네트워크 끊김**(소켓 10060/10053/10054, 2026-06-30 추가). 이런 실패는 계정·자격증명
 /// 문제가 아니라 잠시 후 풀릴 수 있는 일시 상태라, 차단(Blocked)이나 비번 오류와 구분해 계정을
 /// `TimedOut`(대기초과)으로 표시하고 재시도 대상으로 둔다. 차단 계열(`is_blocking_failure`)이
-/// 우선이므로, 호출부는 먼저 차단을 보고 그 다음 이걸 본다. 429(요청 과다)는 여기에 넣지 않는다.
+/// 우선이므로, 호출부는 먼저 차단을 보고 그 다음 이걸 본다. **429(요청 과다)도 여기 포함**한다
+/// (2026-07-01, 사용자 지시): 429는 계정이 죽은 게 아니라 잠깐 요청이 몰린 것이라 재시도로 풀린다.
 pub fn is_timed_out_failure(message: &str) -> bool {
     let m = message;
+    // (3) 429(Too Many Requests, 요청 과다): 계정 차단이 아니라 레이트리밋(일시). 실측 2026-07-01:
+    // 429로 한 종목 실패한 계정(jwy****)이 직후 다른 3종목을 정상 게시 = 계정 살아있음. 이런 계정을
+    // Error로 죽이지 말고 대기초과(TimedOut·재시도)로 둔다(사용자 지시: "최종결과로 판단 — 뒤에
+    // 성공하면 살아있는 것"). 차단(is_blocking_failure)은 429를 false로 두므로, 차단 우선 규칙과
+    // 충돌하지 않는다(재시도 끝에 진짜 차단되면 그때 Blocked로 확정).
+    if m.contains("429") || m.contains("요청이 너무 많") || m.contains("요청 과다") {
+        return true;
+    }
     // (2) 일시적 네트워크 끊김(소켓 10053/54/60)은 우리 망/원격이 잠깐 끊긴 것이라 재시도하면
     // 풀릴 여지가 있다(사용자 지시: 일시적 네트워크 불안정은 재시도 타협).
     if is_transient_network_failure(m) {
@@ -265,11 +278,14 @@ where
             Err(error) => (false, error.message().to_owned(), Some(error.trace()), None),
         };
 
-        // 작업 결과를 pstmacro.log에 기록(가독성·상세화).
+        // 작업 결과를 pstmacro.log에 기록(가독성·상세화). 실패는 *실제 에러 메시지 + 캡처된
+        // 백트레이스*를 함께 남긴다 — 내가 만든 요약("대기초과")만이 아니라 원본 실패 지점이
+        // 로그 파일에 남아야 한다는 사수 지시 반영(백트레이스에 들어가는 내용).
         if ok {
             tracing::info!("[POST] {who}  \"{}\" 종목토론방 {kind} 성공 ✅", stock.name);
         } else {
-            tracing::info!(
+            tracing::warn!(
+                trace = %trace.as_deref().unwrap_or("(트레이스 없음)"),
                 "[POST] {who}  \"{}\" 종목토론방 {kind} 실패 ❌ — {message}",
                 stock.name
             );
@@ -403,6 +419,45 @@ fn run_one_forum_stock_with_retry<R: Runtime>(
     }
 }
 
+// 종목토론방 댓글 사이 최소 간격(사용자 요청 2026-07-01: 댓글 하나 달고 3초 텀). "특정 게시글"
+// 댓글은 URL마다 별도 요청(plan_to_forum_requests)이라 같은 계정이 병렬로 동시에 댓글을 달면
+// 네이버가 도배방지(code 5010)·"In process"(code 8001)로 막는다. 아래 스로틀로 같은 계정 댓글을
+// 3초 간격으로 직렬화해 그 차단을 피한다(다른 계정은 서로 독립적으로 진행).
+const COMMENT_MIN_GAP: Duration = Duration::from_secs(3);
+
+// 계정별 "다음 댓글 허용 시각" 예약대장. 병렬 요청(계정별 Chrome, 각자 스레드)이 이 전역 대장을
+// 공유해, 같은 계정의 댓글이 서로 최소 COMMENT_MIN_GAP 간격이 되게 슬롯을 잡는다.
+static COMMENT_NEXT_ALLOWED: LazyLock<Mutex<HashMap<String, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 이 계정의 댓글 슬롯을 예약하고, 그 시각까지 대기한다. 같은 계정 댓글 N건이 동시에 들어와도
+/// 각자 now, now+3s, now+6s… 슬롯을 잡아 3초 간격으로 직렬화된다. 락은 슬롯 계산 동안만 잡고
+/// 실제 대기(sleep)는 락 밖에서 하므로, 다른 계정은 막히지 않는다.
+fn throttle_account_comment(account_id: &str) {
+    let now = Instant::now();
+    let scheduled = {
+        let mut map = COMMENT_NEXT_ALLOWED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        reserve_comment_slot(&mut map, account_id, now)
+    };
+    if scheduled > now {
+        sleep(scheduled - now);
+    }
+}
+
+/// 이 계정의 이번 댓글 시각(슬롯)을 정하고, 대장의 "다음 허용 시각"을 +COMMENT_MIN_GAP로 민다
+/// (순수 로직, 테스트 대상). 예약이 없거나 과거면 now, 있으면 그 예약 시각(≥now)을 쓴다.
+fn reserve_comment_slot(
+    map: &mut HashMap<String, Instant>,
+    account_id: &str,
+    now: Instant,
+) -> Instant {
+    let slot = map.get(account_id).copied().unwrap_or(now).max(now);
+    map.insert(account_id.to_owned(), slot + COMMENT_MIN_GAP);
+    slot
+}
+
 // 한 종목에 글/댓글을 게시하는 함수입니다(kind에 따라 엔진 함수를 고릅니다).
 fn run_one_forum_stock<R: Runtime>(
     request: &ForumPublishRequest,
@@ -414,6 +469,11 @@ fn run_one_forum_stock<R: Runtime>(
     // AutomationError를 그대로 돌려준다(메시지+캡처된 스택). 호출부가 message/backtrace로
     // 나눠 ForumPublishResult에 싣는다(#199).
 ) -> Result<PostedContent, AutomationError> {
+    // 댓글이 포함된 작업이면(특정 게시글 댓글·글+댓글), 같은 계정 댓글을 3초 간격으로 직렬화해
+    // 도배방지 차단을 피한다(사용자 요청). 글만 올리는 작업은 영향 없다(스로틀 안 탐).
+    if request.run_comment {
+        throttle_account_comment(&request.account_id);
+    }
     // 종목별로 변수 토큰을 치환한다(미리보기 resolveTemplate와 동일 결과).
     // #{종목명}/#{종목코드}는 이 종목 값으로, #{링크}는 링크값(있으면) 또는 종목 시세 링크로.
     let link = crate::template_tokens::resolve_link(&request.link_override, &stock.code);
@@ -986,6 +1046,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn comment_slots_space_same_account_by_gap_but_not_across_accounts() {
+        // 같은 계정 댓글 3건이 같은 순간(now)에 들어와도 now, now+3s, now+6s로 3초씩 벌어지고,
+        // 다른 계정은 서로 영향 없이 각자 now에 시작한다(도배방지 회피 + 병렬성 유지).
+        let mut map: HashMap<String, Instant> = HashMap::new();
+        let now = Instant::now();
+
+        let a1 = reserve_comment_slot(&mut map, "acc-A", now);
+        let a2 = reserve_comment_slot(&mut map, "acc-A", now);
+        let a3 = reserve_comment_slot(&mut map, "acc-A", now);
+        assert_eq!(a1, now);
+        assert_eq!(a2, now + COMMENT_MIN_GAP);
+        assert_eq!(a3, now + COMMENT_MIN_GAP * 2);
+
+        // 다른 계정 B는 A의 예약과 무관하게 now에 시작한다.
+        let b1 = reserve_comment_slot(&mut map, "acc-B", now);
+        assert_eq!(b1, now);
+
+        // 예약 시각이 이미 지난(과거) 계정은 다시 now부터 시작한다(불필요한 대기 없음).
+        let later = now + COMMENT_MIN_GAP * 10;
+        let a_after = reserve_comment_slot(&mut map, "acc-A", later);
+        assert_eq!(a_after, later);
+    }
+
+    #[test]
     fn comment_detail_url_prefers_specific_post_url_then_falls_back() {
         let url = "https://stock.naver.com/domestic/stock/035720/discussion/421063210?chip=all";
         // "특정 게시글" 댓글: 그 글 URL이 '게시내용' 링크가 된다(댓글만 보이지 않게).
@@ -1051,6 +1135,10 @@ mod tests {
         assert!(is_blocking_failure(
             "로그인이 만료되었습니다. 다시 로그인해 주세요"
         ));
+        // 계정 보호조치/세션 무효(npay가 nid 로그인 페이지로 튕김) → 차단으로 본다(2026-07-01).
+        assert!(is_blocking_failure(
+            "계정 세션 무효/보호조치 추정 — 재로그인이 필요합니다. 이 계정의 남은 글은 건너뜁니다."
+        ));
         // 요청 과다(429)는 일시적이라 차단이 아니다 — 건너뛰면 안 된다(사수 지침: 요청 과다 제외).
         assert!(!is_blocking_failure(
             "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요"
@@ -1077,14 +1165,23 @@ mod tests {
         assert!(!is_timed_out_failure(
             "네이버 서버에 문제가 발생했습니다"
         ));
-        // 차단/비번오류/요청과다/일반실패도 대기초과가 아니다(다른 상태로 처리).
+        // 차단/비번오류/일반실패는 대기초과가 아니다(다른 상태로 처리).
         assert!(!is_timed_out_failure("HTTP status 403 Forbidden"));
         assert!(!is_timed_out_failure("HTTP status 401 Unauthorized"));
-        assert!(!is_timed_out_failure("HTTP status 429 Too Many Requests"));
         assert!(!is_timed_out_failure(
             "글 내용을 구성하는 중 문제가 발생했습니다"
         ));
         assert!(!is_timed_out_failure("HTTP status 404 Not Found"));
+        // 2026-07-01(사용자 지시): 429(요청 과다)는 계정 죽은 게 아니라 레이트리밋(일시) → 대기초과로
+        // 재시도한다(실측: 429 실패 계정이 직후 다른 종목 정상 게시). 실제 로그 메시지 형태로도 검증.
+        assert!(is_timed_out_failure(
+            "글쓰기 form 패킷 HTTP 실패: HTTP status 429 Too Many Requests for url (https://m.stock.naver.com/…)"
+        ));
+        assert!(is_timed_out_failure(
+            "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요"
+        ));
+        // 429는 차단이 아니어야(is_blocking_failure=false) 대기초과 규칙과 충돌하지 않는다.
+        assert!(!is_blocking_failure("HTTP status 429 Too Many Requests"));
     }
 
     #[test]
@@ -1135,8 +1232,12 @@ mod tests {
         assert!(!is_retryable_forum_failure(
             "동의하기 버튼이 아직 비활성화 상태입니다."
         ));
-        // 요청 과다(429)는 차단도 대기초과도 아니라 재시도 대상이 아니다.
-        assert!(!is_retryable_forum_failure("HTTP status 429 Too Many Requests"));
+        // 요청 과다(429)는 2026-07-01(사용자 지시)부터 대기초과(일시)로 보아 재시도 대상이다 —
+        // 계정이 죽은 게 아니라 레이트리밋이므로 재시도로 풀린다(차단은 아니라 blocking=false 유지).
+        assert!(is_retryable_forum_failure("HTTP status 429 Too Many Requests"));
+        assert!(is_retryable_forum_failure(
+            "글쓰기 form 패킷 HTTP 실패: HTTP status 429 Too Many Requests for url (https://x)"
+        ));
     }
 
     #[test]

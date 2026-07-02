@@ -25,11 +25,48 @@ pub(crate) struct ChromeHandle {
 
 impl Drop for ChromeHandle {
     fn drop(&mut self) {
-        tracing::info!("[CHROME] 창 닫힘 — Chrome 종료 시작...");
-        let _ = self.child.kill();
-        let _ = self.child.wait(); // 프로세스가 완전히 종료될 때까지 블로킹한다.
-        tracing::info!("[CHROME] ✓ Chrome 프로세스 완전 종료 확인");
-        let _ = std::fs::remove_dir_all(&self.user_data_dir);
+        // "완전 종료"의 판단 근거를 로그로 드러낸다(사수 질문): kill 신호 전송 결과 →
+        // wait()가 돌려주는 ExitStatus(= OS가 우리가 spawn한 Chrome 프로세스를 회수했다는
+        // 확정 신호) → 임시 프로필 삭제 결과. 예전엔 `let _`로 결과를 버리고 무조건
+        // "완전 종료 확인"만 찍어, 정말 죽었는지/무엇을 근거로 판단했는지 알 수 없었다.
+        // 주의: wait()는 우리가 직접 spawn한 프로세스만 확인한다. Chrome이 파생하는 헬퍼
+        // (렌더러/GPU/유틸리티)는 별도 PID라 여기서 회수되지 않을 수 있다 — 그래서 프로필은
+        // 매번 고유·삭제해 세션 재사용을 원천 차단한다.
+        let pid = self.child.id();
+        tracing::info!(
+            pid,
+            "[CHROME] 창 닫힘 — Chrome 종료 시작(kill 신호 전송)..."
+        );
+        match self.child.kill() {
+            Ok(()) => tracing::info!(pid, "[CHROME]   └ kill 신호 전송 성공 — 종료 대기(wait)"),
+            Err(error) => tracing::info!(
+                pid,
+                %error,
+                "[CHROME]   └ kill 불필요/실패(이미 종료됐을 수 있음) — wait로 확정"
+            ),
+        }
+        // wait()는 프로세스가 종료될 때까지 블로킹하고, 회수 성공 시 ExitStatus를 돌려준다.
+        match self.child.wait() {
+            Ok(status) => tracing::info!(
+                pid,
+                exit = %status,
+                "[CHROME] ✓ Chrome 프로세스 종료 확인 — OS가 spawn 프로세스를 회수(wait 반환, 종료상태 위 표시)"
+            ),
+            Err(error) => tracing::warn!(
+                pid,
+                %error,
+                "[CHROME] ⚠ Chrome 종료 확인 실패 — wait 오류(프로세스 상태 불명)"
+            ),
+        }
+        match std::fs::remove_dir_all(&self.user_data_dir) {
+            Ok(()) => tracing::info!(
+                "[CHROME]   └ 임시 프로필 삭제 완료 — 세션 잔여 없음(다음 로그인은 fresh)"
+            ),
+            Err(error) => tracing::info!(
+                %error,
+                "[CHROME]   └ 임시 프로필 삭제 실패(고아 헬퍼가 파일을 잠갔을 수 있음) — 다음 로그인은 새 프로필이라 무해"
+            ),
+        }
     }
 }
 

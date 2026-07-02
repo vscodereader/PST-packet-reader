@@ -108,7 +108,9 @@ export function Queue({ go }: { go: GoFn }) {
   const [dragId, setDragId] = useState<string | null>(null);
   // 진행 중 아이템을 클릭하면 그 자리에서 대상별 상태(items)를 펼친다(#219). 보통 실행
   // 중 아이템은 1개라 단일 id로 충분하다.
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  // 펼친 행의 고유 키(`${id}::${index}`). id만으로 비교하지 않는 이유는 rowKey 계산부 주석 참고
+  // (빈/중복 id가 있어도 안 눌러도/여러 개가 펼쳐지지 않게 행 단위로 못박는다).
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
   // "최대 작동가능 작업 수"(now 큐 동시 작업 상한, #284). 빈 문자열 = 무제한(0). 마운트 시
   // 백엔드에서 현재 값을 읽어 채우고, 저장 시 set_now_concurrency_limit으로 영속화한다.
   const [concurrency, setConcurrency] = useState<number | "">("");
@@ -316,7 +318,7 @@ export function Queue({ go }: { go: GoFn }) {
       </Group>
 
       <Stack gap={8} mb={34}>
-        {now.map((q) => {
+        {now.map((q, idx) => {
           // 차단되어 멈춘 종료성 카드(#REQ1)는 state가 running이라도 더 돌지 않는다 — 스피너·
           // 큐엔 실행 중(live)·대기 아이템만 있다(완료/실패/도중 차단은 finish_item이 큐에서
           // 제거하고 결과는 알림에서 확인). 진행중 배지·드래그 잠금은 live 아이템에만 적용한다.
@@ -339,9 +341,14 @@ export function Queue({ go }: { go: GoFn }) {
             ? null
             : waiting.findIndex((w) => w.id === q.id) + 1;
           // live 카드는 클릭하면 대상별 진행 상태(items)를 펼쳐 볼 수 있다.
-          const expanded = live && expandedId === q.id;
+          // 펼침은 **행 고유 키(id+인덱스)** 기준이다. 예전엔 id만 비교(expandedId === q.id)해서,
+          // 어떤 이유로든 id가 비거나 겹치는 실행중 항목이 있으면 (초기 expandedId=null 과
+          // null===null, 또는 같은 id 여러 개가) 안 눌러도 함께 펼쳐졌다(사용자 지적 2026-07-01).
+          // 인덱스를 섞은 rowKey는 항상 행마다 고유해, 내가 누른 그 행 하나만 펼쳐진다.
+          const rowKey = `${q.id}::${idx}`;
+          const expanded = live && expandedKey === rowKey;
           return (
-            <Box key={q.id}>
+            <Box key={rowKey}>
               <Paper
                 withBorder
                 radius="md"
@@ -349,7 +356,9 @@ export function Queue({ go }: { go: GoFn }) {
                 onClick={
                   live
                     ? () =>
-                        setExpandedId((prev) => (prev === q.id ? null : q.id))
+                        setExpandedKey((prev) =>
+                          prev === rowKey ? null : rowKey,
+                        )
                     : undefined
                 }
                 onDragStart={(e) => {

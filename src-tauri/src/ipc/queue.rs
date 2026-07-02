@@ -280,7 +280,19 @@ pub struct QueueScheduledItem {
 // --------------------------------------------------------------------------
 
 pub fn apply_cancel_now(items: Vec<QueueNowItem>, id: &str) -> Vec<QueueNowItem> {
-    items.into_iter().filter(|i| i.id != id).collect()
+    let before = items.len();
+    let kept: Vec<QueueNowItem> = items.into_iter().filter(|i| i.id != id).collect();
+    // 진단(#6): 한 ID 제거가 2개 이상을 지웠다면 큐에 같은 ID가 여러 개 있었다는 뜻 —
+    // 정상은 1개다. 이게 "나눠서 게시한 계정 일부가 post 0으로 증발"하던 ID 충돌의 결정적 흔적.
+    let removed = before - kept.len();
+    if removed > 1 {
+        tracing::warn!(
+            id = %id,
+            removed,
+            "[QUEUE] 한 ID 제거가 여러 아이템을 지움 — 큐 ID 충돌 흔적(정상은 1개). 프론트 ID 생성 확인 필요"
+        );
+    }
+    kept
 }
 
 /// 종료(`Done`) 아이템을 모두 제거한다(#1, "완료 항목 지우기"). 진행 중/대기 아이템은 보존한다.
@@ -490,7 +502,24 @@ pub fn add_queue_now<R: tauri::Runtime>(
 ) -> Vec<QueueNowItem> {
     let title = item.title.clone();
     let after = now.mutate(|mut items| {
-        items.push(as_fresh_now_item(item));
+        let mut fresh = as_fresh_now_item(item);
+        // 방어 + 진단(#6): 같은 ID가 이미 큐에 있으면(프론트 ID 생성 버그 등) 충돌하지 않게 새 ID를
+        // 붙이고 경고를 남긴다. 같은 ID가 둘이면 mark_running/apply_cancel_now가 둘을 한꺼번에
+        // 다뤄 한쪽이 실행도 못 하고 증발하므로, 적재 단계에서 ID 고유성을 강제한다.
+        if items.iter().any(|i| i.id == fresh.id) {
+            let original = fresh.id.clone();
+            let mut suffix = 2u32;
+            while items.iter().any(|i| i.id == fresh.id) {
+                fresh.id = format!("{original}#{suffix}");
+                suffix += 1;
+            }
+            tracing::warn!(
+                original_id = %original,
+                new_id = %fresh.id,
+                "[QUEUE] 중복 큐 ID 감지 — 충돌 방지로 새 ID 부여(프론트에서 같은 ID로 적재됨)"
+            );
+        }
+        items.push(fresh);
         // 적재 직후 자동 우선순위로 재정렬해, 새 종토/로그인이 대기열(및 화면)에서 위로
         // 올라가게 한다(#229). 실행 중 아이템은 맨 앞 고정이라 안 건드린다.
         apply_priority_order(items)
