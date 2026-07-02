@@ -8,10 +8,8 @@ import {
   Container,
   Group,
   Pagination,
-  Popover,
   Select,
   Table,
-  TagsInput,
   Text,
   TextInput,
   Title,
@@ -236,60 +234,52 @@ function StatusBadge({
   );
 }
 
-function TagCell({
-  tags,
-  suggestions,
-  onChange,
+/**
+ * 로그인 쿠키 만료까지 남은 시간을 "3일 12:04:07 남음"처럼 포맷한다(순수 함수).
+ * `expiresAt`(unix seconds)이 null/undefined면 "—"(로그인 이력/실만료 없음),
+ * 이미 지났으면 "만료됨".
+ */
+export function formatCookieCountdown(
+  expiresAt: number | null | undefined,
+  nowSec: number,
+): string {
+  if (expiresAt == null) return "—";
+  const remain = Math.floor(expiresAt - nowSec);
+  if (remain <= 0) return "만료됨";
+  const days = Math.floor(remain / 86400);
+  const h = Math.floor((remain % 86400) / 3600);
+  const m = Math.floor((remain % 3600) / 60);
+  const s = remain % 60;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const hms = `${pad(h)}:${pad(m)}:${pad(s)}`;
+  return days > 0 ? `${days}일 ${hms} 남음` : `${hms} 남음`;
+}
+
+/** 계정관리 "쿠키만료" 열: 로그인 쿠키 만료까지 1초 간격으로 갱신되는 카운트다운. */
+function CookieExpiryCell({
+  expiresAt,
+  nowSec,
 }: {
-  tags: string[];
-  suggestions: string[];
-  onChange: (t: string[]) => void;
+  expiresAt: number | null | undefined;
+  nowSec: number;
 }) {
-  const [open, setOpen] = useState(false);
+  const text = formatCookieCountdown(expiresAt, nowSec);
+  const expired = text === "만료됨";
+  const none = text === "—";
+  const color = expired ? "red" : none ? "dimmed" : undefined;
   return (
-    <Popover
-      opened={open}
-      onChange={setOpen}
-      width={220}
-      position="bottom-start"
+    <Text
+      size="xs"
+      ff="monospace"
+      {...(color ? { c: color } : {})}
+      title={
+        expiresAt == null
+          ? "저장된 로그인 쿠키 없음(또는 세션 쿠키)"
+          : "로그인 쿠키 만료까지 남은 시간"
+      }
     >
-      <Popover.Target>
-        <Group
-          gap={4}
-          wrap="nowrap"
-          style={{ cursor: "pointer", overflow: "hidden" }}
-          onClick={() => setOpen(true)}
-        >
-          {tags.length === 0 ? (
-            <Text size="xs" c="dimmed">
-              + 태그
-            </Text>
-          ) : (
-            tags.map((t) => (
-              <Badge
-                key={t}
-                size="sm"
-                variant="outline"
-                color="gray"
-                style={{ flexShrink: 0 }}
-              >
-                {t}
-              </Badge>
-            ))
-          )}
-        </Group>
-      </Popover.Target>
-      <Popover.Dropdown p="xs">
-        <TagsInput
-          size="xs"
-          data={suggestions}
-          value={tags}
-          onChange={onChange}
-          placeholder="태그 추가"
-          maxDropdownHeight={130}
-        />
-      </Popover.Dropdown>
-    </Popover>
+      {text}
+    </Text>
   );
 }
 
@@ -847,7 +837,7 @@ export function Accounts({ go }: { go: GoFn }) {
               <Table.Th w={140}>플랫폼</Table.Th>
               <Table.Th w={160}>계정 ID</Table.Th>
               <Table.Th w={160}>계정 PW</Table.Th>
-              <Table.Th w={200}>태그</Table.Th>
+              <Table.Th w={200}>쿠키만료</Table.Th>
               <Table.Th w={96} ta="center">
                 상태
               </Table.Th>
@@ -906,10 +896,9 @@ export function Accounts({ go }: { go: GoFn }) {
                   />
                 </Table.Td>
                 <Table.Td>
-                  <TagCell
-                    tags={r.tags}
-                    suggestions={allTags}
-                    onChange={(t) => update(r.id, { tags: t })}
+                  <CookieExpiryCell
+                    expiresAt={expiries[r.loginId]}
+                    nowSec={nowSec}
                   />
                 </Table.Td>
                 <Table.Td ta="center">

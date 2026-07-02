@@ -734,6 +734,20 @@ fn get_account_cookies(account_id: String) -> Result<Option<serde_json::Value>, 
     auth::read_account_cookies(&account_id).map_err(|e| e.to_string())
 }
 
+/// 계정관리 "쿠키만료" 카운트다운용: 로그인 유지 쿠키의 만료 시각(unix seconds) 최댓값.
+/// 세션 쿠키만 있거나 쿠키가 없으면 `None`. `id`는 쿠키 파일 키(loginId).
+#[tauri::command]
+fn account_cookie_expiry(id: String) -> Result<Option<f64>, String> {
+    auth::account_cookie_expiry(&id).map_err(|e| e.to_string())
+}
+
+/// 우리 임시 프로필로 아직 실행 중인 Chrome 프로세스 개수(고아 헬퍼 포함). UI가 작업관리자
+/// 없이 "실행 중 크롬 N개"를 보여주는 데 쓴다. 조회 실패 시 0(진단용이라 무해).
+#[tauri::command]
+fn running_chrome_count() -> usize {
+    auth::running_chrome_count()
+}
+
 #[tauri::command]
 fn export_accounts_xlsx(
     store: tauri::State<'_, JsonStore<ipc::accounts::Account>>,
@@ -846,6 +860,8 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         rotate_ip,
         manual_add_account,
         get_account_cookies,
+        account_cookie_expiry,
+        running_chrome_count,
         run_naver_discussion,
         parse_template_csv,
         like_discussion_post,

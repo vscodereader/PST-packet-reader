@@ -159,6 +159,12 @@ export const ipc = {
     update: (account: Account) =>
       call<Account[]>("update_account", { account }),
     remove: (ids: string[]) => call<Account[]>("delete_accounts", { ids }),
+    /**
+     * 계정관리 "쿠키만료" 카운트다운용: 로그인 유지 쿠키의 만료 시각(unix seconds) 최댓값.
+     * 세션 쿠키만 있거나 로그인 이력이 없으면 null. `id`는 쿠키 파일 키(loginId).
+     */
+    cookieExpiry: (id: string) =>
+      call<number | null>("account_cookie_expiry", { id }),
   },
   posts: {
     list: () => call<LibraryPost[]>("list_posts"),

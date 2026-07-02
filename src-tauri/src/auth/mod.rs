@@ -13,10 +13,15 @@ mod util;
 
 use tauri::{AppHandle, Runtime};
 
-pub use accounts::{read_account_cookies, read_account_cookies_unchecked, save_accounts_file};
+pub use accounts::{
+    account_cookie_expiry, read_account_cookies, read_account_cookies_unchecked,
+    save_accounts_file,
+};
 pub use adb::probe_adb_connection;
 // 게시(forum)에서도 로그인과 같은 Chrome 런처를 재사용해, 디버그 포트 Chrome을 앱이 직접 띄운다.
 pub(crate) use chrome::launch as launch_debug_chrome;
+// 잔존(고아) Chrome 개수 조회 — UI가 "실행 중 크롬 N개"를 작업관리자 없이 보여주는 데 쓴다.
+pub(crate) use chrome::running_chrome_count;
 pub use error::OrchestratorError;
 pub use paths::{app_data_root, paths_for_root};
 pub use types::{Account, RuntimePaths};
