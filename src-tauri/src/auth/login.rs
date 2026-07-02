@@ -85,7 +85,60 @@ fn attempt(
 // 결과를 해석한다: 성공이면 쿠키를 저장하고, 그 외(인증필요/비번오류/차단/오류)는
 // 세분화된 [`LoginResolution`]으로 보존한다. `Err`은 진짜 인프라 오류(파일 쓰기/쿠키 검증
 // IO 실패)에만 쓴다 — 로그인 결과 자체는 `Ok(LoginResolution)`로 흐른다.
-fn finalize(
+/// 수동추가(사람이 직접 로그인)의 결과 — 사람이 친 평문 아이디/비밀번호. 쿠키는 이미
+/// 자동로그인과 동일하게 저장돼 있고, 호출부(IPC)가 이 값으로 계정 행을 추가한다.
+pub(crate) struct ManualAddResult {
+    pub login_id: String,
+    pub password: String,
+}
+
+/// 수동추가: **headed** Chrome을 띄워 네이버 로그인 폼으로 보내고, 자동 타이핑/IP 회전 없이
+/// 사용자가 직접 로그인할 때까지 기다린다. 성공하면 자동로그인과 **동일한 저장 경로**([`finalize`]
+/// + `LoginOutcome::Ok`)로 쿠키를 저장해 파일이 자동로그인과 구조적으로 같게 만들고, 사람이 친
+/// 아이디/비밀번호를 돌려준다. 취소/타임아웃/창 닫힘이면 `Ok(None)`(아무것도 추가하지 않음).
+pub(crate) fn manual_add(
+    paths: &RuntimePaths,
+) -> Result<Option<ManualAddResult>, OrchestratorError> {
+    // 사람이 창을 보고 입력해야 하므로 headed 고정. IP 회전(ADB)은 하지 않는다.
+    let handle = chrome::launch(false)?;
+    let mut client = CdpClient::connect_to_existing_chrome("127.0.0.1", handle.port)
+        .map_err(|error| OrchestratorError::CommandFailed(error.message().to_owned()))?;
+    // 로그인과 동일하게 Runtime.enable 없이 Page 도메인만 켠다(CDP 탐지 누출 방지).
+    client
+        .enable_page_only()
+        .map_err(|error| OrchestratorError::CommandFailed(error.message().to_owned()))?;
+
+    let captured = login_flow::manual_add_wait(&mut client)
+        .map_err(|error| OrchestratorError::CommandFailed(error.message().to_owned()))?;
+
+    drop(client);
+    drop(handle); // ChromeHandle Drop이 프로세스/임시 프로필을 정리한다.
+
+    let Some(creds) = captured else {
+        return Ok(None); // 취소/타임아웃/창 닫힘 — 아무것도 추가하지 않는다.
+    };
+    // 쿠키 파일명은 login_id에, 계정 행은 평문 pw에 의존하므로 둘 다 캡처됐어야 한다.
+    if !login_flow::captured_credentials_valid(&creds.id, &creds.pw) {
+        return Err(OrchestratorError::CommandFailed(
+            "로그인은 됐지만 입력한 아이디/비밀번호를 읽지 못해 계정을 추가하지 못했습니다.".to_owned(),
+        ));
+    }
+
+    // 자동로그인과 동일한 저장 경로로 쿠키를 저장한다(finalize 재사용 → 파일 구조 동일).
+    let account = Account {
+        id: creds.id.clone(),
+        password: creds.pw.clone(),
+        label: creds.id.clone(),
+    };
+    finalize(paths, &account, LoginOutcome::Ok { cookies: creds.cookies }, None)?;
+
+    Ok(Some(ManualAddResult {
+        login_id: creds.id,
+        password: creds.pw,
+    }))
+}
+
+pub(crate) fn finalize(
     paths: &RuntimePaths,
     account: &Account,
     outcome: LoginOutcome,

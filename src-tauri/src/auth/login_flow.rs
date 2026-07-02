@@ -1462,6 +1462,92 @@ fn manual_login_wait(client: &mut CdpClient) -> Result<LoginOutcome, AutomationE
     }
 }
 
+/// 수동추가로 캡처한 자격증명 + 저장할 쿠키. `manual_add_wait`가 성공 시 돌려준다.
+pub(crate) struct ManualCredentials {
+    pub id: String,
+    pub pw: String,
+    pub cookies: Vec<Value>,
+}
+
+/// 수동추가에서 캡처한 자격증명이 계정 행으로 저장하기에 충분한지(둘 다 비어있지 않은지). 순수 함수.
+/// 쿠키 파일명이 login_id에 의존하므로 id가 비면 저장할 수 없고, 계정 행엔 사람이 친 평문 pw가
+/// 필요하므로 pw도 비면 안 된다.
+pub(crate) fn captured_credentials_valid(id: &str, pw: &str) -> bool {
+    !id.trim().is_empty() && !pw.is_empty()
+}
+
+// 열린 로그인 폼에서 사람이 지금까지 입력한 아이디/비밀번호 값을 읽는다. 로그인 성공 시
+// 네비게이션으로 폼이 사라지며 값이 비워지므로, 폴링마다 마지막 비어있지 않은 값을 계속 붙잡는다.
+const READ_TYPED_ID_JS: &str =
+    "(()=>{const e=document.querySelector('#id');return e&&e.value?e.value:'';})()";
+const READ_TYPED_PW_JS: &str =
+    "(()=>{const e=document.querySelector('#pw');return e&&e.value?e.value:'';})()";
+
+/// 수동추가(사람이 직접 로그인). 네이버 로그인 폼으로 이동한 뒤 **자동 타이핑/IP 회전 없이**
+/// 사용자가 직접 ID/PW를 입력해 로그인할 때까지 기다린다. 성공 판정은 자동로그인과 동일하게
+/// 세션 쿠키(`has_session_cookies`)로 하고, 그때까지 캡처해 둔 마지막 ID/PW와 수거한 쿠키를
+/// 돌려준다. 사용자가 창을 닫거나(CDP 연결 끊김) 상한 시간(180초)을 넘기면 `Ok(None)`(취소).
+/// navigate 실패 등 진짜 인프라 오류만 `Err`로 흘린다.
+pub(crate) fn manual_add_wait(
+    client: &mut CdpClient,
+) -> Result<Option<ManualCredentials>, AutomationError> {
+    // navigate 전에 스텔스 스크립트를 등록해 자동화 지문을 자동로그인과 동일하게 낮춘다(best-effort).
+    let _ = client.call(
+        "Page.addScriptToEvaluateOnNewDocument",
+        json!({ "source": STEALTH_INIT_JS }),
+    );
+    client.navigate(LOGIN_URL)?;
+
+    tracing::info!(
+        "[LOGIN] 🖐 수동추가 — 열린 Chrome 창에서 직접 아이디/비밀번호를 입력해 로그인하세요(최대 180초). 로그인되면 자동으로 계정이 추가됩니다."
+    );
+    let deadline = Instant::now() + Duration::from_secs(180);
+    // CDP 호출이 연속 실패하면 창이 닫힌 것으로 보고 취소한다(무한 wedge 방지). 500ms × 20 ≈ 10초.
+    const MAX_CONN_FAIL: u32 = 20;
+    let mut conn_fail = 0u32;
+    let mut last_id = String::new();
+    let mut last_pw = String::new();
+    loop {
+        // 사람이 지금까지 입력한 값을 계속 붙잡는다(네비게이션으로 비워지기 전 마지막 값 보존).
+        if let Ok(v) = client.evaluate_string(READ_TYPED_ID_JS) {
+            if !v.is_empty() {
+                last_id = v;
+            }
+        }
+        if let Ok(v) = client.evaluate_string(READ_TYPED_PW_JS) {
+            if !v.is_empty() {
+                last_pw = v;
+            }
+        }
+        // 성공 판정은 자동로그인과 동일하게 세션 쿠키로 한다. getAllCookies가 실패하면 창이
+        // 닫혔을 수 있어, 연속 실패가 상한을 넘으면 취소로 종료한다.
+        match collect_naver_cookies(client) {
+            Ok(cookies) => {
+                conn_fail = 0;
+                if has_session_cookies(&cookies) {
+                    return Ok(Some(ManualCredentials {
+                        id: last_id,
+                        pw: last_pw,
+                        cookies,
+                    }));
+                }
+            }
+            Err(_) => {
+                conn_fail += 1;
+                if conn_fail >= MAX_CONN_FAIL {
+                    tracing::info!("[LOGIN] 🖐 수동추가 — Chrome 연결이 끊겨 취소(창이 닫혔거나 크래시)");
+                    return Ok(None);
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            tracing::info!("[LOGIN] 🖐 수동추가 — 180초 내 로그인되지 않아 취소");
+            return Ok(None);
+        }
+        sleep(Duration::from_millis(500));
+    }
+}
+
 fn visible_exists(client: &mut CdpClient, selector: &str) -> bool {
     let expr = format!(
         "(()=>{{const e=document.querySelector('{selector}');\
@@ -1886,6 +1972,15 @@ mod tests {
         assert!(!credentials_present("", "pw"));
         assert!(!credentials_present("   ", "pw"));
         assert!(!credentials_present("user", ""));
+    }
+
+    #[test]
+    fn captured_credentials_valid_requires_both_nonempty() {
+        // 수동추가는 login_id(쿠키 파일명)와 평문 pw(계정 행)가 모두 필요하다.
+        assert!(captured_credentials_valid("user", "pw"));
+        assert!(!captured_credentials_valid("", "pw"));
+        assert!(!captured_credentials_valid("   ", "pw"));
+        assert!(!captured_credentials_valid("user", ""));
     }
 
     // --- decide_loop_step(signal, wait_for_human, manual_captcha) ---
