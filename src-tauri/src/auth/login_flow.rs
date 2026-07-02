@@ -1162,7 +1162,7 @@ const READ_KEY_STATS_JS: &str = "(()=>{const b={vis:document.visibilityState,has
 fn parse_throttle_ms(raw: Option<&str>) -> u64 {
     raw.and_then(|s| s.trim().parse::<u64>().ok())
         .map(|ms| ms.min(500))
-        .unwrap_or(0)
+        .unwrap_or(150)
 }
 
 fn login_throttle_ms() -> u64 {
@@ -1174,6 +1174,22 @@ fn throttle_pause() {
     let t = login_throttle_ms();
     if t > 0 {
         sleep(Duration::from_millis(t));
+    }
+}
+
+/// 타이핑 직전에 페이지를 강제로 "전경·포커스" 상태로 만든다(best-effort). 원격 데스크톱 등에서
+/// 창이 가려지면 `visibilityState=hidden` 이 되어 합성 키 이벤트(`Input.dispatchKeyEvent`)가 렌더러로
+/// 전달되지 않는다(마우스만 먹혀 포커스는 잡히나 타이핑 0자 — 2026-07-02 실측 확정). 탭을 앞으로
+/// 가져오고(`Page.bringToFront`) 포커스 에뮬레이션(`Emulation.setFocusEmulationEnabled`)을 켜 창이
+/// 전경이 아니어도 키가 전달되게 한다. 실패해도 타이핑은 그대로 진행한다(계기판 로그로 남는다).
+fn force_page_foreground(client: &mut CdpClient) {
+    if let Err(error) = client.call("Page.bringToFront", json!({})) {
+        tracing::debug!(error = %error, "[LOGIN] Page.bringToFront 실패(무시하고 진행)");
+    }
+    if let Err(error) =
+        client.call("Emulation.setFocusEmulationEnabled", json!({ "enabled": true }))
+    {
+        tracing::debug!(error = %error, "[LOGIN] setFocusEmulationEnabled 실패(무시하고 진행)");
     }
 }
 
@@ -1194,6 +1210,10 @@ fn type_into(
     // 타이핑 전에 키 이벤트 계기판 recorder 를 설치한다(도달 카운트·IME·defaultPrevented 관측용).
     // best-effort: CDP 가 잠깐 실패해도 타이핑 자체는 막지 않는다(진단 보강이지 입력 경로가 아니다).
     let _ = client.evaluate(INSTALL_KEY_RECORDER_JS);
+
+    // 창이 가려져 visibilityState=hidden 이면 합성 키가 렌더러로 전달되지 않으므로(실측 확정),
+    // 타이핑 직전에 탭을 전경으로 가져오고 포커스 에뮬레이션을 켠다. best-effort.
+    force_page_foreground(client);
 
     // 입력 스로틀(기본 0=꺼짐). 켜져 있으면 첫 시도부터 글자당 지연을 줘 사람처럼 천천히 친다.
     let throttle = login_throttle_ms();
