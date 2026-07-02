@@ -118,13 +118,20 @@ fn is_connection_lost_message(message: &str) -> bool {
     MARKERS.iter().any(|marker| message.contains(marker))
 }
 
-/// CDP 와이어 트레이스 on/off. 환경변수 `PSTMACRO_CDP_TRACE` 가 비어있지 않고 "0"이 아니면 켜진다.
-/// 켜지면 크롬과 주고받는 **모든** CDP 명령·응답·이벤트를 원문 그대로 로그로 남긴다(무슨 API 를
-/// 어떤 파라미터로 호출했고 응답이 뭐였는지 통째로). 기본 꺼짐 — 평상시엔 로그가 폭증하지 않는다.
+/// CDP 와이어 트레이스 on/off. **기본 ON** — 다른 컴퓨터에서도 빌드만 하면 크롬과 주고받는 모든
+/// CDP 명령·응답·이벤트가 원문 그대로 로그에 남는다(무슨 API 를 어떤 파라미터로 호출했고 응답이
+/// 뭐였는지 통째로). 로그가 커지므로 끄려면 환경변수 `PSTMACRO_CDP_TRACE=0`(또는 `false`/`off`).
+/// 순수 로깅이라 네이버로 보내는 내용·페이지를 바꾸지 않아 봇탐지/캡차엔 영향이 없다(Network 등
+/// 새 도메인을 켜지 않음).
 fn cdp_trace_enabled() -> bool {
-    std::env::var("PSTMACRO_CDP_TRACE")
-        .map(|v| !v.is_empty() && v != "0")
-        .unwrap_or(false)
+    match std::env::var("PSTMACRO_CDP_TRACE") {
+        Ok(v) => {
+            let v = v.trim();
+            !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off"))
+        }
+        // 미설정 = 기본 ON(C안). 빌드만 하면 원문 트레이스가 나온다.
+        Err(_) => true,
+    }
 }
 
 /// 트레이스에 남길 파라미터를 문자열로 만든다. `Input.dispatchKeyEvent` 의 실제 글자
