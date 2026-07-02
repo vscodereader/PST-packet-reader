@@ -118,6 +118,42 @@ fn is_connection_lost_message(message: &str) -> bool {
     MARKERS.iter().any(|marker| message.contains(marker))
 }
 
+/// CDP 와이어 트레이스 on/off. **기본 ON** — 다른 컴퓨터에서도 빌드만 하면 크롬과 주고받는 모든
+/// CDP 명령·응답·이벤트가 원문 그대로 로그에 남는다(무슨 API 를 어떤 파라미터로 호출했고 응답이
+/// 뭐였는지 통째로). 로그가 커지므로 끄려면 환경변수 `PSTMACRO_CDP_TRACE=0`(또는 `false`/`off`).
+/// 순수 로깅이라 네이버로 보내는 내용·페이지를 바꾸지 않아 봇탐지/캡차엔 영향이 없다(Network 등
+/// 새 도메인을 켜지 않음).
+fn cdp_trace_enabled() -> bool {
+    match std::env::var("PSTMACRO_CDP_TRACE") {
+        Ok(v) => {
+            let v = v.trim();
+            !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off"))
+        }
+        // 미설정 = 기본 ON(C안). 빌드만 하면 원문 트레이스가 나온다.
+        Err(_) => true,
+    }
+}
+
+/// 트레이스에 남길 파라미터를 문자열로 만든다. `Input.dispatchKeyEvent` 의 실제 글자
+/// (`text`/`key`/`unmodifiedText`)만 `•` 로 가린다 — 아이디/비밀번호 원문이 로그 파일에 남아
+/// 공유 시 유출되는 것을 막기 위함(진단에 필요한 code·keyCode·modifiers·응답은 그대로 남는다).
+fn redact_cdp_params(method: &str, params: &Value) -> String {
+    if method != "Input.dispatchKeyEvent" {
+        return params.to_string();
+    }
+    let mut p = params.clone();
+    if let Some(obj) = p.as_object_mut() {
+        for field in ["text", "key", "unmodifiedText"] {
+            if let Some(v) = obj.get_mut(field) {
+                if v.is_string() {
+                    *v = Value::String("•".to_owned());
+                }
+            }
+        }
+    }
+    p.to_string()
+}
+
 // 네이버 로그인 확인부터 토론방 선택, 글쓰기/댓글 등록까지 전체 흐름을 실행하는 함수입니다.
 // 글/글+댓글 매크로가 공유하는 진입 셋업 결과(Chrome 연결·패킷 클라이언트·로그인·선택 종목).
 struct ForumDiscussionSession {
@@ -652,6 +688,11 @@ impl CdpClient {
     fn call_once(&mut self, method: &str, params: Value) -> AutomationResult<Value> {
         self.next_id += 1;
         let id = self.next_id;
+        // CDP 와이어 트레이스(켜졌을 때만): 보내는 명령을 method+파라미터 원문으로 남긴다.
+        // payload 로 params 가 이동(move)하기 전에 참조해 남긴다.
+        if cdp_trace_enabled() {
+            tracing::info!(target: "cdp", "→ #{id} {method} {}", redact_cdp_params(method, &params));
+        }
         let payload = json!({
             "id": id,
             "method": method,
@@ -676,6 +717,10 @@ impl CdpClient {
                 Message::Frame(_) => continue,
             };
 
+            // CDP 와이어 트레이스(켜졌을 때만): 들어오는 응답·이벤트를 원문 그대로 남긴다.
+            if cdp_trace_enabled() {
+                tracing::info!(target: "cdp", "← {text}");
+            }
             let value: Value = serde_json::from_str(&text)?;
 
             if value.get("id").and_then(Value::as_u64) != Some(id) {

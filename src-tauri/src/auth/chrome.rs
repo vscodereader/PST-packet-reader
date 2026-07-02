@@ -92,6 +92,15 @@ pub(crate) fn launch(headless: bool) -> Result<ChromeHandle, OrchestratorError> 
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-quic",
+        // 창이 가려지거나(원격 데스크톱·다른 창에 가림) 백그라운드가 되면 Chrome이 렌더러를
+        // occluded/backgrounded 로 표시해 `document.visibilityState=hidden` 이 되고, 그러면 합성 키
+        // 이벤트(`Input.dispatchKeyEvent`)를 렌더러로 전달하지 않고 버린다(마우스만 먹혀 포커스는
+        // 잡히나 타이핑 0자). 실측 로그(2026-07-02, 사수 PC/Chrome 원격 데스크톱)에서 vis=hidden·
+        // keydown=0 으로 확정됨. 아래 세 플래그로 가려진 창의 렌더러 백그라운딩/타이머 스로틀을 꺼,
+        // 창이 전경이 아니어도 키 입력이 정상 전달되게 한다.
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
         // 봇탐지(ncaptcha) 완화: CDP 제어 시 Chrome이 navigator.webdriver=true 와
         // "Chrome이 자동화 소프트웨어의 제어를 받고 있습니다" 신호를 노출하는 것을 끈다.
         // 실제 키 이벤트(login_flow)만으로는 점수형 캡차를 못 피하므로 자동화 지문도 함께 낮춘다.

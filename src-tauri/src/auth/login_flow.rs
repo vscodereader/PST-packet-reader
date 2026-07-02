@@ -352,6 +352,7 @@ fn run_inner(
         ));
     }
     sleep(FIELD_PAUSE);
+    throttle_pause();
     if let Some(d) = type_into(client, "#pw", pw)? {
         *diag = Some(format!("{d}\n\n{}", crate::util::backtrace_string()));
         return Ok(LoginOutcome::Error(
@@ -366,6 +367,7 @@ fn run_inner(
 
     // 비밀번호 입력 후 사람처럼 잠깐 멈췄다가 로그인 버튼을 누른다(2초→0.8초, #14).
     sleep(FIELD_PAUSE);
+    throttle_pause();
     // 로그인 버튼을 사람처럼 좌표 마우스 클릭(JS .click() 대신 진짜 mouse 이벤트). 좌표를 못
     // 구하면 .click()으로 폴백한다.
     click_login_button(client)?;
@@ -657,8 +659,11 @@ const GATE_NET_SNAPSHOT_JS: &str = "(()=>{try{\
     const hits=[];for(const p of pats){const m=res.find(e=>p[1].test(e.name));\
         if(m)hits.push(p[0]+'@'+Math.round(m.responseEnd)+'ms');}\
     const frames=document.querySelectorAll('iframe').length;\
+    const c=navigator.connection||{};\
+    const conn={effectiveType:c.effectiveType,downlinkMbps:c.downlink,\
+        downlinkMaxMbps:c.downlinkMax,rttMs:c.rtt,saveData:c.saveData,type:c.type};\
     return JSON.stringify({rs:document.readyState,resCount:res.length,\
-        sinceLastNetMs:since,antibot:hits,iframes:frames});\
+        sinceLastNetMs:since,antibot:hits,iframes:frames,conn:conn});\
 }catch(e){return '{\"err\":\"'+String(e)+'\"}';}})()";
 
 // [진단·임시] 자동화/CDP 지문 스냅샷 — naver 봇탐지(wtm)가 읽는 클라이언트 신호가 정상 크롬과
@@ -1121,18 +1126,75 @@ fn format_fill_diag(d: &FillDiag) -> String {
     )
 }
 
-// keydown 의 기본동작 차단(preventDefault) 관측용 1회 설치 recorder(가설 A 판별). document 의
-// 버블 단계에서 마지막 keydown 의 `defaultPrevented` 를 `window.__pmDp` 에 기록한다 — 버블 단계라
-// 대상(#id) 자체 핸들러(네이버 후킹)가 호출한 preventDefault 까지 반영된다. 이미 설치돼 있으면
-// 리스너를 다시 달지 않고 플래그만 리셋한다(같은 로그인에서 #id·#pw 두 번 호출되므로). navigate
-// 로 새 문서가 뜨면 window 상태가 초기화되니 로그인 간 누수도 없다. best-effort 로 설치한다.
-const INSTALL_DP_RECORDER_JS: &str = "(()=>{if(!window.__pmDpInstalled){\
-    window.__pmDpInstalled=true;\
-    document.addEventListener('keydown',function(e){window.__pmDp=e.defaultPrevented;},false);}\
-    window.__pmDp=null;return true;})()";
-// recorder 가 기록한 값을 읽는다: 1=차단(preventDefault 호출됨), 0=정상(차단 안 됨),
+// 키 이벤트 계기판 recorder(1회 설치). document 버블 단계에서 keydown/keypress/beforeinput/input/
+// compositionstart 를 각각 카운트하고, 마지막 keydown 의 `defaultPrevented`·key·keyCode·isComposing·
+// target.id 를 기록한다(호환 위해 `window.__pmDp` 도 그대로 미러링). 이미 설치돼 있으면 리스너를 다시
+// 달지 않고 카운터만 리셋한다(같은 로그인에서 #id·#pw 두 번 호출되므로). navigate 로 새 문서가 뜨면
+// window 상태가 초기화되니 로그인 간 누수도 없다. best-effort 로 설치한다.
+//
+// 이 계기판으로 "다른 PC/원격데스크톱에서 마우스는 되는데 키만 통째로 무효"인 원인을 가른다:
+//   keydown=0        → 키가 렌더러에 도달조차 못 함(창 백그라운드/원격데스크톱 키 드롭 의심)
+//   keyCode==229/composing → OS 한글 IME 조합에 먹힘
+//   input>0·value=0  → 폼 JS 가 value 를 되돌림
+const INSTALL_KEY_RECORDER_JS: &str = "(()=>{if(!window.__pmKeyRecInstalled){\
+    window.__pmKeyRecInstalled=true;\
+    window.__pmKeyRec={dp:null,kd:0,kp:0,bi:0,inp:0,comp:0,lastKey:'',lastCode:0,composing:false,tgt:''};\
+    const R=window.__pmKeyRec;\
+    document.addEventListener('keydown',function(e){R.kd++;R.dp=e.defaultPrevented;window.__pmDp=e.defaultPrevented;R.lastKey=e.key;R.lastCode=e.keyCode;R.composing=e.isComposing;R.tgt=(e.target&&e.target.id)||'';},false);\
+    document.addEventListener('keypress',function(){R.kp++;},false);\
+    document.addEventListener('beforeinput',function(){R.bi++;},false);\
+    document.addEventListener('input',function(){R.inp++;},false);\
+    document.addEventListener('compositionstart',function(){R.comp++;},false);}\
+    const R=window.__pmKeyRec;R.dp=null;window.__pmDp=null;R.kd=0;R.kp=0;R.bi=0;R.inp=0;R.comp=0;\
+    R.lastKey='';R.lastCode=0;R.composing=false;R.tgt='';return true;})()";
+// recorder 가 기록한 keydown `defaultPrevented` 를 읽는다: 1=차단(preventDefault 호출됨), 0=정상,
 // -1=keydown 이 document 까지 도달 안 함(전파 중단/미관측).
 const READ_DP_JS: &str = "(()=>{const v=window.__pmDp;return v==null?-1:(v?1:0);})()";
+// 계기판 전체를 JSON 문자열로 읽는다(도달 카운트·IME·visibility·창포커스). 자동입력 0자 실패 시
+// 진단 로그로 남겨 원인(렌더러 키 드롭 / IME / value 되돌림)을 가른다.
+const READ_KEY_STATS_JS: &str = "(()=>{const b={vis:document.visibilityState,hasFocus:document.hasFocus()};\
+    const R=window.__pmKeyRec;if(!R)return JSON.stringify(Object.assign({installed:false},b));\
+    return JSON.stringify(Object.assign({installed:true,keydown:R.kd,keypress:R.kp,beforeinput:R.bi,\
+    input:R.inp,compositionstart:R.comp,defaultPrevented:R.dp,lastKey:R.lastKey,lastKeyCode:R.lastCode,\
+    isComposing:R.composing,lastTarget:R.tgt},b));})()";
+
+/// 로그인 입력 스로틀(ms). 기본 0(동작 변화 없음). 환경변수 `PSTMACRO_LOGIN_THROTTLE_MS` 로 켠다 —
+/// 다른 PC/원격데스크톱에서 봇탐지 점수가 높아 캡차가 반복될 때, 글자당 타이핑 지연과 필드 사이
+/// 멈춤을 이 값만큼 늘려 "천천히"(사수 지시: throttle) 입력해 행동 기반 봇탐지 점수를 낮춘다.
+/// 상한 500ms — 과도한 지연으로 클릭 후 전체 타임아웃을 넘기지 않게 막는다.
+fn parse_throttle_ms(raw: Option<&str>) -> u64 {
+    raw.and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|ms| ms.min(500))
+        .unwrap_or(0)
+}
+
+fn login_throttle_ms() -> u64 {
+    parse_throttle_ms(std::env::var("PSTMACRO_LOGIN_THROTTLE_MS").ok().as_deref())
+}
+
+/// 스로틀이 켜져 있으면 그만큼 추가로 멈춘다(필드 사이 사람 같은 텀 강화). 꺼져 있으면 no-op.
+fn throttle_pause() {
+    let t = login_throttle_ms();
+    if t > 0 {
+        sleep(Duration::from_millis(t));
+    }
+}
+
+/// 타이핑 직전에 페이지를 강제로 "전경·포커스" 상태로 만든다(best-effort). 원격 데스크톱 등에서
+/// 창이 가려지면 `visibilityState=hidden` 이 되어 합성 키 이벤트(`Input.dispatchKeyEvent`)가 렌더러로
+/// 전달되지 않는다(마우스만 먹혀 포커스는 잡히나 타이핑 0자 — 2026-07-02 실측 확정). 탭을 앞으로
+/// 가져오고(`Page.bringToFront`) 포커스 에뮬레이션(`Emulation.setFocusEmulationEnabled`)을 켜 창이
+/// 전경이 아니어도 키가 전달되게 한다. 실패해도 타이핑은 그대로 진행한다(계기판 로그로 남는다).
+fn force_page_foreground(client: &mut CdpClient) {
+    if let Err(error) = client.call("Page.bringToFront", json!({})) {
+        tracing::debug!(error = %error, "[LOGIN] Page.bringToFront 실패(무시하고 진행)");
+    }
+    if let Err(error) =
+        client.call("Emulation.setFocusEmulationEnabled", json!({ "enabled": true }))
+    {
+        tracing::debug!(error = %error, "[LOGIN] setFocusEmulationEnabled 실패(무시하고 진행)");
+    }
+}
 
 // 선택자를 마우스로 클릭해 포커스한 뒤 한 글자씩 실제 키 이벤트로 입력한다(keydown 후킹 암호화
 // 대응). 글자 사이 인위적 지연 없이 빠르게 연타한다(#267 후속). 입력 후 필드 값 길이를 확인해, 비어 있으면
@@ -1148,17 +1210,49 @@ fn type_into(
     let mut focused_via_mouse = false;
     let mut last_got = 0usize;
 
-    // 타이핑 전에 keydown 기본동작 차단 관측 recorder 를 설치한다(가설 A 판별용). best-effort:
-    // CDP 가 잠깐 실패해도 타이핑 자체는 막지 않는다(진단 보강이지 입력 경로가 아니다).
-    let _ = client.evaluate(INSTALL_DP_RECORDER_JS);
+    // 타이핑 전에 키 이벤트 계기판 recorder 를 설치한다(도달 카운트·IME·defaultPrevented 관측용).
+    // best-effort: CDP 가 잠깐 실패해도 타이핑 자체는 막지 않는다(진단 보강이지 입력 경로가 아니다).
+    let _ = client.evaluate(INSTALL_KEY_RECORDER_JS);
+
+    // 창이 가려져 visibilityState=hidden 이면 합성 키가 렌더러로 전달되지 않으므로(실측 확정),
+    // 타이핑 직전에 탭을 전경으로 가져오고 포커스 에뮬레이션을 켠다. best-effort.
+    force_page_foreground(client);
+
+    // 입력 스로틀(기본 0=꺼짐). 켜져 있으면 첫 시도부터 글자당 지연을 줘 사람처럼 천천히 친다.
+    let throttle = login_throttle_ms();
+    if throttle > 0 {
+        tracing::info!(
+            selector,
+            throttle_ms = throttle,
+            "[LOGIN] 입력 스로틀 적용 — 글자당·필드사이 지연 증가(봇탐지 점수 완화 시도)"
+        );
+    }
+
+    // recorder 자가진단: JS 로 합성 keydown 을 1발 쏴 계기판 카운터가 오르는지 본다. 오르면 recorder 는
+    // 정상 — 이후 실 타이핑에서 keydown 카운트가 0이면 "키가 렌더러에 도달조차 못 함"이 확정된다(recorder
+    // 버그가 아니라 원격데스크톱/창 가림 등 키 드롭). 1=정상, 0=리스너 미작동, -1=recorder 미설치.
+    // 카운터는 곧바로 복원해 실측을 오염시키지 않는다.
+    let recorder_selftest = client
+        .evaluate(
+            "(()=>{const R=window.__pmKeyRec;if(!R)return -1;const b=R.kd;\
+             document.dispatchEvent(new KeyboardEvent('keydown',{bubbles:true}));\
+             const ok=R.kd>b;R.kd=b;return ok?1:0;})()",
+        )
+        .ok()
+        .and_then(|v| v.as_i64())
+        .unwrap_or(-1);
+    // CDP 로 성공적으로 디스패치한 keyDown 이벤트 수(명령 자체가 먹혔는지). 이 수와 계기판 keydown
+    // 카운트가 어긋나면 "CDP 는 명령을 받았는데 렌더러가 이벤트를 버렸다"를 가리킨다.
+    let mut dispatched = 0usize;
 
     for attempt in 0..3 {
         // 첫 시도는 글자 사이 지연 없이 빠르게 친다(#267: 타이핑 리듬 지문 제거). 재시도부터는
         // 글자마다 작은 지연을 줘, 0지연 연타로 마지막 글자들이 입력칸에 덜 반영되던 경우를 복구한다.
+        // 스로틀이 켜져 있으면 첫 시도부터 그 값(재시도는 최소 35ms 보장)으로 지연을 준다.
         let per_key_delay = if attempt == 0 {
-            None
+            (throttle > 0).then(|| Duration::from_millis(throttle))
         } else {
-            Some(Duration::from_millis(35))
+            Some(Duration::from_millis(throttle.max(35)))
         };
         // 기존 값 비우기(재시도 시 중복 입력 방지). 셀렉터는 고정 안전 문자열(#id/#pw).
         let clear = format!(
@@ -1209,6 +1303,7 @@ fn type_into(
                     "modifiers": modifiers,
                 }),
             )?;
+            dispatched += 1;
             // 첫 시도는 지연 0(빠른 입력, #267). 재시도부터는 글자마다 작은 지연을 줘, 빠른
             // 연타로 마지막 글자들이 입력칸에 덜 반영되던 경우를 복구한다.
             if let Some(d) = per_key_delay {
@@ -1224,6 +1319,13 @@ fn type_into(
             .as_u64()
             .unwrap_or(0) as usize;
         last_got = got;
+        tracing::debug!(
+            selector,
+            attempt = attempt + 1,
+            got,
+            expected,
+            "[LOGIN] 타이핑 시도 후 입력칸 글자수(0 지속 시 키가 value 에 안 박힘)"
+        );
         if got >= expected {
             return Ok(None);
         }
@@ -1262,6 +1364,28 @@ fn type_into(
         Some(0) => Some(false),
         _ => None,
     };
+    // [키 이벤트 계기판] 원인을 한 번에 가르는 진단을 로그로 남긴다:
+    //   · key_stats: keydown/keypress/beforeinput/input/compositionstart 도달 카운트 + 마지막 키
+    //     (key/keyCode/isComposing/target) + visibilityState + 창포커스(document.hasFocus)
+    //   · recorder_selftest: 1이면 recorder 정상 → keydown 카운트 0이면 "렌더러 키 드롭" 확정
+    //   · cdp_dispatched: CDP 가 받은 keyDown 수(계기판 keydown 과 어긋나면 렌더러가 버린 것)
+    //   · browser: 크롬 버전(성공 PC vs 실패 PC 비교용)
+    // 판별표: keydown=0 → 렌더러 도달 실패(원격데스크톱/창 가림) · keyCode=229/isComposing=true → IME
+    //   · input>0 인데 value=0 → 폼 JS 가 value 되돌림 · selftest=1 & keydown=0 → 렌더러 드롭 확정.
+    let key_stats = client.evaluate_string(READ_KEY_STATS_JS).unwrap_or_default();
+    let browser = client
+        .call("Browser.getVersion", json!({}))
+        .ok()
+        .and_then(|v| v.get("product").and_then(Value::as_str).map(ToOwned::to_owned))
+        .unwrap_or_default();
+    tracing::warn!(
+        selector,
+        recorder_selftest,
+        cdp_dispatched = dispatched,
+        browser = %browser,
+        key_stats = %key_stats,
+        "[LOGIN][키진단] 자동입력 0자 원인 판별용 계기판(keydown=0→렌더러 드롭 / keyCode=229·isComposing→IME / input>0·value=0→폼이 되돌림)"
+    );
     // [로그인 실패 시 네이버 페이지·필드 DOM 원문 그대로 덤프] (사용자·사수 지시 2026-07-01: 우리
     // 요약이 아니라 네이버가 실제로 준 것을 그대로). 특히 document.hasFocus()=false 면 "창(OS)
     // 포커스 없음"이라 합성 키 입력이 value에 조합되지 않는 원인이다(렌더러 activeElement는 #id로
@@ -1484,6 +1608,24 @@ mod tests {
             antibot_ready: antibot,
             default_prevented: None,
         }
+    }
+
+    #[test]
+    fn throttle_off_when_unset_or_empty_or_zero() {
+        // 기본(미설정)·빈문자열·"0"·비숫자는 전부 0(=스로틀 꺼짐, 동작 변화 없음).
+        assert_eq!(parse_throttle_ms(None), 0);
+        assert_eq!(parse_throttle_ms(Some("")), 0);
+        assert_eq!(parse_throttle_ms(Some("0")), 0);
+        assert_eq!(parse_throttle_ms(Some("abc")), 0);
+    }
+
+    #[test]
+    fn throttle_parses_and_caps_at_500() {
+        // 유효 값은 그대로, 공백은 무시, 상한 500ms 로 클램프한다.
+        assert_eq!(parse_throttle_ms(Some("120")), 120);
+        assert_eq!(parse_throttle_ms(Some("  80 ")), 80);
+        assert_eq!(parse_throttle_ms(Some("500")), 500);
+        assert_eq!(parse_throttle_ms(Some("9999")), 500);
     }
 
     #[test]
