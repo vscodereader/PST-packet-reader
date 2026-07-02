@@ -297,7 +297,21 @@ export function Accounts({ go }: { go: GoFn }) {
   const [rows, setRows] = useState<Account[]>([]);
 
   useEffect(() => {
-    void ipc.accounts.list().then(setRows);
+    let alive = true;
+    const load = () => {
+      void ipc.accounts.list().then((list) => {
+        if (alive) setRows(list);
+      });
+    };
+    load();
+    // 원격제어(에이전트)가 계정을 등록하거나 로그인 실패로 자동 삭제하면 그 변화가 이 화면에
+    // 바로 보이도록 주기적으로 다시 읽는다. (기존엔 마운트 시 1회만 읽어, 등록·삭제가 다른 페이지를
+    // 갔다 와야 반영됐다.) 편집은 키 입력마다 IPC로 즉시 저장·재조정되므로 폴링이 값을 덮지 않는다.
+    const id = window.setInterval(load, 1500);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
   }, []);
   const [filter, setFilter] = useState<"all" | PlatformId>("all");
   const [tagFilter, setTagFilter] = useState<string | null>(null);
