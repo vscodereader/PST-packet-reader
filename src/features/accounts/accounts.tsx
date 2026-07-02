@@ -308,6 +308,12 @@ export function Accounts({ go }: { go: GoFn }) {
   const [rotatingIp, setRotatingIp] = useState(false);
   const [manualAdding, setManualAdding] = useState(false);
   const loginPollRef = useRef<number | null>(null);
+  // "쿠키만료" 카운트다운을 1초마다 다시 그리기 위한 현재 시각(unix seconds).
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+  // 계정(loginId)별 로그인 쿠키 만료 시각(unix seconds). null = 세션/이력 없음.
+  const [expiries, setExpiries] = useState<Record<string, number | null>>({});
+  // 우리 임시 프로필로 아직 도는 Chrome 개수(작업관리자 없이 앱에서 확인, 사수 요청).
+  const [chromeCount, setChromeCount] = useState(0);
 
   // 화면을 떠날 때 로그인 상태 폴링 타이머를 정리한다.
   useEffect(() => {
@@ -316,6 +322,57 @@ export function Accounts({ go }: { go: GoFn }) {
         window.clearInterval(loginPollRef.current);
     };
   }, []);
+
+  // 카운트다운용 시계: 1초마다 현재 시각을 갱신해 "쿠키만료" 셀이 실시간으로 줄어든다.
+  useEffect(() => {
+    const id = window.setInterval(
+      () => setNowSec(Math.floor(Date.now() / 1000)),
+      1000,
+    );
+    return () => window.clearInterval(id);
+  }, []);
+
+  // 잔존 Chrome 개수를 2초마다 폴링한다(백엔드 running_chrome_count, best-effort).
+  useEffect(() => {
+    let alive = true;
+    const poll = () => {
+      ipc.system
+        .runningChromeCount()
+        .then((n) => {
+          if (alive) setChromeCount(n);
+        })
+        .catch(() => {});
+    };
+    poll();
+    const id = window.setInterval(poll, 2000);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  // 계정 목록이 바뀌면 각 계정의 쿠키 만료 시각을 조회해 카운트다운의 기준값으로 쓴다.
+  // 만료 시각은 재로그인 때만 바뀌므로 매초가 아니라 목록 변경 시에만 다시 읽는다.
+  const loginIdsKey = rows.map((r) => r.loginId).join(" ");
+  useEffect(() => {
+    let alive = true;
+    const ids = rows.map((r) => r.loginId).filter((id) => id.trim());
+    Promise.all(
+      ids.map((id) =>
+        ipc.accounts
+          .cookieExpiry(id)
+          .then((exp) => [id, exp] as const)
+          .catch(() => [id, null] as const),
+      ),
+    ).then((pairs) => {
+      if (alive) setExpiries(Object.fromEntries(pairs));
+    });
+    return () => {
+      alive = false;
+    };
+    // rows 자체가 아니라 loginId 목록이 바뀔 때만 다시 조회한다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loginIdsKey]);
 
   // Optimistically patch the row for snappy editing, then persist over IPC and
   // reconcile with the authoritative list the backend returns.
@@ -506,6 +563,16 @@ export function Accounts({ go }: { go: GoFn }) {
           </Text>
         </Box>
         <Group gap="xs">
+          {/* 잔존 Chrome 지표 — 작업관리자 없이 남은(고아) 크롬을 앱에서 바로 확인(사수 요청). */}
+          <Badge
+            size="lg"
+            variant="light"
+            color={chromeCount > 0 ? "orange" : "gray"}
+            leftSection={<Icon.bolt size={13} />}
+            title="우리가 띄운 임시 프로필로 아직 실행 중인 크롬 프로세스(자식 헬퍼 포함) 개수"
+          >
+            실행 중 크롬 {chromeCount}개
+          </Badge>
           {loginEligible && (
             <Button
               size="sm"

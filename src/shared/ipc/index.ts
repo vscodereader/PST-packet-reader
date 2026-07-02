@@ -330,6 +330,13 @@ export const ipc = {
     openChromeDownload: () => call<void>("open_chrome_download"),
     openUrl: (url: string) => call<void>("open_url", { url }),
   },
+  system: {
+    /**
+     * 우리 임시 프로필로 아직 실행 중인 Chrome 프로세스 개수(고아 헬퍼 포함). 사용자가
+     * 작업관리자를 열지 않아도 "실행 중 크롬 N개"를 앱에서 보게 하는 지표. 조회 실패 시 0.
+     */
+    runningChromeCount: () => call<number>("running_chrome_count"),
+  },
   app: {
     /** 부팅 자동 시작(OS 로그인 시 자동 실행) 등록 여부. */
     getAutostart: () => call<boolean>("get_autostart_enabled"),
