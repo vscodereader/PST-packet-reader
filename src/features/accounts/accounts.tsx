@@ -306,6 +306,7 @@ export function Accounts({ go }: { go: GoFn }) {
   const [page, setPage] = useState(1);
   const [loggingIn, setLoggingIn] = useState(false);
   const [rotatingIp, setRotatingIp] = useState(false);
+  const [manualAdding, setManualAdding] = useState(false);
   const loginPollRef = useRef<number | null>(null);
 
   // 화면을 떠날 때 로그인 상태 폴링 타이머를 정리한다.
@@ -582,6 +583,35 @@ export function Accounts({ go }: { go: GoFn }) {
             }}
           >
             내보내기
+          </Button>
+          <Button
+            size="sm"
+            variant="default"
+            loading={manualAdding}
+            leftSection={<Icon.plus size={16} />}
+            onClick={async () => {
+              // 사람이 직접 로그인(headed Chrome). 성공하면 쿠키는 자동로그인과 동일하게
+              // 저장되고 계정 행이 status=Active로 자동 추가된다. 취소/타임아웃은 중립 토스트.
+              setManualAdding(true);
+              try {
+                const acc = await ipc.auth.manualAdd();
+                setRows(await ipc.accounts.list());
+                toast(`수동추가 완료 — ${acc.loginId}`, "green");
+                ipc.activity
+                  .append("success", `수동추가 완료 — ${acc.loginId}`)
+                  .catch(() => {});
+              } catch (err) {
+                toast(
+                  "수동추가 안 됨 — " +
+                    (err instanceof Error ? err.message : String(err)),
+                  "orange",
+                );
+              } finally {
+                setManualAdding(false);
+              }
+            }}
+          >
+            수동추가
           </Button>
           <Button
             size="sm"

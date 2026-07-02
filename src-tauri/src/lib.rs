@@ -573,6 +573,46 @@ async fn rotate_ip() -> Result<auth::IpRotation, String> {
         .map_err(|e| e.to_string())
 }
 
+/// '수동추가' 버튼: headed Chrome을 띄워 사용자가 **직접** 네이버 로그인하게 한다(자동 타이핑·IP
+/// 회전 없음). 성공하면 쿠키를 자동로그인과 동일하게 저장하고, 사람이 친 아이디/비밀번호로 계정
+/// 행을 status=Active로 자동 추가한 뒤 그 계정을 돌려준다(프론트가 목록을 새로고침). 취소/타임아웃/
+/// 창 닫힘이면 아무것도 추가하지 않고 오류 메시지를 돌려준다(프론트가 중립 토스트 표시).
+#[tauri::command]
+async fn manual_add_account<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<ipc::accounts::Account, String> {
+    use ipc::accounts::{added_msg, apply_add, Account, AccountStatus, PlatformId};
+
+    let result = auth::manual_add_account()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            "수동추가가 취소되었거나 시간이 초과되어 계정을 추가하지 않았습니다.".to_owned()
+        })?;
+
+    // 계정관리 addRow와 동일한 형태로 새 행을 만든다(고유 id, 기본 플랫폼 forum, status=Active).
+    let account = Account {
+        id: format!("n{}", util::now_ms()),
+        platform: PlatformId::Forum,
+        login_id: result.login_id,
+        pw: result.password,
+        status: AccountStatus::Active,
+        status_msg: None,
+        last: "방금".to_owned(),
+        tags: vec![],
+    };
+
+    let store = app.state::<JsonStore<Account>>();
+    store.mutate(|accounts| apply_add(accounts, account.clone()));
+    let activity = app.state::<JsonStore<ipc::activity::ActivityItem>>();
+    ipc::activity::record(
+        activity.inner(),
+        ipc::activity::ActivityType::Success,
+        added_msg(&account.login_id),
+    );
+    Ok(account)
+}
+
 /// 프론트가 보내는 밴드 게시 결과 1건(알림 배치 기록용 최소 입력).
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -804,6 +844,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         band_comment,
         band_resolve_name,
         rotate_ip,
+        manual_add_account,
         get_account_cookies,
         run_naver_discussion,
         parse_template_csv,

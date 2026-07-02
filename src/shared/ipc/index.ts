@@ -369,5 +369,9 @@ export const ipc = {
      * 회전 전후 IP와 변경 여부를 돌려준다 — 호출부가 토스트·알림에 표시한다. */
     rotateIp: () =>
       call<{ before: string; after: string; changed: boolean }>("rotate_ip"),
+    /** '수동추가': headed Chrome을 띄워 사람이 직접 네이버 로그인한다(자동 타이핑·IP 회전 없음).
+     * 성공하면 쿠키를 자동로그인과 동일하게 저장하고 계정 행을 status=Active로 추가한 뒤 그
+     * 계정을 돌려준다. 취소/타임아웃/창 닫힘이면 오류를 던진다(호출부가 중립 토스트 표시). */
+    manualAdd: () => call<Account>("manual_add_account"),
   },
 };

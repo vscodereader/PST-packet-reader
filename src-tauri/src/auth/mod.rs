@@ -22,6 +22,8 @@ pub use paths::{app_data_root, paths_for_root};
 pub use types::{Account, RuntimePaths};
 // 로그용 ID 마스킹 헬퍼를 다른 모듈(예: discussion_batch)에서도 쓸 수 있게 재노출.
 pub(crate) use util::mask_id;
+// 수동추가(사람이 직접 로그인) 결과 — IPC 커맨드가 계정 행을 만들 때 쓴다.
+pub(crate) use login::ManualAddResult;
 
 use accounts::{has_valid_account_cookies, load_accounts_file};
 // band_auth가 ADB IP 회전을 재사용하도록 재노출한다(동작 무변경 — 기존 private import의
@@ -106,6 +108,17 @@ pub(crate) async fn process_account<R: Runtime>(
     })
     .await
     .map_err(|error| OrchestratorError::CommandFailed(format!("로그인 스레드 오류: {error}")))?
+}
+
+/// 수동추가(사람이 직접 로그인). headed Chrome을 띄워 사용자가 직접 로그인하게 하고, 성공하면
+/// 자동로그인과 동일하게 쿠키를 저장한 뒤 사람이 친 아이디/비밀번호를 돌려준다. 취소/타임아웃이면
+/// `Ok(None)`. Chrome을 띄워 동기적으로 기다리므로 blocking 스레드에서 실행한다.
+pub(crate) async fn manual_add_account() -> Result<Option<ManualAddResult>, OrchestratorError> {
+    let paths = paths_for_root(app_data_root()?);
+    ensure_runtime_dirs(&paths)?;
+    tauri::async_runtime::spawn_blocking(move || login::manual_add(&paths))
+        .await
+        .map_err(|error| OrchestratorError::CommandFailed(format!("수동추가 스레드 오류: {error}")))?
 }
 
 // 로컬 쿠키가 유효해 보일 때 실제 로그인을 건너뛸지(단락) 판정한다. 단, 명시적 재로그인
