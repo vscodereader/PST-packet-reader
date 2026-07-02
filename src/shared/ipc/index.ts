@@ -159,6 +159,12 @@ export const ipc = {
     update: (account: Account) =>
       call<Account[]>("update_account", { account }),
     remove: (ids: string[]) => call<Account[]>("delete_accounts", { ids }),
+    /**
+     * 계정관리 "쿠키만료" 카운트다운용: 로그인 유지 쿠키의 만료 시각(unix seconds) 최댓값.
+     * 세션 쿠키만 있거나 로그인 이력이 없으면 null. `id`는 쿠키 파일 키(loginId).
+     */
+    cookieExpiry: (id: string) =>
+      call<number | null>("account_cookie_expiry", { id }),
   },
   posts: {
     list: () => call<LibraryPost[]>("list_posts"),
@@ -329,6 +335,13 @@ export const ipc = {
     /** Chrome 미설치 안내 카드의 "설치 페이지 열기" — 공식 다운로드 페이지를 기본 브라우저로 연다. */
     openChromeDownload: () => call<void>("open_chrome_download"),
     openUrl: (url: string) => call<void>("open_url", { url }),
+  },
+  system: {
+    /**
+     * 우리 임시 프로필로 아직 실행 중인 Chrome 프로세스 개수(고아 헬퍼 포함). 사용자가
+     * 작업관리자를 열지 않아도 "실행 중 크롬 N개"를 앱에서 보게 하는 지표. 조회 실패 시 0.
+     */
+    runningChromeCount: () => call<number>("running_chrome_count"),
   },
   app: {
     /** 부팅 자동 시작(OS 로그인 시 자동 실행) 등록 여부. */

@@ -13,10 +13,15 @@ mod util;
 
 use tauri::{AppHandle, Runtime};
 
-pub use accounts::{read_account_cookies, read_account_cookies_unchecked, save_accounts_file};
+pub use accounts::{
+    account_cookie_expiry, read_account_cookies, read_account_cookies_unchecked,
+    save_accounts_file,
+};
 pub use adb::probe_adb_connection;
 // 게시(forum)에서도 로그인과 같은 Chrome 런처를 재사용해, 디버그 포트 Chrome을 앱이 직접 띄운다.
 pub(crate) use chrome::launch as launch_debug_chrome;
+// 잔존(고아) Chrome 개수 조회 — UI가 "실행 중 크롬 N개"를 작업관리자 없이 보여주는 데 쓴다.
+pub(crate) use chrome::running_chrome_count;
 pub use error::OrchestratorError;
 pub use paths::{app_data_root, paths_for_root};
 pub use types::{Account, RuntimePaths};
@@ -72,20 +77,29 @@ pub(crate) async fn process_account<R: Runtime>(
     }
 
     if use_adb {
-        assert_adb_device().await?;
-        // 로그인: 폰 인터넷 끊김 + IP 실제 변경을 확인하며 진행 → 로그인도 새 IP로 수행.
-        toggle_airplane_mode().await?;
-        // IP가 바뀐 뒤 네트워크가 안정될 시간을 주고 나서 Chrome을 띄운다(사수 권고).
-        // 직전 계정의 Chrome은 직전 login() 반환 시 ChromeHandle Drop에서 kill+wait로
-        // 이미 완전히 종료되며, 그 사실이 "[CHROME] ✓ ... 완전 종료 확인" 로그로 남는다.
-        tracing::info!(
-            "[LOGIN] IP 변경 확인 — {}초 안정화 대기 후 Chrome 실행",
-            config::ADB_SETTLE_AFTER_ROTATE_SECS
-        );
-        tokio::time::sleep(std::time::Duration::from_secs(
-            config::ADB_SETTLE_AFTER_ROTATE_SECS,
-        ))
-        .await;
+        // ADB는 '있으면 IP를 회전, 없으면 현재 IP로 그대로 진행'하는 선택 기능이다(사수 지시).
+        // 폰이 안 붙어 있어도 로그인 자체는 되게 해야 하므로, 디바이스가 없으면 하드 에러로
+        // 계정 전체를 중단하지 않고 IP 회전/체크만 건너뛴다. 연결 확인은 부작용 없는
+        // probe_adb_connection으로 한다(assert_adb_device는 없을 때 에러를 던진다).
+        if probe_adb_connection().await.is_ok() {
+            // 로그인: 폰 인터넷 끊김 + IP 실제 변경을 확인하며 진행 → 로그인도 새 IP로 수행.
+            toggle_airplane_mode().await?;
+            // IP가 바뀐 뒤 네트워크가 안정될 시간을 주고 나서 Chrome을 띄운다(사수 권고).
+            // 직전 계정의 Chrome은 직전 login() 반환 시 ChromeHandle Drop에서 kill+wait로
+            // 이미 완전히 종료되며, 그 사실이 "[CHROME] ✓ ... 완전 종료 확인" 로그로 남는다.
+            tracing::info!(
+                "[LOGIN] IP 변경 확인 — {}초 안정화 대기 후 Chrome 실행",
+                config::ADB_SETTLE_AFTER_ROTATE_SECS
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(
+                config::ADB_SETTLE_AFTER_ROTATE_SECS,
+            ))
+            .await;
+        } else {
+            tracing::info!(
+                "[LOGIN] ADB 디바이스 없음 — IP 회전/체크 생략, 현재 IP로 진행(사수 지시)"
+            );
+        }
     }
 
     // 보류(OnHold) 계정의 재로그인이면 캡차를 사용자가 직접 풀도록 창을 열어둔다(manual_captcha).

@@ -1414,6 +1414,13 @@ export const invoke = vi.fn(
       case "get_band_queue_status":
         return bandQueueStatus();
 
+      // --- 계정관리 부가 지표(쿠키 만료 카운트다운 · 잔존 크롬 개수) --------
+      case "account_cookie_expiry":
+        // 테스트 환경엔 저장된 쿠키가 없으므로 만료 없음(null)으로 본다.
+        return null;
+      case "running_chrome_count":
+        return 0;
+
       default:
         throw new Error(`test ipc: unhandled command "${cmd}"`);
     }

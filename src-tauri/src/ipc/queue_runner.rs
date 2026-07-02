@@ -1982,8 +1982,45 @@ async fn run_forum_targets<R: Runtime>(
                             chrome.port,
                             req.stocks.len()
                         );
+                        // account_id/port를 미리 복사한다 — req는 run_forum_publish로 move된다.
+                        let account_id_done = req.account_id.clone();
+                        let port_done = chrome.port;
                         let results =
                             run_forum_publish(req, app_for_job, on_start, on_result, on_retry);
+                        // [가시성/증명] kill이 '게시 도중'이 아니라 '완전 완료 후'에만 일어난다는
+                        // 것을 로그만으로 증명할 수 있게, 종목별 실제 결과를 원문 그대로 남긴다.
+                        // 종목 N개가 모두 여기 찍힌 뒤에야 아래 "완벽 완료 확인"·Chrome 종료가
+                        // 나오므로, 중간에 kill됐다면 이 결과 줄이 불완전할 것이다.
+                        for r in &results {
+                            let url = r
+                                .posted
+                                .as_ref()
+                                .and_then(|p| p.url.as_deref())
+                                .unwrap_or("-");
+                            tracing::info!(
+                                "[POST]   └ [{}] {} — {} · url={} · {}",
+                                r.code,
+                                r.name,
+                                if r.ok {
+                                    "성공"
+                                } else if r.skipped {
+                                    "건너뜀"
+                                } else {
+                                    "실패"
+                                },
+                                url,
+                                r.message
+                            );
+                        }
+                        let ok = results.iter().filter(|r| r.ok).count();
+                        let total = results.len();
+                        tracing::info!(
+                            "[POST] {} 종목토론방 게시 완벽 완료 확인 — {}/{} 성공, 이제 전용 Chrome(포트 {}) 종료",
+                            crate::auth::mask_id(&account_id_done),
+                            ok,
+                            total,
+                            port_done
+                        );
                         drop(chrome);
                         results
                     }
