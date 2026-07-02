@@ -24,8 +24,22 @@ pub fn build_router(state: AppState) -> Router {
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
+    // Admin UI(admin.html) 정적 서빙 — 하위 COM엔 Node가 없으니 서버 exe 가 UI까지 직접 서빙한다.
+    // exe 옆 `dist/` 를 서빙하고, 알 수 없는 경로는 admin.html 로 폴백(SPA 라우팅). Edge 로
+    // http://localhost:8080 을 열면 Admin 화면이 바로 뜬다. 정적 서빙은 fallback 이라 API 라우트가 우선.
+    use tower_http::services::{ServeDir, ServeFile};
+    let ui_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("dist")))
+        .unwrap_or_else(|| std::path::PathBuf::from("dist"));
+    // `/` 는 디렉토리 index(index.html=매크로 메인앱)로 잡지 말고, 무조건 admin.html 로 폴백시킨다
+    // (하위 COM 운영자는 Admin 화면만 필요). 에셋(/assets/*)은 ServeDir 가 그대로 서빙한다.
+    let ui_service = ServeDir::new(&ui_dir)
+        .append_index_html_on_directories(false)
+        .fallback(ServeFile::new(ui_dir.join("admin.html")));
     Router::new()
-        .route("/", get(|| async { "pstmacro-server ok" }))
+        // 헬스체크(기존 "/" 텍스트). "/" 는 이제 Admin UI(admin.html)가 차지한다.
+        .route("/healthz", get(|| async { "pstmacro-server ok" }))
         // ── 인증(§5) ──
         .route("/auth/signup", post(signup))
         .route("/auth/login", post(login))
@@ -59,6 +73,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/admin/post-reports", get(list_post_reports))
         .route("/agent/login-report", post(login_report))
         .route("/admin/login-reports", get(list_login_reports))
+        .fallback_service(ui_service)
         .layer(cors)
         .with_state(state)
 }
