@@ -397,7 +397,7 @@ impl NaverPacketClient {
                     .post(format!("{STOCK_ORIGIN}/api/community/profile/users"))
                     .headers(self.stock_json_headers(STOCK_HOST, referer)?)
                     .json(&payload)
-                    .send()
+                    .send_traced(&self.client)
                     .map_err(|error| {
                         AutomationError::new(format!("프로필 생성 POST 패킷 전송 실패: {error}"))
                     })
@@ -433,7 +433,7 @@ impl NaverPacketClient {
                     ))
                     .headers(self.stock_json_headers(STOCK_HOST, referer)?)
                     .json(&payload)
-                    .send()
+                    .send_traced(&self.client)
                     .map_err(|error| {
                         AutomationError::new(format!("프로필 저장 PUT 패킷 전송 실패: {error}"))
                     })
@@ -592,9 +592,13 @@ impl NaverPacketClient {
                     "[npay] nid 요청 쿠키 점검 — NID_JST 유무"
                 );
             }
-            let response = client.get(&url).headers(headers).send().map_err(|error| {
-                AutomationError::new(format!("가입 GET 전송 실패({host}): {error}"))
-            })?;
+            let response = client
+                .get(&url)
+                .headers(headers)
+                .send_traced(&client)
+                .map_err(|error| {
+                    AutomationError::new(format!("가입 GET 전송 실패({host}): {error}"))
+                })?;
             // 이 홉이 준 Set-Cookie를 jar에 병합해 다음 홉이 회전된 쿠키를 쓰게 한다(브라우저와 동일).
             merge_set_cookies(
                 &mut jar,
@@ -901,7 +905,7 @@ impl NaverPacketClient {
             .client
             .get(format!("{STOCK_ORIGIN}{path}"))
             .headers(self.stock_get_headers(STOCK_HOST, referer)?)
-            .send()
+            .send_traced(&self.client)
             .map_err(|error| {
                 // 응답 자체가 오지 않은 전송 계층 실패(연결 끊김·타임아웃 등)도 그대로 남긴다.
                 tracing::warn!(label, api = %format!("GET {path}"), error = %error, "실제 API 전송 실패");
@@ -976,7 +980,7 @@ impl NaverPacketClient {
             ))
             .headers(self.stock_json_headers(STOCK_HOST, referer)?)
             .json(&json!({ "unusedNickname": "" }))
-            .send()
+            .send_traced(&self.client)
             .map_err(|error| AutomationError::new(format!("닉네임 추천 패킷 전송 실패: {error}")))
             .and_then(|response| response_text(response, "닉네임 추천"))?;
         let value = parse_json(&response_text, "닉네임 추천")?;
@@ -1000,7 +1004,7 @@ impl NaverPacketClient {
             ))
             .headers(self.stock_json_headers(STOCK_HOST, referer)?)
             .json(&json!({ "targetValue": DEFAULT_PROFILE_INTRODUCTION }))
-            .send()
+            .send_traced(&self.client)
             .map_err(|error| {
                 AutomationError::new(format!("프로필 소개 검증 패킷 전송 실패: {error}"))
             })
@@ -1034,7 +1038,7 @@ impl NaverPacketClient {
             ))
             .headers(self.form_headers(CBOX_HOST, page_url)?)
             .body(form_body)
-            .send()
+            .send_traced(&self.client)
             .map_err(|error| AutomationError::new(format!("댓글 생성 패킷 전송 실패: {error}")))?
             .error_for_status()
             .map_err(|error| AutomationError::new(format!("댓글 생성 패킷 HTTP 실패: {error}")))?
@@ -1141,7 +1145,7 @@ impl NaverPacketClient {
                 "{CBOX_ORIGIN}/commentBox/cbox/web_naver_token_json.json?{query}"
             ))
             .headers(self.json_headers(CBOX_HOST, page_url)?)
-            .send()
+            .send_traced(&self.client)
             .map_err(|error| AutomationError::new(format!("댓글 토큰 패킷 전송 실패: {error}")))?
             .error_for_status()
             .map_err(|error| AutomationError::new(format!("댓글 토큰 패킷 HTTP 실패: {error}")))?
@@ -1281,7 +1285,7 @@ impl NaverPacketClient {
             // 실제 HTTP 호출 1건의 소요시간을 잰다 — "게시 시작까지 N초"·"즉시 대기초과"의
             // 진짜 원인이 어느 단계인지 로그로 드러내기 위함(사수 지적).
             let started = Instant::now();
-            let response = builder.send().map_err(|error| {
+            let response = builder.send_traced(&self.client).map_err(|error| {
                 tracing::warn!(label, attempt, error = %error, "패킷 전송 실패(전송 계층)");
                 AutomationError::new(format!("{label} 패킷 전송 실패: {error}"))
             })?;
@@ -1350,7 +1354,7 @@ impl NaverPacketClient {
                 .put(url)
                 .headers(headers.clone())
                 .json(json_body)
-                .send()
+                .send_traced(&self.client)
                 .map_err(|error| {
                     AutomationError::new(format!("{label} 패킷 전송 실패: {error}"))
                 })?;
@@ -1402,7 +1406,12 @@ impl NaverPacketClient {
     ) -> AutomationResult<reqwest::blocking::Response> {
         retry_transient(
             TRANSPORT_RETRY_MAX_ATTEMPTS,
-            || self.client.get(url).headers(headers.clone()).send(),
+            || {
+                self.client
+                    .get(url)
+                    .headers(headers.clone())
+                    .send_traced(&self.client)
+            },
             |error| is_retryable_transport_kind(crate::util::reqwest_kind(error)),
             |attempt| std::thread::sleep(transport_backoff_delay(attempt)),
         )
@@ -1412,6 +1421,118 @@ impl NaverPacketClient {
                 crate::util::describe_reqwest_error(&error)
             ))
         })
+    }
+}
+
+/// 게시(패킷) HTTP 와이어 트레이스 on/off. **기본 ON** — CDP 로그인 트레이스(`PSTMACRO_CDP_TRACE`)와
+/// 같은 규약이다. 빌드만 하면 네이버로 나가는 모든 요청(메서드·URL·헤더·바디)과 응답(상태·헤더)이
+/// 원문 그대로 로그에 남는다. 응답 바디는 각 호출부가 이미 `body={...}`로 남기므로(요청 원문 + 응답
+/// 헤더 + 기존 응답 바디 = 100% raw), 여기선 중복해서 읽지 않는다. 끄려면 환경변수
+/// `PSTMACRO_PACKET_TRACE=0`(또는 `false`/`off`).
+fn packet_trace_enabled() -> bool {
+    match std::env::var("PSTMACRO_PACKET_TRACE") {
+        Ok(v) => {
+            let v = v.trim();
+            !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off"))
+        }
+        // 미설정 = 기본 ON. 빌드만 하면 원문 트레이스가 나온다(CDP 트레이스와 동일 규약).
+        Err(_) => true,
+    }
+}
+
+/// `prefix` 바로 뒤부터 `terminator`(또는 문자열 끝) 전까지를 `•` 하나로 치환한다. `prefix` 앞 글자가
+/// 영숫자면(다른 키의 꼬리) 건너뛴다 — `pw=` 가 `xpw=` 안에서 오검출되는 것을 막는다.
+fn redact_pattern(input: &str, prefix: &str, terminator: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(pos) = rest.find(prefix) {
+        let before = &rest[..pos];
+        let after = &rest[pos + prefix.len()..];
+        let boundary_ok = before
+            .chars()
+            .last()
+            .map_or(true, |c| !c.is_ascii_alphanumeric());
+        out.push_str(before);
+        out.push_str(prefix);
+        if boundary_ok {
+            let end = after.find(terminator).unwrap_or(after.len());
+            out.push('•');
+            rest = &after[end..];
+        } else {
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 로그에 남기기 전, 로그인류 자격 비밀값만 `•` 로 가린다 — `eccpw`/`password`/`pw` 필드의 값만.
+/// form/query(`key=value`)·json(`"key":"value"`) 두 형태를 다룬다. **쿠키(Cookie/Set-Cookie)는
+/// 가리지 않는다**(호출부가 쿠키 헤더엔 이 함수를 적용하지 않음) — 사용자가 raw 를 원하고 쿠키로
+/// 디버그하기 때문. 게시 경로엔 비밀번호가 없어 실제론 거의 발동하지 않는 방어용이다.
+fn redact_credentials(input: &str) -> String {
+    const KEYS: [&str; 3] = ["eccpw", "password", "pw"];
+    let mut out = input.to_owned();
+    for key in KEYS {
+        out = redact_pattern(&out, &format!("\"{key}\":\""), "\"");
+        out = redact_pattern(&out, &format!("{key}="), "&");
+    }
+    out
+}
+
+/// 나가는 요청 하나를 원문 그대로 `target: "packet"`(CDP 트레이스의 `"cdp"` 와 짝) 에 남긴다.
+/// **주의(유출 위험)**: `Cookie` 를 포함한 모든 헤더와 바디를 원문 그대로 남긴다(사용자가 raw 를
+/// 원하고 쿠키로 디버그) — 로그 파일을 공유하면 세션 쿠키가 노출된다. 로그인류 비밀값만 가린다.
+fn log_packet_request(req: &reqwest::blocking::Request) {
+    let mut lines = format!("→ {} {}", req.method(), req.url());
+    for (name, value) in req.headers() {
+        let raw = String::from_utf8_lossy(value.as_bytes());
+        // 쿠키는 원문 유지. 그 외 헤더값만 자격 비밀값 마스킹.
+        let shown = if name == COOKIE || name == SET_COOKIE {
+            raw.into_owned()
+        } else {
+            redact_credentials(&raw)
+        };
+        lines.push_str(&format!("\n{name}: {shown}"));
+    }
+    if let Some(bytes) = req.body().and_then(reqwest::blocking::Body::as_bytes) {
+        let body = String::from_utf8_lossy(bytes);
+        lines.push_str(&format!("\n\n{}", redact_credentials(&body)));
+    }
+    tracing::info!(target: "packet", "{lines}");
+}
+
+/// 응답 라인 + 헤더 전체를 원문 그대로 `target: "packet"` 에 남긴다(바디는 호출부가 이미 남김).
+fn log_packet_response(resp: &reqwest::blocking::Response) {
+    let mut lines = format!("← {}", resp.status());
+    for (name, value) in resp.headers() {
+        lines.push_str(&format!(
+            "\n{name}: {}",
+            String::from_utf8_lossy(value.as_bytes())
+        ));
+    }
+    tracing::info!(target: "packet", "{lines}");
+}
+
+/// `.send()` 를 대신하는 트레이스 전송. 요청 원문(트레이스 ON일 때)을 남기고 `client` 로 실행한 뒤
+/// 응답 라인·헤더를 남긴다. 실행 클라이언트를 인자로 받아, `self.client`(리다이렉트 추종)와 npay
+/// 가입용 `redirect::none` 클라이언트가 각자 자기 정책으로 실행되게 한다(둘을 섞으면 가입 홉 추종이
+/// 깨진다). 응답 바디는 소비하지 않는다 — 호출부가 그대로 읽어 `body={...}` 로 남긴다.
+trait TracedSend {
+    fn send_traced(self, client: &Client) -> reqwest::Result<reqwest::blocking::Response>;
+}
+
+impl TracedSend for reqwest::blocking::RequestBuilder {
+    fn send_traced(self, client: &Client) -> reqwest::Result<reqwest::blocking::Response> {
+        let req = self.build()?;
+        if packet_trace_enabled() {
+            log_packet_request(&req);
+        }
+        let resp = client.execute(req)?;
+        if packet_trace_enabled() {
+            log_packet_response(&resp);
+        }
+        Ok(resp)
     }
 }
 
