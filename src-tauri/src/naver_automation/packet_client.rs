@@ -35,6 +35,16 @@ const FINANCIAL_JOIN_URL: &str = "https://member-web.pay.naver.com/financial-ser
 const NPAY_AGREEMENT_REFERER: &str =
     "https://member.pay.naver.com/financial-member/agreement?rurl=https://stock.naver.com/discussion";
 const DEFAULT_REFERER: &str = "https://stock.naver.com/discussion";
+
+/// 실명인증(본인인증) 미완 계정이 게시 시 브라우저가 튕겨가는 nid 실명확인 페이지(실측 2026-07-03,
+/// 패킷 캡처 `실명인증`). 프로필 생성 500(Failed to create profile user) 뒤 이 URL을 쿠키 달아 GET해
+/// 실명확인 폼이 오면 "실명인증 필요"로 확정한다. 응답 원문은 캡처에 미포함 → 본문 마커로 best-effort.
+const REAL_NAME_CHECK_URL: &str =
+    "https://nid.naver.com/user2/help/realNameCheck.nhn?type=1&rurl=&surl=";
+const NID_HOST: &str = "nid.naver.com";
+/// 실명인증 미완 실패에 붙이는 사유 접두(호출부 queue_runner가 이 마커로 로그인실패 동일 처리한다).
+/// 차단 마커("권한없음/로그인만료" 등)를 안 담아 `is_blocking_failure`에 안 걸리게 한다 → 상태 Error.
+const REAL_NAME_NOT_VERIFIED_MARKER: &str = "실명인증 미완(본인인증 필요) — ";
 // 실측 브라우저 referer 1:1: 프로필 상태(/status)는 루트, getProfile은 네이버 홈에서 온다.
 const STOCK_ROOT_REFERER: &str = "https://stock.naver.com/";
 const NAVER_HOME_REFERER: &str = "https://www.naver.com/";
@@ -406,14 +416,6 @@ impl NaverPacketClient {
                     "imageUrl": DEFAULT_PROFILE_AVATAR,
                     "danglingImages": [],
                 });
-                // 실명인증(NI) 연결 여부 — 프로필 상태 응답의 `isNiConnected`. 실명인증을 안 한 계정은
-                // 이 값이 false이고, 프로필 생성 POST가 500 {"message":"Failed to create profile user"}로
-                // 막힌다(2026-07-03 실측 lee****). 그 실패를 사람이 읽는 사유("실명인증이 되지
-                // 않았습니다")로 바꿔준다 — 흐름은 그대로 두고 사유만 명확히 한다(원문은 뒤에 보존).
-                let ni_connected = status
-                    .get("isNiConnected")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true);
                 self.client
                     .post(format!("{STOCK_ORIGIN}/api/community/profile/users"))
                     .headers(self.stock_json_headers(STOCK_HOST, referer)?)
@@ -424,10 +426,17 @@ impl NaverPacketClient {
                     })
                     .and_then(|response| response_text(response, "프로필 생성 POST"))
                     .map_err(|error| {
-                        if ni_connected {
-                            error
+                        // create 실패(주로 500 "Failed to create profile user")면 nid realNameCheck를
+                        // 한 번 호출해 **실명인증 필요**를 확정한다(isNiConnected는 성공 계정도 false라
+                        // 무용 → 폐기, 2026-07-03). 확정되면 마커를 붙여 호출부(queue_runner)가 로그인
+                        // 실패와 동일 처리(상태 Error·"권한이 없거나 로그인이 만료되었습니다"·목록숨김)하게
+                        // 한다. 원문은 뒤에 보존. 미확정이면 원래 오류 그대로(오탐 방지).
+                        if error.to_string().contains("Failed to create profile user")
+                            && self.real_name_verification_required()
+                        {
+                            AutomationError::new(format!("{REAL_NAME_NOT_VERIFIED_MARKER}{error}"))
                         } else {
-                            AutomationError::new(format!("실명인증이 되지 않았습니다 — {error}"))
+                            error
                         }
                     })?
             }
@@ -1050,6 +1059,45 @@ impl NaverPacketClient {
             .and_then(|response| response_text(response, label))?;
 
         parse_json(&response_text, label)
+    }
+
+    /// create-500(Failed to create profile user) 뒤 **실명인증 필요**를 확정하는 확인 호출(2026-07-03).
+    /// 실명인증 미완 계정은 브라우저가 nid `realNameCheck`(실명확인 폼)로 튕긴다(실측 패킷). 우리도 그
+    /// URL을 쿠키 달아 GET해서, 응답 본문이 실명확인 폼(실명확인·본인확인·certify·realNameCheck 마커)이면
+    /// true. best-effort — 전송실패·불명확하면 false(오탐 방지). 게시 흐름은 안 바꾸고 확인만 한다.
+    fn real_name_verification_required(&self) -> bool {
+        let mut headers = match self.base_headers(NID_HOST, NAVER_HOME_REFERER, "same-site", false) {
+            Ok(h) => h,
+            Err(_) => return false,
+        };
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("text/html,application/xhtml+xml,*/*"),
+        );
+        tracing::info!(
+            api = "GET /user2/help/realNameCheck.nhn",
+            "실명인증 확인 호출(create-500 후)"
+        );
+        let resp = match self
+            .client
+            .get(REAL_NAME_CHECK_URL)
+            .headers(headers)
+            .send_traced(&self.client)
+        {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        let final_url = resp.url().as_str().to_ascii_lowercase();
+        let body = resp.text().unwrap_or_default();
+        // 실명확인 폼 마커가 본문에 있으면 실명인증 필요. 인증된 계정이면 이 폼 대신 다른 페이지로 가서
+        // 마커가 없다. (응답 원문 캡처 미확보라 실기기 검증 필요 — 안 맞으면 마커만 조정.)
+        let hit = body.contains("실명확인")
+            || body.contains("본인확인")
+            || body.contains("실명인증")
+            || body.contains("realNameCheck")
+            || body.contains("certify");
+        tracing::info!(real_name_required = hit, final_url = %final_url, "실명인증 확인 결과(realNameCheck)");
+        hit
     }
 
     // 프로필 상태 조회를 짧은 백오프로 재시도한다. npay 가입 직후 네이버 서버 반영 지연으로 나는
