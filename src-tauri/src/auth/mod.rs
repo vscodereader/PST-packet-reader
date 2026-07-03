@@ -13,15 +13,22 @@ mod util;
 
 use tauri::{AppHandle, Runtime};
 
-pub use accounts::{read_account_cookies, read_account_cookies_unchecked, save_accounts_file};
+pub use accounts::{
+    account_cookie_expiry, clear_account_cookies, read_account_cookies, read_account_cookies_unchecked,
+    save_accounts_file,
+};
 pub use adb::probe_adb_connection;
 // 게시(forum)에서도 로그인과 같은 Chrome 런처를 재사용해, 디버그 포트 Chrome을 앱이 직접 띄운다.
 pub(crate) use chrome::launch as launch_debug_chrome;
+// 잔존(고아) Chrome 개수 조회 — UI가 "실행 중 크롬 N개"를 작업관리자 없이 보여주는 데 쓴다.
+pub(crate) use chrome::running_chrome_count;
 pub use error::OrchestratorError;
 pub use paths::{app_data_root, paths_for_root};
 pub use types::{Account, RuntimePaths};
 // 로그용 ID 마스킹 헬퍼를 다른 모듈(예: discussion_batch)에서도 쓸 수 있게 재노출.
 pub(crate) use util::mask_id;
+// 수동추가(사람이 직접 로그인) 결과 — IPC 커맨드가 계정 행을 만들 때 쓴다.
+pub(crate) use login::ManualAddResult;
 
 use accounts::{has_valid_account_cookies, load_accounts_file};
 // band_auth가 ADB IP 회전을 재사용하도록 재노출한다(동작 무변경 — 기존 private import의
@@ -70,20 +77,29 @@ pub(crate) async fn process_account<R: Runtime>(
     }
 
     if use_adb {
-        assert_adb_device().await?;
-        // 로그인: 폰 인터넷 끊김 + IP 실제 변경을 확인하며 진행 → 로그인도 새 IP로 수행.
-        toggle_airplane_mode().await?;
-        // IP가 바뀐 뒤 네트워크가 안정될 시간을 주고 나서 Chrome을 띄운다(사수 권고).
-        // 직전 계정의 Chrome은 직전 login() 반환 시 ChromeHandle Drop에서 kill+wait로
-        // 이미 완전히 종료되며, 그 사실이 "[CHROME] ✓ ... 완전 종료 확인" 로그로 남는다.
-        tracing::info!(
-            "[LOGIN] IP 변경 확인 — {}초 안정화 대기 후 Chrome 실행",
-            config::ADB_SETTLE_AFTER_ROTATE_SECS
-        );
-        tokio::time::sleep(std::time::Duration::from_secs(
-            config::ADB_SETTLE_AFTER_ROTATE_SECS,
-        ))
-        .await;
+        // ADB는 '있으면 IP를 회전, 없으면 현재 IP로 그대로 진행'하는 선택 기능이다(사수 지시).
+        // 폰이 안 붙어 있어도 로그인 자체는 되게 해야 하므로, 디바이스가 없으면 하드 에러로
+        // 계정 전체를 중단하지 않고 IP 회전/체크만 건너뛴다. 연결 확인은 부작용 없는
+        // probe_adb_connection으로 한다(assert_adb_device는 없을 때 에러를 던진다).
+        if probe_adb_connection().await.is_ok() {
+            // 로그인: 폰 인터넷 끊김 + IP 실제 변경을 확인하며 진행 → 로그인도 새 IP로 수행.
+            toggle_airplane_mode().await?;
+            // IP가 바뀐 뒤 네트워크가 안정될 시간을 주고 나서 Chrome을 띄운다(사수 권고).
+            // 직전 계정의 Chrome은 직전 login() 반환 시 ChromeHandle Drop에서 kill+wait로
+            // 이미 완전히 종료되며, 그 사실이 "[CHROME] ✓ ... 완전 종료 확인" 로그로 남는다.
+            tracing::info!(
+                "[LOGIN] IP 변경 확인 — {}초 안정화 대기 후 Chrome 실행",
+                config::ADB_SETTLE_AFTER_ROTATE_SECS
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(
+                config::ADB_SETTLE_AFTER_ROTATE_SECS,
+            ))
+            .await;
+        } else {
+            tracing::info!(
+                "[LOGIN] ADB 디바이스 없음 — IP 회전/체크 생략, 현재 IP로 진행(사수 지시)"
+            );
+        }
     }
 
     // 보류(OnHold) 계정의 재로그인이면 캡차를 사용자가 직접 풀도록 창을 열어둔다(manual_captcha).
@@ -106,6 +122,35 @@ pub(crate) async fn process_account<R: Runtime>(
     })
     .await
     .map_err(|error| OrchestratorError::CommandFailed(format!("로그인 스레드 오류: {error}")))?
+}
+
+/// 수동추가(사람이 직접 로그인). headed Chrome을 띄워 사용자가 직접 로그인하게 하고, 성공하면
+/// 자동로그인과 동일하게 쿠키를 저장한 뒤 사람이 친 아이디/비밀번호를 돌려준다. 취소/타임아웃이면
+/// `Ok(None)`. Chrome을 띄워 동기적으로 기다리므로 blocking 스레드에서 실행한다.
+pub(crate) async fn manual_add_account() -> Result<Option<ManualAddResult>, OrchestratorError> {
+    let paths = paths_for_root(app_data_root()?);
+    ensure_runtime_dirs(&paths)?;
+
+    // ADB가 연결돼 있으면 수동추가 로그인창을 띄우기 **전에 IP를 한 번 회전**한다(사용자 요청).
+    // 일반 로그인(§79)과 동일한 '있으면 회전, 없으면 현재 IP로 진행' 규칙을 그대로 재사용한다 —
+    // 폰이 안 붙어 있으면 IP 회전만 건너뛰고 기존과 똑같이 그대로 창을 띄운다(그 이후는 전부 동일).
+    if probe_adb_connection().await.is_ok() {
+        toggle_airplane_mode().await?;
+        tracing::info!(
+            "[수동추가] IP 변경 확인 — {}초 안정화 대기 후 로그인창 실행",
+            config::ADB_SETTLE_AFTER_ROTATE_SECS
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(
+            config::ADB_SETTLE_AFTER_ROTATE_SECS,
+        ))
+        .await;
+    } else {
+        tracing::info!("[수동추가] ADB 디바이스 없음 — IP 회전 생략, 현재 IP로 진행");
+    }
+
+    tauri::async_runtime::spawn_blocking(move || login::manual_add(&paths))
+        .await
+        .map_err(|error| OrchestratorError::CommandFailed(format!("수동추가 스레드 오류: {error}")))?
 }
 
 // 로컬 쿠키가 유효해 보일 때 실제 로그인을 건너뛸지(단락) 판정한다. 단, 명시적 재로그인

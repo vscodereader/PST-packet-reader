@@ -7,7 +7,7 @@ import { ipc } from "@/shared/ipc";
 import { invoke as ipcBackend, resetIpc, setLoginOutcomes } from "@/test/ipc";
 import { pickOption } from "@/test/select";
 
-import { Accounts } from "./accounts";
+import { Accounts, formatCookieCountdown } from "./accounts";
 
 vi.mock("@tauri-apps/api/core", async () => ({
   invoke: (await import("@/test/ipc")).invoke,
@@ -410,14 +410,27 @@ describe("Accounts", () => {
     ).toBe(false);
   });
 
-  it("adds a tag through the tag cell popover", async () => {
+  it("formats the cookie-expiry countdown", () => {
+    const now = 1_000_000;
+    expect(formatCookieCountdown(null, now)).toBe("—");
+    expect(formatCookieCountdown(undefined, now)).toBe("—");
+    expect(formatCookieCountdown(now - 5, now)).toBe("만료됨");
+    // 3일 12:04:07 남음 = 3*86400 + 12*3600 + 4*60 + 7 초 뒤 만료.
+    const remain = 3 * 86400 + 12 * 3600 + 4 * 60 + 7;
+    expect(formatCookieCountdown(now + remain, now)).toBe("3일 12:04:07 남음");
+    // 하루 미만이면 일수 없이 hh:mm:ss.
+    expect(formatCookieCountdown(now + 3661, now)).toBe("01:01:01 남음");
+  });
+
+  it("shows the cookie-expiry column (repurposed from 태그)", async () => {
     await renderAccounts();
+    // 열 머리글이 "쿠키만료"로 바뀌었다.
+    expect(
+      screen.getByRole("columnheader", { name: "쿠키만료" }),
+    ).toBeInTheDocument();
+    // 저장된 쿠키가 없는(mock: account_cookie_expiry=null) 계정은 "—"로 표시된다.
     const row = screen.getAllByRole("row")[1]!;
-    await userEvent.click(within(row).getByText("대형주"));
-    const tagInput = await screen.findByPlaceholderText("태그 추가");
-    await userEvent.type(tagInput, "신규태그{Enter}");
-    // rendered both as a TagsInput pill and a cell badge
-    expect((await screen.findAllByText("신규태그")).length).toBeGreaterThan(0);
+    expect(await within(row).findByText("—")).toBeInTheDocument();
   });
 
   it("paginates to the second page", async () => {

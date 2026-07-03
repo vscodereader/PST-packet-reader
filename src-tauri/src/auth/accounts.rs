@@ -89,6 +89,49 @@ pub fn read_account_cookies(account_id: &str) -> Result<Option<Value>, Orchestra
     }
 }
 
+/// 계정의 저장된 쿠키 파일을 삭제한다 — "쿠키만료" 카운트다운이 사라지고([`account_cookie_expiry`]가
+/// `None`), 죽은/차단된 세션 쿠키를 없앤다. 세션 만료(재로그인)·차단(비활성)으로 상태를 바꿀 때
+/// 함께 호출한다(사용자 요청 2026-07-03: 만료/비활성 시 쿠키기한 삭제). 파일이 없으면 무해.
+pub fn clear_account_cookies(account_id: &str) -> Result<(), OrchestratorError> {
+    let paths = paths_for_root(app_data_root()?);
+    let path = cookie_file_path(&paths, account_id);
+    if path.exists() {
+        fs::remove_file(&path)?;
+    }
+    Ok(())
+}
+
+/// 계정관리 화면의 "쿠키만료" 카운트다운용: 저장된 로그인 쿠키 중 네이버 인증/로그인 유지
+/// 쿠키(NID_SES/NID_JST/NID_SAUTO/NID_AUT)의 만료 시각(unix seconds) 최댓값을 돌려준다.
+/// 전부 세션 쿠키(실만료 없음)거나 쿠키 파일이 없으면 `None`. 만료 검증은 하지 않고 실제
+/// `expires` 값을 그대로 읽어(만료된 값도 포함) 프론트가 "만료됨"을 계산할 수 있게 한다.
+pub fn account_cookie_expiry(account_id: &str) -> Result<Option<f64>, OrchestratorError> {
+    match read_account_cookies_unchecked(account_id)? {
+        Some(value) => Ok(max_keep_login_expiry(&value)),
+        None => Ok(None),
+    }
+}
+
+/// 로그인 유지 계열 네이버 쿠키의 만료 시각(unix seconds) 최댓값을 뽑는다(순수 함수).
+/// `expires`가 양수인 쿠키만 후보이며, 없으면 `None`(전부 세션 쿠키).
+fn max_keep_login_expiry(value: &Value) -> Option<f64> {
+    const KEEP_LOGIN_COOKIE_NAMES: [&str; 4] = ["NID_SES", "NID_JST", "NID_SAUTO", "NID_AUT"];
+    let cookies = value.get("cookies").and_then(Value::as_array)?;
+    cookies
+        .iter()
+        .filter(|cookie| {
+            let name = cookie.get("name").and_then(Value::as_str);
+            let domain = cookie.get("domain").and_then(Value::as_str);
+            name.is_some_and(|n| KEEP_LOGIN_COOKIE_NAMES.contains(&n))
+                && domain.is_some_and(|d| d.contains("naver.com"))
+        })
+        .filter_map(|cookie| cookie.get("expires").and_then(Value::as_f64))
+        .filter(|expires| *expires > 0.0)
+        .fold(None, |acc, expires| {
+            Some(acc.map_or(expires, |max: f64| max.max(expires)))
+        })
+}
+
 pub(crate) fn has_valid_account_cookies(
     paths: &RuntimePaths,
     account_id: &str,
@@ -350,6 +393,44 @@ mod tests {
         assert!(has_valid_account_cookies(&paths, "id1").unwrap());
         assert!(has_valid_cookie_file(&cookie_path).unwrap());
         assert!(!has_valid_cookie_file(&paths.cookies_dir.join("missing.json")).unwrap());
+    }
+
+    #[test]
+    fn max_keep_login_expiry_picks_largest_positive() {
+        // NID_AUT/NID_SES 중 더 나중 만료(NID_SES)를 고르고, 세션 쿠키(-1)와 무관 쿠키는 무시.
+        let value = serde_json::json!({
+            "cookies": [
+                {"name": "NID_AUT", "domain": ".naver.com", "expires": 1000.0},
+                {"name": "NID_SES", "domain": ".naver.com", "expires": 5000.0},
+                {"name": "NID_JST", "domain": ".naver.com", "expires": -1},
+                {"name": "SOMETHING", "domain": ".naver.com", "expires": 9999.0}
+            ]
+        });
+        assert_eq!(max_keep_login_expiry(&value), Some(5000.0));
+    }
+
+    #[test]
+    fn max_keep_login_expiry_none_when_all_session() {
+        // 실만료 없는 세션 쿠키만 있으면 None(카운트다운 대상 없음).
+        let value = serde_json::json!({
+            "cookies": [
+                {"name": "NID_AUT", "domain": ".naver.com", "expires": -1},
+                {"name": "NID_SES", "domain": ".naver.com"}
+            ]
+        });
+        assert_eq!(max_keep_login_expiry(&value), None);
+        // 쿠키 배열이 없으면 None.
+        assert_eq!(max_keep_login_expiry(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn max_keep_login_expiry_ignores_non_naver_domain() {
+        let value = serde_json::json!({
+            "cookies": [
+                {"name": "NID_SES", "domain": "evil.com", "expires": 5000.0}
+            ]
+        });
+        assert_eq!(max_keep_login_expiry(&value), None);
     }
 
     #[test]

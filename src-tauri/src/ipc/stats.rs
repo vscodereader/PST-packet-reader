@@ -60,7 +60,10 @@ fn is_today(at: i64) -> bool {
 fn is_problem_status(s: &AccountStatus) -> bool {
     matches!(
         s,
-        AccountStatus::Error | AccountStatus::BadCredentials | AccountStatus::Blocked
+        AccountStatus::Error
+            | AccountStatus::BadCredentials
+            | AccountStatus::Blocked
+            | AccountStatus::Relogin
     )
 }
 

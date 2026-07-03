@@ -38,7 +38,7 @@ use discussion_batch::{
     StockCandidate, TemplateColumns,
 };
 use naver_automation::{
-    run_naver_discussion_macro, run_naver_like, AutomationReport, AutomationTarget,
+    run_naver_discussion_macro, run_naver_like, AutomationReport, AutomationTarget, LikeVerdict,
     NaverDiscussionRequest,
 };
 
@@ -96,6 +96,33 @@ struct LikeOutcome {
 /// 하나가 실패해도 중단하지 않고 다음으로 넘어가며, (계정×링크)별 성공/실패를 모아 돌려준다.
 /// 좋아요 결과를 알림 로그(log_batches)에 남긴다 — 게시처럼 알림 패널에 뜨게 한다(사용자 지적
 /// 2026-07-01: 좋아요가 토스트만 뜨고 알림엔 안 남았다). (계정×링크)별 성공/실패를 한 배치로 묶는다.
+/// 좋아요 판정이 재로그인/비활성이면 **계정 상태를 바꾸고 쿠키를 지운다**(사용자 요청 2026-07-03:
+/// 세션 만료=재로그인·차단=비활성으로 상태 전환, 둘 다 쿠키만료값 삭제). 좋아요는 계정 id로 돌므로
+/// `apply_status_by_id`로 갱신하고, `store.mutate`가 디스크 저장 + 프론트 이벤트를 발생시킨다.
+fn mark_account_status<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    login_id: &str,
+    status: ipc::accounts::AccountStatus,
+    msg: &str,
+) {
+    // 좋아요는 프론트가 **loginId**(쿠키 키, like-modal.tsx §85)로 넘긴다. 계정 상태 행도 login_id로
+    // 매칭해야 갱신된다(id로 매칭하면 안 맞아 상태가 안 바뀜 — #383 회귀 원인).
+    let store = app.state::<JsonStore<ipc::accounts::Account>>();
+    let id = login_id.to_owned();
+    let msg_owned = msg.to_owned();
+    store.mutate(move |accounts| {
+        ipc::accounts::apply_status_by_login_id(accounts, &id, status, Some(msg_owned))
+    });
+    // 만료/차단 계정의 "쿠키만료" 카운트다운 제거 + 죽은/차단 세션 쿠키 삭제(쿠키 파일 키=loginId).
+    if let Err(error) = crate::auth::clear_account_cookies(login_id) {
+        tracing::warn!(
+            account = %crate::auth::mask_id(login_id),
+            error = %error,
+            "좋아요 후 쿠키 삭제 실패"
+        );
+    }
+}
+
 fn record_like_batch<R: Runtime>(app: &tauri::AppHandle<R>, outcomes: &[LikeOutcome]) {
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -165,6 +192,9 @@ async fn like_discussion_post<R: Runtime>(
     if account_ids.is_empty() {
         return Err("좋아요를 누를 계정을 한 개 이상 선택하세요.".to_owned());
     }
+    // 좋아요 판정이 재로그인/비활성이면 계정 상태를 바꾸고 쿠키를 지워야 하므로 store 접근용으로
+    // app을 블로킹 클로저에 함께 넘긴다(로그 배치 기록은 클로저 밖 record_like_batch가 담당).
+    let app_for_status = app.clone();
     let outcomes = tauri::async_runtime::spawn_blocking(move || {
         let mut outcomes = Vec::with_capacity(account_ids.len() * post_urls.len());
         let mut first = true;
@@ -176,8 +206,29 @@ async fn like_discussion_post<R: Runtime>(
                 }
                 first = false;
                 let (success, message) = match run_naver_like(account_id, post_url) {
-                    Ok(()) => (true, "좋아요 완료".to_owned()),
-                    Err(error) => (false, error.message().to_owned()),
+                    LikeVerdict::Liked => (true, "좋아요 완료".to_owned()),
+                    // 세션 만료 → 상태 '재로그인' + 쿠키 삭제(재로그인해야 회복).
+                    LikeVerdict::Relogin(msg) => {
+                        mark_account_status(
+                            &app_for_status,
+                            account_id,
+                            ipc::accounts::AccountStatus::Relogin,
+                            &msg,
+                        );
+                        (false, msg)
+                    }
+                    // 계정 차단 → 상태 '비활성(Blocked)' + 쿠키 삭제.
+                    LikeVerdict::Blocked(msg) => {
+                        mark_account_status(
+                            &app_for_status,
+                            account_id,
+                            ipc::accounts::AccountStatus::Blocked,
+                            &msg,
+                        );
+                        (false, msg)
+                    }
+                    // 글 삭제(404) 등 계정 문제 아님 — 상태는 바꾸지 않는다.
+                    LikeVerdict::Failed(msg) => (false, msg),
                 };
                 outcomes.push(LikeOutcome {
                     account_id: account_id.clone(),
@@ -574,6 +625,46 @@ async fn rotate_ip() -> Result<auth::IpRotation, String> {
         .map_err(|e| e.to_string())
 }
 
+/// '수동추가' 버튼: headed Chrome을 띄워 사용자가 **직접** 네이버 로그인하게 한다(자동 타이핑·IP
+/// 회전 없음). 성공하면 쿠키를 자동로그인과 동일하게 저장하고, 사람이 친 아이디/비밀번호로 계정
+/// 행을 status=Active로 자동 추가한 뒤 그 계정을 돌려준다(프론트가 목록을 새로고침). 취소/타임아웃/
+/// 창 닫힘이면 아무것도 추가하지 않고 오류 메시지를 돌려준다(프론트가 중립 토스트 표시).
+#[tauri::command]
+async fn manual_add_account<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<ipc::accounts::Account, String> {
+    use ipc::accounts::{added_msg, apply_add, Account, AccountStatus, PlatformId};
+
+    let result = auth::manual_add_account()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            "수동추가가 취소되었거나 시간이 초과되어 계정을 추가하지 않았습니다.".to_owned()
+        })?;
+
+    // 계정관리 addRow와 동일한 형태로 새 행을 만든다(고유 id, 기본 플랫폼 forum, status=Active).
+    let account = Account {
+        id: format!("n{}", util::now_ms()),
+        platform: PlatformId::Forum,
+        login_id: result.login_id,
+        pw: result.password,
+        status: AccountStatus::Active,
+        status_msg: None,
+        last: "방금".to_owned(),
+        tags: vec![],
+    };
+
+    let store = app.state::<JsonStore<Account>>();
+    store.mutate(|accounts| apply_add(accounts, account.clone()));
+    let activity = app.state::<JsonStore<ipc::activity::ActivityItem>>();
+    ipc::activity::record(
+        activity.inner(),
+        ipc::activity::ActivityType::Success,
+        added_msg(&account.login_id),
+    );
+    Ok(account)
+}
+
 /// 프론트가 보내는 밴드 게시 결과 1건(알림 배치 기록용 최소 입력).
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -695,6 +786,20 @@ fn get_account_cookies(account_id: String) -> Result<Option<serde_json::Value>, 
     auth::read_account_cookies(&account_id).map_err(|e| e.to_string())
 }
 
+/// 계정관리 "쿠키만료" 카운트다운용: 로그인 유지 쿠키의 만료 시각(unix seconds) 최댓값.
+/// 세션 쿠키만 있거나 쿠키가 없으면 `None`. `id`는 쿠키 파일 키(loginId).
+#[tauri::command]
+fn account_cookie_expiry(id: String) -> Result<Option<f64>, String> {
+    auth::account_cookie_expiry(&id).map_err(|e| e.to_string())
+}
+
+/// 우리 임시 프로필로 아직 실행 중인 Chrome 프로세스 개수(고아 헬퍼 포함). UI가 작업관리자
+/// 없이 "실행 중 크롬 N개"를 보여주는 데 쓴다. 조회 실패 시 0(진단용이라 무해).
+#[tauri::command]
+fn running_chrome_count() -> usize {
+    auth::running_chrome_count()
+}
+
 #[tauri::command]
 fn export_accounts_xlsx(
     store: tauri::State<'_, JsonStore<ipc::accounts::Account>>,
@@ -805,7 +910,10 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         band_comment,
         band_resolve_name,
         rotate_ip,
+        manual_add_account,
         get_account_cookies,
+        account_cookie_expiry,
+        running_chrome_count,
         run_naver_discussion,
         parse_template_csv,
         like_discussion_post,

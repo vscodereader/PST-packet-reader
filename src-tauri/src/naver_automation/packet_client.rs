@@ -86,6 +86,19 @@ pub(super) enum NpayJoinStatus {
     Unknown,
 }
 
+/// 좋아요가 막힌 계정의 **제재 상태 원문 판정**(2026-07-03). `probe_restriction_raw`가
+/// `/api/community/profile/users/form` 응답 **원문 전체**를 보고 돌려준다.
+pub(super) enum RestrictionVerdict {
+    /// 차단/제재 확정 — 본문에 UMON 밴/아이디 잠금/보호조치/이용제한/글쓰기 금지/비정상적인 활동.
+    Blocked(String),
+    /// 로그인 안 됨(세션 만료) — 로그인 페이지/비로그인 응답.
+    Expired(String),
+    /// 정상(비차단·로그인됨) — 좋아요 실패는 계정 아닌 대상(글 삭제 등) 문제.
+    Healthy,
+    /// 전송 실패 등 판정 불가.
+    Unknown(String),
+}
+
 /// 게시글의 현재 반응(좋아요/싫어요) 상태. `GET /posts/reactions?postIds=` 응답에서 뽑는다.
 /// `reaction_id`가 있으면 내가 이미 어떤 반응을 눌러 둔 것이고(변경은 PUT), 없으면 최초(POST)다.
 pub(super) struct PostReaction {
@@ -397,7 +410,7 @@ impl NaverPacketClient {
                     .post(format!("{STOCK_ORIGIN}/api/community/profile/users"))
                     .headers(self.stock_json_headers(STOCK_HOST, referer)?)
                     .json(&payload)
-                    .send()
+                    .send_traced(&self.client)
                     .map_err(|error| {
                         AutomationError::new(format!("프로필 생성 POST 패킷 전송 실패: {error}"))
                     })
@@ -433,7 +446,7 @@ impl NaverPacketClient {
                     ))
                     .headers(self.stock_json_headers(STOCK_HOST, referer)?)
                     .json(&payload)
-                    .send()
+                    .send_traced(&self.client)
                     .map_err(|error| {
                         AutomationError::new(format!("프로필 저장 PUT 패킷 전송 실패: {error}"))
                     })
@@ -537,6 +550,77 @@ impl NaverPacketClient {
         }
     }
 
+    /// **좋아요 전용** npay 금융서비스 가입 시도. [`Self::ensure_npay_financial_join`]과 달리 가입이
+    /// 실제 **완료(Completed)됐을 때만** 회전 쿠키를 반영하고, nid 로그인 페이지로 튕기거나(세션 만료)
+    /// 약관 페이지에 멈추면 **기존 로그인 쿠키를 보존한다**(덮어쓰지 않음).
+    ///
+    /// 게시 경로는 회전 쿠키를 항상 반영해야 프로필 status가 통과하지만(#364 맥락), 좋아요 경로는
+    /// 튕김 시 쿠키가 빈 값으로 덮어써지면 이어지는 반응 생성이 400Z01("[NidHeader] Nid-No is
+    /// required")로 막힌다 — 밤새 방치된 세션이 가입에서 로그인으로 튕겨 NID_AUT가 비워지고 좋아요가
+    /// 전량 실패한 실측(2026-07-02 야간 배치)의 원인이다. 그래서 좋아요 경로만 쿠키를 보존해 만료
+    /// 계정을 훼손 없이 그대로 "재로그인 필요"로 넘긴다. 반환은 [`NpayJoinStatus`].
+    pub(super) fn try_npay_join_preserving_cookies(&mut self) -> NpayJoinStatus {
+        tracing::info!(
+            api = "GET /financial-service/join",
+            "실제 API 호출 label=\"네이버페이 가입(동의하기)\" mode=좋아요-쿠키보존"
+        );
+        self.log_auth_cookies_raw("좋아요-npay-시도전");
+        let (status, final_url, rotated_cookies) = match self.financial_join_follow() {
+            Ok(result) => result,
+            Err(error) => {
+                // 전송 실패는 비치명적: 쿠키를 건드리지 않고 그대로 넘겨 호출부가 좋아요를 재시도한다.
+                tracing::warn!(
+                    "네이버페이 가입(동의하기) 전송 실패 — 건너뜀(쿠키 보존): {error}"
+                );
+                return NpayJoinStatus::Unknown;
+            }
+        };
+        if financial_join_completed(&final_url) {
+            // 가입이 실제 완료된 경우에만 회전 쿠키(재발급 NID_AUT/NID_SES 등)를 반영한다.
+            self.cookies = rotated_cookies;
+            self.log_auth_cookies_raw("좋아요-npay-완료-회전후");
+            tracing::info!(
+                status,
+                final_url = %final_url,
+                "네이버페이 가입(동의하기) 완료 — 회전 쿠키 반영 ✅ (좋아요-쿠키보존)"
+            );
+            NpayJoinStatus::Completed
+        } else if final_url.contains("nidlogin.login") {
+            // 로그인 페이지로 튕김 = 세션 무효/만료. 회전된(빈) NID_AUT를 **반영하지 않아** 기존
+            // 로그인 쿠키를 지키고, 호출부가 "재로그인 필요"로 처리하게 한다. 반영하지 않는 그 회전
+            // 쿠키(빈 NID_AUT 등)도 원문 그대로 남겨 무엇 때문에 튕겼는지 대조할 수 있게 한다.
+            tracing::warn!(
+                rotated = %auth_cookies_raw_line(&rotated_cookies),
+                "[좋아요][쿠키원문] npay 튕김으로 받은 회전 쿠키(반영 안 함, 원문 그대로)"
+            );
+            tracing::warn!(
+                status,
+                final_url = %final_url,
+                "네이버페이 가입(동의하기) — nid 로그인 페이지로 튕김. 세션 만료 추정 → 쿠키 보존, 재로그인 필요"
+            );
+            NpayJoinStatus::LoginRequired
+        } else {
+            // 약관 페이지에 멈춤(미가입 추정) — 쿠키를 보존한 채 호출부가 좋아요를 재시도한다.
+            tracing::warn!(
+                status,
+                final_url = %final_url,
+                "네이버페이 가입(동의하기) 미완료(약관 페이지) — 쿠키 보존, 미가입 계정은 로그인 시점 브라우저 가입(#364) 필요"
+            );
+            NpayJoinStatus::TermsPending
+        }
+    }
+
+    /// 현재 클라이언트가 들고 있는 네이버 인증 쿠키(NID_AUT/NID_SES/BUC)를 **원문 그대로** 로그에
+    /// 남긴다. 좋아요 경로에서만 호출한다(사용자 요청 2026-07-03). ⚠️ 살아있는 세션 토큰이라 로그
+    /// 파일은 민감정보.
+    pub(super) fn log_auth_cookies_raw(&self, tag: &str) {
+        tracing::info!(
+            tag,
+            cookies = %auth_cookies_raw_line(&self.cookies),
+            "[좋아요][쿠키원문] 현재 인증 쿠키(원문 그대로)"
+        );
+    }
+
     /// 가입 GET의 리다이렉트 체인을 **직접** 따라가며, 매 홉마다 그 홉의 호스트 쿠키를 붙인다.
     ///
     /// reqwest의 자동 리다이렉트 추종은 보안상 **크로스-호스트 리다이렉트에서 Cookie 헤더를 제거**한다.
@@ -592,9 +676,13 @@ impl NaverPacketClient {
                     "[npay] nid 요청 쿠키 점검 — NID_JST 유무"
                 );
             }
-            let response = client.get(&url).headers(headers).send().map_err(|error| {
-                AutomationError::new(format!("가입 GET 전송 실패({host}): {error}"))
-            })?;
+            let response = client
+                .get(&url)
+                .headers(headers)
+                .send_traced(&client)
+                .map_err(|error| {
+                    AutomationError::new(format!("가입 GET 전송 실패({host}): {error}"))
+                })?;
             // 이 홉이 준 Set-Cookie를 jar에 병합해 다음 홉이 회전된 쿠키를 쓰게 한다(브라우저와 동일).
             merge_set_cookies(
                 &mut jar,
@@ -893,6 +981,43 @@ impl NaverPacketClient {
         Ok(())
     }
 
+    /// 좋아요가 막힌 계정의 **제재 상태를 원문으로 확정**한다(사용자 요청 2026-07-03: 추측 말고
+    /// 네이버가 실제로 뱉은 원문으로 차단/만료를 가른다). `/api/community/profile/users/form`을 저장
+    /// 쿠키만으로 GET해 응답 **status·body 전체를 자르지 않고** 로그에 남기고, 그 원문으로 판정한다.
+    /// (실측 07-02: 차단 계정은 이 form이 403 `UMON_*_BANNED`, 정상은 200 `status:existent`.)
+    pub(super) fn probe_restriction_raw(&self) -> RestrictionVerdict {
+        const PATH: &str = "/api/community/profile/users/form";
+        tracing::info!(
+            api = "GET /api/community/profile/users/form",
+            "실제 API 호출 label=\"좋아요-제재확인 프로필 form\""
+        );
+        let headers = match self.stock_get_headers(STOCK_HOST, DEFAULT_REFERER) {
+            Ok(headers) => headers,
+            Err(error) => return RestrictionVerdict::Unknown(format!("form 헤더 생성 실패: {error}")),
+        };
+        let response = match self
+            .client
+            .get(format!("{STOCK_ORIGIN}{PATH}"))
+            .headers(headers)
+            .send_traced(&self.client)
+        {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(error = %error, "좋아요-제재확인 form 전송 실패");
+                return RestrictionVerdict::Unknown(format!("form 전송 실패: {error}"));
+            }
+        };
+        let status = response.status().as_u16();
+        let body = response.text().unwrap_or_default();
+        // 원문 전체를 자르지 않고 그대로 남긴다(사용자 지시: 원문으로 판단).
+        tracing::warn!(
+            status,
+            body = %body,
+            "[좋아요][원문] 프로필 form 응답 전체(제재 판정용, 자르지 않음)"
+        );
+        classify_restriction_body(status, &body)
+    }
+
     // stock.naver.com JSON API를 공통 헤더로 호출하고 JSON으로 파싱하는 함수입니다.
     fn get_stock_json(&self, path: &str, referer: &str, label: &str) -> AutomationResult<Value> {
         // 실제로 어떤 API를 호출하는지 경로째 로그에 남긴다(사수 지시: 실제 API 호출이 보여야 함).
@@ -901,7 +1026,7 @@ impl NaverPacketClient {
             .client
             .get(format!("{STOCK_ORIGIN}{path}"))
             .headers(self.stock_get_headers(STOCK_HOST, referer)?)
-            .send()
+            .send_traced(&self.client)
             .map_err(|error| {
                 // 응답 자체가 오지 않은 전송 계층 실패(연결 끊김·타임아웃 등)도 그대로 남긴다.
                 tracing::warn!(label, api = %format!("GET {path}"), error = %error, "실제 API 전송 실패");
@@ -976,7 +1101,7 @@ impl NaverPacketClient {
             ))
             .headers(self.stock_json_headers(STOCK_HOST, referer)?)
             .json(&json!({ "unusedNickname": "" }))
-            .send()
+            .send_traced(&self.client)
             .map_err(|error| AutomationError::new(format!("닉네임 추천 패킷 전송 실패: {error}")))
             .and_then(|response| response_text(response, "닉네임 추천"))?;
         let value = parse_json(&response_text, "닉네임 추천")?;
@@ -1000,7 +1125,7 @@ impl NaverPacketClient {
             ))
             .headers(self.stock_json_headers(STOCK_HOST, referer)?)
             .json(&json!({ "targetValue": DEFAULT_PROFILE_INTRODUCTION }))
-            .send()
+            .send_traced(&self.client)
             .map_err(|error| {
                 AutomationError::new(format!("프로필 소개 검증 패킷 전송 실패: {error}"))
             })
@@ -1034,7 +1159,7 @@ impl NaverPacketClient {
             ))
             .headers(self.form_headers(CBOX_HOST, page_url)?)
             .body(form_body)
-            .send()
+            .send_traced(&self.client)
             .map_err(|error| AutomationError::new(format!("댓글 생성 패킷 전송 실패: {error}")))?
             .error_for_status()
             .map_err(|error| AutomationError::new(format!("댓글 생성 패킷 HTTP 실패: {error}")))?
@@ -1141,7 +1266,7 @@ impl NaverPacketClient {
                 "{CBOX_ORIGIN}/commentBox/cbox/web_naver_token_json.json?{query}"
             ))
             .headers(self.json_headers(CBOX_HOST, page_url)?)
-            .send()
+            .send_traced(&self.client)
             .map_err(|error| AutomationError::new(format!("댓글 토큰 패킷 전송 실패: {error}")))?
             .error_for_status()
             .map_err(|error| AutomationError::new(format!("댓글 토큰 패킷 HTTP 실패: {error}")))?
@@ -1281,7 +1406,7 @@ impl NaverPacketClient {
             // 실제 HTTP 호출 1건의 소요시간을 잰다 — "게시 시작까지 N초"·"즉시 대기초과"의
             // 진짜 원인이 어느 단계인지 로그로 드러내기 위함(사수 지적).
             let started = Instant::now();
-            let response = builder.send().map_err(|error| {
+            let response = builder.send_traced(&self.client).map_err(|error| {
                 tracing::warn!(label, attempt, error = %error, "패킷 전송 실패(전송 계층)");
                 AutomationError::new(format!("{label} 패킷 전송 실패: {error}"))
             })?;
@@ -1350,7 +1475,7 @@ impl NaverPacketClient {
                 .put(url)
                 .headers(headers.clone())
                 .json(json_body)
-                .send()
+                .send_traced(&self.client)
                 .map_err(|error| {
                     AutomationError::new(format!("{label} 패킷 전송 실패: {error}"))
                 })?;
@@ -1402,7 +1527,12 @@ impl NaverPacketClient {
     ) -> AutomationResult<reqwest::blocking::Response> {
         retry_transient(
             TRANSPORT_RETRY_MAX_ATTEMPTS,
-            || self.client.get(url).headers(headers.clone()).send(),
+            || {
+                self.client
+                    .get(url)
+                    .headers(headers.clone())
+                    .send_traced(&self.client)
+            },
             |error| is_retryable_transport_kind(crate::util::reqwest_kind(error)),
             |attempt| std::thread::sleep(transport_backoff_delay(attempt)),
         )
@@ -1412,6 +1542,118 @@ impl NaverPacketClient {
                 crate::util::describe_reqwest_error(&error)
             ))
         })
+    }
+}
+
+/// 게시(패킷) HTTP 와이어 트레이스 on/off. **기본 ON** — CDP 로그인 트레이스(`PSTMACRO_CDP_TRACE`)와
+/// 같은 규약이다. 빌드만 하면 네이버로 나가는 모든 요청(메서드·URL·헤더·바디)과 응답(상태·헤더)이
+/// 원문 그대로 로그에 남는다. 응답 바디는 각 호출부가 이미 `body={...}`로 남기므로(요청 원문 + 응답
+/// 헤더 + 기존 응답 바디 = 100% raw), 여기선 중복해서 읽지 않는다. 끄려면 환경변수
+/// `PSTMACRO_PACKET_TRACE=0`(또는 `false`/`off`).
+fn packet_trace_enabled() -> bool {
+    match std::env::var("PSTMACRO_PACKET_TRACE") {
+        Ok(v) => {
+            let v = v.trim();
+            !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off"))
+        }
+        // 미설정 = 기본 ON. 빌드만 하면 원문 트레이스가 나온다(CDP 트레이스와 동일 규약).
+        Err(_) => true,
+    }
+}
+
+/// `prefix` 바로 뒤부터 `terminator`(또는 문자열 끝) 전까지를 `•` 하나로 치환한다. `prefix` 앞 글자가
+/// 영숫자면(다른 키의 꼬리) 건너뛴다 — `pw=` 가 `xpw=` 안에서 오검출되는 것을 막는다.
+fn redact_pattern(input: &str, prefix: &str, terminator: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(pos) = rest.find(prefix) {
+        let before = &rest[..pos];
+        let after = &rest[pos + prefix.len()..];
+        let boundary_ok = before
+            .chars()
+            .last()
+            .map_or(true, |c| !c.is_ascii_alphanumeric());
+        out.push_str(before);
+        out.push_str(prefix);
+        if boundary_ok {
+            let end = after.find(terminator).unwrap_or(after.len());
+            out.push('•');
+            rest = &after[end..];
+        } else {
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 로그에 남기기 전, 로그인류 자격 비밀값만 `•` 로 가린다 — `eccpw`/`password`/`pw` 필드의 값만.
+/// form/query(`key=value`)·json(`"key":"value"`) 두 형태를 다룬다. **쿠키(Cookie/Set-Cookie)는
+/// 가리지 않는다**(호출부가 쿠키 헤더엔 이 함수를 적용하지 않음) — 사용자가 raw 를 원하고 쿠키로
+/// 디버그하기 때문. 게시 경로엔 비밀번호가 없어 실제론 거의 발동하지 않는 방어용이다.
+fn redact_credentials(input: &str) -> String {
+    const KEYS: [&str; 3] = ["eccpw", "password", "pw"];
+    let mut out = input.to_owned();
+    for key in KEYS {
+        out = redact_pattern(&out, &format!("\"{key}\":\""), "\"");
+        out = redact_pattern(&out, &format!("{key}="), "&");
+    }
+    out
+}
+
+/// 나가는 요청 하나를 원문 그대로 `target: "packet"`(CDP 트레이스의 `"cdp"` 와 짝) 에 남긴다.
+/// **주의(유출 위험)**: `Cookie` 를 포함한 모든 헤더와 바디를 원문 그대로 남긴다(사용자가 raw 를
+/// 원하고 쿠키로 디버그) — 로그 파일을 공유하면 세션 쿠키가 노출된다. 로그인류 비밀값만 가린다.
+fn log_packet_request(req: &reqwest::blocking::Request) {
+    let mut lines = format!("→ {} {}", req.method(), req.url());
+    for (name, value) in req.headers() {
+        let raw = String::from_utf8_lossy(value.as_bytes());
+        // 쿠키는 원문 유지. 그 외 헤더값만 자격 비밀값 마스킹.
+        let shown = if name == COOKIE || name == SET_COOKIE {
+            raw.into_owned()
+        } else {
+            redact_credentials(&raw)
+        };
+        lines.push_str(&format!("\n{name}: {shown}"));
+    }
+    if let Some(bytes) = req.body().and_then(reqwest::blocking::Body::as_bytes) {
+        let body = String::from_utf8_lossy(bytes);
+        lines.push_str(&format!("\n\n{}", redact_credentials(&body)));
+    }
+    tracing::info!(target: "packet", "{lines}");
+}
+
+/// 응답 라인 + 헤더 전체를 원문 그대로 `target: "packet"` 에 남긴다(바디는 호출부가 이미 남김).
+fn log_packet_response(resp: &reqwest::blocking::Response) {
+    let mut lines = format!("← {}", resp.status());
+    for (name, value) in resp.headers() {
+        lines.push_str(&format!(
+            "\n{name}: {}",
+            String::from_utf8_lossy(value.as_bytes())
+        ));
+    }
+    tracing::info!(target: "packet", "{lines}");
+}
+
+/// `.send()` 를 대신하는 트레이스 전송. 요청 원문(트레이스 ON일 때)을 남기고 `client` 로 실행한 뒤
+/// 응답 라인·헤더를 남긴다. 실행 클라이언트를 인자로 받아, `self.client`(리다이렉트 추종)와 npay
+/// 가입용 `redirect::none` 클라이언트가 각자 자기 정책으로 실행되게 한다(둘을 섞으면 가입 홉 추종이
+/// 깨진다). 응답 바디는 소비하지 않는다 — 호출부가 그대로 읽어 `body={...}` 로 남긴다.
+trait TracedSend {
+    fn send_traced(self, client: &Client) -> reqwest::Result<reqwest::blocking::Response>;
+}
+
+impl TracedSend for reqwest::blocking::RequestBuilder {
+    fn send_traced(self, client: &Client) -> reqwest::Result<reqwest::blocking::Response> {
+        let req = self.build()?;
+        if packet_trace_enabled() {
+            log_packet_request(&req);
+        }
+        let resp = client.execute(req)?;
+        if packet_trace_enabled() {
+            log_packet_response(&resp);
+        }
+        Ok(resp)
     }
 }
 
@@ -1941,6 +2183,62 @@ fn header_value(value: &str, label: &str) -> AutomationResult<HeaderValue> {
 //    "완료 ✅"로 오판했다(실측 로그 2026-07-01). login 페이지·약관동의 페이지를 명시로 잡는다.
 //  - 공통 약관동의 페이지(commonTermAgree) — 필수 약관 동의를 요구하는 중간 페이지.
 // 그 밖(가입 성공 콜백·토론 페이지로 빠짐)이면 완료로 본다.
+/// 네이버 인증 쿠키(NID_AUT/NID_SES/BUC)를 **원문 그대로**(값 자르지 않음) 한 줄로 만든다. 좋아요
+/// 경로 진단용(사용자 요청 2026-07-03): 발급된 쿠키 문자열과 재로그인 후 새 문자열을 원문 대조.
+/// ⚠️ 살아있는 세션 토큰이라 이 로그가 찍힌 파일은 민감정보다.
+fn auth_cookies_raw_line(cookies: &[NaverCookie]) -> String {
+    let pick = |name: &str| -> &str {
+        cookies
+            .iter()
+            .find(|cookie| cookie.name == name)
+            .map(|cookie| cookie.value.as_str())
+            .unwrap_or("(없음)")
+    };
+    format!(
+        "NID_AUT={} | NID_SES={} | BUC={}",
+        pick("NID_AUT"),
+        pick("NID_SES"),
+        pick("BUC")
+    )
+}
+
+/// 프로필 form 응답 **원문(status+body)** 만으로 제재/만료/정상을 가른다(순수 함수, 테스트 가능).
+/// 차단 신호(네이버 원문): UMON 밴/`403F0x`/`penaltyDays`, 또는 페이지 본문 `아이디 잠금`/`잠금조치`/
+/// `보호조치`/`이용제한`/`이용이 제한`/`글쓰기 금지`/`비정상적인 활동`. 로그인 안 됨 신호: 로그인
+/// 페이지(`nidlogin.login`/`frmNIDLogin`) 리다이렉트·비로그인 응답(401/`"rtn_cd":"1"`).
+fn classify_restriction_body(status: u16, body: &str) -> RestrictionVerdict {
+    let has = |needle: &str| body.contains(needle);
+    let blocked = has("UMON_TEMP_BANNED")
+        || has("UMON_PERMANENT_BANNED")
+        || has("403F01")
+        || has("403F02")
+        || has("penaltyDays")
+        || has("아이디 잠금")
+        || has("잠금조치")
+        || has("보호조치")
+        || has("이용제한")
+        || has("이용이 제한")
+        || has("글쓰기 금지")
+        || has("비정상적인 활동");
+    if blocked {
+        return RestrictionVerdict::Blocked(log_snippet(body));
+    }
+    let logged_out = status == 401
+        || has("nidlogin.login")
+        || has("frmNIDLogin")
+        || has("\"rtn_cd\":\"1\"")
+        || has("네이버에 로그인");
+    if logged_out {
+        return RestrictionVerdict::Expired(log_snippet(body));
+    }
+    if status == 200 {
+        RestrictionVerdict::Healthy
+    } else {
+        // 판정 못 한 비200 — 원문은 이미 로그에 남겼으니 보수적으로 만료(재로그인) 처리.
+        RestrictionVerdict::Expired(log_snippet(body))
+    }
+}
+
 fn financial_join_completed(final_url: &str) -> bool {
     !final_url.contains("/agreement")
         && !final_url.contains("/financial-service/join")

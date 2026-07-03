@@ -75,6 +75,7 @@ export type AccountStatus =
   | "timedOut"
   | "badCredentials"
   | "challenge"
+  | "relogin"
   | "blocked"
   | "error";
 

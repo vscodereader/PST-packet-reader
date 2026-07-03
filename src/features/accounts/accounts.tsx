@@ -8,10 +8,8 @@ import {
   Container,
   Group,
   Pagination,
-  Popover,
   Select,
   Table,
-  TagsInput,
   Text,
   TextInput,
   Title,
@@ -236,60 +234,52 @@ function StatusBadge({
   );
 }
 
-function TagCell({
-  tags,
-  suggestions,
-  onChange,
+/**
+ * 로그인 쿠키 만료까지 남은 시간을 "3일 12:04:07 남음"처럼 포맷한다(순수 함수).
+ * `expiresAt`(unix seconds)이 null/undefined면 "—"(로그인 이력/실만료 없음),
+ * 이미 지났으면 "만료됨".
+ */
+export function formatCookieCountdown(
+  expiresAt: number | null | undefined,
+  nowSec: number,
+): string {
+  if (expiresAt == null) return "—";
+  const remain = Math.floor(expiresAt - nowSec);
+  if (remain <= 0) return "만료됨";
+  const days = Math.floor(remain / 86400);
+  const h = Math.floor((remain % 86400) / 3600);
+  const m = Math.floor((remain % 3600) / 60);
+  const s = remain % 60;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const hms = `${pad(h)}:${pad(m)}:${pad(s)}`;
+  return days > 0 ? `${days}일 ${hms} 남음` : `${hms} 남음`;
+}
+
+/** 계정관리 "쿠키만료" 열: 로그인 쿠키 만료까지 1초 간격으로 갱신되는 카운트다운. */
+function CookieExpiryCell({
+  expiresAt,
+  nowSec,
 }: {
-  tags: string[];
-  suggestions: string[];
-  onChange: (t: string[]) => void;
+  expiresAt: number | null | undefined;
+  nowSec: number;
 }) {
-  const [open, setOpen] = useState(false);
+  const text = formatCookieCountdown(expiresAt, nowSec);
+  const expired = text === "만료됨";
+  const none = text === "—";
+  const color = expired ? "red" : none ? "dimmed" : undefined;
   return (
-    <Popover
-      opened={open}
-      onChange={setOpen}
-      width={220}
-      position="bottom-start"
+    <Text
+      size="xs"
+      ff="monospace"
+      {...(color ? { c: color } : {})}
+      title={
+        expiresAt == null
+          ? "저장된 로그인 쿠키 없음(또는 세션 쿠키)"
+          : "로그인 쿠키 만료까지 남은 시간"
+      }
     >
-      <Popover.Target>
-        <Group
-          gap={4}
-          wrap="nowrap"
-          style={{ cursor: "pointer", overflow: "hidden" }}
-          onClick={() => setOpen(true)}
-        >
-          {tags.length === 0 ? (
-            <Text size="xs" c="dimmed">
-              + 태그
-            </Text>
-          ) : (
-            tags.map((t) => (
-              <Badge
-                key={t}
-                size="sm"
-                variant="outline"
-                color="gray"
-                style={{ flexShrink: 0 }}
-              >
-                {t}
-              </Badge>
-            ))
-          )}
-        </Group>
-      </Popover.Target>
-      <Popover.Dropdown p="xs">
-        <TagsInput
-          size="xs"
-          data={suggestions}
-          value={tags}
-          onChange={onChange}
-          placeholder="태그 추가"
-          maxDropdownHeight={130}
-        />
-      </Popover.Dropdown>
-    </Popover>
+      {text}
+    </Text>
   );
 }
 
@@ -320,7 +310,14 @@ export function Accounts({ go }: { go: GoFn }) {
   const [page, setPage] = useState(1);
   const [loggingIn, setLoggingIn] = useState(false);
   const [rotatingIp, setRotatingIp] = useState(false);
+  const [manualAdding, setManualAdding] = useState(false);
   const loginPollRef = useRef<number | null>(null);
+  // "쿠키만료" 카운트다운을 1초마다 다시 그리기 위한 현재 시각(unix seconds).
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+  // 계정(loginId)별 로그인 쿠키 만료 시각(unix seconds). null = 세션/이력 없음.
+  const [expiries, setExpiries] = useState<Record<string, number | null>>({});
+  // 우리 임시 프로필로 아직 도는 Chrome 개수(작업관리자 없이 앱에서 확인, 사수 요청).
+  const [chromeCount, setChromeCount] = useState(0);
 
   // 화면을 떠날 때 로그인 상태 폴링 타이머를 정리한다.
   useEffect(() => {
@@ -329,6 +326,57 @@ export function Accounts({ go }: { go: GoFn }) {
         window.clearInterval(loginPollRef.current);
     };
   }, []);
+
+  // 카운트다운용 시계: 1초마다 현재 시각을 갱신해 "쿠키만료" 셀이 실시간으로 줄어든다.
+  useEffect(() => {
+    const id = window.setInterval(
+      () => setNowSec(Math.floor(Date.now() / 1000)),
+      1000,
+    );
+    return () => window.clearInterval(id);
+  }, []);
+
+  // 잔존 Chrome 개수를 2초마다 폴링한다(백엔드 running_chrome_count, best-effort).
+  useEffect(() => {
+    let alive = true;
+    const poll = () => {
+      ipc.system
+        .runningChromeCount()
+        .then((n) => {
+          if (alive) setChromeCount(n);
+        })
+        .catch(() => {});
+    };
+    poll();
+    const id = window.setInterval(poll, 2000);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  // 계정 목록이 바뀌면 각 계정의 쿠키 만료 시각을 조회해 카운트다운의 기준값으로 쓴다.
+  // 만료 시각은 재로그인 때만 바뀌므로 매초가 아니라 목록 변경 시에만 다시 읽는다.
+  const loginIdsKey = rows.map((r) => r.loginId).join(" ");
+  useEffect(() => {
+    let alive = true;
+    const ids = rows.map((r) => r.loginId).filter((id) => id.trim());
+    Promise.all(
+      ids.map((id) =>
+        ipc.accounts
+          .cookieExpiry(id)
+          .then((exp) => [id, exp] as const)
+          .catch(() => [id, null] as const),
+      ),
+    ).then((pairs) => {
+      if (alive) setExpiries(Object.fromEntries(pairs));
+    });
+    return () => {
+      alive = false;
+    };
+    // rows 자체가 아니라 loginId 목록이 바뀔 때만 다시 조회한다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loginIdsKey]);
 
   // Optimistically patch the row for snappy editing, then persist over IPC and
   // reconcile with the authoritative list the backend returns.
@@ -519,6 +567,16 @@ export function Accounts({ go }: { go: GoFn }) {
           </Text>
         </Box>
         <Group gap="xs">
+          {/* 잔존 Chrome 지표 — 작업관리자 없이 남은(고아) 크롬을 앱에서 바로 확인(사수 요청). */}
+          <Badge
+            size="lg"
+            variant="light"
+            color={chromeCount > 0 ? "orange" : "gray"}
+            leftSection={<Icon.bolt size={13} />}
+            title="우리가 띄운 임시 프로필로 아직 실행 중인 크롬 프로세스(자식 헬퍼 포함) 개수"
+          >
+            실행 중 크롬 {chromeCount}개
+          </Badge>
           {loginEligible && (
             <Button
               size="sm"
@@ -596,6 +654,35 @@ export function Accounts({ go }: { go: GoFn }) {
             }}
           >
             내보내기
+          </Button>
+          <Button
+            size="sm"
+            variant="default"
+            loading={manualAdding}
+            leftSection={<Icon.plus size={16} />}
+            onClick={async () => {
+              // 사람이 직접 로그인(headed Chrome). 성공하면 쿠키는 자동로그인과 동일하게
+              // 저장되고 계정 행이 status=Active로 자동 추가된다. 취소/타임아웃은 중립 토스트.
+              setManualAdding(true);
+              try {
+                const acc = await ipc.auth.manualAdd();
+                setRows(await ipc.accounts.list());
+                toast(`수동추가 완료 — ${acc.loginId}`, "green");
+                ipc.activity
+                  .append("success", `수동추가 완료 — ${acc.loginId}`)
+                  .catch(() => {});
+              } catch (err) {
+                toast(
+                  "수동추가 안 됨 — " +
+                    (err instanceof Error ? err.message : String(err)),
+                  "orange",
+                );
+              } finally {
+                setManualAdding(false);
+              }
+            }}
+          >
+            수동추가
           </Button>
           <Button
             size="sm"
@@ -764,7 +851,7 @@ export function Accounts({ go }: { go: GoFn }) {
               <Table.Th w={140}>플랫폼</Table.Th>
               <Table.Th w={160}>계정 ID</Table.Th>
               <Table.Th w={160}>계정 PW</Table.Th>
-              <Table.Th w={200}>태그</Table.Th>
+              <Table.Th w={200}>쿠키만료</Table.Th>
               <Table.Th w={96} ta="center">
                 상태
               </Table.Th>
@@ -823,10 +910,9 @@ export function Accounts({ go }: { go: GoFn }) {
                   />
                 </Table.Td>
                 <Table.Td>
-                  <TagCell
-                    tags={r.tags}
-                    suggestions={allTags}
-                    onChange={(t) => update(r.id, { tags: t })}
+                  <CookieExpiryCell
+                    expiresAt={expiries[r.loginId]}
+                    nowSec={nowSec}
                   />
                 </Table.Td>
                 <Table.Td ta="center">
