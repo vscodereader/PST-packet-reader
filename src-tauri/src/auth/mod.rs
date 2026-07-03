@@ -130,6 +130,24 @@ pub(crate) async fn process_account<R: Runtime>(
 pub(crate) async fn manual_add_account() -> Result<Option<ManualAddResult>, OrchestratorError> {
     let paths = paths_for_root(app_data_root()?);
     ensure_runtime_dirs(&paths)?;
+
+    // ADB가 연결돼 있으면 수동추가 로그인창을 띄우기 **전에 IP를 한 번 회전**한다(사용자 요청).
+    // 일반 로그인(§79)과 동일한 '있으면 회전, 없으면 현재 IP로 진행' 규칙을 그대로 재사용한다 —
+    // 폰이 안 붙어 있으면 IP 회전만 건너뛰고 기존과 똑같이 그대로 창을 띄운다(그 이후는 전부 동일).
+    if probe_adb_connection().await.is_ok() {
+        toggle_airplane_mode().await?;
+        tracing::info!(
+            "[수동추가] IP 변경 확인 — {}초 안정화 대기 후 로그인창 실행",
+            config::ADB_SETTLE_AFTER_ROTATE_SECS
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(
+            config::ADB_SETTLE_AFTER_ROTATE_SECS,
+        ))
+        .await;
+    } else {
+        tracing::info!("[수동추가] ADB 디바이스 없음 — IP 회전 생략, 현재 IP로 진행");
+    }
+
     tauri::async_runtime::spawn_blocking(move || login::manual_add(&paths))
         .await
         .map_err(|error| OrchestratorError::CommandFailed(format!("수동추가 스레드 오류: {error}")))?
