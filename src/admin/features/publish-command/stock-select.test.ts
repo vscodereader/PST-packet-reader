@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  distributeEvenly,
   isExcludedByName,
   pickStocks,
   type SelectableStock,
@@ -70,5 +71,19 @@ describe("pickStocks", () => {
     const r = pickStocks(list, 2);
     expect(r.error).toBeNull();
     expect(r.picked.map((x) => x.code)).toEqual(["현대차", "카카오"]);
+  });
+});
+
+describe("distributeEvenly (나눠서 게시 균등 분배)", () => {
+  it("14개·4계정 → 4·4·3·3", () => {
+    const codes = Array.from({ length: 14 }, (_, i) => `s${i}`);
+    const out = distributeEvenly(codes, 4);
+    expect(out.map((b) => b.length)).toEqual([4, 4, 3, 3]);
+    // 앞에서부터 순서대로 채운다(겹침 없음).
+    expect(out[0]).toEqual(["s0", "s1", "s2", "s3"]);
+    expect(out[3]).toEqual(["s11", "s12", "s13"]);
+  });
+  it("계정 0이면 빈 배열", () => {
+    expect(distributeEvenly(["a", "b"], 0)).toEqual([]);
   });
 });

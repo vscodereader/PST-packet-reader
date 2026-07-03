@@ -16,9 +16,12 @@ import { notifications } from "@mantine/notifications";
 import { IconDeviceDesktop } from "@tabler/icons-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { Icon } from "@/shared/ui/icons";
+
 import { api } from "../../api";
 
 import {
+  distributeEvenly,
   isExcludedByName,
   pickStocks,
   type SelectableStock,
@@ -176,36 +179,6 @@ export function PublishCommand() {
     }));
 
   const selectedDevices = devices.filter((d) => selDev.has(d.id));
-  // 게시하기 가능: 대상=forum + 선택 하위마다 (글·종목수·계정) 모두 채움.
-  const canPublish =
-    target === "forum" &&
-    selectedDevices.length > 0 &&
-    selectedDevices.every((d) => {
-      const cfg = cfgByDev[d.id] ?? DEFAULT_CFG;
-      return (
-        postByDev[d.id] != null &&
-        typeof cfg.count === "number" &&
-        cfg.count > 0 &&
-        cfg.accounts.length > 0
-      );
-    });
-
-  const publish = () => {
-    // 하위마다 독립 명령 1개(대원칙 0-1). 서버 publish_posts 배선 전이라 지금은 요약 토스트만.
-    const summary = selectedDevices
-      .map((d) => {
-        const cfg = cfgByDev[d.id] ?? DEFAULT_CFG;
-        return `${d.name}: 글 ${shortTitle(
-          mockPosts(d.id).find((p) => p.id === postByDev[d.id])?.title ?? "-",
-        )} · 종목 ${cfg.count}개 · 계정 ${cfg.accounts.length}명`;
-      })
-      .join(" / ");
-    notifications.show({
-      title: `게시 명령 ${selectedDevices.length}건 발행(미리보기)`,
-      message: summary,
-      color: "blue",
-    });
-  };
 
   return (
     <Stack gap="lg" p="md" h="100%">
@@ -326,18 +299,17 @@ export function PublishCommand() {
                 device={d}
                 cfg={cfgByDev[d.id] ?? DEFAULT_CFG}
                 onPatch={(patch) => patchCfg(d.id, patch)}
+                postTitle={
+                  postByDev[d.id]
+                    ? (mockPosts(d.id).find((p) => p.id === postByDev[d.id])
+                        ?.title ?? null)
+                    : null
+                }
               />
             ))}
           </Stack>
         </Box>
       )}
-
-      {/* ④ 게시하기 */}
-      <Group justify="flex-end" mt="auto">
-        <Button size="md" disabled={!canPublish} onClick={publish}>
-          게시하기
-        </Button>
-      </Group>
     </Stack>
   );
 }
@@ -346,10 +318,12 @@ function ForumPanel({
   device,
   cfg,
   onPatch,
+  postTitle,
 }: {
   device: PubDevice;
   cfg: ForumCfg;
   onPatch: (patch: Partial<ForumCfg>) => void;
+  postTitle: string | null;
 }) {
   // 토론 카테고리는 시장 구분이 없어 전체 고정(데스크톱과 동일 규칙).
   const marketDisabled = cfg.category === "discussion";
@@ -363,6 +337,38 @@ function ForumPanel({
   const { picked, error } = useMemo(() => pickStocks(pool, n), [pool, n]);
 
   const accounts = mockAccounts(device.id);
+
+  // 게시 실행 조건. 즉시/예약(각 계정 전체 종목)은 글·종목수·계정만 있으면 됨. 나눠서(균등분배)는
+  // 데스크톱과 동일: 계정 2개↑ + 종목 2개↑ + 종목수 ≥ 계정수(#267-5).
+  const allValid =
+    postTitle != null &&
+    typeof cfg.count === "number" &&
+    cfg.count > 0 &&
+    cfg.accounts.length > 0;
+  const canDistribute =
+    allValid &&
+    cfg.accounts.length >= 2 &&
+    picked.length >= 2 &&
+    picked.length >= cfg.accounts.length;
+
+  const run = (timing: "now" | "schedule", split: boolean) => {
+    const names = picked.map((s) => s.name);
+    const detail = split
+      ? `나눠서 ${cfg.accounts.length}계정 분배 ${distributeEvenly(
+          names,
+          cfg.accounts.length,
+        )
+          .map((b) => b.length)
+          .join("·")}`
+      : `계정마다 ${names.length}종목 전체`;
+    notifications.show({
+      title: `${device.name} · ${timing === "now" ? "지금 바로" : "예약"}${
+        split ? " 나눠서" : ""
+      } 게시(미리보기)`,
+      message: `글 "${shortTitle(postTitle ?? "")}" · ${detail}`,
+      color: "blue",
+    });
+  };
 
   return (
     <Paper withBorder radius="md" p="md">
@@ -482,6 +488,57 @@ function ForumPanel({
           제외됩니다.
         </Text>
       )}
+
+      {/* ④ 게시 실행 — 데스크톱 pstmacro와 동일한 4버튼(#267-5). 하위마다 독립 발행(안 섞임):
+          즉시/예약 = 각 계정이 선택 종목 전체 게시, 나눠서 = 종목을 계정 수만큼 균등 분배. */}
+      <Stack gap={8} mt="md">
+        <Group grow>
+          <Button
+            disabled={!allValid}
+            leftSection={<Icon.bolt size={16} />}
+            onClick={() => run("now", false)}
+          >
+            지금 바로 게시
+          </Button>
+          <Button
+            variant="light"
+            color="grape"
+            disabled={!allValid}
+            leftSection={<Icon.calendar size={16} />}
+            onClick={() => run("schedule", false)}
+          >
+            예약 게시
+          </Button>
+        </Group>
+        <Button
+          variant="light"
+          fullWidth
+          disabled={!canDistribute}
+          leftSection={<Icon.send size={16} />}
+          onClick={() => run("now", true)}
+        >
+          나눠서 즉시 게시하기
+          {canDistribute
+            ? ` (${cfg.accounts.length}계정 · ${picked.length}종목)`
+            : ""}
+        </Button>
+        <Button
+          variant="light"
+          color="grape"
+          fullWidth
+          disabled={!canDistribute}
+          leftSection={<Icon.calendar size={16} />}
+          onClick={() => run("schedule", true)}
+        >
+          나눠서 게시 예약하기
+        </Button>
+        {!canDistribute && cfg.accounts.length > 1 && picked.length > 0 && (
+          <Text fz={11} c="dimmed">
+            나눠서 게시는 계정 2개 이상 + 종목 2개 이상이고, 종목 수가 계정 수
+            이상일 때 켜집니다.
+          </Text>
+        )}
+      </Stack>
     </Paper>
   );
 }
