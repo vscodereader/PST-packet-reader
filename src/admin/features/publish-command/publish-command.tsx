@@ -543,47 +543,46 @@ function ForumConfig({
 
       {/* ④ 게시 실행 — 데스크톱 pstmacro와 동일한 4버튼(#267-5). 하위마다 독립 발행(안 섞임):
           즉시/예약 = 각 계정이 선택 종목 전체 게시, 나눠서 = 종목을 계정 수만큼 균등 분배. */}
-      <Stack gap={8} mt="md">
-        <Group grow>
+      <Stack gap={6} mt="md">
+        <Group grow gap="xs">
           <Button
+            size="xs"
             disabled={!allValid}
-            leftSection={<Icon.bolt size={16} />}
+            leftSection={<Icon.bolt size={14} />}
             onClick={() => run("now", false)}
           >
-            지금 바로 게시
+            지금 게시
           </Button>
           <Button
+            size="xs"
             variant="light"
             color="grape"
             disabled={!allValid}
-            leftSection={<Icon.calendar size={16} />}
+            leftSection={<Icon.calendar size={14} />}
             onClick={() => run("schedule", false)}
           >
             예약 게시
           </Button>
+          <Button
+            size="xs"
+            variant="light"
+            disabled={!canDistribute}
+            leftSection={<Icon.send size={14} />}
+            onClick={() => run("now", true)}
+          >
+            나눠서 즉시
+          </Button>
+          <Button
+            size="xs"
+            variant="light"
+            color="grape"
+            disabled={!canDistribute}
+            leftSection={<Icon.calendar size={14} />}
+            onClick={() => run("schedule", true)}
+          >
+            나눠서 예약
+          </Button>
         </Group>
-        <Button
-          variant="light"
-          fullWidth
-          disabled={!canDistribute}
-          leftSection={<Icon.send size={16} />}
-          onClick={() => run("now", true)}
-        >
-          나눠서 즉시 게시하기
-          {canDistribute
-            ? ` (${cfg.accounts.length}계정 · ${picked.length}종목)`
-            : ""}
-        </Button>
-        <Button
-          variant="light"
-          color="grape"
-          fullWidth
-          disabled={!canDistribute}
-          leftSection={<Icon.calendar size={16} />}
-          onClick={() => run("schedule", true)}
-        >
-          나눠서 게시 예약하기
-        </Button>
         {!canDistribute && cfg.accounts.length > 1 && picked.length > 0 && (
           <Text fz={11} c="dimmed">
             나눠서 게시는 계정 2개 이상 + 종목 2개 이상이고, 종목 수가 계정 수
