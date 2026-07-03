@@ -59,3 +59,21 @@ export function pickStocks<T extends SelectableStock>(
   const cold = candidates.filter((s) => !s.isHotDiscussion);
   return { picked: [...hot, ...cold.slice(0, n - hot.length)], error: null };
 }
+
+/**
+ * "나눠서 게시" 균등 분배 — 데스크톱 `distributeStocksEvenly`(publish-helpers.ts)와 동일 규칙.
+ * 앞 버킷부터 1개씩 더 받아 차이 ≤ 1. 예: 14개·4계정 → [4,4,3,3]. 계정 0이면 빈 배열.
+ */
+export function distributeEvenly<T>(items: T[], buckets: number): T[][] {
+  if (buckets <= 0) return [];
+  const out: T[][] = Array.from({ length: buckets }, () => [] as T[]);
+  const base = Math.floor(items.length / buckets);
+  const remainder = items.length % buckets;
+  let cursor = 0;
+  for (let b = 0; b < buckets; b++) {
+    const take = base + (b < remainder ? 1 : 0);
+    out[b] = items.slice(cursor, cursor + take);
+    cursor += take;
+  }
+  return out;
+}
