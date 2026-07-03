@@ -406,6 +406,14 @@ impl NaverPacketClient {
                     "imageUrl": DEFAULT_PROFILE_AVATAR,
                     "danglingImages": [],
                 });
+                // 실명인증(NI) 연결 여부 — 프로필 상태 응답의 `isNiConnected`. 실명인증을 안 한 계정은
+                // 이 값이 false이고, 프로필 생성 POST가 500 {"message":"Failed to create profile user"}로
+                // 막힌다(2026-07-03 실측 lee****). 그 실패를 사람이 읽는 사유("실명인증이 되지
+                // 않았습니다")로 바꿔준다 — 흐름은 그대로 두고 사유만 명확히 한다(원문은 뒤에 보존).
+                let ni_connected = status
+                    .get("isNiConnected")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
                 self.client
                     .post(format!("{STOCK_ORIGIN}/api/community/profile/users"))
                     .headers(self.stock_json_headers(STOCK_HOST, referer)?)
@@ -414,7 +422,14 @@ impl NaverPacketClient {
                     .map_err(|error| {
                         AutomationError::new(format!("프로필 생성 POST 패킷 전송 실패: {error}"))
                     })
-                    .and_then(|response| response_text(response, "프로필 생성 POST"))?
+                    .and_then(|response| response_text(response, "프로필 생성 POST"))
+                    .map_err(|error| {
+                        if ni_connected {
+                            error
+                        } else {
+                            AutomationError::new(format!("실명인증이 되지 않았습니다 — {error}"))
+                        }
+                    })?
             }
             // 기존(부분 생성) 프로필 — 기존 PUT 경로 그대로(닉네임/이미지는 form 값을 쓴다).
             Some(profile_id) => {
