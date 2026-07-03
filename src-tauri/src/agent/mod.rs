@@ -340,10 +340,71 @@ fn enqueue_publish<R: Runtime>(
     );
 
     let (title, body) = load_post(app, &p.post_id);
+    let plan_title = if p.post_title.is_empty() {
+        title.clone()
+    } else {
+        p.post_title.clone()
+    };
+    let effective_title = if title.is_empty() {
+        plan_title.clone()
+    } else {
+        title.clone()
+    };
 
-    let mut forum: Vec<ForumTarget> = Vec::new();
-    let mut locs: Vec<QueueLocation> = Vec::new();
-    for a in &p.assignments {
+    // ★ 대원칙: **한 계정 = 한 큐**(사용자 지시·데스크톱 dispatchSplitNow와 동일). 서버가 이미 계정별로
+    // 종목을 나눠 보냈으므로(전체=각 계정 전 종목, 나눠서=계정별 분배분), assignment 하나당 QueueNowItem
+    // 하나를 만든다. 그러면 워커가 계정별로 **독립·병렬** 실행하고(종토=계정별 격리 Chrome), 5계정이면
+    // 5개의 큐가 각자 자기 종목만 올린다 — 한 큐에 전 계정이 몰려 직렬 처리되던 것을 고친다.
+    let new_items = build_publish_items(
+        &p.assignments,
+        &p.post_id,
+        &plan_title,
+        &effective_title,
+        &body,
+        now_ms(),
+    );
+    if new_items.is_empty() {
+        return ("fail", "게시 대상(계정×종목)이 비었습니다".into(), None);
+    }
+    let queue_count = new_items.len();
+    let total_targets: usize = new_items
+        .iter()
+        .map(|i| i.plan.as_ref().map(|p| p.forum.len()).unwrap_or(0))
+        .sum();
+    let now = app.state::<JsonStore<QueueNowItem>>();
+    now.mutate(move |mut items| {
+        for it in new_items {
+            items.push(as_fresh_now_item(it));
+        }
+        apply_priority_order(items)
+    });
+    let runner = app.state::<NowQueueRunner>();
+    start_if_idle(runner.inner(), app.clone());
+    (
+        "ok",
+        format!("게시 큐 {queue_count}개 적재(계정당 1큐, 총 {total_targets}종목)"),
+        None,
+    )
+}
+
+/// **계정당 큐 1개** 규칙으로 게시 큐 아이템 목록을 만든다(순수 함수 — 테스트 대상). assignment
+/// 하나당 QueueNowItem 하나이며, 그 계정의 종목만 forum에 담는다. 종목이 빈 계정은 건너뛴다.
+/// id는 `agent-publish-{now}-{idx}`로 같은 tick에도 유일(계정 증발 방지, #6).
+fn build_publish_items(
+    assignments: &[PublishAssign],
+    post_id: &str,
+    plan_title: &str,
+    effective_title: &str,
+    body: &str,
+    now: u128,
+) -> Vec<QueueNowItem> {
+    let mut items = Vec::new();
+    for (idx, a) in assignments.iter().enumerate() {
+        if a.stocks.is_empty() {
+            continue;
+        }
+        let mut forum: Vec<ForumTarget> = Vec::new();
+        let mut locs: Vec<QueueLocation> = Vec::new();
         for s in &a.stocks {
             forum.push(ForumTarget {
                 account_id: a.login_id.clone(),
@@ -357,48 +418,32 @@ fn enqueue_publish<R: Runtime>(
                 code: Some(s.code.clone()),
             });
         }
-    }
-    if forum.is_empty() {
-        return ("fail", "게시 대상(계정×종목)이 비었습니다".into(), None);
-    }
-    let total = forum.len();
-    let plan_title = if p.post_title.is_empty() {
-        title.clone()
-    } else {
-        p.post_title.clone()
-    };
-    let item = QueueNowItem {
-        id: format!("agent-publish-{}", now_ms()),
-        title: plan_title.clone(),
-        kind: ModeValue::Post,
-        state: QueueState::Waiting,
-        batch_id: None,
-        progress: None,
-        locs,
-        plan: Some(PublishPlan {
-            post_id: p.post_id.clone(),
+        items.push(QueueNowItem {
+            id: format!("agent-publish-{now}-{idx}"),
+            title: plan_title.to_string(),
             kind: ModeValue::Post,
-            title: if title.is_empty() { plan_title } else { title },
-            body_text: body,
-            comments: vec![],
-            link_override: String::new(),
-            naver: vec![],
-            forum,
-            band: vec![],
-            blog: vec![],
-            clip: vec![],
-            login: None,
-        }),
-        items: vec![],
-    };
-    let now = app.state::<JsonStore<QueueNowItem>>();
-    now.mutate(|mut items| {
-        items.push(as_fresh_now_item(item));
-        apply_priority_order(items)
-    });
-    let runner = app.state::<NowQueueRunner>();
-    start_if_idle(runner.inner(), app.clone());
-    ("ok", format!("게시 큐 적재 — {total}건(계정×종목)"), None)
+            state: QueueState::Waiting,
+            batch_id: None,
+            progress: None,
+            locs,
+            plan: Some(PublishPlan {
+                post_id: post_id.to_string(),
+                kind: ModeValue::Post,
+                title: effective_title.to_string(),
+                body_text: body.to_string(),
+                comments: vec![],
+                link_override: String::new(),
+                naver: vec![],
+                forum,
+                band: vec![],
+                blog: vec![],
+                clip: vec![],
+                login: None,
+            }),
+            items: vec![],
+        });
+    }
+    items
 }
 
 /// 로컬 글(LibraryPost) 본문 로드(제목·본문). 없으면 빈 문자열(best-effort — 토큰 치환은 plan 기준).
@@ -1035,6 +1080,44 @@ mod tests {
         // 누적 합계 동봉.
         assert_eq!(v["cumulative"]["received"], 20);
         assert_eq!(v["cumulative"]["failed"], 6);
+    }
+
+    #[test]
+    fn build_publish_items_one_queue_per_account() {
+        // "나눠서 즉시" 결과처럼 계정별로 종목이 나뉘어 온다(5→여기선 2계정+빈계정). 각 계정당 큐 1개,
+        // 그 계정 종목만 담기고, 빈 계정은 큐를 안 만들며, id는 유일해야 한다(계정 증발 방지).
+        let assignments = vec![
+            PublishAssign {
+                login_id: "acc_a".into(),
+                stocks: vec![
+                    PublishStockIn { code: "005930".into(), name: "삼성전자".into() },
+                    PublishStockIn { code: "000660".into(), name: "SK하이닉스".into() },
+                ],
+            },
+            PublishAssign {
+                login_id: "acc_b".into(),
+                stocks: vec![PublishStockIn { code: "035420".into(), name: "NAVER".into() }],
+            },
+            PublishAssign { login_id: "acc_empty".into(), stocks: vec![] },
+        ];
+        let items = build_publish_items(&assignments, "p1", "제목", "제목", "본문", 1234);
+
+        // 빈 계정 제외 → 큐 2개(계정당 1개).
+        assert_eq!(items.len(), 2);
+        // id 유일(같은 now라도 idx로 구분).
+        assert_eq!(items[0].id, "agent-publish-1234-0");
+        assert_eq!(items[1].id, "agent-publish-1234-1");
+        // 큐0 = acc_a의 2종목만.
+        let f0 = &items[0].plan.as_ref().unwrap().forum;
+        assert_eq!(f0.len(), 2);
+        assert!(f0.iter().all(|t| t.account_id == "acc_a"));
+        // 큐1 = acc_b의 1종목만(계정끼리 안 섞임).
+        let f1 = &items[1].plan.as_ref().unwrap().forum;
+        assert_eq!(f1.len(), 1);
+        assert_eq!(f1[0].account_id, "acc_b");
+        assert_eq!(f1[0].code, "035420");
+        // 게시 전용(로그인 잡 아님).
+        assert!(items[0].plan.as_ref().unwrap().login.is_none());
     }
 
     #[test]
