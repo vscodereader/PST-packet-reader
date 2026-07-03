@@ -7,6 +7,7 @@ export type Screen =
   | "devices"
   | "distribute"
   | "publish-command"
+  | "scheduled-posts"
   | "report"
   | "operators"
   | "change-pw"
@@ -28,6 +29,7 @@ export const PREVIEW_SCREENS: ScreenMeta[] = [
   { value: "devices", label: "기기 연결", group: "앱(로그인 후)" },
   { value: "distribute", label: "계정 분배", group: "앱(로그인 후)" },
   { value: "publish-command", label: "게시 명령", group: "앱(로그인 후)" },
+  { value: "scheduled-posts", label: "예약된 글", group: "앱(로그인 후)" },
   { value: "report", label: "결과 보고", group: "앱(로그인 후)" },
   { value: "operators", label: "운영자 관리", group: "앱(로그인 후)" },
   { value: "change-pw", label: "비밀번호 변경", group: "앱(로그인 후)" },

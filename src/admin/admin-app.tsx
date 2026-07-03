@@ -9,7 +9,7 @@ import {
   UnstyledButton,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Icon, type IconName } from "@/shared/ui/icons";
 
@@ -22,6 +22,10 @@ import { CommLog } from "./features/comm-log/comm-log";
 import { DeviceConnection } from "./features/device-connection/device-connection";
 import { Operators } from "./features/operators/operators";
 import { PublishCommand } from "./features/publish-command/publish-command";
+import {
+  ScheduledPosts,
+  type ScheduledItem,
+} from "./features/publish-command/scheduled-posts";
 import { ResultReport } from "./features/result-report/result-report";
 import { AUTH_SCREENS, PREVIEW_SCREENS, type Screen } from "./screens";
 
@@ -36,6 +40,7 @@ const NAV: NavEntry[] = [
   { id: "devices", icon: "globe", label: "기기 연결" },
   { id: "distribute", icon: "users", label: "계정 분배" },
   { id: "publish-command", icon: "send", label: "게시 명령" },
+  { id: "scheduled-posts", icon: "calendar", label: "예약된 글" },
   { id: "report", icon: "chart", label: "결과 보고" },
   { id: "operators", icon: "settings", label: "운영자 관리" },
   { id: "change-pw", icon: "eye", label: "비밀번호 변경" },
@@ -121,9 +126,15 @@ function PreviewSwitcher({
 function AppScreen({
   screen,
   go,
+  scheduled,
+  onSchedule,
+  onRemoveScheduled,
 }: {
   screen: Screen;
   go: (s: Screen) => void;
+  scheduled: ScheduledItem[];
+  onSchedule: (item: ScheduledItem) => void;
+  onRemoveScheduled: (id: string) => void;
 }) {
   switch (screen) {
     case "devices":
@@ -131,7 +142,11 @@ function AppScreen({
     case "distribute":
       return <AccountDistribute />;
     case "publish-command":
-      return <PublishCommand />;
+      return <PublishCommand onSchedule={onSchedule} />;
+    case "scheduled-posts":
+      return (
+        <ScheduledPosts items={scheduled} onRemove={onRemoveScheduled} />
+      );
     case "report":
       return <ResultReport />;
     case "operators":
@@ -151,6 +166,23 @@ export function AdminApp() {
   // 첫 SuperAdmin은 기본 비번이라 변경 전까지 로그인 시 강제 변경 화면으로 보낸다(§5).
   // (미리보기 데모용 상태. 실제로는 서버가 "비번 변경 필요" 플래그로 판단.)
   const [mustChangePw, setMustChangePw] = useState(true);
+  // 예약된 글 목록(게시 명령↔예약된 글 화면이 공유). 서버 배선 전 미리보기 상태.
+  const [scheduled, setScheduled] = useState<ScheduledItem[]>([]);
+  const addScheduled = (item: ScheduledItem) =>
+    setScheduled((prev) => [...prev, item]);
+  const removeScheduled = (id: string) =>
+    setScheduled((prev) => prev.filter((x) => x.id !== id));
+  // 예약 시각이 되면 게시된 것으로 보고 **목록에서 즉시 제거**한다(게시 큐처럼 — 다른 화면 안 가도
+  // 바로 사라짐). 실제로는 하위가 게시 완료를 보고하면 제거된다.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      setScheduled((prev) =>
+        prev.some((x) => x.at <= now) ? prev.filter((x) => x.at > now) : prev,
+      );
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
   const go = (s: Screen) => setScreen(s);
 
   // 로그인: 서버 인증 시도 → 성공 시 mustChangePassword면 강제 변경, 아니면 앱(기기 연결).
@@ -268,7 +300,13 @@ export function AdminApp() {
         style={{ display: "flex", flexDirection: "column" }}
       >
         <Box style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-          <AppScreen screen={screen} go={go} />
+          <AppScreen
+            screen={screen}
+            go={go}
+            scheduled={scheduled}
+            onSchedule={addScheduled}
+            onRemoveScheduled={removeScheduled}
+          />
         </Box>
       </AppShell.Main>
     </AppShell>

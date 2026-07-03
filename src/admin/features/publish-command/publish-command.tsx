@@ -16,10 +16,13 @@ import { notifications } from "@mantine/notifications";
 import { IconDeviceDesktop } from "@tabler/icons-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { nowParts, scheduleMoment, toEpochMs } from "@/shared/schedule";
+import { DateTimePicker } from "@/shared/ui/date-time-picker";
 import { Icon } from "@/shared/ui/icons";
 
 import { api } from "../../api";
 
+import type { ScheduledItem } from "./scheduled-posts";
 import {
   distributeEvenly,
   isExcludedByName,
@@ -136,7 +139,11 @@ export function shortTitle(title: string): string {
   return title.length > 6 ? `${title.slice(0, 6)}…` : title;
 }
 
-export function PublishCommand() {
+export function PublishCommand({
+  onSchedule,
+}: {
+  onSchedule: (item: ScheduledItem) => void;
+}) {
   const [devices, setDevices] = useState<PubDevice[]>(DUMMY_DEVICES);
   const [selDev, setSelDev] = useState<Set<string>>(new Set());
   const [postByDev, setPostByDev] = useState<Record<string, string | null>>({});
@@ -284,6 +291,7 @@ export function PublishCommand() {
                 }
                 cfg={cfgByDev[d.id] ?? DEFAULT_CFG}
                 onPatch={(patch) => patchCfg(d.id, patch)}
+                onSchedule={onSchedule}
               />
             ))}
           </Stack>
@@ -301,6 +309,7 @@ function DeviceBlock({
   onSetTarget,
   cfg,
   onPatch,
+  onSchedule,
 }: {
   device: PubDevice;
   postTitle: string | null;
@@ -308,6 +317,7 @@ function DeviceBlock({
   onSetTarget: (t: Target) => void;
   cfg: ForumCfg;
   onPatch: (patch: Partial<ForumCfg>) => void;
+  onSchedule: (item: ScheduledItem) => void;
 }) {
   return (
     <Paper withBorder radius="md" p="md">
@@ -360,6 +370,7 @@ function DeviceBlock({
           cfg={cfg}
           onPatch={onPatch}
           postTitle={postTitle}
+          onSchedule={onSchedule}
         />
       )}
       {target != null && target !== "forum" && (
@@ -378,11 +389,13 @@ function ForumConfig({
   cfg,
   onPatch,
   postTitle,
+  onSchedule,
 }: {
   device: PubDevice;
   cfg: ForumCfg;
   onPatch: (patch: Partial<ForumCfg>) => void;
   postTitle: string | null;
+  onSchedule: (item: ScheduledItem) => void;
 }) {
   // 토론 카테고리는 시장 구분이 없어 전체 고정(데스크톱과 동일 규칙).
   const marketDisabled = cfg.category === "discussion";
@@ -410,23 +423,46 @@ function ForumConfig({
     picked.length >= 2 &&
     picked.length >= cfg.accounts.length;
 
-  const run = (timing: "now" | "schedule", split: boolean) => {
+  // 예약 폼: null=닫힘, false=예약 게시, true=나눠서 예약. 예약 버튼을 누르면 아래에 달력+시간이 뜬다.
+  const [armed, setArmed] = useState<boolean | null>(null);
+  const [sched, setSched] = useState(() => nowParts());
+
+  const detailFor = (split: boolean) => {
     const names = picked.map((s) => s.name);
-    const detail = split
-      ? `나눠서 ${cfg.accounts.length}계정 분배 ${distributeEvenly(
+    return split
+      ? `종목 ${picked.length} · 계정 ${cfg.accounts.length} · 나눠서 ${distributeEvenly(
           names,
           cfg.accounts.length,
         )
           .map((b) => b.length)
           .join("·")}`
-      : `계정마다 ${names.length}종목 전체`;
+      : `종목 ${picked.length} · 계정 ${cfg.accounts.length} 전체`;
+  };
+
+  const runNow = (split: boolean) => {
     notifications.show({
-      title: `${device.name} · ${timing === "now" ? "지금 바로" : "예약"}${
-        split ? " 나눠서" : ""
-      } 게시(미리보기)`,
-      message: `글 "${shortTitle(postTitle ?? "")}" · ${detail}`,
+      title: `${device.name} · 지금${split ? " 나눠서" : ""} 게시(미리보기)`,
+      message: `글 "${shortTitle(postTitle ?? "")}" · ${detailFor(split)}`,
       color: "blue",
     });
+  };
+
+  const confirmSchedule = () => {
+    const split = armed === true;
+    onSchedule({
+      id: `sch-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+      deviceName: device.name,
+      postTitle: postTitle ?? "-",
+      targetLabel: "종목토론방",
+      detail: detailFor(split),
+      at: toEpochMs(sched.date, sched.time),
+    });
+    notifications.show({
+      title: `${device.name} 예약 등록`,
+      message: `${scheduleMoment(sched.date, sched.time).when} · ${detailFor(split)}`,
+      color: "grape",
+    });
+    setArmed(null);
   };
 
   return (
@@ -543,46 +579,78 @@ function ForumConfig({
 
       {/* ④ 게시 실행 — 데스크톱 pstmacro와 동일한 4버튼(#267-5). 하위마다 독립 발행(안 섞임):
           즉시/예약 = 각 계정이 선택 종목 전체 게시, 나눠서 = 종목을 계정 수만큼 균등 분배. */}
-      <Stack gap={6} mt="md">
+      <Stack gap={8} mt="md">
         <Group grow gap="xs">
           <Button
-            size="xs"
+            size="sm"
+            fw={700}
             disabled={!allValid}
-            leftSection={<Icon.bolt size={14} />}
-            onClick={() => run("now", false)}
+            leftSection={<Icon.bolt size={15} />}
+            onClick={() => runNow(false)}
           >
             지금 게시
           </Button>
           <Button
-            size="xs"
-            variant="light"
+            size="sm"
+            fw={700}
+            variant={armed === false ? "filled" : "light"}
             color="grape"
             disabled={!allValid}
-            leftSection={<Icon.calendar size={14} />}
-            onClick={() => run("schedule", false)}
+            leftSection={<Icon.calendar size={15} />}
+            onClick={() => setArmed(false)}
           >
             예약 게시
           </Button>
           <Button
-            size="xs"
+            size="sm"
+            fw={700}
             variant="light"
             disabled={!canDistribute}
-            leftSection={<Icon.send size={14} />}
-            onClick={() => run("now", true)}
+            leftSection={<Icon.send size={15} />}
+            onClick={() => runNow(true)}
           >
             나눠서 즉시
           </Button>
           <Button
-            size="xs"
-            variant="light"
+            size="sm"
+            fw={700}
+            variant={armed === true ? "filled" : "light"}
             color="grape"
             disabled={!canDistribute}
-            leftSection={<Icon.calendar size={14} />}
-            onClick={() => run("schedule", true)}
+            leftSection={<Icon.calendar size={15} />}
+            onClick={() => setArmed(true)}
           >
             나눠서 예약
           </Button>
         </Group>
+
+        {/* 예약 버튼을 누르면 바로 밑에 달력+시간(공유 DateTimePicker 재사용). 확정하면 '예약된 글'로. */}
+        {armed != null && (
+          <Paper withBorder radius="md" p="sm" bg="var(--mantine-color-gray-0)">
+            <Text fz={12} fw={700} mb={6}>
+              {armed ? "나눠서 예약" : "예약 게시"} — 게시 시각 선택
+            </Text>
+            <Group gap="sm" wrap="wrap">
+              <DateTimePicker
+                date={sched.date}
+                time={sched.time}
+                onChange={setSched}
+              />
+              <Button size="sm" color="grape" onClick={confirmSchedule}>
+                예약 확정
+              </Button>
+              <Button
+                size="sm"
+                variant="subtle"
+                color="gray"
+                onClick={() => setArmed(null)}
+              >
+                취소
+              </Button>
+            </Group>
+          </Paper>
+        )}
+
         {!canDistribute && cfg.accounts.length > 1 && picked.length > 0 && (
           <Text fz={11} c="dimmed">
             나눠서 게시는 계정 2개 이상 + 종목 2개 이상이고, 종목 수가 계정 수
