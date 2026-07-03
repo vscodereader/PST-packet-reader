@@ -537,6 +537,77 @@ impl NaverPacketClient {
         }
     }
 
+    /// **좋아요 전용** npay 금융서비스 가입 시도. [`Self::ensure_npay_financial_join`]과 달리 가입이
+    /// 실제 **완료(Completed)됐을 때만** 회전 쿠키를 반영하고, nid 로그인 페이지로 튕기거나(세션 만료)
+    /// 약관 페이지에 멈추면 **기존 로그인 쿠키를 보존한다**(덮어쓰지 않음).
+    ///
+    /// 게시 경로는 회전 쿠키를 항상 반영해야 프로필 status가 통과하지만(#364 맥락), 좋아요 경로는
+    /// 튕김 시 쿠키가 빈 값으로 덮어써지면 이어지는 반응 생성이 400Z01("[NidHeader] Nid-No is
+    /// required")로 막힌다 — 밤새 방치된 세션이 가입에서 로그인으로 튕겨 NID_AUT가 비워지고 좋아요가
+    /// 전량 실패한 실측(2026-07-02 야간 배치)의 원인이다. 그래서 좋아요 경로만 쿠키를 보존해 만료
+    /// 계정을 훼손 없이 그대로 "재로그인 필요"로 넘긴다. 반환은 [`NpayJoinStatus`].
+    pub(super) fn try_npay_join_preserving_cookies(&mut self) -> NpayJoinStatus {
+        tracing::info!(
+            api = "GET /financial-service/join",
+            "실제 API 호출 label=\"네이버페이 가입(동의하기)\" mode=좋아요-쿠키보존"
+        );
+        self.log_auth_cookies_raw("좋아요-npay-시도전");
+        let (status, final_url, rotated_cookies) = match self.financial_join_follow() {
+            Ok(result) => result,
+            Err(error) => {
+                // 전송 실패는 비치명적: 쿠키를 건드리지 않고 그대로 넘겨 호출부가 좋아요를 재시도한다.
+                tracing::warn!(
+                    "네이버페이 가입(동의하기) 전송 실패 — 건너뜀(쿠키 보존): {error}"
+                );
+                return NpayJoinStatus::Unknown;
+            }
+        };
+        if financial_join_completed(&final_url) {
+            // 가입이 실제 완료된 경우에만 회전 쿠키(재발급 NID_AUT/NID_SES 등)를 반영한다.
+            self.cookies = rotated_cookies;
+            self.log_auth_cookies_raw("좋아요-npay-완료-회전후");
+            tracing::info!(
+                status,
+                final_url = %final_url,
+                "네이버페이 가입(동의하기) 완료 — 회전 쿠키 반영 ✅ (좋아요-쿠키보존)"
+            );
+            NpayJoinStatus::Completed
+        } else if final_url.contains("nidlogin.login") {
+            // 로그인 페이지로 튕김 = 세션 무효/만료. 회전된(빈) NID_AUT를 **반영하지 않아** 기존
+            // 로그인 쿠키를 지키고, 호출부가 "재로그인 필요"로 처리하게 한다. 반영하지 않는 그 회전
+            // 쿠키(빈 NID_AUT 등)도 원문 그대로 남겨 무엇 때문에 튕겼는지 대조할 수 있게 한다.
+            tracing::warn!(
+                rotated = %auth_cookies_raw_line(&rotated_cookies),
+                "[좋아요][쿠키원문] npay 튕김으로 받은 회전 쿠키(반영 안 함, 원문 그대로)"
+            );
+            tracing::warn!(
+                status,
+                final_url = %final_url,
+                "네이버페이 가입(동의하기) — nid 로그인 페이지로 튕김. 세션 만료 추정 → 쿠키 보존, 재로그인 필요"
+            );
+            NpayJoinStatus::LoginRequired
+        } else {
+            // 약관 페이지에 멈춤(미가입 추정) — 쿠키를 보존한 채 호출부가 좋아요를 재시도한다.
+            tracing::warn!(
+                status,
+                final_url = %final_url,
+                "네이버페이 가입(동의하기) 미완료(약관 페이지) — 쿠키 보존, 미가입 계정은 로그인 시점 브라우저 가입(#364) 필요"
+            );
+            NpayJoinStatus::TermsPending
+        }
+    }
+
+    /// 현재 클라이언트가 들고 있는 네이버 인증 쿠키(NID_AUT/NID_SES/BUC)를 **원문 그대로** 로그에
+    /// 남긴다. 좋아요 경로에서만 호출한다(사용자 요청 2026-07-03). ⚠️ 살아있는 세션 토큰이라 로그
+    /// 파일은 민감정보.
+    pub(super) fn log_auth_cookies_raw(&self, tag: &str) {
+        tracing::info!(
+            tag,
+            cookies = %auth_cookies_raw_line(&self.cookies),
+            "[좋아요][쿠키원문] 현재 인증 쿠키(원문 그대로)"
+        );
+    }
+
     /// 가입 GET의 리다이렉트 체인을 **직접** 따라가며, 매 홉마다 그 홉의 호스트 쿠키를 붙인다.
     ///
     /// reqwest의 자동 리다이렉트 추종은 보안상 **크로스-호스트 리다이렉트에서 Cookie 헤더를 제거**한다.
@@ -2062,6 +2133,25 @@ fn header_value(value: &str, label: &str) -> AutomationResult<HeaderValue> {
 //    "완료 ✅"로 오판했다(실측 로그 2026-07-01). login 페이지·약관동의 페이지를 명시로 잡는다.
 //  - 공통 약관동의 페이지(commonTermAgree) — 필수 약관 동의를 요구하는 중간 페이지.
 // 그 밖(가입 성공 콜백·토론 페이지로 빠짐)이면 완료로 본다.
+/// 네이버 인증 쿠키(NID_AUT/NID_SES/BUC)를 **원문 그대로**(값 자르지 않음) 한 줄로 만든다. 좋아요
+/// 경로 진단용(사용자 요청 2026-07-03): 발급된 쿠키 문자열과 재로그인 후 새 문자열을 원문 대조.
+/// ⚠️ 살아있는 세션 토큰이라 이 로그가 찍힌 파일은 민감정보다.
+fn auth_cookies_raw_line(cookies: &[NaverCookie]) -> String {
+    let pick = |name: &str| -> &str {
+        cookies
+            .iter()
+            .find(|cookie| cookie.name == name)
+            .map(|cookie| cookie.value.as_str())
+            .unwrap_or("(없음)")
+    };
+    format!(
+        "NID_AUT={} | NID_SES={} | BUC={}",
+        pick("NID_AUT"),
+        pick("NID_SES"),
+        pick("BUC")
+    )
+}
+
 fn financial_join_completed(final_url: &str) -> bool {
     !final_url.contains("/agreement")
         && !final_url.contains("/financial-service/join")

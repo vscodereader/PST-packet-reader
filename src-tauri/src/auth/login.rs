@@ -1,7 +1,7 @@
 //! 로그인 오케스트레이터. fresh Chrome을 띄워 CDP로 로그인하고, headless에서
 //! 챌린지가 나오면 headed로 승격 재실행한다. 성공 시 쿠키 파일을 저장한다.
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::ipc::accounts::AccountStatus;
 use crate::naver_automation::CdpClient;
@@ -146,6 +146,10 @@ pub(crate) fn finalize(
 ) -> Result<LoginResolution, OrchestratorError> {
     match outcome {
         LoginOutcome::Ok { cookies } => {
+            // 재로그인/로그인으로 새로 발급돼 저장되는 네이버 인증 쿠키 원문을 그대로 남긴다(사용자
+            // 요청 2026-07-03: 만료 → 재로그인 시 새로 들어가는 NID_AUT/NID_SES 문자열을 만료 전
+            // 값과 원문 대조). 로그만 추가할 뿐 로그인/게시 동작은 바뀌지 않는다.
+            log_saved_auth_cookies_raw(&account.id, &cookies);
             let path = paths
                 .cookies_dir
                 .join(format!("{}.json", safe_file_stem(&account.id)));
@@ -190,6 +194,26 @@ fn disk_io_error(op: &str, path: &std::path::Path, e: &std::io::Error) -> Orches
 /// ⒝ 같은 디렉터리에 임시파일로 쓰고 rename으로 교체(원자적 — 부분기록/손상 방지, 최종 파일
 ///    점유 창 축소), ⒞ 백신/인덱서의 **일시적 파일 잠금**(Windows 공유위반 os error 32·권한 거부)
 ///    에만 짧게 백오프 재시도. 디스크 풀 등 영구 오류는 재시도하지 않고 진단 메시지로 올린다.
+/// 로그인 성공으로 새로 저장되는 네이버 인증 쿠키(NID_AUT/NID_SES)를 **원문 그대로** 로그에 남긴다.
+/// 재로그인 후 새 세션 문자열을 만료 전 값과 원문 대조하기 위함(사용자 요청 2026-07-03). 로그만
+/// 추가할 뿐 동작 변경은 없다. ⚠️ 살아있는 세션 토큰이라 이 로그가 찍힌 파일은 민감정보다.
+fn log_saved_auth_cookies_raw(account_id: &str, cookies: &[Value]) {
+    let pick = |name: &str| -> String {
+        cookies
+            .iter()
+            .find(|cookie| cookie.get("name").and_then(Value::as_str) == Some(name))
+            .and_then(|cookie| cookie.get("value").and_then(Value::as_str))
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| "(없음)".to_owned())
+    };
+    tracing::info!(
+        account = %crate::auth::mask_id(account_id),
+        NID_AUT = %pick("NID_AUT"),
+        NID_SES = %pick("NID_SES"),
+        "[로그인][쿠키원문] 새로 저장된 네이버 인증 쿠키(원문 그대로)"
+    );
+}
+
 fn write_cookie_file_resilient(
     path: &std::path::Path,
     contents: &str,
