@@ -934,6 +934,11 @@ fn apply_waiting_for_successful_posts<R: Runtime>(app: &AppHandle<R>, forum: &[F
         .into_iter()
         .filter(|id| !blocked.contains(id) && !timed_out.contains(id))
         .collect();
+    // 에러 중 실명인증 미완(본인인증 필요) 계정 — 로그인 실패와 동일 메시지를 줄 대상(상태는 Error).
+    let real_name: std::collections::BTreeSet<String> = real_name_not_verified_login_ids(forum)
+        .into_iter()
+        .filter(|id| errored.contains(id))
+        .collect();
     // 대기 후보(성공)에서 차단·대기초과·에러 계정은 뺀다 — 종료성/일시/그밖의 실패가 대기보다
     // 우선한다(#2/#7 + 후속). 같은 계정에 성공과 실패가 섞이면 실패를 표면화한다(기존 #7과 동일 철학).
     let waiting: Vec<String> = successful_post_login_ids(forum)
@@ -970,16 +975,13 @@ fn apply_waiting_for_successful_posts<R: Runtime>(app: &AppHandle<R>, forum: &[F
             )
         });
         let list = errored.iter().fold(list, |acc, id| {
-            apply_status_by_login_id(
-                acc,
-                id,
-                AccountStatus::Error,
-                Some(
-                    "글 게시에 실패해 '에러' 상태로 전환했습니다(약관 동의·세션 등). 자세한 원인은 완료 로그의 '자세히 보기'에서 확인한 뒤, 상태를 눌러 다시 시도하세요."
-                        .to_owned(),
-                ),
-                None,
-            )
+            // 실명인증 미완 계정은 로그인 실패와 **동일 메시지**(사수 지시). 상태는 Error 유지.
+            let msg = if real_name.contains(id) {
+                "권한이 없거나 로그인이 만료되었습니다".to_owned()
+            } else {
+                "글 게시에 실패해 '에러' 상태로 전환했습니다(약관 동의·세션 등). 자세한 원인은 완료 로그의 '자세히 보기'에서 확인한 뒤, 상태를 눌러 다시 시도하세요.".to_owned()
+            };
+            apply_status_by_login_id(acc, id, AccountStatus::Error, Some(msg), None)
         });
         waiting.iter().fold(list, |acc, id| {
             apply_status_by_login_id(
@@ -994,6 +996,14 @@ fn apply_waiting_for_successful_posts<R: Runtime>(app: &AppHandle<R>, forum: &[F
             )
         })
     });
+    // Active였다가 게시 중 차단(짤림·보호조치)/에러(실명인증 등)로 죽은 계정은 쿠키만료 카운트다운을
+    // 숨긴다(사수 지시 2026-07-03): 죽은 세션 쿠키를 삭제하면 cookieExpiry가 null이 되어 카운트다운이
+    // 사라진다. 좋아요 흐름(mark_account_status)이 만료/차단에 하는 것과 동일. loginId=쿠키 파일 키.
+    for id in blocked.iter().chain(errored.iter()) {
+        if let Err(error) = crate::auth::clear_account_cookies(id) {
+            tracing::warn!(account = %crate::auth::mask_id(id), %error, "죽은 계정 쿠키 삭제 실패");
+        }
+    }
 }
 
 /// 게시 **도중 차단**(`is_blocking_failure`)을 만난 계정(loginId) 집합(#2, 순수). 부분 성공
@@ -1055,6 +1065,20 @@ fn errored_post_login_ids(forum: &[ForumOutcome]) -> std::collections::BTreeSet<
             && !is_blocking_failure(&o.result.message)
             && !is_timed_out_failure(&o.result.message)
     }) {
+        ids.insert(o.account_id.clone());
+    }
+    ids
+}
+
+/// 실명인증 미완(본인인증 필요)으로 실패한 계정(loginId) 집합(순수). packet_client가 realNameCheck로
+/// 확정해 붙인 마커("실명인증 미완")로 가른다. `errored`의 부분집합이며, 이 계정만 로그인 실패와
+/// **동일한 상태 메시지**("권한이 없거나 로그인이 만료되었습니다")를 준다(상태는 Error 유지).
+fn real_name_not_verified_login_ids(forum: &[ForumOutcome]) -> std::collections::BTreeSet<String> {
+    let mut ids = std::collections::BTreeSet::new();
+    for o in forum
+        .iter()
+        .filter(|o| !o.result.ok && !o.result.skipped && o.result.message.contains("실명인증 미완"))
+    {
         ids.insert(o.account_id.clone());
     }
     ids
@@ -2926,6 +2950,16 @@ fn forum_failure_reason(message: &str) -> String {
     if trimmed.is_empty() {
         return "종목토론방 게시에 실패했습니다".to_owned();
     }
+    // 실명인증 미완(본인인증 필요, packet_client가 realNameCheck로 확정) → 로그인 실패와 **동일 문구**
+    // (사수 지시 2026-07-03). HTTP 상태 매핑보다 먼저 본다(원문은 status=500이지만 로그인에러로 통일).
+    if trimmed.contains("실명인증 미완") {
+        return "권한이 없거나 로그인이 만료되었습니다".to_owned();
+    }
+    // 네이버가 직접 쏜 차단/제재(UMON_*_BANNED·403F01 등)는 우리 일반 문구로 덮지 말고 **원문 그대로**
+    // (사수 지시 2026-07-03). HTTP 상태 매핑(403→"권한 없음")보다 먼저 본다.
+    if let Some(raw) = naver_original_ban_reason(trimmed) {
+        return raw;
+    }
     if let Some(status) = parse_http_status(trimmed) {
         return status_reason(status).to_owned();
     }
@@ -2941,6 +2975,44 @@ fn forum_failure_reason(message: &str) -> String {
     } else {
         trimmed.to_owned()
     }
+}
+
+/// 네이버가 직접 쏜 차단/제재 응답이면 그 **원문 메시지**를 그대로 돌려준다(우리 일반 문구로 덮지
+/// 않음, 사수 지시 2026-07-03). UMON 밴·403F01/403F02 등. `body={...}` JSON의 message(+title)를
+/// 뽑고, 파싱 실패면 원문 일부를 그대로. 차단이 아니면 None.
+fn naver_original_ban_reason(message: &str) -> Option<String> {
+    let upper = message.to_ascii_uppercase();
+    let is_ban = (upper.contains("UMON") && upper.contains("BANNED"))
+        || message.contains("Permanent banned")
+        || message.contains("403F01")
+        || message.contains("403F02");
+    if !is_ban {
+        return None;
+    }
+    if let Some(idx) = message.find("body=") {
+        let body = message[idx + 5..].trim();
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+            let pick = |val: &serde_json::Value, k: &str| {
+                val.get(k)
+                    .and_then(|x| x.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_owned())
+            };
+            let msg = pick(&v, "message")
+                .or_else(|| v.get("result").and_then(|r| pick(r, "detail")))
+                .or_else(|| pick(&v, "detail"));
+            let title = pick(&v, "title").or_else(|| v.get("result").and_then(|r| pick(r, "title")));
+            let out = match (msg, title) {
+                (Some(m), Some(t)) => format!("{m} ({t})"),
+                (Some(m), None) => m,
+                (None, Some(t)) => t,
+                (None, None) => body.chars().take(200).collect(),
+            };
+            return Some(out);
+        }
+        return Some(body.chars().take(200).collect());
+    }
+    Some(message.chars().take(200).collect())
 }
 
 /// 메시지에 섞인 HTTP 상태코드(3자리, "status" 토큰 뒤 첫 정수)를 추출한다(#243). packet_client가
@@ -5852,6 +5924,32 @@ mod tests {
         assert_eq!(
             parse_http_status("글쓰기 form 패킷 HTTP 실패: status=500, body=x"),
             Some(500)
+        );
+    }
+
+    #[test]
+    fn forum_failure_reason_identity_not_verified_maps_to_login_error() {
+        // 실명인증 미완(realNameCheck 확정) → HTTP 500이라도 로그인 실패와 동일 문구(사수 지시).
+        let msg = "실명인증 미완(본인인증 필요) — 프로필 생성 POST 패킷 HTTP 실패: status=500, body={\"message\":\"Failed to create profile user\"}";
+        assert_eq!(
+            forum_failure_reason(msg),
+            "권한이 없거나 로그인이 만료되었습니다"
+        );
+    }
+
+    #[test]
+    fn forum_failure_reason_naver_ban_keeps_original_message() {
+        // 네이버가 직접 쏜 차단(UMON_PERMANENT_BANNED) → 일반 문구로 덮지 말고 원문 그대로(사수 지시).
+        let msg = "글쓰기 form 패킷 HTTP 실패: status=403, body={\"detailCode\":\"403F01\",\"message\":\"Permanent banned user.\",\"result\":{\"title\":\"UMON_PERMANENT_BANNED\",\"status\":403,\"detail\":\"Permanent banned user.\",\"errorCode\":\"403F01\",\"userId\":\"mmllmm10\"}}";
+        // 403이지만 status_reason(권한없음)으로 덮지 않고 네이버 message(+title)를 살린다.
+        assert_eq!(
+            forum_failure_reason(msg),
+            "Permanent banned user. (UMON_PERMANENT_BANNED)"
+        );
+        // 차단이 아니면 None(일반 403 매핑 경로 유지).
+        assert_eq!(
+            naver_original_ban_reason("글쓰기 form 패킷 HTTP 실패: status=403, body={\"message\":\"x\"}"),
+            None
         );
     }
 
