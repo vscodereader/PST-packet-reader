@@ -22,10 +22,13 @@ describe("admin api client", () => {
     expect(typeof api.devices.issueCode).toBe("function");
     expect(typeof api.accounts.distribute).toBe("function");
     expect(typeof api.audit.list).toBe("function");
-    // 07-게시명령 배선(2단계 종목 프록시 · 1단계 게시 명령 · 3단계 인벤토리).
+    // 07-게시명령 배선(1 게시명령 · 2 종목프록시 · 3 인벤토리 · 4 예약).
     expect(typeof api.forumStocks.list).toBe("function");
     expect(typeof api.publish.send).toBe("function");
     expect(typeof api.devices.inventory).toBe("function");
+    expect(typeof api.scheduled.create).toBe("function");
+    expect(typeof api.scheduled.list).toBe("function");
+    expect(typeof api.scheduled.remove).toBe("function");
   });
 });
 

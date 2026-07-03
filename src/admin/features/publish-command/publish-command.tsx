@@ -556,20 +556,53 @@ function ForumConfig({
 
   const confirmSchedule = () => {
     const split = armed === true;
-    onSchedule({
-      id: `sch-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
-      deviceName: device.name,
-      postTitle: postTitle ?? "-",
-      targetLabel: "종목토론방",
-      detail: detailFor(split),
-      at: toEpochMs(sched.date, sched.time),
-    });
-    notifications.show({
-      title: `${device.name} 예약 등록`,
-      message: `${scheduleMoment(sched.date, sched.time).when} · ${detailFor(split)}`,
-      color: "grape",
-    });
+    const at = toEpochMs(sched.date, sched.time);
+    const detail = detailFor(split);
+    const when = scheduleMoment(sched.date, sched.time).when;
     setArmed(null);
+    void (async () => {
+      try {
+        // 서버가 예약을 보관하고 스케줄러가 시각되면 발송한다(4단계). 계정×종목·글 전체를 함께 보낸다.
+        await api.scheduled.create({
+          deviceId: device.id,
+          postId: postId ?? "",
+          postTitle: postTitle ?? "",
+          targetLabel: "종목토론방",
+          split,
+          assignments: buildAssignments(split),
+          at,
+          detail,
+        });
+        notifications.show({
+          title: `${device.name} 예약 등록`,
+          message: `${when} · ${detail}`,
+          color: "grape",
+        });
+      } catch (e) {
+        if (isOffline(e)) {
+          // 서버 오프라인 → 로컬 예약 목록으로 폴백(미리보기 무손상).
+          onSchedule({
+            id: `sch-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+            deviceName: device.name,
+            postTitle: postTitle ?? "-",
+            targetLabel: "종목토론방",
+            detail,
+            at,
+          });
+          notifications.show({
+            title: `${device.name} 예약(미리보기)`,
+            message: `${when} · ${detail} · 서버 오프라인(로컬에만 표시)`,
+            color: "gray",
+          });
+        } else {
+          notifications.show({
+            title: "예약 등록 실패",
+            message: e instanceof Error ? e.message : String(e),
+            color: "red",
+          });
+        }
+      }
+    })();
   };
 
   return (

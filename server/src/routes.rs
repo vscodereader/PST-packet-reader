@@ -57,6 +57,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/devices/:id/commands", post(issue_command))
         .route("/admin/publish", post(issue_publish))
         .route("/admin/forum-stocks", get(forum_stocks))
+        .route("/admin/scheduled", post(create_scheduled).get(list_scheduled))
+        .route("/admin/scheduled/:id", delete(delete_scheduled))
         .route("/devices/:id/inventory", get(device_inventory))
         // ── 계정 스테이징·분배(§7·§10-3) ──
         .route("/admin/accounts", get(list_accounts))
@@ -388,35 +390,17 @@ async fn issue_command(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PublishStock {
-    code: String,
-    name: String,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PublishAssignment {
-    login_id: String,
-    stocks: Vec<PublishStock>,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct PublishReq {
     device_id: String,
     #[serde(default)]
     command_id: Option<String>,
-    post_id: String,
-    #[serde(default)]
-    post_title: String,
-    #[serde(default)]
-    target_label: String,
-    #[serde(default)]
-    split: bool,
-    assignments: Vec<PublishAssignment>,
+    #[serde(flatten)]
+    spec: crate::scheduled::PublishSpec,
 }
 
-/// 게시 명령 발행 — **하위 1대당 1묶음**(대원칙 0-1). 서버가 확정한 계정×종목(`assignments`)을 그대로
-/// 그 하위 SSE로 내려보내고, **통신로그에 무엇을·어느 계정에·어느 종목으로 보내는지 원문 전체를
-/// 자르지 않고** 남긴다(사용자 지시). 실제 게시는 하위(기존 큐/`run_forum_targets`)가 수행한다.
+/// 게시 명령 발행(즉시) — **하위 1대당 1묶음**(대원칙 0-1). 서버가 확정한 계정×종목을 그 하위 SSE로
+/// 내려보내고, **통신로그에 무엇을·어느 계정에·어느 종목으로 보내는지 원문 전체를 자르지 않고**
+/// 남긴다(사용자 지시). 발송·로깅은 예약 게시와 **동일 함수**(`dispatch_publish`)를 재사용한다.
 async fn issue_publish(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -434,11 +418,6 @@ async fn issue_publish(
         .command_id
         .clone()
         .unwrap_or_else(|| format!("c-{}", Uuid::new_v4()));
-    let target_label = if req.target_label.is_empty() {
-        "종목토론방".to_string()
-    } else {
-        req.target_label.clone()
-    };
 
     if !AppState::is_commandable(device.state) {
         let reason = match device.state {
@@ -452,7 +431,7 @@ async fn issue_publish(
             &req.device_id,
             &format!(
                 "거부: publish_posts(게시 명령) commandId={cid} 사유={reason} operator={} 글=\"{}\"(postId={})",
-                op.login_id, req.post_title, req.post_id
+                op.login_id, req.spec.post_title, req.spec.post_id
             ),
             "fail",
         )
@@ -460,64 +439,133 @@ async fn issue_publish(
         return Err(AppError::Conflict(format!("{reason} — 재연결 후 다시 시도")));
     }
 
-    let assignments_json: Vec<serde_json::Value> = req
-        .assignments
-        .iter()
-        .map(|a| {
-            serde_json::json!({
-                "loginId": a.login_id,
-                "stocks": a.stocks.iter()
-                    .map(|s| serde_json::json!({ "code": s.code, "name": s.name }))
-                    .collect::<Vec<_>>(),
-            })
-        })
-        .collect();
-    let payload = serde_json::json!({
-        "type": "publish_posts",
-        "commandId": cid,
-        "publish": {
-            "postId": req.post_id,
-            "postTitle": req.post_title,
-            "targetLabel": target_label,
-            "split": req.split,
-            "assignments": assignments_json,
-        }
-    });
-    st.hub.device_push(uid, payload.to_string());
-
-    // ★ 통신로그: 계정×종목·payload 원문 전체를 자르지 않고 남긴다(사용자 지시: 원문 전부).
-    let detail = req
-        .assignments
-        .iter()
-        .map(|a| {
-            format!(
-                "{}=[{}]",
-                a.login_id,
-                a.stocks
-                    .iter()
-                    .map(|s| format!("{}({})", s.name, s.code))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" · ");
-    st.audit(
-        "[CMD]",
-        &format!("Admin → {}", device.name),
-        &req.device_id,
-        &format!(
-            "publish_posts(게시 명령) commandId={cid} operator={} · 글=\"{}\"(postId={}) · 대상={target_label} · 방식={} · 계정×종목: {detail} · payload={payload}",
-            op.login_id,
-            req.post_title,
-            req.post_id,
-            if req.split { "나눠서" } else { "전체" }
-        ),
-        "cmd",
+    crate::scheduled::dispatch_publish(
+        &st,
+        &device,
+        &cid,
+        &req.spec,
+        &format!("operator={}", op.login_id),
     )
     .await;
 
     Ok(Json(serde_json::json!({ "ok": true, "commandId": cid })))
+}
+
+// ───────────────────────── 예약 게시(07-게시명령 4단계) ─────────────────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateScheduledReq {
+    device_id: String,
+    #[serde(flatten)]
+    spec: crate::scheduled::PublishSpec,
+    /// 발송 시각(epoch ms).
+    at: i64,
+    #[serde(default)]
+    detail: String,
+}
+
+/// 예약 등록 — 서버가 목록에 보관하고 스케줄러가 시각되면 발송한다. 등록 자체를 통신로그에 남긴다.
+async fn create_scheduled(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<CreateScheduledReq>,
+) -> AppResult<Json<serde_json::Value>> {
+    let op = st.auth_operator(&headers).await?;
+    let uid = Uuid::parse_str(&req.device_id)
+        .map_err(|_| AppError::BadRequest("기기 id 형식 오류".into()))?;
+    let device = st
+        .repo
+        .find_device(uid)
+        .await?
+        .ok_or_else(|| AppError::NotFound("없는 기기".into()))?;
+    let id = format!("sch-{}", Uuid::new_v4());
+    let item = crate::scheduled::ScheduledPost {
+        id: id.clone(),
+        device_id: uid,
+        device_name: device.name.clone(),
+        spec: req.spec,
+        at: req.at,
+        detail: req.detail,
+        created_at: Some(Utc::now().to_rfc3339()),
+    };
+    st.audit(
+        "[예약]",
+        &format!("Admin → {}", device.name),
+        &req.device_id,
+        &format!(
+            "예약 등록 id={id} operator={} · 발송예정(at={}) · 글=\"{}\"(postId={}) · 대상={} · 방식={} · 계정×종목: {}",
+            op.login_id,
+            item.at,
+            item.spec.post_title,
+            item.spec.post_id,
+            item.spec.target_label_or_default(),
+            if item.spec.split { "나눠서" } else { "전체" },
+            item.spec.detail(),
+        ),
+        "cmd",
+    )
+    .await;
+    st.scheduled.lock().unwrap().push(item);
+    Ok(Json(serde_json::json!({ "ok": true, "id": id })))
+}
+
+/// Admin '예약된 글' 목록(발송 시각 오름차순).
+async fn list_scheduled(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<Vec<crate::scheduled::ScheduledDto>>> {
+    st.auth_operator(&headers).await?;
+    let mut items: Vec<crate::scheduled::ScheduledDto> = st
+        .scheduled
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| s.to_dto())
+        .collect();
+    items.sort_by_key(|d| d.at);
+    Ok(Json(items))
+}
+
+/// 예약 삭제 — **무엇을 지웠는지(글·대상·계정×종목) 원문 전부**를 통신로그에 남긴다(사용자 지시).
+async fn delete_scheduled(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> AppResult<Json<serde_json::Value>> {
+    let op = st.auth_operator(&headers).await?;
+    let removed = {
+        let mut g = st.scheduled.lock().unwrap();
+        if let Some(pos) = g.iter().position(|s| s.id == id) {
+            Some(g.remove(pos))
+        } else {
+            None
+        }
+    };
+    match removed {
+        Some(item) => {
+            st.audit(
+                "[예약]",
+                &format!("Admin → {}", item.device_name),
+                &item.device_id.to_string(),
+                &format!(
+                    "예약 삭제 id={id} operator={} · 취소된 예약: 하위={} · 발송예정(at={}) · 글=\"{}\"(postId={}) · 대상={} · 방식={} · 계정×종목: {}",
+                    op.login_id,
+                    item.device_name,
+                    item.at,
+                    item.spec.post_title,
+                    item.spec.post_id,
+                    item.spec.target_label_or_default(),
+                    if item.spec.split { "나눠서" } else { "전체" },
+                    item.spec.detail(),
+                ),
+                "warn",
+            )
+            .await;
+            Ok(Json(serde_json::json!({ "ok": true })))
+        }
+        None => Err(AppError::NotFound("없는 예약".into())),
+    }
 }
 
 // ───────────────────────── 종목 프록시(07-게시명령 2단계) ─────────────────────────

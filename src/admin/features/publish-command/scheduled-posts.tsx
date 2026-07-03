@@ -9,9 +9,12 @@ import {
   ThemeIcon,
 } from "@mantine/core";
 import { IconTrash } from "@tabler/icons-react";
+import { useCallback, useEffect, useState } from "react";
 
 import { scheduleMoment } from "@/shared/schedule";
 import { Icon } from "@/shared/ui/icons";
+
+import { api } from "../../api";
 
 // 예약된 글 1건. 게시 명령 화면에서 '예약'하면 여기에 쌓이고, 예약 시각이 되면(AdminApp 타이머)
 // **게시되어 즉시 목록에서 사라진다**(게시 큐처럼 — 다른 화면 다녀올 필요 없음). 휴지통=예약 취소.
@@ -39,7 +42,40 @@ export function ScheduledPosts({
   items: ScheduledItem[];
   onRemove: (id: string) => void;
 }) {
-  const sorted = [...items].sort((a, b) => a.at - b.at);
+  // 서버가 예약을 보관·발송한다(4단계). 서버 목록을 2초마다 폴링해 실데이터로 렌더하고, 시각이
+  // 되면 서버 스케줄러가 발송·제거하므로 목록에서 자동으로 사라진다. 서버 오프라인이면 로컬 폴백
+  // (미리보기 무손상): server=null 이면 상위가 준 로컬 items/onRemove를 그대로 쓴다.
+  const [server, setServer] = useState<ScheduledItem[] | null>(null);
+
+  const refresh = useCallback(() => {
+    api.scheduled
+      .list()
+      .then((list) => setServer(list))
+      .catch(() => setServer(null)); // 오프라인 → 로컬 폴백
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    const t = setInterval(refresh, 2000);
+    return () => clearInterval(t);
+  }, [refresh]);
+
+  const online = server != null;
+  const list = server ?? items;
+  const remove = (id: string) => {
+    if (online) {
+      api.scheduled
+        .remove(id)
+        .then(refresh)
+        .catch(() => {
+          /* 실패해도 다음 폴링이 상태를 맞춘다 */
+        });
+    } else {
+      onRemove(id);
+    }
+  };
+
+  const sorted = [...list].sort((a, b) => a.at - b.at);
   return (
     <Stack gap="md" p="md" h="100%">
       <Box>
@@ -92,7 +128,7 @@ export function ScheduledPosts({
                     variant="subtle"
                     color="red"
                     title="예약 취소"
-                    onClick={() => onRemove(it.id)}
+                    onClick={() => remove(it.id)}
                   >
                     <IconTrash size={18} />
                   </ActionIcon>

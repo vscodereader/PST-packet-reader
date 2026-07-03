@@ -23,6 +23,9 @@ pub struct AppState {
     /// 하위 인벤토리(글목록·성공계정) — 하위가 주기적으로 보고하는 **실시간 상태**라 DB가 아니라
     /// 메모리에 최신 1건만 둔다(서버 재시작해도 하위가 곧 재보고). 07-게시명령 3단계.
     pub inventory: Arc<Mutex<HashMap<Uuid, DeviceInventory>>>,
+    /// 예약 게시 목록 — 서버가 보관하고 스케줄러가 시각되면 발송한다(07-게시명령 4단계). 인벤토리와
+    /// 같은 이유로 메모리 보관(개발 기본 in-memory 저장소와 일관).
+    pub scheduled: Arc<Mutex<Vec<crate::scheduled::ScheduledPost>>>,
 }
 
 fn bearer(headers: &HeaderMap) -> AppResult<String> {

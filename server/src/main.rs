@@ -8,6 +8,7 @@ mod hub;
 mod jwt;
 mod model;
 mod naver_stocks;
+mod scheduled;
 mod repo;
 mod routes;
 mod state;
@@ -85,7 +86,10 @@ async fn main() {
         cfg: Arc::new(cfg),
         dummy_pw_hash: Arc::new(dummy_pw_hash),
         inventory: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        scheduled: Arc::new(std::sync::Mutex::new(Vec::new())),
     };
+    // 예약 게시 스케줄러(07-게시명령 4단계) — 1초마다 도래한 예약을 하위로 발송한다.
+    tokio::spawn(scheduled::scheduler_loop(state.clone()));
     let app = routes::build_router(state);
 
     let listener = tokio::net::TcpListener::bind(&bind)

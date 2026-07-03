@@ -117,6 +117,15 @@ export interface DistributeResult {
   assignments: { deviceId: string; deviceName: string; count: number }[];
   moved: number;
 }
+// 예약 게시(07-게시명령 4단계) — 서버가 보관한 예약 목록(표시 전용). 프론트 ScheduledItem과 동일 모양.
+export interface ScheduledDto {
+  id: string;
+  deviceName: string;
+  postTitle: string;
+  targetLabel: string;
+  detail: string;
+  at: number;
+}
 // 하위 인벤토리(§8 신규 데이터흐름, 07-게시명령 3단계) — 하위가 보고한 글목록·성공계정.
 export interface InvPostDto {
   id: string;
@@ -304,6 +313,27 @@ export const api = {
       assignments: { loginId: string; stocks: { code: string; name: string }[] }[];
     }): Promise<{ ok: boolean; commandId: string }> {
       return request("POST", "/admin/publish", req);
+    },
+  },
+  scheduled: {
+    // 예약 게시(07-게시명령 4단계) — 서버가 보관하고 스케줄러가 시각되면 발송. 목록/삭제도 서버가.
+    create(req: {
+      deviceId: string;
+      postId: string;
+      postTitle: string;
+      targetLabel: string;
+      split: boolean;
+      assignments: { loginId: string; stocks: { code: string; name: string }[] }[];
+      at: number; // 발송 시각 epoch ms
+      detail: string;
+    }): Promise<{ ok: boolean; id: string }> {
+      return request("POST", "/admin/scheduled", req);
+    },
+    list(): Promise<ScheduledDto[]> {
+      return request("GET", "/admin/scheduled");
+    },
+    remove(id: string): Promise<unknown> {
+      return request("DELETE", `/admin/scheduled/${encodeURIComponent(id)}`);
     },
   },
   accounts: {
