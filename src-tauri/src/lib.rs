@@ -100,20 +100,22 @@ struct LikeOutcome {
 /// `apply_status_by_id`로 갱신하고, `store.mutate`가 디스크 저장 + 프론트 이벤트를 발생시킨다.
 fn mark_account_status<R: Runtime>(
     app: &tauri::AppHandle<R>,
-    account_id: &str,
+    login_id: &str,
     status: ipc::accounts::AccountStatus,
     msg: &str,
 ) {
+    // 좋아요는 프론트가 **loginId**(쿠키 키, like-modal.tsx §85)로 넘긴다. 계정 상태 행도 login_id로
+    // 매칭해야 갱신된다(id로 매칭하면 안 맞아 상태가 안 바뀜 — #383 회귀 원인).
     let store = app.state::<JsonStore<ipc::accounts::Account>>();
-    let id = account_id.to_owned();
+    let id = login_id.to_owned();
     let msg_owned = msg.to_owned();
     store.mutate(move |accounts| {
-        ipc::accounts::apply_status_by_id(accounts, &id, status, Some(msg_owned))
+        ipc::accounts::apply_status_by_login_id(accounts, &id, status, Some(msg_owned))
     });
-    // 만료/차단 계정의 "쿠키만료" 카운트다운 제거 + 죽은/차단 세션 쿠키 삭제.
-    if let Err(error) = crate::auth::clear_account_cookies(account_id) {
+    // 만료/차단 계정의 "쿠키만료" 카운트다운 제거 + 죽은/차단 세션 쿠키 삭제(쿠키 파일 키=loginId).
+    if let Err(error) = crate::auth::clear_account_cookies(login_id) {
         tracing::warn!(
-            account = %crate::auth::mask_id(account_id),
+            account = %crate::auth::mask_id(login_id),
             error = %error,
             "좋아요 후 쿠키 삭제 실패"
         );

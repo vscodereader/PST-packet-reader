@@ -86,6 +86,19 @@ pub(super) enum NpayJoinStatus {
     Unknown,
 }
 
+/// 좋아요가 막힌 계정의 **제재 상태 원문 판정**(2026-07-03). `probe_restriction_raw`가
+/// `/api/community/profile/users/form` 응답 **원문 전체**를 보고 돌려준다.
+pub(super) enum RestrictionVerdict {
+    /// 차단/제재 확정 — 본문에 UMON 밴/아이디 잠금/보호조치/이용제한/글쓰기 금지/비정상적인 활동.
+    Blocked(String),
+    /// 로그인 안 됨(세션 만료) — 로그인 페이지/비로그인 응답.
+    Expired(String),
+    /// 정상(비차단·로그인됨) — 좋아요 실패는 계정 아닌 대상(글 삭제 등) 문제.
+    Healthy,
+    /// 전송 실패 등 판정 불가.
+    Unknown(String),
+}
+
 /// 게시글의 현재 반응(좋아요/싫어요) 상태. `GET /posts/reactions?postIds=` 응답에서 뽑는다.
 /// `reaction_id`가 있으면 내가 이미 어떤 반응을 눌러 둔 것이고(변경은 PUT), 없으면 최초(POST)다.
 pub(super) struct PostReaction {
@@ -966,6 +979,43 @@ impl NaverPacketClient {
         }
         tracing::info!(post_id = %post_id, "좋아요 완료");
         Ok(())
+    }
+
+    /// 좋아요가 막힌 계정의 **제재 상태를 원문으로 확정**한다(사용자 요청 2026-07-03: 추측 말고
+    /// 네이버가 실제로 뱉은 원문으로 차단/만료를 가른다). `/api/community/profile/users/form`을 저장
+    /// 쿠키만으로 GET해 응답 **status·body 전체를 자르지 않고** 로그에 남기고, 그 원문으로 판정한다.
+    /// (실측 07-02: 차단 계정은 이 form이 403 `UMON_*_BANNED`, 정상은 200 `status:existent`.)
+    pub(super) fn probe_restriction_raw(&self) -> RestrictionVerdict {
+        const PATH: &str = "/api/community/profile/users/form";
+        tracing::info!(
+            api = "GET /api/community/profile/users/form",
+            "실제 API 호출 label=\"좋아요-제재확인 프로필 form\""
+        );
+        let headers = match self.stock_get_headers(STOCK_HOST, DEFAULT_REFERER) {
+            Ok(headers) => headers,
+            Err(error) => return RestrictionVerdict::Unknown(format!("form 헤더 생성 실패: {error}")),
+        };
+        let response = match self
+            .client
+            .get(format!("{STOCK_ORIGIN}{PATH}"))
+            .headers(headers)
+            .send_traced(&self.client)
+        {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(error = %error, "좋아요-제재확인 form 전송 실패");
+                return RestrictionVerdict::Unknown(format!("form 전송 실패: {error}"));
+            }
+        };
+        let status = response.status().as_u16();
+        let body = response.text().unwrap_or_default();
+        // 원문 전체를 자르지 않고 그대로 남긴다(사용자 지시: 원문으로 판단).
+        tracing::warn!(
+            status,
+            body = %body,
+            "[좋아요][원문] 프로필 form 응답 전체(제재 판정용, 자르지 않음)"
+        );
+        classify_restriction_body(status, &body)
     }
 
     // stock.naver.com JSON API를 공통 헤더로 호출하고 JSON으로 파싱하는 함수입니다.
@@ -2150,6 +2200,43 @@ fn auth_cookies_raw_line(cookies: &[NaverCookie]) -> String {
         pick("NID_SES"),
         pick("BUC")
     )
+}
+
+/// 프로필 form 응답 **원문(status+body)** 만으로 제재/만료/정상을 가른다(순수 함수, 테스트 가능).
+/// 차단 신호(네이버 원문): UMON 밴/`403F0x`/`penaltyDays`, 또는 페이지 본문 `아이디 잠금`/`잠금조치`/
+/// `보호조치`/`이용제한`/`이용이 제한`/`글쓰기 금지`/`비정상적인 활동`. 로그인 안 됨 신호: 로그인
+/// 페이지(`nidlogin.login`/`frmNIDLogin`) 리다이렉트·비로그인 응답(401/`"rtn_cd":"1"`).
+fn classify_restriction_body(status: u16, body: &str) -> RestrictionVerdict {
+    let has = |needle: &str| body.contains(needle);
+    let blocked = has("UMON_TEMP_BANNED")
+        || has("UMON_PERMANENT_BANNED")
+        || has("403F01")
+        || has("403F02")
+        || has("penaltyDays")
+        || has("아이디 잠금")
+        || has("잠금조치")
+        || has("보호조치")
+        || has("이용제한")
+        || has("이용이 제한")
+        || has("글쓰기 금지")
+        || has("비정상적인 활동");
+    if blocked {
+        return RestrictionVerdict::Blocked(log_snippet(body));
+    }
+    let logged_out = status == 401
+        || has("nidlogin.login")
+        || has("frmNIDLogin")
+        || has("\"rtn_cd\":\"1\"")
+        || has("네이버에 로그인");
+    if logged_out {
+        return RestrictionVerdict::Expired(log_snippet(body));
+    }
+    if status == 200 {
+        RestrictionVerdict::Healthy
+    } else {
+        // 판정 못 한 비200 — 원문은 이미 로그에 남겼으니 보수적으로 만료(재로그인) 처리.
+        RestrictionVerdict::Expired(log_snippet(body))
+    }
 }
 
 fn financial_join_completed(final_url: &str) -> bool {
