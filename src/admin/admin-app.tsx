@@ -21,6 +21,7 @@ import { AccountDistribute } from "./features/account-distribute/account-distrib
 import { CommLog } from "./features/comm-log/comm-log";
 import { DeviceConnection } from "./features/device-connection/device-connection";
 import { Operators } from "./features/operators/operators";
+import { PublishCommand } from "./features/publish-command/publish-command";
 import { ResultReport } from "./features/result-report/result-report";
 import { AUTH_SCREENS, PREVIEW_SCREENS, type Screen } from "./screens";
 
@@ -34,6 +35,7 @@ interface NavEntry {
 const NAV: NavEntry[] = [
   { id: "devices", icon: "globe", label: "기기 연결" },
   { id: "distribute", icon: "users", label: "계정 분배" },
+  { id: "publish-command", icon: "send", label: "게시 명령" },
   { id: "report", icon: "chart", label: "결과 보고" },
   { id: "operators", icon: "settings", label: "운영자 관리" },
   { id: "change-pw", icon: "eye", label: "비밀번호 변경" },
@@ -128,6 +130,8 @@ function AppScreen({
       return <DeviceConnection />;
     case "distribute":
       return <AccountDistribute />;
+    case "publish-command":
+      return <PublishCommand />;
     case "report":
       return <ResultReport />;
     case "operators":
