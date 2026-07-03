@@ -89,6 +89,18 @@ pub fn read_account_cookies(account_id: &str) -> Result<Option<Value>, Orchestra
     }
 }
 
+/// 계정의 저장된 쿠키 파일을 삭제한다 — "쿠키만료" 카운트다운이 사라지고([`account_cookie_expiry`]가
+/// `None`), 죽은/차단된 세션 쿠키를 없앤다. 세션 만료(재로그인)·차단(비활성)으로 상태를 바꿀 때
+/// 함께 호출한다(사용자 요청 2026-07-03: 만료/비활성 시 쿠키기한 삭제). 파일이 없으면 무해.
+pub fn clear_account_cookies(account_id: &str) -> Result<(), OrchestratorError> {
+    let paths = paths_for_root(app_data_root()?);
+    let path = cookie_file_path(&paths, account_id);
+    if path.exists() {
+        fs::remove_file(&path)?;
+    }
+    Ok(())
+}
+
 /// 계정관리 화면의 "쿠키만료" 카운트다운용: 저장된 로그인 쿠키 중 네이버 인증/로그인 유지
 /// 쿠키(NID_SES/NID_JST/NID_SAUTO/NID_AUT)의 만료 시각(unix seconds) 최댓값을 돌려준다.
 /// 전부 세션 쿠키(실만료 없음)거나 쿠키 파일이 없으면 `None`. 만료 검증은 하지 않고 실제

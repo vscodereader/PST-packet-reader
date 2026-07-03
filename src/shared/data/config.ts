@@ -115,6 +115,8 @@ export const STATUS_ACCOUNT: Record<string, { t: string; c: string }> = {
   timedOut: { t: "대기초과", c: "cyan" },
   badCredentials: { t: "비번오류", c: "orange" },
   challenge: { t: "인증필요", c: "yellow" },
+  // 세션 만료로 좋아요/게시 인증 실패(2026-07-03). 재로그인하면 회복 — 분홍 배지로 차단(빨강)과 구분.
+  relogin: { t: "재로그인", c: "pink" },
   blocked: { t: "차단", c: "red" },
   error: { t: "에러", c: "red" },
 };
@@ -126,6 +128,7 @@ export const STATUS_ACCOUNT_ORDER = [
   "timedOut",
   "badCredentials",
   "challenge",
+  "relogin",
   "blocked",
   "error",
 ];
@@ -151,6 +154,8 @@ export const STATUS_GUIDE: Record<string, string> = {
     "아이디 또는 비밀번호가 올바르지 않습니다. 계정 정보를 확인하세요.",
   challenge:
     "추가 인증이 필요합니다. 열린 창에서 캡차/2차 인증을 완료한 뒤 다시 실행하세요.",
+  relogin:
+    "세션이 만료되었습니다. 이 계정을 다시 로그인하세요(쿠키는 삭제됐습니다). 재로그인 후에도 막히면 차단 계정입니다.",
   blocked:
     "계정 접근이 차단되었습니다. 잠시 후 다시 시도하거나 계정 상태를 확인하세요.",
   error: "로그인 중 오류가 발생했습니다. 네트워크/환경을 확인하세요.",
@@ -159,7 +164,12 @@ export const STATUS_GUIDE: Record<string, string> = {
 
 // 대시보드 "오류" 집계 대상. 백엔드 `stats.rs::is_problem_status`와 일치시킨다 — 사용자
 // 조치가 필요한 실패 계열(비번오류·차단·기타 오류). challenge는 진행 중 단계라 제외.
-export const PROBLEM_STATUSES = ["error", "badCredentials", "blocked"];
+export const PROBLEM_STATUSES = [
+  "error",
+  "badCredentials",
+  "relogin",
+  "blocked",
+];
 export function isProblemStatus(status: string): boolean {
   return PROBLEM_STATUSES.includes(status);
 }

@@ -89,6 +89,9 @@ pub(crate) fn guide(status: &AccountStatus) -> &'static str {
         AccountStatus::Blocked => {
             "계정 접근이 차단되었습니다. 잠시 후 다시 시도하거나 계정 상태를 확인하세요."
         }
+        AccountStatus::Relogin => {
+            "세션이 만료되었습니다. 이 계정을 다시 로그인하세요."
+        }
         AccountStatus::Error => "로그인 중 오류가 발생했습니다. 네트워크/환경을 확인하세요.",
         AccountStatus::New => "아직 로그인하지 않은 계정입니다.",
     }
@@ -174,9 +177,10 @@ pub(crate) fn status_activity_type(status: &AccountStatus) -> ActivityType {
         AccountStatus::OnHold => ActivityType::Info,
         // 대기초과(서버/타이밍 일시 문제, #286 후속)도 재시도 대상이라 Info로 둔다.
         AccountStatus::TimedOut => ActivityType::Info,
-        AccountStatus::BadCredentials | AccountStatus::Blocked | AccountStatus::Error => {
-            ActivityType::Error
-        }
+        AccountStatus::BadCredentials
+        | AccountStatus::Blocked
+        | AccountStatus::Relogin
+        | AccountStatus::Error => ActivityType::Error,
     }
 }
 
@@ -190,6 +194,7 @@ pub(crate) fn activity_message(login_id: &str, status: &AccountStatus, detail: &
         AccountStatus::BadCredentials => "로그인 실패(비밀번호 오류)",
         AccountStatus::Challenge => "추가 인증 필요",
         AccountStatus::Blocked => "접근 차단",
+        AccountStatus::Relogin => "재로그인 필요",
         AccountStatus::Error => "로그인 오류",
         AccountStatus::New => "미로그인",
     };
