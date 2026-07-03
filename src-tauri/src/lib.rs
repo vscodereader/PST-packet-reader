@@ -111,7 +111,8 @@ fn mark_account_status<R: Runtime>(
     let id = login_id.to_owned();
     let msg_owned = msg.to_owned();
     store.mutate(move |accounts| {
-        ipc::accounts::apply_status_by_login_id(accounts, &id, status, Some(msg_owned))
+        // 좋아요 경로는 백트레이스가 없으므로 status_trace=None(#324 병합: 5번째 인자 추가됨).
+        ipc::accounts::apply_status_by_login_id(accounts, &id, status, Some(msg_owned), None)
     });
     // 만료/차단 계정의 "쿠키만료" 카운트다운 제거 + 죽은/차단 세션 쿠키 삭제(쿠키 파일 키=loginId).
     if let Err(error) = crate::auth::clear_account_cookies(login_id) {
@@ -650,6 +651,7 @@ async fn manual_add_account<R: Runtime>(
         pw: result.password,
         status: AccountStatus::Active,
         status_msg: None,
+        status_trace: None,
         last: "방금".to_owned(),
         tags: vec![],
     };

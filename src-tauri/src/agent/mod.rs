@@ -674,10 +674,13 @@ fn classify_accounts<R: Runtime>(app: &AppHandle<R>, login_ids: &[String]) -> Ta
             AccountStatus::TimedOut => t.timedout.push((id.clone(), pw)),
             // 미시도/게시쿨다운 등 로그인 결과 아님 — 삭제·집계 제외.
             AccountStatus::New | AccountStatus::Waiting => {}
-            // 비번오류·추가인증·차단·에러 = 실패(§10-4)
+            // 비번오류·추가인증·차단·재로그인(세션만료)·에러 = 실패(§10-4). Relogin은 master가
+            // 추가한 상태로, 앱 전반(is_problem_status·status_activity_type)에서 실패/오류군으로
+            // 묶이므로 여기서도 실패로 본다(자동삭제는 BadCredentials만이라 Relogin은 보존됨).
             AccountStatus::BadCredentials
             | AccountStatus::Challenge
             | AccountStatus::Blocked
+            | AccountStatus::Relogin
             | AccountStatus::Error => {
                 let reason = if why.is_empty() {
                     format!("{:?}", acct.status)
