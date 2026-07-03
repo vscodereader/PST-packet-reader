@@ -117,6 +117,16 @@ export interface DistributeResult {
   assignments: { deviceId: string; deviceName: string; count: number }[];
   moved: number;
 }
+// 하위 인벤토리(§8 신규 데이터흐름, 07-게시명령 3단계) — 하위가 보고한 글목록·성공계정.
+export interface InvPostDto {
+  id: string;
+  title: string;
+}
+export interface DeviceInventoryDto {
+  posts: InvPostDto[];
+  accounts: string[];
+  receivedAt: string | null;
+}
 // 종목 프록시(§8 신규 데이터흐름, 07-게시명령 2단계) — 서버 DTO와 일치(camelCase).
 export interface ForumStockDto {
   code: string;
@@ -260,6 +270,10 @@ export const api = {
         type,
         commandId,
       });
+    },
+    // 게시명령 화면 실데이터(07-게시명령 3단계) — 이 하위의 글목록·성공계정.
+    inventory(id: string): Promise<DeviceInventoryDto> {
+      return request("GET", `/devices/${encodeURIComponent(id)}/inventory`);
     },
   },
   forumStocks: {

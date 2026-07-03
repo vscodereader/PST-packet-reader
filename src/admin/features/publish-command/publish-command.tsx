@@ -146,6 +146,10 @@ export function PublishCommand({
 }) {
   const [devices, setDevices] = useState<PubDevice[]>(DUMMY_DEVICES);
   const [selDev, setSelDev] = useState<Set<string>>(new Set());
+  // 하위별 실데이터 인벤토리(글목록·성공계정) — 서버가 있으면 채워지고, 없으면 더미로 폴백(UI 무손상).
+  const [invByDev, setInvByDev] = useState<
+    Record<string, { posts: { id: string; title: string }[]; accounts: string[] }>
+  >({});
   const [postByDev, setPostByDev] = useState<Record<string, string | null>>({});
   // 게시 대상은 **하위별로** 고른다 — 한 대는 종토, 다른 대는 카페처럼 서로 다를 수 있다.
   const [targetByDev, setTargetByDev] = useState<Record<string, Target>>({});
@@ -167,6 +171,35 @@ export function PublishCommand({
         /* 오프라인 → 더미 유지 */
       });
   }, []);
+
+  // 하위별 인벤토리(글목록·성공계정) 로드 — 하위가 서버로 보고한 실데이터. 오프라인/미보고면
+  // 그 하위는 채우지 않아 더미로 폴백된다(postsFor/accountsFor). devices가 바뀔 때마다 다시 조회.
+  useEffect(() => {
+    let cancelled = false;
+    devices.forEach((d) => {
+      api.devices
+        .inventory(d.id)
+        .then((inv) => {
+          if (cancelled) return;
+          setInvByDev((prev) => ({
+            ...prev,
+            [d.id]: { posts: inv.posts, accounts: inv.accounts },
+          }));
+        })
+        .catch(() => {
+          /* 오프라인/미보고 → 그 하위는 더미 폴백 */
+        });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [devices]);
+
+  // 실데이터 우선, 없으면(오프라인/미보고) 더미. 글목록이 비어있어도 보고된 것이면 실데이터로 본다.
+  const postsFor = (deviceId: string): { id: string; title: string }[] =>
+    invByDev[deviceId]?.posts ?? mockPosts(deviceId);
+  const accountsFor = (deviceId: string): string[] =>
+    invByDev[deviceId]?.accounts ?? mockAccounts(deviceId);
 
   const toggleDev = (id: string) =>
     setSelDev((prev) => {
@@ -252,7 +285,7 @@ export function PublishCommand({
                   onChange={(v) =>
                     setPostByDev((prev) => ({ ...prev, [d.id]: v }))
                   }
-                  data={mockPosts(d.id).map((p) => ({
+                  data={postsFor(d.id).map((p) => ({
                     value: p.id,
                     label: shortTitle(p.title),
                   }))}
@@ -281,11 +314,12 @@ export function PublishCommand({
                 device={d}
                 postTitle={
                   postByDev[d.id]
-                    ? (mockPosts(d.id).find((p) => p.id === postByDev[d.id])
+                    ? (postsFor(d.id).find((p) => p.id === postByDev[d.id])
                         ?.title ?? null)
                     : null
                 }
                 postId={postByDev[d.id] ?? null}
+                accounts={accountsFor(d.id)}
                 target={targetByDev[d.id] ?? null}
                 onSetTarget={(t) =>
                   setTargetByDev((prev) => ({ ...prev, [d.id]: t }))
@@ -307,6 +341,7 @@ function DeviceBlock({
   device,
   postId,
   postTitle,
+  accounts,
   target,
   onSetTarget,
   cfg,
@@ -316,6 +351,7 @@ function DeviceBlock({
   device: PubDevice;
   postId: string | null;
   postTitle: string | null;
+  accounts: string[];
   target: Target | null;
   onSetTarget: (t: Target) => void;
   cfg: ForumCfg;
@@ -374,6 +410,7 @@ function DeviceBlock({
           onPatch={onPatch}
           postId={postId}
           postTitle={postTitle}
+          accounts={accounts}
           onSchedule={onSchedule}
         />
       )}
@@ -394,6 +431,7 @@ function ForumConfig({
   onPatch,
   postId,
   postTitle,
+  accounts,
   onSchedule,
 }: {
   device: PubDevice;
@@ -401,6 +439,7 @@ function ForumConfig({
   onPatch: (patch: Partial<ForumCfg>) => void;
   postId: string | null;
   postTitle: string | null;
+  accounts: string[];
   onSchedule: (item: ScheduledItem) => void;
 }) {
   // 토론 카테고리는 시장 구분이 없어 전체 고정(데스크톱과 동일 규칙).
@@ -437,7 +476,7 @@ function ForumConfig({
   const n = typeof cfg.count === "number" ? cfg.count : 0;
   const { picked, error } = useMemo(() => pickStocks(pool, n), [pool, n]);
 
-  const accounts = mockAccounts(device.id);
+  // 계정 = 상위(PublishCommand)가 넘긴 이 하위의 성공(Active) 계정(실데이터/더미 폴백).
 
   // 게시 실행 조건. 즉시/예약(각 계정 전체 종목)은 글·종목수·계정만 있으면 됨. 나눠서(균등분배)는
   // 데스크톱과 동일: 계정 2개↑ + 종목 2개↑ + 종목수 ≥ 계정수(#267-5).

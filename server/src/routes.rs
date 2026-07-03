@@ -57,6 +57,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/devices/:id/commands", post(issue_command))
         .route("/admin/publish", post(issue_publish))
         .route("/admin/forum-stocks", get(forum_stocks))
+        .route("/devices/:id/inventory", get(device_inventory))
         // ── 계정 스테이징·분배(§7·§10-3) ──
         .route("/admin/accounts", get(list_accounts))
         .route("/admin/accounts/import", post(import_accounts))
@@ -70,6 +71,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/agent/heartbeat", post(agent_heartbeat))
         .route("/agent/state", post(agent_state))
         .route("/agent/log", post(agent_log))
+        .route("/agent/inventory", post(agent_inventory))
         .route("/agent/commands/:command_id/result", post(command_result))
         .route("/agent/post-report", post(post_report))
         .route("/admin/post-reports", get(list_post_reports))
@@ -1028,6 +1030,58 @@ async fn agent_log(
 struct AgentLogReq {
     #[serde(default)]
     lines: Vec<String>,
+}
+
+/// 하위 인벤토리 보고(07-게시명령 3단계). 하위가 자기 글목록(LibraryPost)·성공(Active)계정을
+/// 주기적으로 올린다 → Admin 게시명령 화면이 실데이터로 렌더. 메모리에 최신 1건만 둔다.
+/// **바뀌었을 때만** 통신로그에 원문(글 제목·계정 loginId 전부)을 남긴다(주기 보고 도배 방지).
+async fn agent_inventory(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(mut inv): Json<DeviceInventory>,
+) -> AppResult<Json<serde_json::Value>> {
+    let device = st.auth_device(&headers).await?;
+    inv.received_at = Some(Utc::now().to_rfc3339());
+    let posts_dump = inv
+        .posts
+        .iter()
+        .map(|p| format!("{}({})", p.title, p.id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let accts_dump = inv.accounts.join(", ");
+    let changed = st.set_inventory(device.id, inv.clone());
+    if changed {
+        st.audit(
+            "[인벤토리]",
+            &format!("{} → 서버", device.name),
+            &device.id.to_string(),
+            &format!(
+                "글목록 {}건·성공계정 {}명 갱신 · 글=[{}] · 계정=[{}]",
+                inv.posts.len(),
+                inv.accounts.len(),
+                posts_dump,
+                accts_dump
+            ),
+            "info",
+        )
+        .await;
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Admin 게시명령 화면 — 특정 하위의 글목록·성공계정(실데이터). 아직 보고 전이면 빈 목록.
+async fn device_inventory(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> AppResult<Json<DeviceInventory>> {
+    st.auth_operator(&headers).await?;
+    let uid = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("기기 id 형식 오류".into()))?;
+    Ok(Json(st.get_inventory(uid).unwrap_or(DeviceInventory {
+        posts: vec![],
+        accounts: vec![],
+        received_at: None,
+    })))
 }
 
 /// Admin '로그인 결과' 탭 — 모든 하위의 로그인 결과(컴퓨터당 최신 1건, 최신순).

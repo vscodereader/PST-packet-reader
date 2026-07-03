@@ -132,6 +132,17 @@ pub async fn post_log(
     post_authed(client, base, token, "/agent/log", &LogReq { lines }).await
 }
 
+/// 인벤토리 보고(07-게시명령 3단계). 하위 글목록(LibraryPost)·성공(Active)계정을 올려
+/// Admin 게시명령 화면이 실데이터로 렌더하게 한다. body = `{posts:[{id,title}], accounts:[loginId]}`.
+pub async fn post_inventory(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    body: &serde_json::Value,
+) -> Result<(), String> {
+    post_authed(client, base, token, "/agent/inventory", body).await
+}
+
 /// SSE 스트림 열기(`GET /agent/stream?token=`). 브라우저가 아니므로 토큰을 쿼리로 싣는다.
 /// 반환된 Response를 `chunk()`로 읽어 `data:` 줄을 파싱한다(호출부).
 pub async fn open_stream(

@@ -1,5 +1,6 @@
 //! 공유 상태 + 인증/감사 헬퍼.
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use axum::http::{header::AUTHORIZATION, HeaderMap};
 use chrono::Utc;
@@ -8,7 +9,7 @@ use uuid::Uuid;
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
 use crate::hub::Hub;
-use crate::model::{AuditDto, AuditEntry, Device, Operator, Role};
+use crate::model::{AuditDto, AuditEntry, Device, DeviceInventory, Operator, Role};
 use crate::repo::Repository;
 use crate::{jwt, model::DeviceState};
 
@@ -19,6 +20,9 @@ pub struct AppState {
     pub cfg: Arc<Config>,
     /// 존재하지 않는 운영자 로그인 시에도 argon2를 한 번 돌려 타이밍을 맞추기 위한 더미 해시(계정 열거 방지).
     pub dummy_pw_hash: Arc<String>,
+    /// 하위 인벤토리(글목록·성공계정) — 하위가 주기적으로 보고하는 **실시간 상태**라 DB가 아니라
+    /// 메모리에 최신 1건만 둔다(서버 재시작해도 하위가 곧 재보고). 07-게시명령 3단계.
+    pub inventory: Arc<Mutex<HashMap<Uuid, DeviceInventory>>>,
 }
 
 fn bearer(headers: &HeaderMap) -> AppResult<String> {
@@ -115,5 +119,68 @@ impl AppState {
     /// 기기 상태가 명령 가능(online)인지(§4-2 거부 판정용).
     pub fn is_commandable(state: DeviceState) -> bool {
         matches!(state, DeviceState::Online)
+    }
+
+
+    /// 하위 인벤토리 최신 1건 저장. 반환값 = 직전 내용과 **달라졌는지**(글목록·성공계정 기준).
+    /// 통신로그는 바뀌었을 때만 남겨(주기 보고 도배 방지) 실제 변화만 기록한다.
+    pub fn set_inventory(&self, id: Uuid, inv: DeviceInventory) -> bool {
+        let mut g = self.inventory.lock().unwrap();
+        let changed = inventory_changed(g.get(&id), &inv);
+        g.insert(id, inv);
+        changed
+    }
+
+    /// 하위 인벤토리 최신 1건 조회(없으면 None).
+    pub fn get_inventory(&self, id: Uuid) -> Option<DeviceInventory> {
+        self.inventory.lock().unwrap().get(&id).cloned()
+    }
+}
+
+/// 인벤토리가 직전 대비 바뀌었는지(글목록·성공계정 기준). `received_at`은 매번 바뀌므로 비교에서
+/// 제외한다 — 시각만 달라진 재보고를 "변화"로 보면 통신로그가 도배된다. 순수함수(테스트 대상).
+fn inventory_changed(prev: Option<&DeviceInventory>, next: &DeviceInventory) -> bool {
+    match prev {
+        Some(p) => p.posts != next.posts || p.accounts != next.accounts,
+        None => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::InvPost;
+
+    fn inv(posts: &[(&str, &str)], accounts: &[&str]) -> DeviceInventory {
+        DeviceInventory {
+            posts: posts
+                .iter()
+                .map(|(id, t)| InvPost { id: (*id).into(), title: (*t).into() })
+                .collect(),
+            accounts: accounts.iter().map(|s| (*s).to_string()).collect(),
+            // received_at은 비교 제외 대상이므로 일부러 채워 넣어도 결과가 같아야 한다.
+            received_at: Some("2026-07-03T00:00:00Z".into()),
+        }
+    }
+
+    #[test]
+    fn first_report_is_always_a_change() {
+        assert!(inventory_changed(None, &inv(&[("p1", "글")], &["a"])));
+    }
+
+    #[test]
+    fn same_content_is_not_a_change_even_if_received_at_differs() {
+        let prev = inv(&[("p1", "글")], &["a"]);
+        let mut next = inv(&[("p1", "글")], &["a"]);
+        next.received_at = Some("2099-01-01T00:00:00Z".into()); // 시각만 다름
+        assert!(!inventory_changed(Some(&prev), &next), "시각만 바뀐 재보고는 변화 아님");
+    }
+
+    #[test]
+    fn changed_posts_or_accounts_is_a_change() {
+        let prev = inv(&[("p1", "글")], &["a"]);
+        assert!(inventory_changed(Some(&prev), &inv(&[("p1", "글2")], &["a"])), "제목 변경");
+        assert!(inventory_changed(Some(&prev), &inv(&[("p1", "글"), ("p2", "새글")], &["a"])), "글 추가");
+        assert!(inventory_changed(Some(&prev), &inv(&[("p1", "글")], &["a", "b"])), "성공계정 추가");
     }
 }

@@ -84,6 +84,7 @@ async fn main() {
         hub: Arc::new(Hub::new()),
         cfg: Arc::new(cfg),
         dummy_pw_hash: Arc::new(dummy_pw_hash),
+        inventory: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
     let app = routes::build_router(state);
 

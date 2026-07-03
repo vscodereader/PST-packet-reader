@@ -42,6 +42,27 @@ pub struct Device {
     pub last_seen: DateTime<Utc>,
 }
 
+/// 하위 인벤토리(글목록·성공계정) — 하위가 주기적으로 보고. Admin 게시명령 화면이 실데이터로 렌더한다.
+/// serde(camelCase)로 하위 보고 body와 Admin 응답 DTO를 겸한다(07-게시명령 3단계).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvPost {
+    pub id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceInventory {
+    /// 로컬 글 목록(LibraryPost id/title).
+    pub posts: Vec<InvPost>,
+    /// 로그인 성공(Active) 계정 loginId 목록.
+    pub accounts: Vec<String>,
+    /// 마지막 보고 시각(Admin 표시용).
+    #[serde(default)]
+    pub received_at: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct DeviceCode {
     pub code: String,

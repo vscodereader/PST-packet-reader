@@ -120,11 +120,53 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
 
     let cmd_app = app.clone();
     let post_app = app.clone();
+    let inv_app = app.clone();
     tauri::async_runtime::spawn(async move { command_loop(cmd_app).await });
     tauri::async_runtime::spawn(async move { heartbeat_loop().await });
     tauri::async_runtime::spawn(async move { state_report_loop(rx).await });
     tauri::async_runtime::spawn(async move { post_report_loop(post_app).await });
     tauri::async_runtime::spawn(async move { log_forward_loop().await });
+    tauri::async_runtime::spawn(async move { inventory_report_loop(inv_app).await });
+}
+
+// ───────────────────────── 인벤토리 보고 루프(07-게시명령 3단계) ─────────────────────────
+
+/// 하위 글목록(LibraryPost)·성공(Active)계정을 주기적으로 서버에 보고 → Admin 게시명령 화면이
+/// 실데이터로 렌더한다. 서버는 최신 1건만 두고 **바뀌었을 때만** 통신로그에 남긴다(도배 방지).
+/// 미등록이면 보고 안 함(단독 동작 무영향).
+async fn inventory_report_loop<R: Runtime>(app: AppHandle<R>) {
+    let client = reqwest::Client::new();
+    loop {
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        let Some(cfg) = config::load() else {
+            continue;
+        };
+        let posts: Vec<(String, String)> = app
+            .state::<JsonStore<crate::ipc::posts::LibraryPost>>()
+            .snapshot()
+            .into_iter()
+            .map(|p| (p.id, p.title))
+            .collect();
+        let accounts = app.state::<JsonStore<Account>>().snapshot();
+        let body = inventory_body(&posts, &accounts);
+        let _ = net::post_inventory(&client, &cfg.server_url, &cfg.device_token, &body).await;
+    }
+}
+
+/// 인벤토리 보고 본문(서버 `DeviceInventory` 모양). 글=(id,title) 전부, 계정=성공(Active) loginId만.
+/// 순수함수(테스트 대상) — 스토어 스냅샷 투영값을 받아 JSON을 만든다.
+fn inventory_body(posts: &[(String, String)], accounts: &[Account]) -> serde_json::Value {
+    let posts: Vec<serde_json::Value> = posts
+        .iter()
+        .map(|(id, title)| serde_json::json!({ "id": id, "title": title }))
+        .collect();
+    // 게시 대상 계정 = 로그인 성공(Active)만. 게시명령 화면은 이 계정들만 노출한다.
+    let accounts: Vec<String> = accounts
+        .iter()
+        .filter(|a| matches!(a.status, AccountStatus::Active))
+        .map(|a| a.login_id.clone())
+        .collect();
+    serde_json::json!({ "posts": posts, "accounts": accounts })
 }
 
 // ───────────────────────── 로그 전송 루프(#324) ─────────────────────────
@@ -990,6 +1032,44 @@ mod tests {
         // 누적 합계 동봉.
         assert_eq!(v["cumulative"]["received"], 20);
         assert_eq!(v["cumulative"]["failed"], 6);
+    }
+
+    #[test]
+    fn inventory_body_lists_posts_and_only_active_accounts() {
+        let posts = vec![
+            ("p1".to_string(), "급등주 분석".to_string()),
+            ("p2".to_string(), "반도체 전략".to_string()),
+        ];
+        let acct = |login: &str, status: AccountStatus| Account {
+            id: login.into(),
+            platform: PlatformId::Forum,
+            login_id: login.into(),
+            pw: "pw".into(),
+            status,
+            status_msg: None,
+            status_trace: None,
+            last: "—".into(),
+            tags: vec![],
+        };
+        let accounts = vec![
+            acct("ok_a", AccountStatus::Active),
+            acct("blocked_b", AccountStatus::Blocked),
+            acct("new_c", AccountStatus::New),
+            acct("ok_d", AccountStatus::Active),
+        ];
+        let v = inventory_body(&posts, &accounts);
+        // 글은 id/title 전부.
+        assert_eq!(v["posts"].as_array().unwrap().len(), 2);
+        assert_eq!(v["posts"][0]["id"], "p1");
+        assert_eq!(v["posts"][1]["title"], "반도체 전략");
+        // 계정은 성공(Active)만 — 차단/신규는 빠진다.
+        let accts: Vec<&str> = v["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        assert_eq!(accts, vec!["ok_a", "ok_d"]);
     }
 
     #[test]
