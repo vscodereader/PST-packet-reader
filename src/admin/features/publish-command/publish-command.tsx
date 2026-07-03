@@ -140,7 +140,8 @@ export function PublishCommand() {
   const [devices, setDevices] = useState<PubDevice[]>(DUMMY_DEVICES);
   const [selDev, setSelDev] = useState<Set<string>>(new Set());
   const [postByDev, setPostByDev] = useState<Record<string, string | null>>({});
-  const [target, setTarget] = useState<Target | null>(null);
+  // 게시 대상은 **하위별로** 고른다 — 한 대는 종토, 다른 대는 카페처럼 서로 다를 수 있다.
+  const [targetByDev, setTargetByDev] = useState<Record<string, Target>>({});
   const [cfgByDev, setCfgByDev] = useState<Record<string, ForumCfg>>({});
 
   // online 하위 로드(서버 연결 시 실데이터, 오프라인이면 더미 유지). "성공 계정 보유" 필터는
@@ -257,54 +258,32 @@ export function PublishCommand() {
         </SimpleGrid>
       </Box>
 
-      {/* ② 게시 대상 4버튼 */}
-      <Box>
-        <Text fw={700} size="sm" mb="xs">
-          ② 게시 대상
-        </Text>
-        <Group gap="xs">
-          {TARGETS.map((t) => (
-            <Button
-              key={t.key}
-              variant={target === t.key ? "filled" : "default"}
-              disabled={t.soon || selDev.size === 0}
-              onClick={() => setTarget(t.key)}
-              rightSection={
-                t.soon ? (
-                  <Badge size="xs" color="gray" variant="light">
-                    추후
-                  </Badge>
-                ) : undefined
-              }
-            >
-              {t.label}
-            </Button>
-          ))}
-        </Group>
-      </Box>
-
-      {/* ③ (종토) 하위별 독립 패널 */}
-      {target === "forum" && selectedDevices.length > 0 && (
+      {/* ② 하위별 게시 대상 + 구성 — 하위마다 대상(종토/카페/…)을 따로 고른다(안 섞임). */}
+      {selectedDevices.length > 0 && (
         <Box>
           <Text fw={700} size="sm" mb="xs">
-            ③ 하위별 종목·계정 구성{" "}
+            ② 하위별 게시 대상·구성{" "}
             <Text span c="dimmed" size="xs">
-              (하위마다 독립 — 서로 안 섞임)
+              (하위마다 대상·종목·계정 독립 — 서로 안 섞임)
             </Text>
           </Text>
           <Stack gap="md">
             {selectedDevices.map((d) => (
-              <ForumPanel
+              <DeviceBlock
                 key={d.id}
                 device={d}
-                cfg={cfgByDev[d.id] ?? DEFAULT_CFG}
-                onPatch={(patch) => patchCfg(d.id, patch)}
                 postTitle={
                   postByDev[d.id]
                     ? (mockPosts(d.id).find((p) => p.id === postByDev[d.id])
                         ?.title ?? null)
                     : null
                 }
+                target={targetByDev[d.id] ?? null}
+                onSetTarget={(t) =>
+                  setTargetByDev((prev) => ({ ...prev, [d.id]: t }))
+                }
+                cfg={cfgByDev[d.id] ?? DEFAULT_CFG}
+                onPatch={(patch) => patchCfg(d.id, patch)}
               />
             ))}
           </Stack>
@@ -314,7 +293,87 @@ export function PublishCommand() {
   );
 }
 
-function ForumPanel({
+// 하위 1대 블록: 기기 헤더 + 게시 대상(하위별) + 대상별 상세 구성. 종토만 상세 구현, 나머지는 추후.
+function DeviceBlock({
+  device,
+  postTitle,
+  target,
+  onSetTarget,
+  cfg,
+  onPatch,
+}: {
+  device: PubDevice;
+  postTitle: string | null;
+  target: Target | null;
+  onSetTarget: (t: Target) => void;
+  cfg: ForumCfg;
+  onPatch: (patch: Partial<ForumCfg>) => void;
+}) {
+  return (
+    <Paper withBorder radius="md" p="md">
+      {/* 기기 헤더 + 선택한 글 */}
+      <Group gap="xs" mb="sm">
+        <ThemeIcon size={26} radius="md" variant="light" color="blue">
+          <IconDeviceDesktop size={16} />
+        </ThemeIcon>
+        <Text fw={700}>{device.name}</Text>
+        {postTitle ? (
+          <Badge variant="light" color="blue" radius="sm">
+            글: {shortTitle(postTitle)}
+          </Badge>
+        ) : (
+          <Badge variant="light" color="gray" radius="sm">
+            글을 먼저 선택하세요
+          </Badge>
+        )}
+      </Group>
+
+      {/* 게시 대상 — 하위별(글 선택돼야 활성). 카페/블로그/밴드는 추후(비활성). */}
+      <Text size="xs" c="dimmed" mb={4}>
+        게시 대상
+      </Text>
+      <Group gap="xs" mb="sm">
+        {TARGETS.map((t) => (
+          <Button
+            key={t.key}
+            size="xs"
+            variant={target === t.key ? "filled" : "default"}
+            disabled={t.soon || postTitle == null}
+            onClick={() => onSetTarget(t.key)}
+            rightSection={
+              t.soon ? (
+                <Badge size="xs" color="gray" variant="light">
+                  추후
+                </Badge>
+              ) : undefined
+            }
+          >
+            {t.label}
+          </Button>
+        ))}
+      </Group>
+
+      {/* 대상별 상세 구성 */}
+      {target === "forum" && (
+        <ForumConfig
+          device={device}
+          cfg={cfg}
+          onPatch={onPatch}
+          postTitle={postTitle}
+        />
+      )}
+      {target != null && target !== "forum" && (
+        <Text size="sm" c="dimmed">
+          {TARGETS.find((t) => t.key === target)?.label} 상세 구성은 추후
+          구현됩니다.
+        </Text>
+      )}
+    </Paper>
+  );
+}
+
+// 종토 상세 구성(카테고리/시장/종목수/계정 + 4버튼). 외곽 Paper·기기헤더는 DeviceBlock이 제공.
+function ForumConfig({
   device,
   cfg,
   onPatch,
@@ -371,14 +430,7 @@ function ForumPanel({
   };
 
   return (
-    <Paper withBorder radius="md" p="md">
-      <Group gap="xs" mb="sm">
-        <ThemeIcon size={26} radius="md" variant="light" color="blue">
-          <IconDeviceDesktop size={16} />
-        </ThemeIcon>
-        <Text fw={700}>{device.name}</Text>
-      </Group>
-
+    <Box>
       {/* 카테고리 6버튼 */}
       <Text size="xs" c="dimmed" mb={4}>
         카테고리
@@ -539,6 +591,6 @@ function ForumPanel({
           </Text>
         )}
       </Stack>
-    </Paper>
+    </Box>
   );
 }
