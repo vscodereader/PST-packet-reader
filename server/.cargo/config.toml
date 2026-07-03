@@ -1,0 +1,5 @@
+# 원격 PC에 MSVC 런타임(vcruntime140.dll·msvcp140·api-ms-win-crt-*)이 없어도 pstmacro-server.exe가
+# 단독 실행되도록 **CRT를 정적 링크**한다(자기완결 → 설치 불필요, 배포 원칙과 일치).
+# `cargo xwin build` 를 server 디렉토리에서 돌릴 때 자동 적용된다(명령어는 그대로).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
