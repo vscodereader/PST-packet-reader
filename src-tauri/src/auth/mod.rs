@@ -14,7 +14,7 @@ mod util;
 use tauri::{AppHandle, Runtime};
 
 pub use accounts::{
-    account_cookie_expiry, read_account_cookies, read_account_cookies_unchecked,
+    account_cookie_expiry, clear_account_cookies, read_account_cookies, read_account_cookies_unchecked,
     save_accounts_file,
 };
 pub use adb::probe_adb_connection;

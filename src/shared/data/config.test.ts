@@ -60,6 +60,8 @@ describe("label tables", () => {
         // 게시 대기초과(#286 후속).
         "timedOut",
         "badCredentials",
+        // 세션 만료 → 재로그인 필요(2026-07-03). 재로그인하면 회복.
+        "relogin",
         "blocked",
         "challenge",
         "error",

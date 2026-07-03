@@ -40,6 +40,7 @@ fn status_str(s: &AccountStatus) -> &'static str {
         TimedOut => "timedOut",
         BadCredentials => "badCredentials",
         Challenge => "challenge",
+        Relogin => "relogin",
         Blocked => "blocked",
         Error => "error",
     }

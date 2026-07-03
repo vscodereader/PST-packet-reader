@@ -56,6 +56,10 @@ pub enum AccountStatus {
     TimedOut,
     BadCredentials,
     Challenge,
+    /// 세션 만료로 좋아요/게시가 인증 실패해 **재로그인이 필요한** 상태(2026-07-03). getProfile가
+    /// 로그아웃으로 응답하는 등 세션이 죽어, 회복하려면 다시 로그인해야 하는 계정. 차단(`Blocked`)과
+    /// 달리 재로그인하면 복구 가능하므로 별도 배지로 구분한다. 와이어 형태는 camelCase `"relogin"`.
+    Relogin,
     Blocked,
     Error,
 }
@@ -122,6 +126,26 @@ pub fn apply_status_by_login_id(
         .into_iter()
         .map(|mut a| {
             if a.login_id == login_id {
+                a.status = status.clone();
+                a.status_msg = status_msg.clone();
+            }
+            a
+        })
+        .collect()
+}
+
+/// 계정 **id**(login_id 아님)로 상태·메시지를 설정한다. 좋아요 경로는 계정 id로 도므로 이 함수를
+/// 쓴다([`apply_status_by_login_id`]는 로그인 흐름이 login_id로 여러 행을 갱신할 때 쓴다).
+pub fn apply_status_by_id(
+    accounts: Vec<Account>,
+    id: &str,
+    status: AccountStatus,
+    status_msg: Option<String>,
+) -> Vec<Account> {
+    accounts
+        .into_iter()
+        .map(|mut a| {
+            if a.id == id {
                 a.status = status.clone();
                 a.status_msg = status_msg.clone();
             }

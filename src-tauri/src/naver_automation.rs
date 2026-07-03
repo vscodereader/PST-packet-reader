@@ -276,7 +276,7 @@ fn clarify_profile_status_error(
 
 /// 좋아요 전용 흐름은 [`like_flow`] 모듈에 있다(게시 경로와 분리 — 게시의 npay/프로필 로직을
 /// 건드리지 않는다). 여기서 재수출해 기존 호출부(`lib.rs`)의 import 경로를 유지한다.
-pub use like_flow::run_naver_like;
+pub use like_flow::{run_naver_like, LikeVerdict};
 
 pub fn run_naver_discussion_macro(
     request: NaverDiscussionRequest,

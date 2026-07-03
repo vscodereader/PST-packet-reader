@@ -37,7 +37,7 @@ use discussion_batch::{
     StockCandidate, TemplateColumns,
 };
 use naver_automation::{
-    run_naver_discussion_macro, run_naver_like, AutomationReport, AutomationTarget,
+    run_naver_discussion_macro, run_naver_like, AutomationReport, AutomationTarget, LikeVerdict,
     NaverDiscussionRequest,
 };
 
@@ -95,6 +95,31 @@ struct LikeOutcome {
 /// 하나가 실패해도 중단하지 않고 다음으로 넘어가며, (계정×링크)별 성공/실패를 모아 돌려준다.
 /// 좋아요 결과를 알림 로그(log_batches)에 남긴다 — 게시처럼 알림 패널에 뜨게 한다(사용자 지적
 /// 2026-07-01: 좋아요가 토스트만 뜨고 알림엔 안 남았다). (계정×링크)별 성공/실패를 한 배치로 묶는다.
+/// 좋아요 판정이 재로그인/비활성이면 **계정 상태를 바꾸고 쿠키를 지운다**(사용자 요청 2026-07-03:
+/// 세션 만료=재로그인·차단=비활성으로 상태 전환, 둘 다 쿠키만료값 삭제). 좋아요는 계정 id로 돌므로
+/// `apply_status_by_id`로 갱신하고, `store.mutate`가 디스크 저장 + 프론트 이벤트를 발생시킨다.
+fn mark_account_status<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    account_id: &str,
+    status: ipc::accounts::AccountStatus,
+    msg: &str,
+) {
+    let store = app.state::<JsonStore<ipc::accounts::Account>>();
+    let id = account_id.to_owned();
+    let msg_owned = msg.to_owned();
+    store.mutate(move |accounts| {
+        ipc::accounts::apply_status_by_id(accounts, &id, status, Some(msg_owned))
+    });
+    // 만료/차단 계정의 "쿠키만료" 카운트다운 제거 + 죽은/차단 세션 쿠키 삭제.
+    if let Err(error) = crate::auth::clear_account_cookies(account_id) {
+        tracing::warn!(
+            account = %crate::auth::mask_id(account_id),
+            error = %error,
+            "좋아요 후 쿠키 삭제 실패"
+        );
+    }
+}
+
 fn record_like_batch<R: Runtime>(app: &tauri::AppHandle<R>, outcomes: &[LikeOutcome]) {
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -164,6 +189,9 @@ async fn like_discussion_post<R: Runtime>(
     if account_ids.is_empty() {
         return Err("좋아요를 누를 계정을 한 개 이상 선택하세요.".to_owned());
     }
+    // 좋아요 판정이 재로그인/비활성이면 계정 상태를 바꾸고 쿠키를 지워야 하므로 store 접근용으로
+    // app을 블로킹 클로저에 함께 넘긴다(로그 배치 기록은 클로저 밖 record_like_batch가 담당).
+    let app_for_status = app.clone();
     let outcomes = tauri::async_runtime::spawn_blocking(move || {
         let mut outcomes = Vec::with_capacity(account_ids.len() * post_urls.len());
         let mut first = true;
@@ -175,8 +203,29 @@ async fn like_discussion_post<R: Runtime>(
                 }
                 first = false;
                 let (success, message) = match run_naver_like(account_id, post_url) {
-                    Ok(()) => (true, "좋아요 완료".to_owned()),
-                    Err(error) => (false, error.message().to_owned()),
+                    LikeVerdict::Liked => (true, "좋아요 완료".to_owned()),
+                    // 세션 만료 → 상태 '재로그인' + 쿠키 삭제(재로그인해야 회복).
+                    LikeVerdict::Relogin(msg) => {
+                        mark_account_status(
+                            &app_for_status,
+                            account_id,
+                            ipc::accounts::AccountStatus::Relogin,
+                            &msg,
+                        );
+                        (false, msg)
+                    }
+                    // 계정 차단 → 상태 '비활성(Blocked)' + 쿠키 삭제.
+                    LikeVerdict::Blocked(msg) => {
+                        mark_account_status(
+                            &app_for_status,
+                            account_id,
+                            ipc::accounts::AccountStatus::Blocked,
+                            &msg,
+                        );
+                        (false, msg)
+                    }
+                    // 글 삭제(404) 등 계정 문제 아님 — 상태는 바꾸지 않는다.
+                    LikeVerdict::Failed(msg) => (false, msg),
                 };
                 outcomes.push(LikeOutcome {
                     account_id: account_id.clone(),
