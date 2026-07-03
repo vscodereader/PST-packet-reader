@@ -407,10 +407,33 @@ function ForumConfig({
   const marketDisabled = cfg.category === "discussion";
   const effectiveMarket: Market = marketDisabled ? "all" : cfg.market;
 
-  const pool = useMemo(
-    () => mockStocks(cfg.category, effectiveMarket),
-    [cfg.category, effectiveMarket],
+  // 종목 목록 = 서버 프록시(네이버 공개 front-api) 실데이터. 카테고리/시장이 바뀔 때마다 다시 가져온다.
+  // 서버가 종목 코드의 원천 — 여기서 고른 실코드로 게시 명령을 만든다. 오프라인이면 더미 폴백(UI 무손상).
+  const [pool, setPool] = useState<SelectableStock[]>(() =>
+    mockStocks(cfg.category, effectiveMarket),
   );
+  useEffect(() => {
+    let cancelled = false;
+    api.forumStocks
+      .list({ category: cfg.category, exchange: "krx", market: effectiveMarket })
+      .then((p) => {
+        if (cancelled) return;
+        setPool(
+          p.stocks.map((s) => ({
+            code: s.code,
+            name: s.name,
+            isHotDiscussion: s.isHotDiscussion,
+          })),
+        );
+      })
+      .catch(() => {
+        // 서버 오프라인/프록시 실패 → 더미 유지(미리보기 무손상).
+        if (!cancelled) setPool(mockStocks(cfg.category, effectiveMarket));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cfg.category, effectiveMarket]);
   const n = typeof cfg.count === "number" ? cfg.count : 0;
   const { picked, error } = useMemo(() => pickStocks(pool, n), [pool, n]);
 

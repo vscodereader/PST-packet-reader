@@ -288,6 +288,8 @@ mod tests {
             received_at: Utc.timestamp_opt(secs, 0).unwrap(),
             batch: LoginBatchDto { success, onhold: vec![], timedout: vec![], failed: vec![] },
             cumulative: LoginCumulativeDto::default(),
+            registered: success,
+            registered_visible: success,
         }
     }
 

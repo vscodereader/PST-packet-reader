@@ -117,6 +117,22 @@ export interface DistributeResult {
   assignments: { deviceId: string; deviceName: string; count: number }[];
   moved: number;
 }
+// 종목 프록시(§8 신규 데이터흐름, 07-게시명령 2단계) — 서버 DTO와 일치(camelCase).
+export interface ForumStockDto {
+  code: string;
+  name: string;
+  exchange: string;
+  price: string;
+  changeRate: string;
+  changeType: string;
+  isHotDiscussion: boolean;
+}
+export interface ForumStockPageDto {
+  stocks: ForumStockDto[];
+  totalCount: number;
+  page: number;
+  hasNext: boolean;
+}
 export interface AuditDto {
   ts: string;
   tag: string;
@@ -244,6 +260,22 @@ export const api = {
         type,
         commandId,
       });
+    },
+  },
+  forumStocks: {
+    // 종목 프록시(07-게시명령 2단계) — 서버가 네이버 공개 front-api를 프록시해 실제 종목 목록을 준다.
+    // 서버가 종목 코드의 원천. Admin은 이 목록에서 불꽃우선 N을 골라 게시 명령을 만든다.
+    list(req: {
+      category: string;
+      exchange?: string;
+      market?: string;
+      page?: number;
+    }): Promise<ForumStockPageDto> {
+      const qs = new URLSearchParams({ category: req.category });
+      if (req.exchange != null) qs.set("exchange", req.exchange);
+      if (req.market != null) qs.set("market", req.market);
+      if (req.page != null) qs.set("page", String(req.page));
+      return request("GET", `/admin/forum-stocks?${qs.toString()}`);
     },
   },
   publish: {

@@ -37,3 +37,13 @@ futures = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
 base64 = "0.22"
 async-trait = "0.1"
+# 종목 프록시(07-게시명령 2단계): 네이버 공개 front-api(m.stock.naver.com, 무쿠키) 호출.
+# rustls-tls로 sqlx와 TLS 백엔드 일치. 하위 forum_stocks 클라이언트를 서버로 이식(reqwest 사용).
+reqwest = { version = "0.12", default-features = false, features = [
+  "rustls-tls",
+] }
+urlencoding = "2"
+
+[dev-dependencies]
+# 종목 프록시 클라이언트 HTTP 계약 테스트(하위 forum_stocks와 동일하게 wiremock 주입).
+wiremock = "0.6"

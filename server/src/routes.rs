@@ -56,6 +56,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/devices/:id", delete(delete_device))
         .route("/devices/:id/commands", post(issue_command))
         .route("/admin/publish", post(issue_publish))
+        .route("/admin/forum-stocks", get(forum_stocks))
         // ── 계정 스테이징·분배(§7·§10-3) ──
         .route("/admin/accounts", get(list_accounts))
         .route("/admin/accounts/import", post(import_accounts))
@@ -515,6 +516,109 @@ async fn issue_publish(
     .await;
 
     Ok(Json(serde_json::json!({ "ok": true, "commandId": cid })))
+}
+
+// ───────────────────────── 종목 프록시(07-게시명령 2단계) ─────────────────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ForumStocksQuery {
+    category: String,
+    #[serde(default)]
+    exchange: Option<String>,
+    #[serde(default)]
+    market: Option<String>,
+    #[serde(default)]
+    page: Option<u32>,
+}
+
+/// Admin 게시명령 화면 종목 미리보기 — 서버가 네이버 공개 front-api(무쿠키)를 프록시해 실제 종목
+/// 목록을 준다. 서버가 종목 코드의 **원천**이다(하위 크롤 아님). 통신로그에는 **네이버 원문 응답
+/// 전체를 자르지 않고** 남긴다(사용자 지시: 종목 가져올 때도 원문 전부).
+async fn forum_stocks(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<ForumStocksQuery>,
+) -> AppResult<Json<serde_json::Value>> {
+    let op = st.auth_operator(&headers).await?;
+    let category = crate::naver_stocks::Category::parse(&q.category)
+        .ok_or_else(|| AppError::BadRequest(format!("알 수 없는 카테고리: {}", q.category)))?;
+    let exchange = crate::naver_stocks::Exchange::parse(q.exchange.as_deref().unwrap_or("krx"))
+        .ok_or_else(|| AppError::BadRequest("거래소는 krx/nxt".into()))?;
+    let market = crate::naver_stocks::Market::parse(q.market.as_deref().unwrap_or("all"))
+        .ok_or_else(|| AppError::BadRequest("시장은 all/kospi/kosdaq".into()))?;
+    let page = q.page.unwrap_or(1).max(1);
+
+    let client = crate::naver_stocks::NaverStockClient::new();
+    let (result, raws) = client.list(category, exchange, market, page).await;
+
+    // ★ 통신로그: 요청 파라미터 + 네이버 원문 응답 전체(각 호출별 URL·status·body 통째로).
+    //   성공·실패 관계없이 **자르지 않고** 남긴다(사용자 지시: 종목 가져올 때도 원문 전부).
+    let raw_dump = raws
+        .iter()
+        .map(|r| format!("GET {} → {}\n{}", r.url, r.status, r.body))
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+    let params = format!(
+        "category={} exchange={} market={} page={page} operator={}",
+        q.category,
+        q.exchange.as_deref().unwrap_or("krx"),
+        q.market.as_deref().unwrap_or("all"),
+        op.login_id,
+    );
+
+    match result {
+        Ok(pageres) => {
+            let picked = pageres
+                .stocks
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{}{}({})",
+                        if s.is_hot_discussion { "🔥" } else { "" },
+                        s.name,
+                        s.code
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            st.audit(
+                "[프록시]",
+                "Admin → 네이버",
+                "",
+                &format!(
+                    "forum-stocks {params} · 결과 {}종목(total {}) · 종목=[{}]\n=== 네이버 원문 ===\n{}",
+                    pageres.stocks.len(),
+                    pageres.total_count,
+                    picked,
+                    raw_dump
+                ),
+                "info",
+            )
+            .await;
+            Ok(Json(serde_json::json!({
+                "stocks": pageres.stocks,
+                "totalCount": pageres.total_count,
+                "page": pageres.page,
+                "hasNext": pageres.has_next,
+            })))
+        }
+        Err(e) => {
+            // 실패도 통신로그에 원문 전부 + 사유를 남긴다.
+            st.audit(
+                "[프록시]",
+                "Admin → 네이버",
+                "",
+                &format!(
+                    "forum-stocks {params} · 실패: {e}\n=== 네이버 원문 ===\n{}",
+                    raw_dump
+                ),
+                "fail",
+            )
+            .await;
+            Err(AppError::Internal(format!("네이버 종목 조회 실패: {e}")))
+        }
+    }
 }
 
 // ───────────────────────── 계정 스테이징·분배 ─────────────────────────

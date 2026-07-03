@@ -102,6 +102,13 @@ impl AppState {
         if let Ok(j) = serde_json::to_string(&dto) {
             self.hub.admin_push(j);
         }
+        // ★ 통신로그 화면(SSE+저장)뿐 아니라 **서버 로그 파일에도 원문 그대로** 남긴다(사용자 지시:
+        //   로그 파일에서도 통신로그 화면에서도 전부 보여지게). 자르지 않는다. 레벨만 색/등급에 맞춘다.
+        match level {
+            "fail" => tracing::error!("{tag} {dir} [{device}] {msg}"),
+            "warn" => tracing::warn!("{tag} {dir} [{device}] {msg}"),
+            _ => tracing::info!("{tag} {dir} [{device}] {msg}"),
+        }
         let _ = self.repo.add_audit(entry).await;
     }
 

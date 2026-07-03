@@ -7,6 +7,7 @@ mod error;
 mod hub;
 mod jwt;
 mod model;
+mod naver_stocks;
 mod repo;
 mod routes;
 mod state;
