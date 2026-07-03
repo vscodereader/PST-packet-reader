@@ -55,6 +55,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/devices", get(list_devices))
         .route("/devices/:id", delete(delete_device))
         .route("/devices/:id/commands", post(issue_command))
+        .route("/admin/publish", post(issue_publish))
         // ── 계정 스테이징·분배(§7·§10-3) ──
         .route("/admin/accounts", get(list_accounts))
         .route("/admin/accounts/import", post(import_accounts))
@@ -329,6 +330,7 @@ fn cmd_label(kind: &str) -> &'static str {
     match kind {
         "import_then_login_all" => "전체로그인",
         "distribute_accounts" => "계정 분배",
+        "publish_posts" => "게시 명령",
         "delete_accounts" => "계정 삭제",
         _ => "명령",
     }
@@ -376,6 +378,142 @@ async fn issue_command(
         "cmd",
     )
     .await;
+    Ok(Json(serde_json::json!({ "ok": true, "commandId": cid })))
+}
+
+// ───────────────────────── 게시 명령(publish_posts, 07-게시명령) ─────────────────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishStock {
+    code: String,
+    name: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishAssignment {
+    login_id: String,
+    stocks: Vec<PublishStock>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishReq {
+    device_id: String,
+    #[serde(default)]
+    command_id: Option<String>,
+    post_id: String,
+    #[serde(default)]
+    post_title: String,
+    #[serde(default)]
+    target_label: String,
+    #[serde(default)]
+    split: bool,
+    assignments: Vec<PublishAssignment>,
+}
+
+/// 게시 명령 발행 — **하위 1대당 1묶음**(대원칙 0-1). 서버가 확정한 계정×종목(`assignments`)을 그대로
+/// 그 하위 SSE로 내려보내고, **통신로그에 무엇을·어느 계정에·어느 종목으로 보내는지 원문 전체를
+/// 자르지 않고** 남긴다(사용자 지시). 실제 게시는 하위(기존 큐/`run_forum_targets`)가 수행한다.
+async fn issue_publish(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<PublishReq>,
+) -> AppResult<Json<serde_json::Value>> {
+    let op = st.auth_operator(&headers).await?;
+    let uid = Uuid::parse_str(&req.device_id)
+        .map_err(|_| AppError::BadRequest("기기 id 형식 오류".into()))?;
+    let device = st
+        .repo
+        .find_device(uid)
+        .await?
+        .ok_or_else(|| AppError::NotFound("없는 기기".into()))?;
+    let cid = req
+        .command_id
+        .clone()
+        .unwrap_or_else(|| format!("c-{}", Uuid::new_v4()));
+    let target_label = if req.target_label.is_empty() {
+        "종목토론방".to_string()
+    } else {
+        req.target_label.clone()
+    };
+
+    if !AppState::is_commandable(device.state) {
+        let reason = match device.state {
+            DeviceState::Rotating => "대상 컴퓨터 IP 변경 중(ROTATING·거부코드 409)",
+            DeviceState::Reconnecting => "대상 컴퓨터 재연결 중(거부코드 409)",
+            _ => "대상 컴퓨터 꺼짐(offline·거부코드 409)",
+        };
+        st.audit(
+            "[REJECT]",
+            &format!("Admin → {}", device.name),
+            &req.device_id,
+            &format!(
+                "거부: publish_posts(게시 명령) commandId={cid} 사유={reason} operator={} 글=\"{}\"(postId={})",
+                op.login_id, req.post_title, req.post_id
+            ),
+            "fail",
+        )
+        .await;
+        return Err(AppError::Conflict(format!("{reason} — 재연결 후 다시 시도")));
+    }
+
+    let assignments_json: Vec<serde_json::Value> = req
+        .assignments
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "loginId": a.login_id,
+                "stocks": a.stocks.iter()
+                    .map(|s| serde_json::json!({ "code": s.code, "name": s.name }))
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let payload = serde_json::json!({
+        "type": "publish_posts",
+        "commandId": cid,
+        "publish": {
+            "postId": req.post_id,
+            "postTitle": req.post_title,
+            "targetLabel": target_label,
+            "split": req.split,
+            "assignments": assignments_json,
+        }
+    });
+    st.hub.device_push(uid, payload.to_string());
+
+    // ★ 통신로그: 계정×종목·payload 원문 전체를 자르지 않고 남긴다(사용자 지시: 원문 전부).
+    let detail = req
+        .assignments
+        .iter()
+        .map(|a| {
+            format!(
+                "{}=[{}]",
+                a.login_id,
+                a.stocks
+                    .iter()
+                    .map(|s| format!("{}({})", s.name, s.code))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    st.audit(
+        "[CMD]",
+        &format!("Admin → {}", device.name),
+        &req.device_id,
+        &format!(
+            "publish_posts(게시 명령) commandId={cid} operator={} · 글=\"{}\"(postId={}) · 대상={target_label} · 방식={} · 계정×종목: {detail} · payload={payload}",
+            op.login_id,
+            req.post_title,
+            req.post_id,
+            if req.split { "나눠서" } else { "전체" }
+        ),
+        "cmd",
+    )
+    .await;
+
     Ok(Json(serde_json::json!({ "ok": true, "commandId": cid })))
 }
 

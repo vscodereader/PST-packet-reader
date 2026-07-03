@@ -23,8 +23,8 @@ use crate::ipc::accounts::{Account, AccountStatus, PlatformId};
 use crate::ipc::log_batches::LogBatch;
 use crate::ipc::posts::ModeValue;
 use crate::ipc::queue::{
-    apply_priority_order, as_fresh_now_item, LoginTarget, PublishPlan, QueueLocation, QueueNowItem,
-    QueueState,
+    apply_priority_order, as_fresh_now_item, ForumTarget, LoginTarget, PublishPlan, QueueLocation,
+    QueueNowItem, QueueState,
 };
 use crate::ipc::queue_runner::{start_if_idle, NowQueueRunner};
 use crate::store::JsonStore;
@@ -38,6 +38,9 @@ struct Command {
     command_id: Option<String>,
     #[serde(default)]
     accounts: Vec<AccountIn>,
+    /// 게시 명령(`publish_posts`)일 때만 채워진다 — 서버가 확정한 계정×종목·글 정보(07-게시명령).
+    #[serde(default)]
+    publish: Option<PublishCmd>,
 }
 
 #[derive(Deserialize)]
@@ -45,6 +48,33 @@ struct Command {
 struct AccountIn {
     login_id: String,
     pw: String,
+}
+
+/// 게시 명령 페이로드 — 서버가 계정×종목을 확정해 내려보낸다(하위는 그대로 ForumTarget으로 조립).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishCmd {
+    post_id: String,
+    #[serde(default)]
+    post_title: String,
+    #[serde(default)]
+    target_label: String,
+    #[serde(default)]
+    split: bool,
+    assignments: Vec<PublishAssign>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishAssign {
+    login_id: String,
+    stocks: Vec<PublishStockIn>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishStockIn {
+    code: String,
+    #[serde(default)]
+    name: String,
 }
 
 /// 에이전트 상태(하위 등록 화면 표시용).
@@ -223,8 +253,120 @@ fn dispatch<R: Runtime>(app: &AppHandle<R>, cmd: &Command) -> (&'static str, Str
             let removed = delete_by_login_ids(app, &ids);
             ("info", format!("계정 {removed}건 삭제"), None)
         }
+        "publish_posts" => match &cmd.publish {
+            Some(p) => enqueue_publish(app, p),
+            None => (
+                "fail",
+                "publish_posts에 publish 페이로드가 없습니다".into(),
+                None,
+            ),
+        },
         other => ("fail", format!("알 수 없는 명령: {other}"), None),
     }
+}
+
+/// 게시 명령(publish_posts) 큐 적재 — 서버가 확정한 계정×종목을 그대로 `ForumTarget`으로 조립해
+/// 기존 now 큐에 적재하고 러너를 기동한다(게시 로직 100% 재사용). 무엇을·어느 계정에·어느 종목으로
+/// 게시하는지 **원문 전부**를 로그에 남긴다(server log-forward로 통신로그에 그대로 뜬다).
+fn enqueue_publish<R: Runtime>(
+    app: &AppHandle<R>,
+    p: &PublishCmd,
+) -> (&'static str, String, Option<Followup>) {
+    let detail: String = p
+        .assignments
+        .iter()
+        .map(|a| {
+            format!(
+                "{}=[{}]",
+                a.login_id,
+                a.stocks
+                    .iter()
+                    .map(|s| format!("{}({})", s.name, s.code))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    tracing::info!(
+        post_id = %p.post_id,
+        title = %p.post_title,
+        target = %p.target_label,
+        split = p.split,
+        assignments = %detail,
+        "[AGENT] publish_posts 수신 — 게시 큐 적재(계정×종목 원문)"
+    );
+
+    let (title, body) = load_post(app, &p.post_id);
+
+    let mut forum: Vec<ForumTarget> = Vec::new();
+    let mut locs: Vec<QueueLocation> = Vec::new();
+    for a in &p.assignments {
+        for s in &a.stocks {
+            forum.push(ForumTarget {
+                account_id: a.login_id.clone(),
+                name: s.name.clone(),
+                code: s.code.clone(),
+                comment_url: String::new(),
+            });
+            locs.push(QueueLocation {
+                p: PlatformId::Forum,
+                name: s.name.clone(),
+                code: Some(s.code.clone()),
+            });
+        }
+    }
+    if forum.is_empty() {
+        return ("fail", "게시 대상(계정×종목)이 비었습니다".into(), None);
+    }
+    let total = forum.len();
+    let plan_title = if p.post_title.is_empty() {
+        title.clone()
+    } else {
+        p.post_title.clone()
+    };
+    let item = QueueNowItem {
+        id: format!("agent-publish-{}", now_ms()),
+        title: plan_title.clone(),
+        kind: ModeValue::Post,
+        state: QueueState::Waiting,
+        batch_id: None,
+        progress: None,
+        locs,
+        plan: Some(PublishPlan {
+            post_id: p.post_id.clone(),
+            kind: ModeValue::Post,
+            title: if title.is_empty() { plan_title } else { title },
+            body_text: body,
+            comments: vec![],
+            link_override: String::new(),
+            naver: vec![],
+            forum,
+            band: vec![],
+            blog: vec![],
+            clip: vec![],
+            login: None,
+        }),
+        items: vec![],
+    };
+    let now = app.state::<JsonStore<QueueNowItem>>();
+    now.mutate(|mut items| {
+        items.push(as_fresh_now_item(item));
+        apply_priority_order(items)
+    });
+    let runner = app.state::<NowQueueRunner>();
+    start_if_idle(runner.inner(), app.clone());
+    ("ok", format!("게시 큐 적재 — {total}건(계정×종목)"), None)
+}
+
+/// 로컬 글(LibraryPost) 본문 로드(제목·본문). 없으면 빈 문자열(best-effort — 토큰 치환은 plan 기준).
+fn load_post<R: Runtime>(app: &AppHandle<R>, post_id: &str) -> (String, String) {
+    app.state::<JsonStore<crate::ipc::posts::LibraryPost>>()
+        .snapshot()
+        .into_iter()
+        .find(|p| p.id == post_id)
+        .map(|p| (p.title, p.body.unwrap_or_default()))
+        .unwrap_or_default()
 }
 
 /// 반환: (IPC 스토어에 새로 추가된 수, 그중 로그인 엔진(accounts.json)이 볼 수 있는 수).

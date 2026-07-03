@@ -20,7 +20,7 @@ import { nowParts, scheduleMoment, toEpochMs } from "@/shared/schedule";
 import { DateTimePicker } from "@/shared/ui/date-time-picker";
 import { Icon } from "@/shared/ui/icons";
 
-import { api } from "../../api";
+import { api, isOffline } from "../../api";
 
 import type { ScheduledItem } from "./scheduled-posts";
 import {
@@ -285,6 +285,7 @@ export function PublishCommand({
                         ?.title ?? null)
                     : null
                 }
+                postId={postByDev[d.id] ?? null}
                 target={targetByDev[d.id] ?? null}
                 onSetTarget={(t) =>
                   setTargetByDev((prev) => ({ ...prev, [d.id]: t }))
@@ -304,6 +305,7 @@ export function PublishCommand({
 // 하위 1대 블록: 기기 헤더 + 게시 대상(하위별) + 대상별 상세 구성. 종토만 상세 구현, 나머지는 추후.
 function DeviceBlock({
   device,
+  postId,
   postTitle,
   target,
   onSetTarget,
@@ -312,6 +314,7 @@ function DeviceBlock({
   onSchedule,
 }: {
   device: PubDevice;
+  postId: string | null;
   postTitle: string | null;
   target: Target | null;
   onSetTarget: (t: Target) => void;
@@ -369,6 +372,7 @@ function DeviceBlock({
           device={device}
           cfg={cfg}
           onPatch={onPatch}
+          postId={postId}
           postTitle={postTitle}
           onSchedule={onSchedule}
         />
@@ -388,12 +392,14 @@ function ForumConfig({
   device,
   cfg,
   onPatch,
+  postId,
   postTitle,
   onSchedule,
 }: {
   device: PubDevice;
   cfg: ForumCfg;
   onPatch: (patch: Partial<ForumCfg>) => void;
+  postId: string | null;
   postTitle: string | null;
   onSchedule: (item: ScheduledItem) => void;
 }) {
@@ -439,12 +445,51 @@ function ForumConfig({
       : `종목 ${picked.length} · 계정 ${cfg.accounts.length} 전체`;
   };
 
+  // 서버로 내려보낼 계정×종목 배정. 전체=각 계정이 picked 전부, 나눠서=distributeEvenly로 분배.
+  const buildAssignments = (split: boolean) => {
+    const stocks = picked.map((s) => ({ code: s.code, name: s.name }));
+    if (!split) {
+      return cfg.accounts.map((loginId) => ({ loginId, stocks }));
+    }
+    const slices = distributeEvenly(stocks, cfg.accounts.length);
+    return cfg.accounts.map((loginId, i) => ({
+      loginId,
+      stocks: slices[i] ?? [],
+    }));
+  };
+
   const runNow = (split: boolean) => {
-    notifications.show({
-      title: `${device.name} · 지금${split ? " 나눠서" : ""} 게시(미리보기)`,
-      message: `글 "${shortTitle(postTitle ?? "")}" · ${detailFor(split)}`,
-      color: "blue",
-    });
+    void (async () => {
+      try {
+        await api.publish.send({
+          deviceId: device.id,
+          postId: postId ?? "",
+          postTitle: postTitle ?? "",
+          targetLabel: "종목토론방",
+          split,
+          assignments: buildAssignments(split),
+        });
+        notifications.show({
+          title: `${device.name} · 게시 명령 전송`,
+          message: `글 "${shortTitle(postTitle ?? "")}" · ${detailFor(split)}`,
+          color: "blue",
+        });
+      } catch (e) {
+        if (isOffline(e)) {
+          notifications.show({
+            title: `${device.name} · 지금${split ? " 나눠서" : ""} 게시(미리보기)`,
+            message: `글 "${shortTitle(postTitle ?? "")}" · ${detailFor(split)} · 서버 오프라인(전송 안 됨)`,
+            color: "gray",
+          });
+        } else {
+          notifications.show({
+            title: "게시 명령 실패",
+            message: e instanceof Error ? e.message : String(e),
+            color: "red",
+          });
+        }
+      }
+    })();
   };
 
   const confirmSchedule = () => {

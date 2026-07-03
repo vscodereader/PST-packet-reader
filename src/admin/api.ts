@@ -246,6 +246,20 @@ export const api = {
       });
     },
   },
+  publish: {
+    // 게시 명령(07-게시명령) — 하위 1대당 1묶음. 서버가 확정한 계정×종목을 그 하위로 내려보낸다.
+    send(req: {
+      deviceId: string;
+      commandId?: string;
+      postId: string;
+      postTitle: string;
+      targetLabel: string;
+      split: boolean;
+      assignments: { loginId: string; stocks: { code: string; name: string }[] }[];
+    }): Promise<{ ok: boolean; commandId: string }> {
+      return request("POST", "/admin/publish", req);
+    },
+  },
   accounts: {
     list(): Promise<AccountDto[]> {
       return request("GET", "/admin/accounts");
