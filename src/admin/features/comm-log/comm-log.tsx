@@ -8,11 +8,15 @@ import {
   Text,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Icon } from "@/shared/ui/icons";
 
 import { api } from "../../api";
+
+// 통신로그 스크롤 위치를 화면 전환(언마운트) 후에도 기억한다. 다른 페이지 갔다 와도 맨 위로
+// 튕기지 않고 마지막으로 읽던 위치에서 이어 읽게 한다(모듈 변수라 세션 동안 유지).
+let savedScrollTop = 0;
 
 // 통신 로그 화면 — Admin↔하위 사이의 모든 통신(SSE 명령 / POST 결과 / 하트비트 /
 // 등록 / IP변경)을 콘솔처럼 보여준다. 설계 §7 감사로그(명령/결과 이력)의 조회 화면.
@@ -225,6 +229,13 @@ export function CommLog() {
   const [device, setDevice] = useState<string>("all");
   // 서버 감사로그(§7) 로드. 연결 시 실데이터, 오프라인 미리보기면 더미 유지. 3초 폴링.
   const [allLines, setAllLines] = useState<LogLine[]>(LOG_LINES);
+  const viewportRef = useRef<HTMLDivElement>(null);
+
+  // 마운트 시 저장해둔 스크롤 위치를 복원한다(다른 페이지 갔다 와도 맨 위로 안 튕기고 이어 읽기).
+  useEffect(() => {
+    const v = viewportRef.current;
+    if (v) v.scrollTop = savedScrollTop;
+  }, []);
 
   useEffect(() => {
     const load = () => {
@@ -336,7 +347,16 @@ export function CommLog() {
           overflow: "hidden",
         }}
       >
-        <ScrollArea h="100%" type="auto" p="md">
+        <ScrollArea
+          h="100%"
+          type="always"
+          scrollbarSize={12}
+          p="md"
+          viewportRef={viewportRef}
+          onScrollPositionChange={({ y }) => {
+            savedScrollTop = y;
+          }}
+        >
           <Box
             style={{
               fontFamily: "monospace",

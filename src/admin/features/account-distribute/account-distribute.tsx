@@ -197,15 +197,27 @@ export function AccountDistribute() {
     const total = selectedAccountIds.length + selectedDrafts.length;
     const deviceIds = [...selDev];
     try {
-      // 입력행은 분배 시점에 입력값 그대로 import(at-rest 암호화는 서버, §7)한 뒤 기존 계정과 합쳐
-      // 분배한다. 사용자가 "저장" 버튼을 따로 누르지 않아도 입력 상태 그대로 서버로 전송된다.
+      let poolIds = selectedAccountIds;
+      // 입력행(draft)은 분배 시점에 입력값 그대로 import한다. import 응답엔 새 계정 ID가 없으므로,
+      // 목록을 다시 받아 방금 넣은 loginId로 서버 ID를 찾아 분배 대상에 합친다. (예전엔 draft를
+      // import만 하고 그 ID를 분배에 안 넣어, 첫 클릭은 "계정을 선택하세요"로 거부되고 다른 페이지를
+      // 갔다 와야(재조회) 반영되던 버그를 고침.)
       if (selectedDrafts.length > 0) {
         await api.accounts.import(
           selectedDrafts.map((d) => ({ loginId: d.loginId, pw: d.pw })),
         );
+        const fresh = await api.accounts.list();
+        setAccounts(fresh.map((a) => ({ id: a.id, loginId: a.loginId })));
+        const wantLogins = new Set(
+          selectedDrafts.map((d) => d.loginId.trim()).filter((s) => s !== ""),
+        );
+        const newIds = fresh
+          .filter((a) => wantLogins.has(a.loginId))
+          .map((a) => a.id);
+        poolIds = Array.from(new Set([...selectedAccountIds, ...newIds]));
       }
       // 서버가 균등+랜덤 분배(겹침 없음) + MOVE(스테이징에서 제거) + 대별 명령 push(§10-3).
-      const r = await api.accounts.distribute(selectedAccountIds, deviceIds);
+      const r = await api.accounts.distribute(poolIds, deviceIds);
       const summary = r.assignments
         .map((a) => `${a.deviceName} ${a.count}`)
         .join("·");
@@ -256,7 +268,7 @@ export function AccountDistribute() {
               계정 풀
             </Text>
             <Badge variant="light" color="gray" radius="sm">
-              총 {accounts.length}개 계정
+              총 {accounts.length + drafts.length}개 계정
             </Badge>
             {selAcc.size > 0 && (
               <Badge variant="light" color="blue" radius="sm">
