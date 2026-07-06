@@ -352,6 +352,7 @@ export function CommLog() {
           type="always"
           scrollbarSize={12}
           p="md"
+          classNames={{ scrollbar: "commlog-scrollbar", thumb: "commlog-thumb" }}
           viewportRef={viewportRef}
           onScrollPositionChange={({ y }) => {
             savedScrollTop = y;
