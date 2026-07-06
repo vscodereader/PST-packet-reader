@@ -90,6 +90,29 @@ export function toDeviceReport(r: LoginReportDto): DeviceReport {
   };
 }
 
+// 중지 요약(설계서 08 §10-3) — "N개 중 M개 진행 후 중지" 사유 문자열. done=진행/성공 수, total=전체.
+export function stopReason(done: number, total: number): string {
+  if (total <= 0) return "대기 중 취소(진행 전)";
+  return `${total}개 작업 중 ${done}개 진행 후 중지`;
+}
+
+// 서버 StopReportDto의 stopped 줄 → 화면 Line(사유=글제목 + 진행/전체). ID·PW는 표시 시점 마스킹.
+export function toStopLines(
+  stopped: {
+    loginId: string;
+    pw: string;
+    title: string;
+    done: number;
+    total: number;
+  }[],
+): Line[] {
+  return stopped.map((s) => ({
+    loginId: s.loginId || "(계정 미상)",
+    pw: s.pw,
+    reason: `${s.title ? s.title + " · " : ""}${stopReason(s.done, s.total)}`,
+  }));
+}
+
 // epoch ms → "YYYY-MM-DD HH:MM" (게시 완료 시각 표시용).
 export function fmtAt(ms: number): string {
   if (!ms) return "";

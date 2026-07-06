@@ -2,7 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import type { LoginReportDto, PostReportDto } from "../../api";
 
-import { fmtAt, toDeviceReport, toPostBatch } from "./mapping";
+import {
+  fmtAt,
+  stopReason,
+  toDeviceReport,
+  toPostBatch,
+  toStopLines,
+} from "./mapping";
 
 // 순수 매핑 함수만 검증한다(렌더/네트워크 비의존). 서버 PostReportDto(하위 LogBatch 사본) →
 // 화면 PostBatch 변환 규칙(§10-4-2)을 고정한다.
@@ -14,6 +20,31 @@ describe("result-report 매핑", () => {
     it("epoch ms를 YYYY-MM-DD HH:MM 형태로(로컬) 포맷", () => {
       const out = fmtAt(1_719_700_000_000);
       expect(out).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+    });
+  });
+
+  describe("stopReason (중지 사유, §10-3)", () => {
+    it("전체>0이면 'N개 중 M개 진행 후 중지'", () => {
+      expect(stopReason(2, 5)).toBe("5개 작업 중 2개 진행 후 중지");
+    });
+    it("전체 0이면 진행 전 대기 취소", () => {
+      expect(stopReason(0, 0)).toBe("대기 중 취소(진행 전)");
+    });
+  });
+
+  describe("toStopLines (중지 요약 → 화면 Line)", () => {
+    it("글제목 + 진행/전체를 사유로 합치고, 계정 미상은 라벨 대체", () => {
+      const lines = toStopLines([
+        { loginId: "abc", pw: "pw1", title: "시황", done: 1, total: 3 },
+        { loginId: "", pw: "", title: "", done: 0, total: 0 },
+      ]);
+      expect(lines[0]).toEqual({
+        loginId: "abc",
+        pw: "pw1",
+        reason: "시황 · 3개 작업 중 1개 진행 후 중지",
+      });
+      expect(lines[1]?.loginId).toBe("(계정 미상)");
+      expect(lines[1]?.reason).toBe("대기 중 취소(진행 전)");
     });
   });
 

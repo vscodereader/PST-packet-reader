@@ -229,6 +229,21 @@ export interface LoginReportDto {
   registeredVisible: number;
 }
 
+// 중지(kill) 요약(설계서 08 §10-3) — 결과보고 "중지" 섹션. "N개 중 M개 진행 후 중지".
+export interface StopLineDto {
+  loginId: string;
+  pw: string;
+  title: string;
+  done: number;
+  total: number;
+}
+export interface StopReportDto {
+  device: string;
+  deviceId: string;
+  receivedAt: string;
+  stopped: StopLineDto[];
+}
+
 export const api = {
   baseUrl: BASE,
   auth: {
@@ -400,6 +415,12 @@ export const api = {
     // 로그인 결과 보고(§10-4-1) — 컴퓨터당 최신 1건(최신순).
     list(): Promise<LoginReportDto[]> {
       return request("GET", "/admin/login-reports");
+    },
+  },
+  stopReports: {
+    // 중지 요약(설계서 08 §10-3) — 모든 하위의 kill 요약(디바이스별 누적, 최신순).
+    list(): Promise<StopReportDto[]> {
+      return request("GET", "/admin/stop-reports");
     },
   },
 };

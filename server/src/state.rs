@@ -10,7 +10,8 @@ use crate::config::Config;
 use crate::error::{AppError, AppResult};
 use crate::hub::Hub;
 use crate::model::{
-    AuditDto, AuditEntry, Device, DeviceInventory, DeviceQueueState, Operator, Role,
+    AuditDto, AuditEntry, Device, DeviceInventory, DeviceQueueState, DeviceStopReport, Operator,
+    Role,
 };
 use crate::repo::Repository;
 use crate::{jwt, model::DeviceState};
@@ -28,6 +29,8 @@ pub struct AppState {
     /// 하위 실행/대기 게시큐 스냅샷 최신 1건(설계서 08 §10-2). 인벤토리와 같이 메모리 보관 —
     /// Admin "중지 명령" 페이지가 폴링해 실시간으로 본다.
     pub queue_states: Arc<Mutex<HashMap<Uuid, DeviceQueueState>>>,
+    /// 하위 중지(kill) 요약 누적(설계서 08 §10-3). 결과보고 "중지" 섹션이 렌더. 메모리 보관.
+    pub stop_reports: Arc<Mutex<HashMap<Uuid, DeviceStopReport>>>,
     /// 예약 게시 목록 — 서버가 보관하고 스케줄러가 시각되면 발송한다(07-게시명령 4단계). 인벤토리와
     /// 같은 이유로 메모리 보관(개발 기본 in-memory 저장소와 일관).
     pub scheduled: Arc<Mutex<Vec<crate::scheduled::ScheduledPost>>>,
@@ -153,6 +156,28 @@ impl AppState {
     /// 하위 실행큐 스냅샷 최신 1건 조회(없으면 None).
     pub fn get_queue_state(&self, id: Uuid) -> Option<DeviceQueueState> {
         self.queue_states.lock().unwrap().get(&id).cloned()
+    }
+
+    /// 중지 요약을 디바이스별로 **누적**(개별 kill이 덮어써 사라지지 않게). 상한 200(오래된 것부터).
+    pub fn set_stop_report(&self, id: Uuid, mut rpt: DeviceStopReport) {
+        let mut g = self.stop_reports.lock().unwrap();
+        let entry = g.entry(id).or_default();
+        entry.stopped.append(&mut rpt.stopped);
+        let len = entry.stopped.len();
+        if len > 200 {
+            entry.stopped.drain(0..len - 200);
+        }
+        entry.received_at = rpt.received_at;
+    }
+
+    /// 모든 디바이스의 중지 요약 스냅샷((id, report) 목록).
+    pub fn stop_reports_snapshot(&self) -> Vec<(Uuid, DeviceStopReport)> {
+        self.stop_reports
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect()
     }
 }
 

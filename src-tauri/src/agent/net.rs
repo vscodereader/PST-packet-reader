@@ -154,6 +154,17 @@ pub async fn post_queue_state(
     post_authed(client, base, token, "/agent/queue-state", body).await
 }
 
+/// 중지(kill) 요약 보고(설계서 08 §10-3). 하위가 kill한 큐 요약을 올려 Admin 결과보고 "중지"
+/// 섹션이 계정별 "N개 중 M개 진행 후 중지"를 보여주게 한다. body = `{stopped:[{loginId,pw,title,done,total}]}`.
+pub async fn post_stop_report(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    body: &serde_json::Value,
+) -> Result<(), String> {
+    post_authed(client, base, token, "/agent/stop-report", body).await
+}
+
 /// SSE 스트림 열기(`GET /agent/stream?token=`). 브라우저가 아니므로 토큰을 쿼리로 싣는다.
 /// 반환된 Response를 `chunk()`로 읽어 `data:` 줄을 파싱한다(호출부).
 pub async fn open_stream(

@@ -23,6 +23,7 @@ import { api } from "../../api";
 import {
   toDeviceReport,
   toPostBatch,
+  toStopLines,
   type DeviceReport,
   type Line,
   type PostBatch,
@@ -171,7 +172,13 @@ function Section({
   );
 }
 
-function LoginReportCard({ r }: { r: DeviceReport }) {
+function LoginReportCard({
+  r,
+  stopped = [],
+}: {
+  r: DeviceReport;
+  stopped?: Line[];
+}) {
   const { batch, cumulative: c } = r;
   return (
     <Paper withBorder radius="md" p="lg">
@@ -213,6 +220,11 @@ function LoginReportCard({ r }: { r: DeviceReport }) {
           <Badge color="red" variant="light">
             실패 {batch.failed.length}
           </Badge>
+          {stopped.length > 0 && (
+            <Badge color="orange" variant="light">
+              중지 {stopped.length}
+            </Badge>
+          )}
         </Group>
       </Group>
 
@@ -239,6 +251,8 @@ function LoginReportCard({ r }: { r: DeviceReport }) {
             withReason={false}
           />
           <Section title="실패" color="red.6" lines={batch.failed} withReason />
+          {/* 중지(kill, 설계서 §10-3) — 계정별 ID·PW + "N개 중 M개 진행 후 중지" 사유. */}
+          <Section title="중지" color="orange.7" lines={stopped} withReason />
         </Stack>
       </ScrollArea.Autosize>
 
@@ -602,6 +616,8 @@ export function ResultReport() {
   // 오프라인 미리보기/빈 서버면 더미 유지(통신 로그 화면과 동일 폴백). 3초 폴링(즉시 반영).
   const [loginReports, setLoginReports] = useState<DeviceReport[]>(REPORTS);
   const [postBatches, setPostBatches] = useState<PostBatch[]>(POST_BATCHES);
+  // 중지(kill) 요약(설계서 §10-3): device 이름 → 중지 줄들. 로그인 결과 카드에 "중지 N" + 섹션으로 표시.
+  const [stopByDevice, setStopByDevice] = useState<Record<string, Line[]>>({});
   useEffect(() => {
     const load = () => {
       api.loginReports
@@ -612,6 +628,18 @@ export function ResultReport() {
         })
         .catch(() => {
           /* 오프라인 → 더미 유지 */
+        });
+      api.stopReports
+        .list()
+        .then((rows) => {
+          const m: Record<string, Line[]> = {};
+          rows.forEach((r) => {
+            if (r.stopped.length > 0) m[r.device] = toStopLines(r.stopped);
+          });
+          setStopByDevice(m);
+        })
+        .catch(() => {
+          /* 오프라인 → 빈 상태 유지 */
         });
       api.postReports
         .list()
@@ -648,7 +676,11 @@ export function ResultReport() {
       {view === "login" ? (
         <Stack gap="md">
           {loginReports.map((r) => (
-            <LoginReportCard key={r.device} r={r} />
+            <LoginReportCard
+              key={r.device}
+              r={r}
+              stopped={stopByDevice[r.device] ?? []}
+            />
           ))}
         </Stack>
       ) : (

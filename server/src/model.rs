@@ -91,6 +91,41 @@ pub struct QueueItemDto {
     pub login_ids: Vec<String>,
 }
 
+/// 중지(kill) 요약 1줄(설계서 08 §10-3) — 어느 계정을 "몇 개 중 몇 개 진행 후 중지"했는지.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopLineDto {
+    pub login_id: String,
+    #[serde(default)]
+    pub pw: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub done: u32,
+    #[serde(default)]
+    pub total: u32,
+}
+
+/// 하위 → 서버 중지 리포트(설계서 08 §10-3). 하위가 kill한 큐 요약. 인벤토리처럼 메모리에
+/// 디바이스별로 **누적** 보관(결과보고 "중지" 섹션이 렌더).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceStopReport {
+    pub stopped: Vec<StopLineDto>,
+    #[serde(default)]
+    pub received_at: Option<String>,
+}
+
+/// Admin 결과보고용 중지 리포트(디바이스 이름 포함).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopReportDto {
+    pub device: String,
+    pub device_id: String,
+    pub received_at: String,
+    pub stopped: Vec<StopLineDto>,
+}
+
 #[derive(Debug, Clone)]
 pub struct DeviceCode {
     pub code: String,

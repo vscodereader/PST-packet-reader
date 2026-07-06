@@ -62,6 +62,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/devices/:id/inventory", get(device_inventory))
         .route("/devices/:id/queue-state", get(device_queue_state))
         .route("/admin/kill", post(issue_kill))
+        .route("/admin/stop-reports", get(list_stop_reports))
         // ── 계정 스테이징·분배(§7·§10-3) ──
         .route("/admin/accounts", get(list_accounts))
         .route("/admin/accounts/import", post(import_accounts))
@@ -77,6 +78,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/agent/log", post(agent_log))
         .route("/agent/inventory", post(agent_inventory))
         .route("/agent/queue-state", post(agent_queue_state))
+        .route("/agent/stop-report", post(agent_stop_report))
         .route("/agent/commands/:command_id/result", post(command_result))
         .route("/agent/post-report", post(post_report))
         .route("/admin/post-reports", get(list_post_reports))
@@ -1240,6 +1242,62 @@ async fn device_queue_state(
     st.auth_operator(&headers).await?;
     let uid = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("기기 id 형식 오류".into()))?;
     Ok(Json(st.get_queue_state(uid).unwrap_or_default()))
+}
+
+/// 하위 → 서버: 중지(kill) 요약 보고(설계서 08 §10-3). 결과보고 "중지" 섹션 데이터. 요약도 원문
+/// 그대로 통신로그에 남긴다(Stage5).
+async fn agent_stop_report(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(mut rpt): Json<DeviceStopReport>,
+) -> AppResult<Json<serde_json::Value>> {
+    let device = st.auth_device(&headers).await?;
+    rpt.received_at = Some(Utc::now().to_rfc3339());
+    let n = rpt.stopped.len();
+    let dump = rpt
+        .stopped
+        .iter()
+        .map(|s| format!("{}({}/{})", s.login_id, s.done, s.total))
+        .collect::<Vec<_>>()
+        .join(", ");
+    st.set_stop_report(device.id, rpt);
+    st.audit(
+        "[중지]",
+        &format!("{} → 서버", device.name),
+        &device.id.to_string(),
+        &format!("중지 요약 {n}건(계정(진행/전체)): {dump}"),
+        "warn",
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Admin 결과보고 "중지" 섹션 — 모든 하위의 중지 요약(디바이스 이름 포함, 최신순).
+async fn list_stop_reports(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<Vec<StopReportDto>>> {
+    st.auth_operator(&headers).await?;
+    let devices = st.repo.list_devices().await?;
+    let name_of = |id: Uuid| {
+        devices
+            .iter()
+            .find(|d| d.id == id)
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| id.to_string())
+    };
+    let mut out: Vec<StopReportDto> = st
+        .stop_reports_snapshot()
+        .into_iter()
+        .map(|(id, r)| StopReportDto {
+            device: name_of(id),
+            device_id: id.to_string(),
+            received_at: r.received_at.unwrap_or_default(),
+            stopped: r.stopped,
+        })
+        .collect();
+    out.sort_by(|a, b| b.received_at.cmp(&a.received_at));
+    Ok(Json(out))
 }
 
 /// Admin '로그인 결과' 탭 — 모든 하위의 로그인 결과(컴퓨터당 최신 1건, 최신순).

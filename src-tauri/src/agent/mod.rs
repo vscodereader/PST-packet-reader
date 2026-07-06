@@ -443,8 +443,48 @@ fn agent_kill<R: Runtime>(app: &AppHandle<R>, k: &KillCmd) -> (&'static str, Str
         queue_id = ?k.queue_id, login_id = ?k.login_id,
         "[AGENT] 중지 명령 수신 — 큐 완전 종료 시작(원문)"
     );
+    // 결과보고 "중지" 섹션(설계서 §10-3)용 요약을 kill 전에 캡처 — kill_one이 큐에서 지우기 전에
+    // 계정별 진행률(done/total)·PW를 확보한다("N개 중 M개 진행 후 중지").
+    let accounts = app.state::<JsonStore<Account>>().snapshot();
+    let pw_of = |lid: &str| {
+        accounts
+            .iter()
+            .find(|a| a.login_id == lid)
+            .map(|a| a.pw.clone())
+            .unwrap_or_default()
+    };
+    let mut stop_lines: Vec<serde_json::Value> = Vec::new();
+    for item in live.iter().filter(|i| target_ids.iter().any(|t| t == &i.id)) {
+        let (done, total) = item.progress.unwrap_or((0, 0));
+        let (_, lids) = plan_summary(item.plan.as_ref());
+        let lids = if lids.is_empty() {
+            vec![String::new()]
+        } else {
+            lids
+        };
+        for lid in lids {
+            stop_lines.push(serde_json::json!({
+                "loginId": lid,
+                "pw": pw_of(&lid),
+                "title": item.title,
+                "done": done,
+                "total": total,
+            }));
+        }
+    }
     for id in &target_ids {
         crate::ipc::kill::kill_one(app, id);
+    }
+    // 중지 요약을 서버로 비동기 보고(결과보고 렌더용). dispatch는 동기라 spawn한다.
+    if !stop_lines.is_empty() {
+        tauri::async_runtime::spawn(async move {
+            if let Some(cfg) = config::load() {
+                let client = reqwest::Client::new();
+                let body = serde_json::json!({ "stopped": stop_lines });
+                let _ = net::post_stop_report(&client, &cfg.server_url, &cfg.device_token, &body)
+                    .await;
+            }
+        });
     }
     // 원문 로그 자기완결(Stage5): "수신 → 각 큐 정지(kill_one 로그) → 완료"가 통신로그·하위
     // 로그에 그대로 남아, Admin에서 하위가 제대로 멈췄는지 원문으로 확인할 수 있다.
