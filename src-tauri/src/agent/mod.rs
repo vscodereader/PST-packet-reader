@@ -550,8 +550,10 @@ fn enqueue_publish<R: Runtime>(
         title = %p.post_title,
         target = %p.target_label,
         split = p.split,
+        mode = %p.mode,
+        comment_urls = ?p.comment_urls,
         assignments = %detail,
-        "[AGENT] publish_posts 수신 — 게시 큐 적재(계정×종목 원문)"
+        "[AGENT] publish_posts 수신 — 게시 큐 적재(계정×종목/댓글URL 원문)"
     );
 
     let (title, body, comments) = load_post(app, &p.post_id);
