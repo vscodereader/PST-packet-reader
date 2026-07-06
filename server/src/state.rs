@@ -9,7 +9,9 @@ use uuid::Uuid;
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
 use crate::hub::Hub;
-use crate::model::{AuditDto, AuditEntry, Device, DeviceInventory, Operator, Role};
+use crate::model::{
+    AuditDto, AuditEntry, Device, DeviceInventory, DeviceQueueState, Operator, Role,
+};
 use crate::repo::Repository;
 use crate::{jwt, model::DeviceState};
 
@@ -23,6 +25,9 @@ pub struct AppState {
     /// 하위 인벤토리(글목록·성공계정) — 하위가 주기적으로 보고하는 **실시간 상태**라 DB가 아니라
     /// 메모리에 최신 1건만 둔다(서버 재시작해도 하위가 곧 재보고). 07-게시명령 3단계.
     pub inventory: Arc<Mutex<HashMap<Uuid, DeviceInventory>>>,
+    /// 하위 실행/대기 게시큐 스냅샷 최신 1건(설계서 08 §10-2). 인벤토리와 같이 메모리 보관 —
+    /// Admin "중지 명령" 페이지가 폴링해 실시간으로 본다.
+    pub queue_states: Arc<Mutex<HashMap<Uuid, DeviceQueueState>>>,
     /// 예약 게시 목록 — 서버가 보관하고 스케줄러가 시각되면 발송한다(07-게시명령 4단계). 인벤토리와
     /// 같은 이유로 메모리 보관(개발 기본 in-memory 저장소와 일관).
     pub scheduled: Arc<Mutex<Vec<crate::scheduled::ScheduledPost>>>,
@@ -137,6 +142,17 @@ impl AppState {
     /// 하위 인벤토리 최신 1건 조회(없으면 None).
     pub fn get_inventory(&self, id: Uuid) -> Option<DeviceInventory> {
         self.inventory.lock().unwrap().get(&id).cloned()
+    }
+
+    /// 하위 실행큐 스냅샷 최신 1건 저장(설계서 08 §10-2). 주기 보고라 통신로그엔 안 남긴다
+    /// (kill 명령만 원문 로그). Admin이 폴링으로 최신본을 읽는다.
+    pub fn set_queue_state(&self, id: Uuid, qs: DeviceQueueState) {
+        self.queue_states.lock().unwrap().insert(id, qs);
+    }
+
+    /// 하위 실행큐 스냅샷 최신 1건 조회(없으면 None).
+    pub fn get_queue_state(&self, id: Uuid) -> Option<DeviceQueueState> {
+        self.queue_states.lock().unwrap().get(&id).cloned()
     }
 }
 

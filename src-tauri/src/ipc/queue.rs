@@ -487,26 +487,13 @@ pub fn cancel_queue_now(
 pub fn kill_queue_now<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     store: tauri::State<'_, JsonStore<QueueNowItem>>,
-    cancels: tauri::State<'_, crate::ipc::kill::CancelRegistry>,
     activity: tauri::State<'_, JsonStore<crate::ipc::activity::ActivityItem>>,
     id: String,
 ) -> Vec<QueueNowItem> {
-    // ① 실행 중 루프에 "멈춰라" 신호(종목 사이·대기 중에 확인하고 스스로 정지).
-    cancels.request(&id);
-    // ② 큐에서 제거 — 배치 경계(item_present) 협조 취소도 함께 발동하고, 워커가 재실행하지 않게.
-    let next = store.mutate(|items| apply_cancel_now(items, &id));
+    // 로컬·원격 공유 경로(설계서 08 §5): 취소 신호 set + 큐 제거 + Stage2 강제 감시.
+    crate::ipc::kill::kill_one(&app, &id);
     record(activity.inner(), ActivityType::Info, "실행 작업 완전 종료(중지)됨");
-    tracing::info!(id = %id, "[QUEUE] 사용자 중지(kill) — 취소 신호 set + 큐에서 제거");
-    // ③ Stage2 강제 종료 감시(설계서 08): 협조 정지가 타임아웃 안에 안 끝나면(hang) 등록된
-    //    Chrome PID를 taskkill한다. 신호가 등록돼 있을 때만(=Chrome 띄운 종토 실행 중) 띄운다.
-    if let Some(sig) = cancels.get(&id) {
-        let app_bg = app.clone();
-        let id_bg = id.clone();
-        tauri::async_runtime::spawn(async move {
-            crate::ipc::kill::escalate_kill(app_bg, id_bg, sig).await;
-        });
-    }
-    next
+    store.snapshot()
 }
 
 /// 종료(`Done`) 아이템을 모두 큐에서 치운다(#1, "완료 항목 지우기"). 진행 중/대기 작업은

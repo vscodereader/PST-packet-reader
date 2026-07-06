@@ -41,6 +41,23 @@ struct Command {
     /// 게시 명령(`publish_posts`)일 때만 채워진다 — 서버가 확정한 계정×종목·글 정보(07-게시명령).
     #[serde(default)]
     publish: Option<PublishCmd>,
+    /// 중지 명령(`kill_publish`)일 때만 채워진다 — 어느 큐(queueId)/계정(loginId)/전체(all)를
+    /// 완전 종료할지(설계서 08 §10).
+    #[serde(default)]
+    kill: Option<KillCmd>,
+}
+
+/// 중지 명령 페이로드(설계서 08). queueId=그 큐 1개, all=디바이스 전 실행/대기 큐, loginId=그
+/// 계정 큐. Admin "중지 명령" 페이지가 실시간 큐 스냅샷으로 queueId를, 디바이스 버튼이 all을 보낸다.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct KillCmd {
+    #[serde(default)]
+    queue_id: Option<String>,
+    #[serde(default)]
+    all: bool,
+    #[serde(default)]
+    login_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -121,12 +138,15 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
     let cmd_app = app.clone();
     let post_app = app.clone();
     let inv_app = app.clone();
+    let qs_app = app.clone();
     tauri::async_runtime::spawn(async move { command_loop(cmd_app).await });
     tauri::async_runtime::spawn(async move { heartbeat_loop().await });
     tauri::async_runtime::spawn(async move { state_report_loop(rx).await });
     tauri::async_runtime::spawn(async move { post_report_loop(post_app).await });
     tauri::async_runtime::spawn(async move { log_forward_loop().await });
     tauri::async_runtime::spawn(async move { inventory_report_loop(inv_app).await });
+    // 실시간 실행큐 스냅샷 보고(설계서 08 §10-2) → Admin "중지 명령" 페이지.
+    tauri::async_runtime::spawn(async move { queue_state_report_loop(qs_app).await });
 }
 
 // ───────────────────────── 인벤토리 보고 루프(07-게시명령 3단계) ─────────────────────────
@@ -167,6 +187,84 @@ fn inventory_body(posts: &[(String, String)], accounts: &[Account]) -> serde_jso
         .map(|a| a.login_id.clone())
         .collect();
     serde_json::json!({ "posts": posts, "accounts": accounts })
+}
+
+// ───────────────────────── 실시간 실행큐 스냅샷 보고 루프(설계서 08 §10-2) ─────────────────────────
+
+/// 하위의 실행/대기 게시큐 스냅샷을 주기적으로 서버에 보고 → Admin "중지 명령" 페이지가 하위 앱
+/// 게시큐 화면과 **동일한 내용을 실시간으로** 본다. 변화 없으면 전송 생략(트래픽 절약). 미등록이면
+/// 보고 안 함(단독 동작 무영향).
+async fn queue_state_report_loop<R: Runtime>(app: AppHandle<R>) {
+    let client = reqwest::Client::new();
+    let mut last: Option<String> = None;
+    loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let Some(cfg) = config::load() else {
+            continue;
+        };
+        let items = app.state::<JsonStore<QueueNowItem>>().snapshot();
+        let body = queue_state_body(&items);
+        let key = body.to_string();
+        if last.as_deref() == Some(key.as_str()) {
+            continue; // 직전과 동일 → 전송 생략(도배 방지)
+        }
+        last = Some(key);
+        let _ = net::post_queue_state(&client, &cfg.server_url, &cfg.device_token, &body).await;
+    }
+}
+
+/// 큐 스냅샷 보고 본문(서버 `DeviceQueueState` 모양). 실행/대기 아이템만, 하위 게시큐 화면과
+/// 같은 표시값(제목·종류·진행률·대상 계정). 순수함수(테스트 대상).
+fn queue_state_body(items: &[QueueNowItem]) -> serde_json::Value {
+    let rows: Vec<serde_json::Value> = items
+        .iter()
+        .filter(|i| matches!(i.state, QueueState::Running | QueueState::Waiting))
+        .map(|i| {
+            let (done, total) = i.progress.unwrap_or((0, 0));
+            let state = match i.state {
+                QueueState::Running => "running",
+                QueueState::Waiting => "waiting",
+                QueueState::Done => "done",
+            };
+            let (kind, login_ids) = plan_summary(i.plan.as_ref());
+            serde_json::json!({
+                "id": i.id,
+                "title": i.title,
+                "kind": kind,
+                "state": state,
+                "done": done,
+                "total": total,
+                "loginIds": login_ids,
+            })
+        })
+        .collect();
+    serde_json::json!({ "items": rows })
+}
+
+/// 큐 아이템의 표시 종류 라벨과 대상 계정 목록. 종토는 계정별 큐라 loginIds가 실질적이고,
+/// 그 외(카페/밴드/블로그/클립/로그인)는 라벨만(계정 목록은 표시 우선순위 낮아 생략).
+fn plan_summary(plan: Option<&PublishPlan>) -> (&'static str, Vec<String>) {
+    let Some(p) = plan else {
+        return ("게시", vec![]);
+    };
+    if !p.forum.is_empty() {
+        let mut ids: Vec<String> = p.forum.iter().map(|t| t.account_id.clone()).collect();
+        ids.sort();
+        ids.dedup();
+        ("종토", ids)
+    } else if !p.naver.is_empty() {
+        ("카페", vec![])
+    } else if !p.band.is_empty() {
+        ("밴드", vec![])
+    } else if !p.blog.is_empty() {
+        ("블로그", vec![])
+    } else if !p.clip.is_empty() {
+        ("클립", vec![])
+    } else if p.login.as_ref().is_some_and(|l| !l.is_empty()) {
+        ("로그인", vec![])
+    } else {
+        ("게시", vec![])
+    }
 }
 
 // ───────────────────────── 로그 전송 루프(#324) ─────────────────────────
@@ -303,8 +401,63 @@ fn dispatch<R: Runtime>(app: &AppHandle<R>, cmd: &Command) -> (&'static str, Str
                 None,
             ),
         },
+        "kill_publish" => match &cmd.kill {
+            Some(k) => agent_kill(app, k),
+            None => ("fail", "kill_publish에 kill 페이로드가 없습니다".into(), None),
+        },
         other => ("fail", format!("알 수 없는 명령: {other}"), None),
     }
+}
+
+/// 중지 명령(kill_publish) 처리(설계서 08 §10) — Admin이 보낸 대상(queueId 1개 / all 디바이스
+/// 전체 / loginId 계정)을 로컬 실행 중 큐에서 찾아 **로컬 UI와 동일한 kill 경로**(`kill_one`)로
+/// 완전 종료한다. 무엇을 왜 중지하는지 **원문 그대로** 로그에 남긴다(server log-forward로 Admin
+/// 통신로그에 그대로 뜬다 — Stage5 무필터 로그).
+fn agent_kill<R: Runtime>(app: &AppHandle<R>, k: &KillCmd) -> (&'static str, String, Option<Followup>) {
+    let snapshot = app.state::<JsonStore<QueueNowItem>>().snapshot();
+    let live: Vec<&QueueNowItem> = snapshot
+        .iter()
+        .filter(|i| matches!(i.state, QueueState::Running | QueueState::Waiting))
+        .collect();
+    let target_ids: Vec<String> = if k.all {
+        live.iter().map(|i| i.id.clone()).collect()
+    } else if let Some(qid) = k.queue_id.as_deref() {
+        live.iter().filter(|i| i.id == qid).map(|i| i.id.clone()).collect()
+    } else if let Some(lid) = k.login_id.as_deref() {
+        live.iter()
+            .filter(|i| item_targets_login(i, lid))
+            .map(|i| i.id.clone())
+            .collect()
+    } else {
+        vec![]
+    };
+    if target_ids.is_empty() {
+        tracing::info!(
+            all = k.all, queue_id = ?k.queue_id, login_id = ?k.login_id,
+            "[AGENT] 중지 명령 수신 — 대상 실행 중 큐 없음(이미 끝났거나 대상 불일치)"
+        );
+        return ("info", "중지할 실행 중 큐가 없습니다".into(), None);
+    }
+    tracing::warn!(
+        count = target_ids.len(), all = k.all, ids = ?target_ids,
+        queue_id = ?k.queue_id, login_id = ?k.login_id,
+        "[AGENT] 중지 명령 수신 — 큐 완전 종료 시작(원문)"
+    );
+    for id in &target_ids {
+        crate::ipc::kill::kill_one(app, id);
+    }
+    (
+        "ok",
+        format!("중지 처리 — {}개 큐 완전 종료(다음 대기 큐 승계)", target_ids.len()),
+        None,
+    )
+}
+
+/// 이 큐 아이템이 특정 계정(loginId)을 게시 대상으로 삼는지(종토 계정당 큐 매칭용).
+fn item_targets_login(item: &QueueNowItem, login_id: &str) -> bool {
+    item.plan
+        .as_ref()
+        .is_some_and(|p| p.forum.iter().any(|t| t.account_id == login_id))
 }
 
 /// 게시 명령(publish_posts) 큐 적재 — 서버가 확정한 계정×종목을 그대로 `ForumTarget`으로 조립해

@@ -143,6 +143,17 @@ pub async fn post_inventory(
     post_authed(client, base, token, "/agent/inventory", body).await
 }
 
+/// 실행큐 스냅샷 보고(설계서 08 §10-2). 하위의 실행/대기 게시큐를 올려 Admin "중지 명령"
+/// 페이지가 하위 화면과 동일한 내용을 실시간으로 보게 한다. body = `{items:[{id,title,kind,state,done,total,loginIds}]}`.
+pub async fn post_queue_state(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    body: &serde_json::Value,
+) -> Result<(), String> {
+    post_authed(client, base, token, "/agent/queue-state", body).await
+}
+
 /// SSE 스트림 열기(`GET /agent/stream?token=`). 브라우저가 아니므로 토큰을 쿼리로 싣는다.
 /// 반환된 Response를 `chunk()`로 읽어 `data:` 줄을 파싱한다(호출부).
 pub async fn open_stream(

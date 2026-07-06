@@ -60,6 +60,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/admin/scheduled", post(create_scheduled).get(list_scheduled))
         .route("/admin/scheduled/:id", delete(delete_scheduled))
         .route("/devices/:id/inventory", get(device_inventory))
+        .route("/devices/:id/queue-state", get(device_queue_state))
+        .route("/admin/kill", post(issue_kill))
         // ── 계정 스테이징·분배(§7·§10-3) ──
         .route("/admin/accounts", get(list_accounts))
         .route("/admin/accounts/import", post(import_accounts))
@@ -74,6 +76,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/agent/state", post(agent_state))
         .route("/agent/log", post(agent_log))
         .route("/agent/inventory", post(agent_inventory))
+        .route("/agent/queue-state", post(agent_queue_state))
         .route("/agent/commands/:command_id/result", post(command_result))
         .route("/agent/post-report", post(post_report))
         .route("/admin/post-reports", get(list_post_reports))
@@ -448,6 +451,88 @@ async fn issue_publish(
     )
     .await;
 
+    Ok(Json(serde_json::json!({ "ok": true, "commandId": cid })))
+}
+
+// ───────────────────────── 중지 명령(kill_publish, 설계서 08 §10) ─────────────────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KillReq {
+    device_id: String,
+    #[serde(default)]
+    command_id: Option<String>,
+    /// 특정 큐 1개(Admin "중지 명령" 페이지의 큐 옆 [중지]).
+    #[serde(default)]
+    queue_id: Option<String>,
+    /// 디바이스 전체(하위 옆 [중지]) — 그 하위의 실행/대기 큐 전부.
+    #[serde(default)]
+    all: bool,
+    /// 계정 단위(선택).
+    #[serde(default)]
+    login_id: Option<String>,
+}
+
+/// 중지 명령 발행(설계서 08 §10) — Admin이 고른 대상(큐 1개 / 디바이스 전체 / 계정)을 그 하위
+/// SSE로 내려보내 실행 중 게시큐를 완전 종료시킨다. **무엇을 중지하라 했는지 payload 원문 전체를
+/// 자르지 않고** 통신로그·서버 로그에 남긴다(Stage5 무필터 로그). 게이트·[REJECT]는 게시 명령과 동일.
+async fn issue_kill(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<KillReq>,
+) -> AppResult<Json<serde_json::Value>> {
+    let op = st.auth_operator(&headers).await?;
+    let uid = Uuid::parse_str(&req.device_id)
+        .map_err(|_| AppError::BadRequest("기기 id 형식 오류".into()))?;
+    let device = st
+        .repo
+        .find_device(uid)
+        .await?
+        .ok_or_else(|| AppError::NotFound("없는 기기".into()))?;
+    let cid = req
+        .command_id
+        .clone()
+        .unwrap_or_else(|| format!("c-{}", Uuid::new_v4()));
+
+    if !AppState::is_commandable(device.state) {
+        let reason = match device.state {
+            DeviceState::Rotating => "대상 컴퓨터 IP 변경 중(ROTATING·거부코드 409)",
+            DeviceState::Reconnecting => "대상 컴퓨터 재연결 중(거부코드 409)",
+            _ => "대상 컴퓨터 꺼짐(offline·거부코드 409)",
+        };
+        st.audit(
+            "[REJECT]",
+            &format!("Admin → {}", device.name),
+            &req.device_id,
+            &format!(
+                "거부: kill_publish(중지) commandId={cid} 사유={reason} operator={} queueId={:?} all={} loginId={:?}",
+                op.login_id, req.queue_id, req.all, req.login_id
+            ),
+            "fail",
+        )
+        .await;
+        return Err(AppError::Conflict(format!("{reason} — 재연결 후 다시 시도")));
+    }
+
+    let payload = serde_json::json!({
+        "type": "kill_publish",
+        "commandId": cid,
+        "kill": { "queueId": req.queue_id, "all": req.all, "loginId": req.login_id },
+    });
+    st.hub.device_push(uid, payload.to_string());
+    // 원문 무필터 로그(Stage5): 무엇을 중지하라 했는지 payload 그대로. 하위의 실제 정지 과정은
+    // 하위 앱 로그(log-forward)로 이어서 통신로그에 그대로 뜬다.
+    st.audit(
+        "[CMD]",
+        &format!("Admin → {}", device.name),
+        &req.device_id,
+        &format!(
+            "kill_publish(중지) commandId={cid} operator={} payload={payload}",
+            op.login_id
+        ),
+        "cmd",
+    )
+    .await;
     Ok(Json(serde_json::json!({ "ok": true, "commandId": cid })))
 }
 
@@ -1130,6 +1215,31 @@ async fn device_inventory(
         accounts: vec![],
         received_at: None,
     })))
+}
+
+/// 하위 → 서버: 실행/대기 게시큐 스냅샷 보고(설계서 08 §10-2). 주기 보고라 통신로그엔 안 남기고
+/// 최신 1건만 보관한다(kill 명령만 원문 로그). Admin "중지 명령" 페이지가 폴링으로 읽는다.
+async fn agent_queue_state(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(mut qs): Json<DeviceQueueState>,
+) -> AppResult<Json<serde_json::Value>> {
+    let device = st.auth_device(&headers).await?;
+    qs.received_at = Some(Utc::now().to_rfc3339());
+    st.set_queue_state(device.id, qs);
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Admin "중지 명령" 페이지 — 특정 하위의 실행/대기 게시큐(실데이터, 하위 화면과 동일). 아직 보고
+/// 전이면 빈 목록.
+async fn device_queue_state(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> AppResult<Json<DeviceQueueState>> {
+    st.auth_operator(&headers).await?;
+    let uid = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("기기 id 형식 오류".into()))?;
+    Ok(Json(st.get_queue_state(uid).unwrap_or_default()))
 }
 
 /// Admin '로그인 결과' 탭 — 모든 하위의 로그인 결과(컴퓨터당 최신 1건, 최신순).

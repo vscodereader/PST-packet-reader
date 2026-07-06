@@ -63,6 +63,34 @@ pub struct DeviceInventory {
     pub received_at: Option<String>,
 }
 
+/// 하위 실행/대기 게시큐 스냅샷(설계서 08 §10-2). 하위가 주기 보고하는 실시간 상태라 인벤토리와
+/// 같이 메모리에 최신 1건만 둔다. Admin "중지 명령" 페이지가 이걸 폴링해 하위 게시큐 화면과
+/// 동일한 내용을 실시간으로 보여주고, 각 큐 옆 [중지]가 그 큐의 id로 kill을 보낸다.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceQueueState {
+    pub items: Vec<QueueItemDto>,
+    #[serde(default)]
+    pub received_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueItemDto {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub done: u32,
+    #[serde(default)]
+    pub total: u32,
+    #[serde(default)]
+    pub login_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct DeviceCode {
     pub code: String,

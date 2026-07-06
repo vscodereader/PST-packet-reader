@@ -103,6 +103,26 @@ impl CancelRegistry {
     }
 }
 
+/// 큐 아이템 1개를 완전 종료(kill)한다 — 로컬 UI(`kill_queue_now`)와 Admin 원격(agent
+/// `kill_publish`)이 공유하는 **단일 경로**(설계서 08 §5, "kill primitive 1개가 두 트리거를
+/// 커버"). ① 취소 신호 set(실행 중 루프가 종목 사이·대기 중에 스스로 정지) ② 큐에서 제거
+/// (배치 경계 협조 취소 + 워커 재실행 방지) ③ Stage2 강제 감시 spawn(hang 대비).
+pub fn kill_one<R: tauri::Runtime>(app: &tauri::AppHandle<R>, id: &str) {
+    use tauri::Manager;
+    let cancels = app.state::<CancelRegistry>();
+    cancels.request(id);
+    app.state::<crate::store::JsonStore<crate::ipc::queue::QueueNowItem>>()
+        .mutate(|items| crate::ipc::queue::apply_cancel_now(items, id));
+    tracing::info!(id = %id, "[QUEUE] 중지(kill) — 취소 신호 set + 큐에서 제거");
+    if let Some(sig) = cancels.get(id) {
+        let app_bg = app.clone();
+        let id_bg = id.to_owned();
+        tauri::async_runtime::spawn(async move {
+            escalate_kill(app_bg, id_bg, sig).await;
+        });
+    }
+}
+
 /// Stage2 강제 종료 감시(설계서 08 §4-3). 협조적 정지(Stage1)가 `GRACE_SECS` 안에 끝나면
 /// (신호가 레지스트리에서 제거됨 = 아이템 정상 종료) 아무것도 안 한다. 안 끝나면(hang) 등록된
 /// Chrome PID를 `taskkill /T`로 강제 종료한다 — 단 add POST 임계구역(`in_critical`)이면 그 창이
