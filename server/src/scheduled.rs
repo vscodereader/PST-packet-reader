@@ -42,6 +42,12 @@ pub struct PublishSpec {
     pub target_label: String,
     #[serde(default)]
     pub split: bool,
+    /// 게시 종류: "post"(글)·"comment"(댓글)·"both"(글+댓글). 빈값=post(하위호환).
+    #[serde(default)]
+    pub mode: String,
+    /// 댓글 모드의 특정 게시글 URL들(종토 댓글=특정게시글).
+    #[serde(default)]
+    pub comment_urls: Vec<String>,
     pub assignments: Vec<PublishAssignment>,
 }
 
@@ -97,6 +103,11 @@ pub async fn dispatch_publish(
             })
         })
         .collect();
+    let mode = if spec.mode.is_empty() {
+        "post"
+    } else {
+        spec.mode.as_str()
+    };
     let payload = serde_json::json!({
         "type": "publish_posts",
         "commandId": cid,
@@ -105,6 +116,8 @@ pub async fn dispatch_publish(
             "postTitle": spec.post_title,
             "targetLabel": target_label,
             "split": spec.split,
+            "mode": mode,
+            "commentUrls": spec.comment_urls,
             "assignments": assignments_json,
         }
     });
@@ -268,6 +281,8 @@ mod tests {
                 post_title: "글".into(),
                 target_label: String::new(),
                 split: false,
+                mode: String::new(),
+                comment_urls: vec![],
                 assignments: vec![PublishAssignment {
                     login_id: "acc".into(),
                     stocks: vec![PublishStock { code: "005930".into(), name: "삼성전자".into() }],

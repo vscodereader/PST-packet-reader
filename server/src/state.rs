@@ -253,7 +253,11 @@ mod tests {
         DeviceInventory {
             posts: posts
                 .iter()
-                .map(|(id, t)| InvPost { id: (*id).into(), title: (*t).into() })
+                .map(|(id, t)| InvPost {
+                    id: (*id).into(),
+                    title: (*t).into(),
+                    kind: "post".into(),
+                })
                 .collect(),
             accounts: accounts.iter().map(|s| (*s).to_string()).collect(),
             // received_at은 비교 제외 대상이므로 일부러 채워 넣어도 결과가 같아야 한다.

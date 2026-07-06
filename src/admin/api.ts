@@ -130,6 +130,8 @@ export interface ScheduledDto {
 export interface InvPostDto {
   id: string;
   title: string;
+  // 글 종류: "post"(글)·"comment"(댓글)·"both"(글+댓글). 옛 하위는 빈값 → post로 본다.
+  kind?: string;
 }
 export interface DeviceInventoryDto {
   posts: InvPostDto[];
@@ -372,6 +374,8 @@ export const api = {
       postTitle: string;
       targetLabel: string;
       split: boolean;
+      mode?: string; // "post"|"comment"|"both" (빈값=post)
+      commentUrls?: string[]; // 댓글 모드(종토=특정게시글) URL들
       assignments: { loginId: string; stocks: { code: string; name: string }[] }[];
     }): Promise<{ ok: boolean; commandId: string }> {
       return request("POST", "/admin/publish", req);
@@ -385,6 +389,8 @@ export const api = {
       postTitle: string;
       targetLabel: string;
       split: boolean;
+      mode?: string; // "post"|"comment"|"both" (빈값=post)
+      commentUrls?: string[];
       assignments: { loginId: string; stocks: { code: string; name: string }[] }[];
       at: number; // 발송 시각 epoch ms
       detail: string;

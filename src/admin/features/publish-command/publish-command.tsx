@@ -1,4 +1,5 @@
 import {
+  ActionIcon,
   Badge,
   Box,
   Button,
@@ -10,6 +11,7 @@ import {
   SimpleGrid,
   Stack,
   Text,
+  TextInput,
   ThemeIcon,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
@@ -38,6 +40,19 @@ interface PubDevice {
   id: string;
   name: string;
   ip: string;
+}
+
+// 글 종류(사용자 요청 2026-07-06) — 하위 선택 후 먼저 고른다. 고른 종류의 글만 목록에 뜬다.
+// post=글, comment=댓글(종토=특정게시글), both=글+댓글.
+type PostKind = "post" | "comment" | "both";
+const KIND_OPTS: { value: PostKind; label: string }[] = [
+  { value: "post", label: "글" },
+  { value: "comment", label: "댓글" },
+  { value: "both", label: "글+댓글" },
+];
+/** 글의 종류(없으면 post로 본다 — 옛 하위 하위호환). */
+function postKindOf(p: { kind?: string }): PostKind {
+  return p.kind === "comment" || p.kind === "both" ? p.kind : "post";
 }
 
 type Target = "forum" | "cafe" | "blog" | "band";
@@ -90,11 +105,13 @@ const DUMMY_DEVICES: PubDevice[] = [
   { id: "d2", name: "하위-002", ip: "1.2.3.5" },
   { id: "d3", name: "하위-003", ip: "1.2.3.6" },
 ];
-function mockPosts(deviceId: string): { id: string; title: string }[] {
+function mockPosts(
+  deviceId: string,
+): { id: string; title: string; kind: PostKind }[] {
   return [
-    { id: `${deviceId}-p1`, title: "오늘의 급등주 분석과 전망" },
-    { id: `${deviceId}-p2`, title: "반도체 섹터 단기 대응 전략" },
-    { id: `${deviceId}-p3`, title: "코스닥 중소형주 모멘텀 점검" },
+    { id: `${deviceId}-p1`, title: "오늘의 급등주 분석과 전망", kind: "post" },
+    { id: `${deviceId}-p2`, title: "반도체 섹터 단기 대응 댓글", kind: "comment" },
+    { id: `${deviceId}-p3`, title: "코스닥 모멘텀 글+댓글", kind: "both" },
   ];
 }
 function mockAccounts(deviceId: string): string[] {
@@ -148,9 +165,14 @@ export function PublishCommand({
   const [selDev, setSelDev] = useState<Set<string>>(new Set());
   // 하위별 실데이터 인벤토리(글목록·성공계정) — 서버가 있으면 채워지고, 없으면 더미로 폴백(UI 무손상).
   const [invByDev, setInvByDev] = useState<
-    Record<string, { posts: { id: string; title: string }[]; accounts: string[] }>
+    Record<
+      string,
+      { posts: { id: string; title: string; kind?: string }[]; accounts: string[] }
+    >
   >({});
   const [postByDev, setPostByDev] = useState<Record<string, string | null>>({});
+  // 하위별 선택한 글 종류(글/댓글/글+댓글). 종류를 바꾸면 그 종류 글만 목록에 뜬다.
+  const [kindByDev, setKindByDev] = useState<Record<string, PostKind>>({});
   // 게시 대상은 **하위별로** 고른다 — 한 대는 종토, 다른 대는 카페처럼 서로 다를 수 있다.
   const [targetByDev, setTargetByDev] = useState<Record<string, Target>>({});
   const [cfgByDev, setCfgByDev] = useState<Record<string, ForumCfg>>({});
@@ -196,8 +218,13 @@ export function PublishCommand({
   }, [devices]);
 
   // 실데이터 우선, 없으면(오프라인/미보고) 더미. 글목록이 비어있어도 보고된 것이면 실데이터로 본다.
-  const postsFor = (deviceId: string): { id: string; title: string }[] =>
+  const postsFor = (
+    deviceId: string,
+  ): { id: string; title: string; kind?: string }[] =>
     invByDev[deviceId]?.posts ?? mockPosts(deviceId);
+  // 선택한 글 종류의 글만(사용자 요청: 종류별로 안 섞이게).
+  const postsForKind = (deviceId: string, kind: PostKind) =>
+    postsFor(deviceId).filter((p) => postKindOf(p) === kind);
   const accountsFor = (deviceId: string): string[] =>
     invByDev[deviceId]?.accounts ?? mockAccounts(deviceId);
 
@@ -244,6 +271,7 @@ export function PublishCommand({
         <SimpleGrid cols={4} spacing="sm">
           {devices.map((d) => {
             const on = selDev.has(d.id);
+            const devKind = kindByDev[d.id] ?? null;
             return (
               <Stack key={d.id} gap={6}>
                 <Paper
@@ -277,18 +305,40 @@ export function PublishCommand({
                     </Box>
                   </Group>
                 </Paper>
+                {/* 글 종류 먼저 고른다 → 그 종류 글만 아래 목록에 뜬다(안 섞임). */}
                 <Select
                   size="xs"
                   disabled={!on}
-                  placeholder="글을 선택하세요"
+                  placeholder="글 종류를 고르세요"
+                  value={devKind}
+                  onChange={(v) => {
+                    if (!v) return;
+                    setKindByDev((prev) => ({ ...prev, [d.id]: v as PostKind }));
+                    // 종류가 바뀌면 이전에 고른 글 선택을 초기화(다른 종류 글이 남지 않게).
+                    setPostByDev((prev) => ({ ...prev, [d.id]: null }));
+                  }}
+                  data={KIND_OPTS}
+                  comboboxProps={{ withinPortal: true }}
+                  aria-label={`${d.name} 글 종류 선택`}
+                />
+                <Select
+                  size="xs"
+                  disabled={!on || devKind == null}
+                  placeholder={
+                    devKind == null ? "글 종류 먼저" : "글을 선택하세요"
+                  }
                   value={postByDev[d.id] ?? null}
                   onChange={(v) =>
                     setPostByDev((prev) => ({ ...prev, [d.id]: v }))
                   }
-                  data={postsFor(d.id).map((p) => ({
-                    value: p.id,
-                    label: shortTitle(p.title),
-                  }))}
+                  data={
+                    devKind != null
+                      ? postsForKind(d.id, devKind).map((p) => ({
+                          value: p.id,
+                          label: shortTitle(p.title),
+                        }))
+                      : []
+                  }
                   comboboxProps={{ withinPortal: true }}
                   aria-label={`${d.name} 글 선택`}
                 />
@@ -312,6 +362,7 @@ export function PublishCommand({
               <DeviceBlock
                 key={d.id}
                 device={d}
+                kind={kindByDev[d.id] ?? "post"}
                 postTitle={
                   postByDev[d.id]
                     ? (postsFor(d.id).find((p) => p.id === postByDev[d.id])
@@ -339,6 +390,7 @@ export function PublishCommand({
 // 하위 1대 블록: 기기 헤더 + 게시 대상(하위별) + 대상별 상세 구성. 종토만 상세 구현, 나머지는 추후.
 function DeviceBlock({
   device,
+  kind,
   postId,
   postTitle,
   accounts,
@@ -349,6 +401,7 @@ function DeviceBlock({
   onSchedule,
 }: {
   device: PubDevice;
+  kind: PostKind;
   postId: string | null;
   postTitle: string | null;
   accounts: string[];
@@ -358,6 +411,7 @@ function DeviceBlock({
   onPatch: (patch: Partial<ForumCfg>) => void;
   onSchedule: (item: ScheduledItem) => void;
 }) {
+  const kindLabel = KIND_OPTS.find((k) => k.value === kind)?.label ?? "글";
   return (
     <Paper withBorder radius="md" p="md">
       {/* 기기 헤더 + 선택한 글 */}
@@ -366,13 +420,16 @@ function DeviceBlock({
           <IconDeviceDesktop size={16} />
         </ThemeIcon>
         <Text fw={700}>{device.name}</Text>
+        <Badge variant="light" color="grape" radius="sm">
+          {kindLabel}
+        </Badge>
         {postTitle ? (
           <Badge variant="light" color="blue" radius="sm">
-            글: {shortTitle(postTitle)}
+            {kindLabel}: {shortTitle(postTitle)}
           </Badge>
         ) : (
           <Badge variant="light" color="gray" radius="sm">
-            글을 먼저 선택하세요
+            {kindLabel} 선택하세요
           </Badge>
         )}
       </Group>
@@ -402,12 +459,22 @@ function DeviceBlock({
         ))}
       </Group>
 
-      {/* 대상별 상세 구성 */}
-      {target === "forum" && (
+      {/* 대상별 상세 구성 — 종토는 종류에 따라 다르다: 글/글+댓글=종목 게시, 댓글=특정게시글 URL. */}
+      {target === "forum" && kind !== "comment" && (
         <ForumConfig
           device={device}
+          mode={kind}
           cfg={cfg}
           onPatch={onPatch}
+          postId={postId}
+          postTitle={postTitle}
+          accounts={accounts}
+          onSchedule={onSchedule}
+        />
+      )}
+      {target === "forum" && kind === "comment" && (
+        <ForumCommentConfig
+          device={device}
           postId={postId}
           postTitle={postTitle}
           accounts={accounts}
@@ -427,6 +494,7 @@ function DeviceBlock({
 // 종토 상세 구성(카테고리/시장/종목수/계정 + 4버튼). 외곽 Paper·기기헤더는 DeviceBlock이 제공.
 function ForumConfig({
   device,
+  mode,
   cfg,
   onPatch,
   postId,
@@ -435,6 +503,7 @@ function ForumConfig({
   onSchedule,
 }: {
   device: PubDevice;
+  mode: PostKind; // "post"(글) | "both"(글+댓글) — 댓글은 ForumCommentConfig가 처리.
   cfg: ForumCfg;
   onPatch: (patch: Partial<ForumCfg>) => void;
   postId: string | null;
@@ -529,6 +598,7 @@ function ForumConfig({
           postTitle: postTitle ?? "",
           targetLabel: "종목토론방",
           split,
+          mode, // 글=post / 글+댓글=both(글 게시 후 그 글에 저장된 댓글까지).
           assignments: buildAssignments(split),
         });
         notifications.show({
@@ -569,6 +639,7 @@ function ForumConfig({
           postTitle: postTitle ?? "",
           targetLabel: "종목토론방",
           split,
+          mode,
           assignments: buildAssignments(split),
           at,
           detail,
@@ -796,6 +867,244 @@ function ForumConfig({
             나눠서 게시는 계정 2개 이상 + 종목 2개 이상이고, 종목 수가 계정 수
             이상일 때 켜집니다.
           </Text>
+        )}
+      </Stack>
+    </Box>
+  );
+}
+
+// 종토 댓글 상세 구성(사용자 확정 2026-07-06: 종토 댓글=특정 게시글). 링크 여러 개 입력 + 링크추가
+// → 각 URL의 글에 저장된 댓글을 단다(엔진 기존 comment_url 경로 재사용). 계정 선택 후 지금/예약
+// 게시. 나눠서는 없다(URL 댓글은 계정마다 같은 URL에 단다). 데스크톱 writer-modal 링크 UX 이식.
+function ForumCommentConfig({
+  device,
+  postId,
+  postTitle,
+  accounts,
+  onSchedule,
+}: {
+  device: PubDevice;
+  postId: string | null;
+  postTitle: string | null;
+  accounts: string[];
+  onSchedule: (item: ScheduledItem) => void;
+}) {
+  const [urls, setUrls] = useState<string[]>(["", "", ""]);
+  const [accts, setAccts] = useState<string[]>([]);
+  const [armed, setArmed] = useState<boolean>(false);
+  const [sched, setSched] = useState(() => nowParts());
+
+  const cleanUrls = urls.map((u) => u.trim()).filter((u) => u.length > 0);
+  const valid = postTitle != null && cleanUrls.length > 0 && accts.length > 0;
+  const detail = `특정 게시글 ${cleanUrls.length}개 · 계정 ${accts.length}`;
+
+  // 댓글은 계정마다 같은 URL들에 단다(나눠서 없음). assignment는 계정만(종목 없음).
+  const buildAssignments = () => accts.map((loginId) => ({ loginId, stocks: [] }));
+
+  const setUrl = (i: number, v: string) =>
+    setUrls((prev) => prev.map((u, idx) => (idx === i ? v : u)));
+  const removeUrl = (i: number) =>
+    setUrls((prev) =>
+      prev.length <= 1 ? [""] : prev.filter((_, idx) => idx !== i),
+    );
+
+  const runNow = () => {
+    void (async () => {
+      try {
+        await api.publish.send({
+          deviceId: device.id,
+          postId: postId ?? "",
+          postTitle: postTitle ?? "",
+          targetLabel: "종목토론방",
+          split: false,
+          mode: "comment",
+          commentUrls: cleanUrls,
+          assignments: buildAssignments(),
+        });
+        notifications.show({
+          title: `${device.name} · 댓글 명령 전송`,
+          message: `"${shortTitle(postTitle ?? "")}" · ${detail}`,
+          color: "blue",
+        });
+      } catch (e) {
+        if (isOffline(e)) {
+          notifications.show({
+            title: `${device.name} · 댓글 게시(미리보기)`,
+            message: `${detail} · 서버 오프라인(전송 안 됨)`,
+            color: "gray",
+          });
+        } else {
+          notifications.show({
+            title: "댓글 명령 실패",
+            message: e instanceof Error ? e.message : String(e),
+            color: "red",
+          });
+        }
+      }
+    })();
+  };
+
+  const confirmSchedule = () => {
+    const at = toEpochMs(sched.date, sched.time);
+    const when = scheduleMoment(sched.date, sched.time).when;
+    setArmed(false);
+    void (async () => {
+      try {
+        await api.scheduled.create({
+          deviceId: device.id,
+          postId: postId ?? "",
+          postTitle: postTitle ?? "",
+          targetLabel: "종목토론방",
+          split: false,
+          mode: "comment",
+          commentUrls: cleanUrls,
+          assignments: buildAssignments(),
+          at,
+          detail,
+        });
+        notifications.show({
+          title: `${device.name} 댓글 예약`,
+          message: `${when} · ${detail}`,
+          color: "grape",
+        });
+      } catch (e) {
+        if (isOffline(e)) {
+          onSchedule({
+            id: `sch-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+            deviceName: device.name,
+            postTitle: postTitle ?? "-",
+            targetLabel: "종목토론방(댓글)",
+            detail,
+            at,
+          });
+          notifications.show({
+            title: `${device.name} 댓글 예약(미리보기)`,
+            message: `${when} · ${detail} · 서버 오프라인(로컬에만 표시)`,
+            color: "gray",
+          });
+        } else {
+          notifications.show({
+            title: "댓글 예약 실패",
+            message: e instanceof Error ? e.message : String(e),
+            color: "red",
+          });
+        }
+      }
+    })();
+  };
+
+  return (
+    <Box>
+      {/* 특정 게시글 URL 입력 + 링크 추가(데스크톱 writer-modal와 동일 UX) */}
+      <Text size="xs" c="dimmed" mb={4}>
+        특정 게시글 링크 (넣은 링크의 글마다 저장된 댓글을 답니다)
+      </Text>
+      <Stack gap={6} mb="sm">
+        {urls.map((u, i) => (
+          <Group key={i} gap={6} wrap="nowrap">
+            <TextInput
+              size="xs"
+              style={{ flex: 1 }}
+              placeholder={`종목토론방 글 URL ${i + 1}`}
+              value={u}
+              onChange={(e) => setUrl(i, e.currentTarget.value)}
+              styles={{ input: { fontFamily: "monospace" } }}
+            />
+            <ActionIcon
+              size="md"
+              variant="subtle"
+              color="gray"
+              title="링크 삭제"
+              onClick={() => removeUrl(i)}
+            >
+              <Icon.x size={15} />
+            </ActionIcon>
+          </Group>
+        ))}
+        <Button
+          size="xs"
+          variant="light"
+          leftSection={<Icon.plus size={13} />}
+          onClick={() => setUrls((prev) => [...prev, ""])}
+          style={{ alignSelf: "flex-start" }}
+        >
+          링크 추가
+        </Button>
+      </Stack>
+
+      {/* 계정 선택 — 이 하위의 성공 계정만 */}
+      <Text size="xs" c="dimmed" mb={4}>
+        계정 (이 하위의 로그인 성공 계정만 · {accts.length}명 선택)
+      </Text>
+      <Group gap={6}>
+        {accounts.map((a) => {
+          const on = accts.includes(a);
+          return (
+            <Button
+              key={a}
+              size="xs"
+              variant={on ? "filled" : "default"}
+              color={on ? "blue" : "gray"}
+              onClick={() =>
+                setAccts((prev) =>
+                  on ? prev.filter((x) => x !== a) : [...prev, a],
+                )
+              }
+            >
+              {maskId(a)}
+            </Button>
+          );
+        })}
+      </Group>
+
+      {/* 지금/예약 게시(댓글은 나눠서 없음) */}
+      <Stack gap={8} mt="md">
+        <Group grow gap="xs">
+          <Button
+            size="sm"
+            fw={700}
+            disabled={!valid}
+            leftSection={<Icon.bolt size={15} />}
+            onClick={runNow}
+          >
+            지금 게시
+          </Button>
+          <Button
+            size="sm"
+            fw={700}
+            variant={armed ? "filled" : "light"}
+            color="grape"
+            disabled={!valid}
+            leftSection={<Icon.calendar size={15} />}
+            onClick={() => setArmed(true)}
+          >
+            예약 게시
+          </Button>
+        </Group>
+        {armed && (
+          <Paper withBorder radius="md" p="sm" bg="var(--mantine-color-gray-0)">
+            <Text fz={12} fw={700} mb={6}>
+              댓글 예약 — 게시 시각 선택
+            </Text>
+            <Group gap="sm" wrap="wrap">
+              <DateTimePicker
+                date={sched.date}
+                time={sched.time}
+                onChange={setSched}
+              />
+              <Button size="sm" color="grape" onClick={confirmSchedule}>
+                예약 확정
+              </Button>
+              <Button
+                size="sm"
+                variant="subtle"
+                color="gray"
+                onClick={() => setArmed(false)}
+              >
+                취소
+              </Button>
+            </Group>
+          </Paper>
         )}
       </Stack>
     </Box>

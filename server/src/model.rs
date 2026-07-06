@@ -49,6 +49,10 @@ pub struct Device {
 pub struct InvPost {
     pub id: String,
     pub title: String,
+    /// 글 종류: "post"(글)·"comment"(댓글)·"both"(글+댓글). Admin에서 글 종류로 필터한다.
+    /// 하위호환: 옛 하위가 안 보내면 기본 "post"(빈값도 post로 본다).
+    #[serde(default)]
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

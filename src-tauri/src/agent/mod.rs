@@ -78,6 +78,12 @@ struct PublishCmd {
     target_label: String,
     #[serde(default)]
     split: bool,
+    /// 게시 종류: "post"(글)·"comment"(댓글)·"both"(글+댓글). 빈값=post(하위호환).
+    #[serde(default)]
+    mode: String,
+    /// 댓글 모드의 특정 게시글 URL들(종토 댓글=특정게시글, 사용자 확정 2026-07-06).
+    #[serde(default)]
+    comment_urls: Vec<String>,
     assignments: Vec<PublishAssign>,
 }
 #[derive(Deserialize)]
@@ -161,11 +167,11 @@ async fn inventory_report_loop<R: Runtime>(app: AppHandle<R>) {
         let Some(cfg) = config::load() else {
             continue;
         };
-        let posts: Vec<(String, String)> = app
+        let posts: Vec<(String, String, &'static str)> = app
             .state::<JsonStore<crate::ipc::posts::LibraryPost>>()
             .snapshot()
             .into_iter()
-            .map(|p| (p.id, p.title))
+            .map(|p| (p.id, p.title, mode_to_str(&p.kind)))
             .collect();
         let accounts = app.state::<JsonStore<Account>>().snapshot();
         let body = inventory_body(&posts, &accounts);
@@ -175,10 +181,19 @@ async fn inventory_report_loop<R: Runtime>(app: AppHandle<R>) {
 
 /// 인벤토리 보고 본문(서버 `DeviceInventory` 모양). 글=(id,title) 전부, 계정=성공(Active) loginId만.
 /// 순수함수(테스트 대상) — 스토어 스냅샷 투영값을 받아 JSON을 만든다.
-fn inventory_body(posts: &[(String, String)], accounts: &[Account]) -> serde_json::Value {
+/// ModeValue → 인벤토리·명령용 문자열("post"|"comment"|"both"). ModeValue serde(lowercase)와 일치.
+fn mode_to_str(m: &ModeValue) -> &'static str {
+    match m {
+        ModeValue::Post => "post",
+        ModeValue::Comment => "comment",
+        ModeValue::Both => "both",
+    }
+}
+
+fn inventory_body(posts: &[(String, String, &str)], accounts: &[Account]) -> serde_json::Value {
     let posts: Vec<serde_json::Value> = posts
         .iter()
-        .map(|(id, title)| serde_json::json!({ "id": id, "title": title }))
+        .map(|(id, title, kind)| serde_json::json!({ "id": id, "title": title, "kind": kind }))
         .collect();
     // 게시 대상 계정 = 로그인 성공(Active)만. 게시명령 화면은 이 계정들만 노출한다.
     let accounts: Vec<String> = accounts
@@ -539,7 +554,8 @@ fn enqueue_publish<R: Runtime>(
         "[AGENT] publish_posts 수신 — 게시 큐 적재(계정×종목 원문)"
     );
 
-    let (title, body) = load_post(app, &p.post_id);
+    let (title, body, comments) = load_post(app, &p.post_id);
+    let mode = mode_from_str(&p.mode);
     let plan_title = if p.post_title.is_empty() {
         title.clone()
     } else {
@@ -561,10 +577,17 @@ fn enqueue_publish<R: Runtime>(
         &plan_title,
         &effective_title,
         &body,
+        mode,
+        &comments,
+        &p.comment_urls,
         now_ms(),
     );
     if new_items.is_empty() {
-        return ("fail", "게시 대상(계정×종목)이 비었습니다".into(), None);
+        return (
+            "fail",
+            "게시 대상(계정×종목 또는 댓글 URL)이 비었습니다".into(),
+            None,
+        );
     }
     let queue_count = new_items.len();
     let total_targets: usize = new_items
@@ -590,48 +613,87 @@ fn enqueue_publish<R: Runtime>(
 /// **계정당 큐 1개** 규칙으로 게시 큐 아이템 목록을 만든다(순수 함수 — 테스트 대상). assignment
 /// 하나당 QueueNowItem 하나이며, 그 계정의 종목만 forum에 담는다. 종목이 빈 계정은 건너뛴다.
 /// id는 `agent-publish-{now}-{idx}`로 같은 tick에도 유일(계정 증발 방지, #6).
+#[allow(clippy::too_many_arguments)]
 fn build_publish_items(
     assignments: &[PublishAssign],
     post_id: &str,
     plan_title: &str,
     effective_title: &str,
     body: &str,
+    mode: ModeValue,
+    comments: &[String],
+    comment_urls: &[String],
     now: u128,
 ) -> Vec<QueueNowItem> {
+    // 댓글 모드는 종토 "특정 게시글(URL)"만 지원한다(사용자 확정 2026-07-06: 종토 댓글=특정게시글).
+    // 계정마다 입력된 URL들에 각각 댓글을 단다(엔진 기존 comment_url 경로 재사용). 글/글+댓글은
+    // 기존과 동일하게 계정×종목으로 게시한다(글+댓글은 kind=Both라 글 게시 후 그 글에 댓글까지).
+    let is_comment = matches!(mode, ModeValue::Comment);
+    let urls: Vec<String> = comment_urls
+        .iter()
+        .map(|u| u.trim().to_owned())
+        .filter(|u| !u.is_empty())
+        .collect();
+    // 댓글/글+댓글은 저장된 댓글 텍스트를 plan.comments로 실어 forum이 comments.first()로 쓴다.
+    let plan_comments: Vec<String> = if matches!(mode, ModeValue::Comment | ModeValue::Both) {
+        comments.to_vec()
+    } else {
+        vec![]
+    };
+
     let mut items = Vec::new();
     for (idx, a) in assignments.iter().enumerate() {
-        if a.stocks.is_empty() {
-            continue;
-        }
         let mut forum: Vec<ForumTarget> = Vec::new();
         let mut locs: Vec<QueueLocation> = Vec::new();
-        for s in &a.stocks {
-            forum.push(ForumTarget {
-                account_id: a.login_id.clone(),
-                name: s.name.clone(),
-                code: s.code.clone(),
-                comment_url: String::new(),
-            });
-            locs.push(QueueLocation {
-                p: PlatformId::Forum,
-                name: s.name.clone(),
-                code: Some(s.code.clone()),
-            });
+        if is_comment {
+            for url in &urls {
+                forum.push(ForumTarget {
+                    account_id: a.login_id.clone(),
+                    name: "특정 게시글".to_string(),
+                    code: String::new(),
+                    comment_url: url.clone(),
+                });
+                locs.push(QueueLocation {
+                    p: PlatformId::Forum,
+                    name: "특정 게시글 댓글".to_string(),
+                    code: None,
+                });
+            }
+        } else {
+            if a.stocks.is_empty() {
+                continue;
+            }
+            for s in &a.stocks {
+                forum.push(ForumTarget {
+                    account_id: a.login_id.clone(),
+                    name: s.name.clone(),
+                    code: s.code.clone(),
+                    comment_url: String::new(),
+                });
+                locs.push(QueueLocation {
+                    p: PlatformId::Forum,
+                    name: s.name.clone(),
+                    code: Some(s.code.clone()),
+                });
+            }
+        }
+        if forum.is_empty() {
+            continue;
         }
         items.push(QueueNowItem {
             id: format!("agent-publish-{now}-{idx}"),
             title: plan_title.to_string(),
-            kind: ModeValue::Post,
+            kind: mode.clone(),
             state: QueueState::Waiting,
             batch_id: None,
             progress: None,
             locs,
             plan: Some(PublishPlan {
                 post_id: post_id.to_string(),
-                kind: ModeValue::Post,
+                kind: mode.clone(),
                 title: effective_title.to_string(),
                 body_text: body.to_string(),
-                comments: vec![],
+                comments: plan_comments.clone(),
                 link_override: String::new(),
                 naver: vec![],
                 forum,
@@ -646,14 +708,30 @@ fn build_publish_items(
     items
 }
 
-/// 로컬 글(LibraryPost) 본문 로드(제목·본문). 없으면 빈 문자열(best-effort — 토큰 치환은 plan 기준).
-fn load_post<R: Runtime>(app: &AppHandle<R>, post_id: &str) -> (String, String) {
+/// 로컬 글(LibraryPost) 본문 로드(제목·본문·댓글). 없으면 빈 값(best-effort). 댓글은 댓글/글+댓글
+/// 모드에서 forum이 `comments.first()`로 쓴다(엔진 기존 동작 재사용).
+fn load_post<R: Runtime>(app: &AppHandle<R>, post_id: &str) -> (String, String, Vec<String>) {
     app.state::<JsonStore<crate::ipc::posts::LibraryPost>>()
         .snapshot()
         .into_iter()
         .find(|p| p.id == post_id)
-        .map(|p| (p.title, p.body.unwrap_or_default()))
+        .map(|p| {
+            (
+                p.title,
+                p.body.unwrap_or_default(),
+                p.comments.unwrap_or_default(),
+            )
+        })
         .unwrap_or_default()
+}
+
+/// 게시 명령의 mode 문자열("post"|"comment"|"both", 빈값=post)을 ModeValue로.
+fn mode_from_str(s: &str) -> ModeValue {
+    match s {
+        "comment" => ModeValue::Comment,
+        "both" => ModeValue::Both,
+        _ => ModeValue::Post,
+    }
 }
 
 /// 반환: (IPC 스토어에 새로 추가된 수, 그중 로그인 엔진(accounts.json)이 볼 수 있는 수).
@@ -1300,7 +1378,17 @@ mod tests {
             },
             PublishAssign { login_id: "acc_empty".into(), stocks: vec![] },
         ];
-        let items = build_publish_items(&assignments, "p1", "제목", "제목", "본문", 1234);
+        let items = build_publish_items(
+            &assignments,
+            "p1",
+            "제목",
+            "제목",
+            "본문",
+            ModeValue::Post,
+            &[],
+            &[],
+            1234,
+        );
 
         // 빈 계정 제외 → 큐 2개(계정당 1개).
         assert_eq!(items.len(), 2);
@@ -1323,8 +1411,8 @@ mod tests {
     #[test]
     fn inventory_body_lists_posts_and_only_active_accounts() {
         let posts = vec![
-            ("p1".to_string(), "급등주 분석".to_string()),
-            ("p2".to_string(), "반도체 전략".to_string()),
+            ("p1".to_string(), "급등주 분석".to_string(), "post"),
+            ("p2".to_string(), "반도체 전략".to_string(), "comment"),
         ];
         let acct = |login: &str, status: AccountStatus| Account {
             id: login.into(),
