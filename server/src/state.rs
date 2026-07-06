@@ -257,6 +257,7 @@ mod tests {
                     id: (*id).into(),
                     title: (*t).into(),
                     kind: "post".into(),
+                    excerpt: String::new(),
                 })
                 .collect(),
             accounts: accounts.iter().map(|s| (*s).to_string()).collect(),

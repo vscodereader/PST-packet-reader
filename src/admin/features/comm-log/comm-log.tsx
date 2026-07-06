@@ -230,12 +230,24 @@ export function CommLog() {
   // 서버 감사로그(§7) 로드. 연결 시 실데이터, 오프라인 미리보기면 더미 유지. 3초 폴링.
   const [allLines, setAllLines] = useState<LogLine[]>(LOG_LINES);
   const viewportRef = useRef<HTMLDivElement>(null);
+  const restoredRef = useRef(false);
 
-  // 마운트 시 저장해둔 스크롤 위치를 복원한다(다른 페이지 갔다 와도 맨 위로 안 튕기고 이어 읽기).
+  // 저장해둔 스크롤 위치 복원 — 단 **콘텐츠가 저장 위치까지 찬 뒤에** 딱 한 번만 복원한다.
+  // 마운트 직후엔 짧은 더미 목록만 있어 곧바로 복원하면 최대 스크롤이 작아 위치가 맨 위로
+  // 뭉개졌다(=이전 버그: 다른 페이지 갔다 오면 첫 줄로 튕김). 서버 실데이터(3초 폴링)가
+  // 로드돼 스크롤 가능 높이가 저장 위치 이상이 될 때 복원해 마지막으로 읽던 곳에서 이어 읽는다.
   useEffect(() => {
+    if (restoredRef.current) return;
     const v = viewportRef.current;
-    if (v) v.scrollTop = savedScrollTop;
-  }, []);
+    if (!v) return;
+    if (
+      savedScrollTop === 0 ||
+      v.scrollHeight - v.clientHeight >= savedScrollTop
+    ) {
+      v.scrollTop = savedScrollTop;
+      restoredRef.current = true;
+    }
+  }, [allLines]);
 
   useEffect(() => {
     const load = () => {

@@ -53,6 +53,11 @@ pub struct InvPost {
     /// 하위호환: 옛 하위가 안 보내면 기본 "post"(빈값도 post로 본다).
     #[serde(default)]
     pub kind: String,
+    /// 댓글 내용 미리보기(LibraryPost.excerpt). 댓글은 제목이 없어(당연) title이 비거나
+    /// "제목 없음"이므로, Admin이 이 내용을 제목 대신 보여준다("작성한 댓글 내용"이 보이게).
+    /// 글/글+댓글은 제목을 쓰므로 이 값은 무시된다. 옛 하위가 안 보내면 빈 문자열.
+    #[serde(default)]
+    pub excerpt: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

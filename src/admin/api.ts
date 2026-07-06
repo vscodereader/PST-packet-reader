@@ -132,6 +132,8 @@ export interface InvPostDto {
   title: string;
   // 글 종류: "post"(글)·"comment"(댓글)·"both"(글+댓글). 옛 하위는 빈값 → post로 본다.
   kind?: string;
+  // 댓글 내용 미리보기 — 댓글은 제목이 없어(당연) 이 내용을 제목 대신 보여준다(글이 제목 보여주듯).
+  excerpt?: string;
 }
 export interface DeviceInventoryDto {
   posts: InvPostDto[];

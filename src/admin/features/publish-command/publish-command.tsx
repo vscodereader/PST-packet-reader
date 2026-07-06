@@ -107,10 +107,16 @@ const DUMMY_DEVICES: PubDevice[] = [
 ];
 function mockPosts(
   deviceId: string,
-): { id: string; title: string; kind: PostKind }[] {
+): { id: string; title: string; kind: PostKind; excerpt?: string }[] {
   return [
     { id: `${deviceId}-p1`, title: "오늘의 급등주 분석과 전망", kind: "post" },
-    { id: `${deviceId}-p2`, title: "반도체 섹터 단기 대응 댓글", kind: "comment" },
+    // 댓글은 제목 없음 → 내용(excerpt)이 보이는지 미리보기로 보여준다.
+    {
+      id: `${deviceId}-p2`,
+      title: "제목 없음",
+      kind: "comment",
+      excerpt: "오늘 흐름 좋네요 👍 관심종목 추가요",
+    },
     { id: `${deviceId}-p3`, title: "코스닥 모멘텀 글+댓글", kind: "both" },
   ];
 }
@@ -155,6 +161,22 @@ export function maskId(loginId: string): string {
 export function shortTitle(title: string): string {
   return title.length > 6 ? `${title.slice(0, 6)}…` : title;
 }
+/**
+ * 목록/배지에 보여줄 글 라벨. 댓글은 제목이 없으니(당연) title이 비거나 "제목 없음"이라
+ * 작성한 댓글 내용(excerpt)을 제목 대신 보여준다 — 글이 제목을 보여주는 것과 똑같이.
+ * 글/글+댓글은 제목이 의미 있으므로 그대로 제목을 쓴다(내용 없으면 title로 폴백).
+ */
+export function postDisplay(p: {
+  title: string;
+  kind?: string;
+  excerpt?: string;
+}): string {
+  if (postKindOf(p) === "comment") {
+    const content = (p.excerpt ?? "").trim();
+    if (content) return content;
+  }
+  return p.title;
+}
 
 export function PublishCommand({
   onSchedule,
@@ -167,7 +189,10 @@ export function PublishCommand({
   const [invByDev, setInvByDev] = useState<
     Record<
       string,
-      { posts: { id: string; title: string; kind?: string }[]; accounts: string[] }
+      {
+        posts: { id: string; title: string; kind?: string; excerpt?: string }[];
+        accounts: string[];
+      }
     >
   >({});
   const [postByDev, setPostByDev] = useState<Record<string, string | null>>({});
@@ -195,36 +220,52 @@ export function PublishCommand({
   }, []);
 
   // 하위별 인벤토리(글목록·성공계정) 로드 — 하위가 서버로 보고한 실데이터. 오프라인/미보고면
-  // 그 하위는 채우지 않아 더미로 폴백된다(postsFor/accountsFor). devices가 바뀔 때마다 다시 조회.
+  // 그 하위는 채우지 않아 더미로 폴백된다(postsFor/accountsFor).
+  //
+  // **주기 폴링(4초)** — 하위 COM에서 글/댓글을 지우거나 추가하면 하위가 서버로 재보고하고,
+  // Admin이 폴링으로 최신본을 다시 읽어 **즉석 반영**한다(다른 페이지 갔다 오지 않아도 갱신).
+  // (다른 Admin 화면 — 중지 명령·통신로그 — 과 동일한 폴링 패턴.)
   useEffect(() => {
     let cancelled = false;
-    devices.forEach((d) => {
-      api.devices
-        .inventory(d.id)
-        .then((inv) => {
-          if (cancelled) return;
-          setInvByDev((prev) => ({
-            ...prev,
-            [d.id]: { posts: inv.posts, accounts: inv.accounts },
-          }));
-        })
-        .catch(() => {
-          /* 오프라인/미보고 → 그 하위는 더미 폴백 */
-        });
-    });
+    const loadInventory = () => {
+      devices.forEach((d) => {
+        api.devices
+          .inventory(d.id)
+          .then((inv) => {
+            if (cancelled) return;
+            setInvByDev((prev) => ({
+              ...prev,
+              [d.id]: { posts: inv.posts, accounts: inv.accounts },
+            }));
+          })
+          .catch(() => {
+            /* 오프라인/미보고 → 그 하위는 더미 폴백 */
+          });
+      });
+    };
+    loadInventory();
+    const id = window.setInterval(loadInventory, 4000);
     return () => {
       cancelled = true;
+      window.clearInterval(id);
     };
   }, [devices]);
 
   // 실데이터 우선, 없으면(오프라인/미보고) 더미. 글목록이 비어있어도 보고된 것이면 실데이터로 본다.
   const postsFor = (
     deviceId: string,
-  ): { id: string; title: string; kind?: string }[] =>
+  ): { id: string; title: string; kind?: string; excerpt?: string }[] =>
     invByDev[deviceId]?.posts ?? mockPosts(deviceId);
   // 선택한 글 종류의 글만(사용자 요청: 종류별로 안 섞이게).
   const postsForKind = (deviceId: string, kind: PostKind) =>
     postsFor(deviceId).filter((p) => postKindOf(p) === kind);
+  // 선택한 글의 표시 라벨(댓글=작성한 댓글 내용, 글=제목). null=아직 글 미선택.
+  const postLabelFor = (deviceId: string): string | null => {
+    const pid = postByDev[deviceId];
+    if (!pid) return null;
+    const p = postsFor(deviceId).find((x) => x.id === pid);
+    return p ? postDisplay(p) : null;
+  };
   const accountsFor = (deviceId: string): string[] =>
     invByDev[deviceId]?.accounts ?? mockAccounts(deviceId);
 
@@ -335,7 +376,8 @@ export function PublishCommand({
                     devKind != null
                       ? postsForKind(d.id, devKind).map((p) => ({
                           value: p.id,
-                          label: shortTitle(p.title),
+                          // 댓글은 제목이 없으니 작성한 댓글 내용을 보여준다(글=제목).
+                          label: shortTitle(postDisplay(p)),
                         }))
                       : []
                   }
@@ -363,12 +405,7 @@ export function PublishCommand({
                 key={d.id}
                 device={d}
                 kind={kindByDev[d.id] ?? "post"}
-                postTitle={
-                  postByDev[d.id]
-                    ? (postsFor(d.id).find((p) => p.id === postByDev[d.id])
-                        ?.title ?? null)
-                    : null
-                }
+                postTitle={postLabelFor(d.id)}
                 postId={postByDev[d.id] ?? null}
                 accounts={accountsFor(d.id)}
                 target={targetByDev[d.id] ?? null}

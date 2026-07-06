@@ -167,11 +167,11 @@ async fn inventory_report_loop<R: Runtime>(app: AppHandle<R>) {
         let Some(cfg) = config::load() else {
             continue;
         };
-        let posts: Vec<(String, String, &'static str)> = app
+        let posts: Vec<(String, String, &'static str, String)> = app
             .state::<JsonStore<crate::ipc::posts::LibraryPost>>()
             .snapshot()
             .into_iter()
-            .map(|p| (p.id, p.title, mode_to_str(&p.kind)))
+            .map(|p| (p.id, p.title, mode_to_str(&p.kind), p.excerpt))
             .collect();
         let accounts = app.state::<JsonStore<Account>>().snapshot();
         let body = inventory_body(&posts, &accounts);
@@ -190,10 +190,17 @@ fn mode_to_str(m: &ModeValue) -> &'static str {
     }
 }
 
-fn inventory_body(posts: &[(String, String, &str)], accounts: &[Account]) -> serde_json::Value {
+fn inventory_body(
+    posts: &[(String, String, &str, String)],
+    accounts: &[Account],
+) -> serde_json::Value {
+    // 댓글은 제목이 없어(당연) title이 비거나 "제목 없음"이다 → excerpt(작성한 댓글 내용)를 함께
+    // 실어 Admin이 제목 대신 내용을 보여주게 한다(글이 제목 보여주는 것과 똑같이).
     let posts: Vec<serde_json::Value> = posts
         .iter()
-        .map(|(id, title, kind)| serde_json::json!({ "id": id, "title": title, "kind": kind }))
+        .map(|(id, title, kind, excerpt)| {
+            serde_json::json!({ "id": id, "title": title, "kind": kind, "excerpt": excerpt })
+        })
         .collect();
     // 게시 대상 계정 = 로그인 성공(Active)만. 게시명령 화면은 이 계정들만 노출한다.
     let accounts: Vec<String> = accounts
@@ -1413,8 +1420,18 @@ mod tests {
     #[test]
     fn inventory_body_lists_posts_and_only_active_accounts() {
         let posts = vec![
-            ("p1".to_string(), "급등주 분석".to_string(), "post"),
-            ("p2".to_string(), "반도체 전략".to_string(), "comment"),
+            (
+                "p1".to_string(),
+                "급등주 분석".to_string(),
+                "post",
+                "외국인 순매수 유입".to_string(),
+            ),
+            (
+                "p2".to_string(),
+                "제목 없음".to_string(),
+                "comment",
+                "오늘 흐름 좋네요 👍".to_string(),
+            ),
         ];
         let acct = |login: &str, status: AccountStatus| Account {
             id: login.into(),
@@ -1434,10 +1451,11 @@ mod tests {
             acct("ok_d", AccountStatus::Active),
         ];
         let v = inventory_body(&posts, &accounts);
-        // 글은 id/title 전부.
+        // 글은 id/title/kind/excerpt 전부. 댓글은 제목 대신 내용을 보여주도록 excerpt를 싣는다.
         assert_eq!(v["posts"].as_array().unwrap().len(), 2);
         assert_eq!(v["posts"][0]["id"], "p1");
-        assert_eq!(v["posts"][1]["title"], "반도체 전략");
+        assert_eq!(v["posts"][1]["title"], "제목 없음");
+        assert_eq!(v["posts"][1]["excerpt"], "오늘 흐름 좋네요 👍");
         // 계정은 성공(Active)만 — 차단/신규는 빠진다.
         let accts: Vec<&str> = v["accounts"]
             .as_array()
