@@ -238,7 +238,7 @@ export interface BatchItem {
   code?: string;
   board?: string;
   loginId: string;
-  status: "success" | "fail" | "running" | "waiting" | "skip";
+  status: "success" | "fail" | "running" | "waiting" | "skip" | "stopped";
   msg: string;
   trace?: string;
   /** 종목별 실제 게시 내용(제목/본문/댓글/URL). 게시 성공 시에만. */

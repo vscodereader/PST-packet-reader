@@ -314,6 +314,7 @@ fn item_status_str(s: &BatchItemStatus) -> &'static str {
         Running => "처리중",
         Waiting => "대기",
         Skip => "건너뜀",
+        Stopped => "중지",
     }
 }
 

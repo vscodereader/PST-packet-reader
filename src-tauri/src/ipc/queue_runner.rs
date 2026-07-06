@@ -1708,6 +1708,7 @@ fn synth_forum_failures(
                 trace: Some(format!("{}\n{}", skip.code, skip.trace_body())),
                 posted: None,
                 skipped: false,
+                stopped: false,
             },
         })
         .collect()
@@ -2105,6 +2106,7 @@ async fn run_forum_targets<R: Runtime>(
                                     message,
                                     posted: None,
                                     skipped: false,
+                                    stopped: false,
                                 }
                             })
                             .collect();
@@ -2137,6 +2139,7 @@ async fn run_forum_targets<R: Runtime>(
                             message,
                             posted: None,
                             skipped: false,
+                            stopped: false,
                         }
                     })
                     .collect(),
@@ -3112,8 +3115,11 @@ fn forum_result_to_item(account_id: &str, result: &ForumPublishResult) -> BatchI
         code: Some(result.code.clone()),
         board: None,
         login_id: account_id.to_owned(),
-        // 차단 계정으로 건너뛴 글(#267-9)은 X(실패)가 아니라 "건너뜀(Skip)"으로 구분한다.
-        status: if result.skipped {
+        // 사용자 중지(kill)로 안 올린 글은 "중지(Stopped)", 차단 건너뜀(#267-9)은 "건너뜀(Skip)",
+        // 그 외는 성공/실패. 셋 다 X(실패)와 구분한다.
+        status: if result.stopped {
+            BatchItemStatus::Stopped
+        } else if result.skipped {
             BatchItemStatus::Skip
         } else {
             status_of(result.ok)
@@ -3121,14 +3127,14 @@ fn forum_result_to_item(account_id: &str, result: &ForumPublishResult) -> BatchI
         // 성공은 엔진 문구("게시 완료"+URL). 실패는 비개발자용 한국어 사유로 변환해 "왜
         // 실패했는지"를 한눈에 보이게 한다(#243: 카페 failure_reason과 동일 철학). 건너뜀은
         // run_forum_publish가 만든 안내문("앞선 글이 …건너뜀")을 그대로 보여준다.
-        msg: if result.skipped || result.ok {
+        msg: if result.stopped || result.skipped || result.ok {
             result.message.clone()
         } else {
             forum_failure_reason(&result.message)
         },
         // 실패 시 친절 사유로 가려진 원본 기술 메시지를 자세히 보기 맨 위에 보존한다(#243). 성공·
         // 건너뜀은 그대로(없음). AutomationError::trace()는 위치+백트레이스만 담아 message가 빠지므로 합친다.
-        trace: if result.skipped || result.ok {
+        trace: if result.stopped || result.skipped || result.ok {
             result.trace.clone()
         } else {
             Some(match &result.trace {
@@ -4179,6 +4185,7 @@ mod tests {
                 trace: None,
                 posted: None,
                 skipped: false,
+                stopped: false,
             },
         }
     }
@@ -4194,6 +4201,7 @@ mod tests {
                 trace: Some(trace.into()),
                 posted: None,
                 skipped: false,
+                stopped: false,
             },
         }
     }
@@ -4211,6 +4219,7 @@ mod tests {
                 trace: None,
                 posted: None,
                 skipped: false,
+                stopped: false,
             },
         }
     }
@@ -4227,6 +4236,7 @@ mod tests {
                 trace: None,
                 posted: None,
                 skipped: true,
+                stopped: false,
             },
         }
     }
@@ -4243,6 +4253,7 @@ mod tests {
                 trace: None,
                 posted: None,
                 skipped: false,
+                stopped: false,
             },
         }
     }
@@ -5745,6 +5756,7 @@ mod tests {
             trace: None,
             posted: None,
             skipped: true,
+            stopped: false,
         };
         let item = forum_result_to_item("u0", &result);
         assert_eq!(item.status, BatchItemStatus::Skip);
@@ -6065,6 +6077,7 @@ mod tests {
             trace: Some("at foo.rs:1\n\nframe0".into()),
             posted: None,
             skipped: false,
+            stopped: false,
         };
         let item = forum_result_to_item("u0", &result);
         assert_eq!(item.status, BatchItemStatus::Fail);
@@ -6086,6 +6099,7 @@ mod tests {
             trace: None,
             posted: None,
             skipped: false,
+            stopped: false,
         };
         let item = forum_result_to_item("u0", &result);
         assert_eq!(item.msg, "종목토론방 게시에 실패했습니다");

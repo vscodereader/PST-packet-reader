@@ -17,7 +17,7 @@ export interface PostItem {
   platform: PlatformId;
   target: string; // 어디에 게시했는지(종목토론방·카페 이름 등)
   loginId: string;
-  status: "success" | "fail";
+  status: "success" | "fail" | "stopped"; // stopped=사용자 중지로 안 올린 글(설계서 08)
   msg: string; // 메인 사유(친절한 한국어)
   trace?: string; // 실패 시 "자세히 보기"용 백트레이스(util.rs transport_error_message! 형식)
   posted?: Posted; // 성공 시 실제 게시 내용 + 링크
@@ -156,7 +156,12 @@ export function toPostBatch(r: PostReportDto): PostBatch {
       platform: it.platform as PlatformId,
       target: it.target,
       loginId: it.loginId,
-      status: it.status === "success" ? "success" : "fail",
+      status:
+        it.status === "success"
+          ? "success"
+          : it.status === "stopped"
+            ? "stopped"
+            : "fail",
       msg: it.msg,
       ...(it.trace !== undefined ? { trace: it.trace } : {}),
       ...(it.posted !== undefined

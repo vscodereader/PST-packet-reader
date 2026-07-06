@@ -25,7 +25,6 @@ import {
   toDailyView,
   toDeviceReport,
   toPostBatch,
-  toStopLines,
   type DeviceReport,
   type Line,
   type PostBatch,
@@ -176,24 +175,33 @@ function Section({
 
 function LoginReportCard({
   r,
-  stopped = [],
   daily,
 }: {
   r: DeviceReport;
-  stopped?: Line[];
   daily?: DeviceDailyDto | undefined;
 }) {
-  const { cumulative: c } = r;
-  // 날짜 분류: 날짜를 고르면 그 날(KST)의 4분류+중지만 보여준다(절대 날짜 섞임 없음). 미선택이면
-  // 기존 "이번 배치(최신)" + 누적 중지.
+  // 날짜 분류: 날짜를 고르면 그 날(KST)의 4분류만 보여준다(절대 날짜 섞임 없음). 미선택이면 최신 배치.
+  // (중지는 로그인 결과가 아니라 "게시 결과"에 성공N 중지M으로 뜬다 — 사용자 요청 2026-07-06.)
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const dates = daily?.days.map((d) => d.date) ?? [];
   const day = selectedDate
     ? daily?.days.find((d) => d.date === selectedDate)
     : undefined;
-  const view = day ? toDailyView(day) : { batch: r.batch, stopped };
-  const batch = view.batch;
-  const shownStopped = view.stopped;
+  const batch = day ? toDailyView(day).batch : r.batch;
+  // 누적도 선택 날짜에 맞춘다(사용자 요청): 그 날 집계 = 그 날의 총계. 미선택이면 전체 누적.
+  const c = day
+    ? {
+        received:
+          day.success +
+          day.onhold.length +
+          day.timedout.length +
+          day.failed.length,
+        success: day.success,
+        onhold: day.onhold.length,
+        timedout: day.timedout.length,
+        failed: day.failed.length,
+      }
+    : r.cumulative;
   return (
     <Paper withBorder radius="md" p="lg">
       <Group justify="space-between" mb="xs">
@@ -272,11 +280,6 @@ function LoginReportCard({
           <Badge color="red" variant="light">
             실패 {batch.failed.length}
           </Badge>
-          {shownStopped.length > 0 && (
-            <Badge color="orange" variant="light">
-              중지 {shownStopped.length}
-            </Badge>
-          )}
         </Group>
       </Group>
 
@@ -303,8 +306,6 @@ function LoginReportCard({
             withReason={false}
           />
           <Section title="실패" color="red.6" lines={batch.failed} withReason />
-          {/* 중지(kill, 설계서 §10-3) — 계정별 ID·PW + "N개 중 M개 진행 후 중지" 사유. */}
-          <Section title="중지" color="orange.7" lines={shownStopped} withReason />
         </Stack>
       </ScrollArea.Autosize>
 
@@ -462,7 +463,7 @@ const POST_BATCHES: PostBatch[] = [
 ];
 
 function statusColor(s: PostItem["status"]) {
-  return s === "success" ? "green" : "red";
+  return s === "success" ? "green" : s === "stopped" ? "orange" : "red";
 }
 
 // 데스크톱 앱 SubLog와 동일한 한 행: 상태 아이콘 + 플랫폼 + 어디에 + 계정 + 사유,
@@ -491,7 +492,12 @@ function PostSubLog({ item }: { item: PostItem }) {
             · {maskHead(item.loginId)}
           </Text>
         </Group>
-        <Text fz={11.5} c={ok ? "dimmed" : "red"} truncate maw="40%">
+        <Text
+          fz={11.5}
+          c={ok ? "dimmed" : item.status === "stopped" ? "orange" : "red"}
+          truncate
+          maw="40%"
+        >
           {item.msg}
         </Text>
         {item.status === "fail" && item.trace && (
@@ -597,11 +603,15 @@ function PostSubLog({ item }: { item: PostItem }) {
 
 function PostBatchCard({ b }: { b: PostBatch }) {
   // 성공/실패 배지를 누르면 그 상태만 필터(다시 누르면 전체). 컴퓨터(카드)마다 따로.
-  const [filter, setFilter] = useState<"all" | "success" | "fail">("all");
+  const [filter, setFilter] = useState<"all" | "success" | "fail" | "stopped">(
+    "all",
+  );
   const okN = b.items.filter((i) => i.status === "success").length;
   const failN = b.items.filter((i) => i.status === "fail").length;
+  // 사용자 중지(kill)로 안 올린 글(설계서 08). 로컬 🗑·Admin 원격 중지 둘 다 여기 집계된다.
+  const stoppedN = b.items.filter((i) => i.status === "stopped").length;
   const shown = b.items.filter((i) => filter === "all" || i.status === filter);
-  const toggle = (f: "success" | "fail") =>
+  const toggle = (f: "success" | "fail" | "stopped") =>
     setFilter((cur) => (cur === f ? "all" : f));
   return (
     <Paper withBorder radius="md" p={0} style={{ overflow: "hidden" }}>
@@ -638,6 +648,16 @@ function PostBatchCard({ b }: { b: PostBatch }) {
               실패 {failN}
             </Badge>
           )}
+          {stoppedN > 0 && (
+            <Badge
+              color="orange"
+              variant={filter === "stopped" ? "filled" : "light"}
+              style={{ cursor: "pointer" }}
+              onClick={() => toggle("stopped")}
+            >
+              중지 {stoppedN}
+            </Badge>
+          )}
           {filter !== "all" && (
             <Button
               size="compact-xs"
@@ -668,8 +688,6 @@ export function ResultReport() {
   // 오프라인 미리보기/빈 서버면 더미 유지(통신 로그 화면과 동일 폴백). 3초 폴링(즉시 반영).
   const [loginReports, setLoginReports] = useState<DeviceReport[]>(REPORTS);
   const [postBatches, setPostBatches] = useState<PostBatch[]>(POST_BATCHES);
-  // 중지(kill) 요약(설계서 §10-3): device 이름 → 중지 줄들. 로그인 결과 카드에 "중지 N" + 섹션으로 표시.
-  const [stopByDevice, setStopByDevice] = useState<Record<string, Line[]>>({});
   // 날짜별 결과(날짜 분류): device 이름 → 날짜별 결과. 로그인 카드의 날짜 선택 메뉴가 쓴다.
   const [dailyByDevice, setDailyByDevice] = useState<
     Record<string, DeviceDailyDto>
@@ -684,18 +702,6 @@ export function ResultReport() {
         })
         .catch(() => {
           /* 오프라인 → 더미 유지 */
-        });
-      api.stopReports
-        .list()
-        .then((rows) => {
-          const m: Record<string, Line[]> = {};
-          rows.forEach((r) => {
-            if (r.stopped.length > 0) m[r.device] = toStopLines(r.stopped);
-          });
-          setStopByDevice(m);
-        })
-        .catch(() => {
-          /* 오프라인 → 빈 상태 유지 */
         });
       api.dailyResults
         .list()
@@ -747,7 +753,6 @@ export function ResultReport() {
             <LoginReportCard
               key={r.device}
               r={r}
-              stopped={stopByDevice[r.device] ?? []}
               daily={dailyByDevice[r.device]}
             />
           ))}

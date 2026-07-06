@@ -113,6 +113,11 @@ pub struct ForumPublishResult {
     /// `ok=false`이지만 실제 실패(X)가 아니라 "건너뜀(skip)"으로 구분 표시한다.
     #[serde(default)]
     pub skipped: bool,
+    /// 사용자 완전 종료(kill, 설계서 08)로 게시하지 않은 종목이면 true. `ok=false`·`skipped=false`와
+    /// 구분해 게시 결과에 "중지"로 집계한다("성공 N 중지 M"). 진행 중이던 종목 1개는 정상 마치고,
+    /// 그 뒤 남은 종목들이 이 값으로 기록된다(로컬·Admin 공통 forum 경로).
+    #[serde(default)]
+    pub stopped: bool,
 }
 
 /// 게시 실패 메시지가 "계정 차단(로그인/권한 만료)"을 뜻하는지 판별한다(#267-9, 순수 함수).
@@ -261,6 +266,23 @@ where
                 "[POST] {who} 종목토론방 {kind} 사용자 중지 — 남은 {}종목 게시 안 함(안전 경계에서 정지)",
                 total - index
             );
+            // 남은 종목(index..)을 "중지"로 기록한다 — 게시 결과에 "성공 N 중지 M"으로 뜨게(설계서 08).
+            // on_result로 라이브 스켈레톤도 갱신하고, results에 담아 완료 로그·post-report에 실린다.
+            // 로컬 🗑·Admin 원격 중지 모두 이 경로를 타므로 두 방식 다 동일하게 집계된다.
+            for (i, s) in request.stocks.iter().enumerate().skip(index) {
+                let stopped_result = ForumPublishResult {
+                    code: s.code.clone(),
+                    name: s.name.clone(),
+                    ok: false,
+                    message: "사용자 중지 — 게시하지 않음".to_owned(),
+                    trace: None,
+                    posted: None,
+                    skipped: false,
+                    stopped: true,
+                };
+                on_result(i, &stopped_result);
+                results.push(stopped_result);
+            }
             break;
         }
         on_start(index);
@@ -279,6 +301,7 @@ where
                 trace: None,
                 posted: None,
                 skipped: true,
+                stopped: false,
             });
             if let Some(last) = results.last() {
                 on_result(index, last);
@@ -328,6 +351,7 @@ where
             trace,
             posted,
             skipped: false,
+            stopped: false,
         });
         // 종목 1건 완료를 호출부에 통지한다(#219). 큐 워커는 여기서 진행률·라이브 상태를
         // 60초 대기 전에 갱신해, 종토방 작업이 0/N에 멈춰 보이지 않게 한다.

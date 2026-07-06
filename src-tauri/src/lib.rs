@@ -1218,6 +1218,7 @@ mod tests {
                 trace: None,
                 posted: None,
                 skipped: false,
+                stopped: false,
             },
             ForumPublishResult {
                 code: "000660".into(),
@@ -1227,6 +1228,7 @@ mod tests {
                 trace: Some("stack backtrace:\n  0: forum::login_check".into()),
                 posted: None,
                 skipped: false,
+                stopped: false,
             },
         ];
         let b = build_publish_batch(
@@ -1264,6 +1266,7 @@ mod tests {
             trace: None,
             posted: None,
             skipped: false,
+            stopped: false,
         }];
         let b = build_publish_batch(
             "제목",
