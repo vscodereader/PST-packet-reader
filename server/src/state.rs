@@ -10,8 +10,8 @@ use crate::config::Config;
 use crate::error::{AppError, AppResult};
 use crate::hub::Hub;
 use crate::model::{
-    AuditDto, AuditEntry, Device, DeviceInventory, DeviceQueueState, DeviceStopReport, Operator,
-    Role,
+    AuditDto, AuditEntry, DailyResultDto, Device, DeviceInventory, DeviceQueueState,
+    DeviceStopReport, LoginBatchDto, Operator, Role, StopLineDto,
 };
 use crate::repo::Repository;
 use crate::{jwt, model::DeviceState};
@@ -31,6 +31,9 @@ pub struct AppState {
     pub queue_states: Arc<Mutex<HashMap<Uuid, DeviceQueueState>>>,
     /// 하위 중지(kill) 요약 누적(설계서 08 §10-3). 결과보고 "중지" 섹션이 렌더. 메모리 보관.
     pub stop_reports: Arc<Mutex<HashMap<Uuid, DeviceStopReport>>>,
+    /// 하위별·날짜별 결과 집계(날짜 분류). 로그인 4분류 + 중지를 그 날(KST) 버킷에 합산해,
+    /// 결과보고에서 하위별로 날짜를 골라 그 날 결과만 보게 한다(날짜 섞임 방지). 메모리·최근 90일.
+    pub daily: Arc<Mutex<HashMap<Uuid, std::collections::BTreeMap<String, DailyResultDto>>>>,
     /// 예약 게시 목록 — 서버가 보관하고 스케줄러가 시각되면 발송한다(07-게시명령 4단계). 인벤토리와
     /// 같은 이유로 메모리 보관(개발 기본 in-memory 저장소와 일관).
     pub scheduled: Arc<Mutex<Vec<crate::scheduled::ScheduledPost>>>,
@@ -178,6 +181,57 @@ impl AppState {
             .iter()
             .map(|(k, v)| (*k, v.clone()))
             .collect()
+    }
+
+    /// 로그인 결과 배치를 그 날(KST) 버킷에 합산(날짜 분류). 등록·누적은 무관, 4분류만 누적한다.
+    pub fn add_login_daily(&self, id: Uuid, date: &str, batch: &LoginBatchDto) {
+        let mut g = self.daily.lock().unwrap();
+        let device_days = g.entry(id).or_default();
+        {
+            let day = device_days.entry(date.to_string()).or_default();
+            day.date = date.to_string();
+            day.success += batch.success;
+            day.onhold.extend(batch.onhold.iter().cloned());
+            day.timedout.extend(batch.timedout.iter().cloned());
+            day.failed.extend(batch.failed.iter().cloned());
+        }
+        cap_days(device_days);
+    }
+
+    /// 중지(kill) 요약을 그 날(KST) 버킷에 합산(날짜 분류).
+    pub fn add_stop_daily(&self, id: Uuid, date: &str, lines: &[StopLineDto]) {
+        let mut g = self.daily.lock().unwrap();
+        let device_days = g.entry(id).or_default();
+        {
+            let day = device_days.entry(date.to_string()).or_default();
+            day.date = date.to_string();
+            day.stopped.extend(lines.iter().cloned());
+        }
+        cap_days(device_days);
+    }
+
+    /// 하위별 날짜별 결과 스냅샷((id, 최신날짜 우선 목록)).
+    pub fn daily_snapshot(&self) -> Vec<(Uuid, Vec<DailyResultDto>)> {
+        self.daily
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, days)| {
+                let mut v: Vec<DailyResultDto> = days.values().cloned().collect();
+                v.sort_by(|a, b| b.date.cmp(&a.date)); // 최신 날짜 우선
+                (*id, v)
+            })
+            .collect()
+    }
+}
+
+/// 날짜 버킷을 최근 90일로 제한(오래된 날짜부터 제거). BTreeMap은 날짜 오름차순이라 앞이 가장 오래된 것.
+fn cap_days(days: &mut std::collections::BTreeMap<String, DailyResultDto>) {
+    while days.len() > 90 {
+        let Some(oldest) = days.keys().next().cloned() else {
+            break;
+        };
+        days.remove(&oldest);
     }
 }
 

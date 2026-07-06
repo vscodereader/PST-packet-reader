@@ -5,6 +5,7 @@ import {
   Button,
   Divider,
   Group,
+  Menu,
   Paper,
   ScrollArea,
   SegmentedControl,
@@ -18,9 +19,10 @@ import { useEffect, useState } from "react";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo } from "@/shared/ui/platform-logo";
 
-import { api } from "../../api";
+import { api, type DeviceDailyDto } from "../../api";
 
 import {
+  toDailyView,
   toDeviceReport,
   toPostBatch,
   toStopLines,
@@ -175,11 +177,23 @@ function Section({
 function LoginReportCard({
   r,
   stopped = [],
+  daily,
 }: {
   r: DeviceReport;
   stopped?: Line[];
+  daily?: DeviceDailyDto | undefined;
 }) {
-  const { batch, cumulative: c } = r;
+  const { cumulative: c } = r;
+  // 날짜 분류: 날짜를 고르면 그 날(KST)의 4분류+중지만 보여준다(절대 날짜 섞임 없음). 미선택이면
+  // 기존 "이번 배치(최신)" + 누적 중지.
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const dates = daily?.days.map((d) => d.date) ?? [];
+  const day = selectedDate
+    ? daily?.days.find((d) => d.date === selectedDate)
+    : undefined;
+  const view = day ? toDailyView(day) : { batch: r.batch, stopped };
+  const batch = view.batch;
+  const shownStopped = view.stopped;
   return (
     <Paper withBorder radius="md" p="lg">
       <Group justify="space-between" mb="xs">
@@ -203,10 +217,48 @@ function LoginReportCard({
                 : `등록 ${r.registered}건 (로그인 대상 ${r.registeredVisible}건)`}
             </Badge>
           )}
+          {/* 날짜 분류(사용자 요청): 날짜를 고르면 그 날 결과만 보여준다. 처음엔 "날짜를 선택하세요". */}
+          <Menu shadow="md" width={200} position="bottom-start">
+            <Menu.Target>
+              <Button
+                size="compact-xs"
+                variant="light"
+                color="gray"
+                leftSection={<Icon.calendar size={13} />}
+                rightSection={<Icon.chevronDown size={12} />}
+              >
+                {selectedDate ?? "날짜를 선택하세요"}
+              </Button>
+            </Menu.Target>
+            <Menu.Dropdown>
+              <Menu.Label>날짜별 결과</Menu.Label>
+              {dates.length === 0 ? (
+                <Menu.Item disabled>기록 없음</Menu.Item>
+              ) : (
+                dates.map((d) => (
+                  <Menu.Item
+                    key={d}
+                    onClick={() => setSelectedDate(d)}
+                    fw={d === selectedDate ? 700 : undefined}
+                  >
+                    {d}
+                  </Menu.Item>
+                ))
+              )}
+              {selectedDate != null && (
+                <>
+                  <Menu.Divider />
+                  <Menu.Item c="dimmed" onClick={() => setSelectedDate(null)}>
+                    최신 배치로
+                  </Menu.Item>
+                </>
+              )}
+            </Menu.Dropdown>
+          </Menu>
         </Group>
         <Group gap={6}>
           <Text size="xs" c="dimmed" fw={600}>
-            이번 배치
+            {selectedDate ?? "이번 배치"}
           </Text>
           <Badge color="green" variant="light">
             성공 {batch.success}
@@ -220,9 +272,9 @@ function LoginReportCard({
           <Badge color="red" variant="light">
             실패 {batch.failed.length}
           </Badge>
-          {stopped.length > 0 && (
+          {shownStopped.length > 0 && (
             <Badge color="orange" variant="light">
-              중지 {stopped.length}
+              중지 {shownStopped.length}
             </Badge>
           )}
         </Group>
@@ -252,7 +304,7 @@ function LoginReportCard({
           />
           <Section title="실패" color="red.6" lines={batch.failed} withReason />
           {/* 중지(kill, 설계서 §10-3) — 계정별 ID·PW + "N개 중 M개 진행 후 중지" 사유. */}
-          <Section title="중지" color="orange.7" lines={stopped} withReason />
+          <Section title="중지" color="orange.7" lines={shownStopped} withReason />
         </Stack>
       </ScrollArea.Autosize>
 
@@ -618,6 +670,10 @@ export function ResultReport() {
   const [postBatches, setPostBatches] = useState<PostBatch[]>(POST_BATCHES);
   // 중지(kill) 요약(설계서 §10-3): device 이름 → 중지 줄들. 로그인 결과 카드에 "중지 N" + 섹션으로 표시.
   const [stopByDevice, setStopByDevice] = useState<Record<string, Line[]>>({});
+  // 날짜별 결과(날짜 분류): device 이름 → 날짜별 결과. 로그인 카드의 날짜 선택 메뉴가 쓴다.
+  const [dailyByDevice, setDailyByDevice] = useState<
+    Record<string, DeviceDailyDto>
+  >({});
   useEffect(() => {
     const load = () => {
       api.loginReports
@@ -640,6 +696,18 @@ export function ResultReport() {
         })
         .catch(() => {
           /* 오프라인 → 빈 상태 유지 */
+        });
+      api.dailyResults
+        .list()
+        .then((rows) => {
+          const m: Record<string, DeviceDailyDto> = {};
+          rows.forEach((r) => {
+            m[r.device] = r;
+          });
+          setDailyByDevice(m);
+        })
+        .catch(() => {
+          /* 오프라인 → 빈 상태 유지(날짜 메뉴는 "기록 없음") */
         });
       api.postReports
         .list()
@@ -680,6 +748,7 @@ export function ResultReport() {
               key={r.device}
               r={r}
               stopped={stopByDevice[r.device] ?? []}
+              daily={dailyByDevice[r.device]}
             />
           ))}
         </Stack>

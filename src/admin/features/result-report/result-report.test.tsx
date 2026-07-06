@@ -5,6 +5,7 @@ import type { LoginReportDto, PostReportDto } from "../../api";
 import {
   fmtAt,
   stopReason,
+  toDailyView,
   toDeviceReport,
   toPostBatch,
   toStopLines,
@@ -29,6 +30,25 @@ describe("result-report 매핑", () => {
     });
     it("전체 0이면 진행 전 대기 취소", () => {
       expect(stopReason(0, 0)).toBe("대기 중 취소(진행 전)");
+    });
+  });
+
+  describe("toDailyView (날짜별 결과 → 화면)", () => {
+    it("그 날 4분류 + 중지를 화면 모양으로 변환(날짜 섞임 없음)", () => {
+      const view = toDailyView({
+        date: "2026-07-05",
+        success: 3,
+        onhold: [{ loginId: "a", pw: "p", reason: "캡차" }],
+        timedout: [{ loginId: "b", pw: "q" }],
+        failed: [{ loginId: "c", pw: "r", reason: "비번오류" }],
+        stopped: [{ loginId: "d", pw: "s", title: "글", done: 1, total: 2 }],
+      });
+      expect(view.batch.success).toBe(3);
+      expect(view.batch.onhold).toEqual([
+        { loginId: "a", pw: "p", reason: "캡차" },
+      ]);
+      expect(view.batch.timedout[0]).toEqual({ loginId: "b", pw: "q" });
+      expect(view.stopped[0]?.reason).toBe("글 · 2개 작업 중 1개 진행 후 중지");
     });
   });
 

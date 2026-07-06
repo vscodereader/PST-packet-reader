@@ -244,6 +244,21 @@ export interface StopReportDto {
   stopped: StopLineDto[];
 }
 
+// 날짜별 결과(결과보고 날짜 분류) — 그 날(KST)의 로그인 4분류 + 중지. 날짜를 골라 그 날만 본다.
+export interface DailyResultDto {
+  date: string; // YYYY-MM-DD
+  success: number;
+  onhold: LoginLineDto[];
+  timedout: LoginLineDto[];
+  failed: LoginLineDto[];
+  stopped: StopLineDto[];
+}
+export interface DeviceDailyDto {
+  device: string;
+  deviceId: string;
+  days: DailyResultDto[]; // 최신 날짜 우선
+}
+
 export const api = {
   baseUrl: BASE,
   auth: {
@@ -421,6 +436,12 @@ export const api = {
     // 중지 요약(설계서 08 §10-3) — 모든 하위의 kill 요약(디바이스별 누적, 최신순).
     list(): Promise<StopReportDto[]> {
       return request("GET", "/admin/stop-reports");
+    },
+  },
+  dailyResults: {
+    // 날짜별 결과(결과보고 날짜 분류) — 하위별로 그 날(KST) 로그인 4분류 + 중지.
+    list(): Promise<DeviceDailyDto[]> {
+      return request("GET", "/admin/daily-results");
     },
   },
 };

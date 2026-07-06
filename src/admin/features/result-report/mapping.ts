@@ -1,6 +1,6 @@
 import type { PlatformId } from "@/shared/data/types";
 
-import type { LoginReportDto, PostReportDto } from "../../api";
+import type { DailyResultDto, LoginReportDto, PostReportDto } from "../../api";
 
 // 게시 결과(§10-4-2) 데이터 모델 + 순수 변환. 데스크톱 앱 알림(notifications.tsx)의
 // BatchItem/PostedContent 모델 그대로다. 컴포넌트 파일과 분리해 fast-refresh를 깨지 않고,
@@ -111,6 +111,29 @@ export function toStopLines(
     pw: s.pw,
     reason: `${s.title ? s.title + " · " : ""}${stopReason(s.done, s.total)}`,
   }));
+}
+
+// 날짜별 결과(결과보고 날짜 분류) → 화면 표시 모양. 로그인 카드의 배치 요약/섹션을 그 날 값으로
+// 대체한다. onhold/timedout/failed는 Line, stopped는 사유가 붙은 Line으로.
+export interface DailyView {
+  batch: {
+    success: number;
+    onhold: Line[];
+    timedout: Line[];
+    failed: Line[];
+  };
+  stopped: Line[];
+}
+export function toDailyView(day: DailyResultDto): DailyView {
+  return {
+    batch: {
+      success: day.success,
+      onhold: day.onhold.map(toLine),
+      timedout: day.timedout.map(toLine),
+      failed: day.failed.map(toLine),
+    },
+    stopped: toStopLines(day.stopped),
+  };
 }
 
 // epoch ms → "YYYY-MM-DD HH:MM" (게시 완료 시각 표시용).

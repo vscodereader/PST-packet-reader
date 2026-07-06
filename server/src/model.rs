@@ -126,6 +126,28 @@ pub struct StopReportDto {
     pub stopped: Vec<StopLineDto>,
 }
 
+/// 하루치 결과 집계(날짜별 분류) — 그 날(KST)의 로그인 4분류 + 중지를 합산 보관. 결과보고에서
+/// 하위별로 날짜를 골라 그 날의 성공/보류/대기초과/실패/중지만 보게 한다(절대 날짜 섞임 없음).
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyResultDto {
+    pub date: String, // YYYY-MM-DD (KST)
+    pub success: usize,
+    pub onhold: Vec<LoginLineDto>,
+    pub timedout: Vec<LoginLineDto>,
+    pub failed: Vec<LoginLineDto>,
+    pub stopped: Vec<StopLineDto>,
+}
+
+/// 한 하위의 날짜별 결과 목록(최신 날짜 우선).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceDailyDto {
+    pub device: String,
+    pub device_id: String,
+    pub days: Vec<DailyResultDto>,
+}
+
 #[derive(Debug, Clone)]
 pub struct DeviceCode {
     pub code: String,

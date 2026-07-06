@@ -63,6 +63,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/devices/:id/queue-state", get(device_queue_state))
         .route("/admin/kill", post(issue_kill))
         .route("/admin/stop-reports", get(list_stop_reports))
+        .route("/admin/daily-results", get(list_daily_results))
         // ── 계정 스테이징·분배(§7·§10-3) ──
         .route("/admin/accounts", get(list_accounts))
         .route("/admin/accounts/import", post(import_accounts))
@@ -1100,6 +1101,14 @@ async fn list_post_reports(
 
 // ───────────────────────── 로그인 결과 보고(§10-4-1) ─────────────────────────
 
+/// 결과 날짜 분류용 오늘 날짜(KST=UTC+9, YYYY-MM-DD). 하위·운영자 모두 한국이라 서버에서 KST로
+/// 버킷팅한다(자정 근처 UTC 오분류 방지).
+fn kst_date() -> String {
+    (Utc::now() + chrono::Duration::hours(9))
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
 /// 하위 에이전트 → 로그인 결과 보고. 4분류 + 누적을 device당 최신으로 보관 + 통신 로그 요약 1줄.
 async fn login_report(
     State(st): State<AppState>,
@@ -1122,6 +1131,8 @@ async fn login_report(
             .unwrap_or_default(),
     );
     let level = if b.failed.is_empty() { "ok" } else { "fail" };
+    // 날짜별 분류(KST): 이 배치 4분류를 그 날 버킷에 합산한다(결과보고 날짜 선택용).
+    st.add_login_daily(device.id, &kst_date(), b);
     let report = LoginReport {
         device_id: device.id,
         device_name: device.name.clone(),
@@ -1260,6 +1271,8 @@ async fn agent_stop_report(
         .map(|s| format!("{}({}/{})", s.login_id, s.done, s.total))
         .collect::<Vec<_>>()
         .join(", ");
+    // 날짜별 분류(KST): 중지 요약을 그 날 버킷에도 합산한다(결과보고 날짜 선택용).
+    st.add_stop_daily(device.id, &kst_date(), &rpt.stopped);
     st.set_stop_report(device.id, rpt);
     st.audit(
         "[중지]",
@@ -1297,6 +1310,33 @@ async fn list_stop_reports(
         })
         .collect();
     out.sort_by(|a, b| b.received_at.cmp(&a.received_at));
+    Ok(Json(out))
+}
+
+/// Admin 결과보고 날짜 분류 — 모든 하위의 날짜별 결과(로그인 4분류 + 중지). Admin이 하위별로
+/// 날짜를 골라 그 날 결과만 보여준다(날짜 섞임 방지).
+async fn list_daily_results(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<Vec<DeviceDailyDto>>> {
+    st.auth_operator(&headers).await?;
+    let devices = st.repo.list_devices().await?;
+    let name_of = |id: Uuid| {
+        devices
+            .iter()
+            .find(|d| d.id == id)
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| id.to_string())
+    };
+    let out: Vec<DeviceDailyDto> = st
+        .daily_snapshot()
+        .into_iter()
+        .map(|(id, days)| DeviceDailyDto {
+            device: name_of(id),
+            device_id: id.to_string(),
+            days,
+        })
+        .collect();
     Ok(Json(out))
 }
 
