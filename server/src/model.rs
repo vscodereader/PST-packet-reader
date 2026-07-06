@@ -60,13 +60,30 @@ pub struct InvPost {
     pub excerpt: String,
 }
 
+/// 인벤토리 계정 1건(전체 계정 — loginId·platform·status). 카페 게시명령은 로그인 성공/실패
+/// 무관 카페(naver) 계정을 전부 노출하므로 상태를 그대로 싣는다. 옛 하위는 안 보낼 수 있어
+/// 기본값을 허용한다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvAccount {
+    pub login_id: String,
+    #[serde(default)]
+    pub platform: String,
+    #[serde(default)]
+    pub status: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceInventory {
     /// 로컬 글 목록(LibraryPost id/title).
     pub posts: Vec<InvPost>,
-    /// 로그인 성공(Active) 계정 loginId 목록.
+    /// 로그인 성공(Active) 계정 loginId 목록(종토 게시명령용 — 기존 동작 유지).
     pub accounts: Vec<String>,
+    /// 전체 계정(loginId·platform·status) — 카페 게시명령이 로그인 무관 카페 계정을 전부 쓰기 위함.
+    /// 옛 하위는 안 보낼 수 있어 기본값(빈 Vec)을 허용한다.
+    #[serde(default)]
+    pub account_rows: Vec<InvAccount>,
     /// 마지막 보고 시각(Admin 표시용).
     #[serde(default)]
     pub received_at: Option<String>,
@@ -172,6 +189,9 @@ pub struct StagedAccount {
     pub id: Uuid,
     pub login_id: String,
     pub pw_cipher: String,
+    /// 계정 플랫폼("forum"/"naver"/…). 분배 payload로 하위에 전달돼 카페=등록만 판정에 쓰인다.
+    /// 빈값=forum(하위호환).
+    pub platform: String,
 }
 
 // ───────────────────────── 감사로그/통신로그(§10-5) ─────────────────────────
@@ -275,6 +295,10 @@ pub struct RegisterResp {
 pub struct AccountIn {
     pub login_id: String,
     pub pw: String,
+    /// 계정 플랫폼("forum"/"naver"/"blog"/"clip"/"band"). 빈값=forum(하위호환). 카페("naver")는
+    /// 하위가 분배 시 로그인하지 않고 등록만 한다.
+    #[serde(default)]
+    pub platform: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -293,6 +317,9 @@ pub struct ImportResp {
 pub struct AccountDto {
     pub id: String,
     pub login_id: String,
+    /// 계정 플랫폼(계정 풀에 배지로 표시). 빈값이면 프론트가 forum으로 본다.
+    #[serde(default)]
+    pub platform: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]

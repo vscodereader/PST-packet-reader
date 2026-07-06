@@ -107,6 +107,8 @@ export interface DeviceCodeResp {
 export interface AccountDto {
   id: string;
   loginId: string;
+  // 계정 플랫폼("forum"/"naver"/"blog"/"clip"/"band"). 빈값=forum. 카페=naver.
+  platform?: string;
 }
 export interface ImportResult {
   imported: number;
@@ -135,9 +137,17 @@ export interface InvPostDto {
   // 댓글 내용 미리보기 — 댓글은 제목이 없어(당연) 이 내용을 제목 대신 보여준다(글이 제목 보여주듯).
   excerpt?: string;
 }
+// 인벤토리 계정 1건(전체 — loginId·platform·status). 카페 게시명령이 로그인 무관 카페 계정을
+// 전부 쓰기 위함. 옛 하위는 안 보낼 수 있어 optional.
+export interface InvAccountDto {
+  loginId: string;
+  platform?: string;
+  status?: string;
+}
 export interface DeviceInventoryDto {
   posts: InvPostDto[];
-  accounts: string[];
+  accounts: string[]; // 로그인 성공(Active) loginId — 종토 게시명령용(기존)
+  accountRows?: InvAccountDto[]; // 전체 계정(platform·status) — 카페 게시명령용
   receivedAt: string | null;
 }
 // 실행큐 스냅샷(설계서 08 §10-2) — 하위가 보고한 실행/대기 게시큐. 중지 명령 화면이 폴링해
@@ -377,6 +387,13 @@ export const api = {
       targetLabel: string;
       split: boolean;
       mode?: string; // "post"|"comment"|"both" (빈값=post)
+      target?: string; // "forum"(기본)|"naver"(카페)
+      cafeBoards?: {
+        cafeId: number;
+        menuId?: number;
+        articleId?: number;
+        link?: string;
+      }[]; // 카페 게시판/글 링크 파싱 결과(target=="naver")
       commentUrls?: string[]; // 댓글 모드(종토=특정게시글) URL들
       assignments: { loginId: string; stocks: { code: string; name: string }[] }[];
     }): Promise<{ ok: boolean; commandId: string }> {
@@ -392,6 +409,13 @@ export const api = {
       targetLabel: string;
       split: boolean;
       mode?: string; // "post"|"comment"|"both" (빈값=post)
+      target?: string; // "forum"(기본)|"naver"(카페)
+      cafeBoards?: {
+        cafeId: number;
+        menuId?: number;
+        articleId?: number;
+        link?: string;
+      }[];
       commentUrls?: string[];
       assignments: { loginId: string; stocks: { code: string; name: string }[] }[];
       at: number; // 발송 시각 epoch ms
@@ -410,7 +434,9 @@ export const api = {
     list(): Promise<AccountDto[]> {
       return request("GET", "/admin/accounts");
     },
-    import(accounts: { loginId: string; pw: string }[]): Promise<ImportResult> {
+    import(
+      accounts: { loginId: string; pw: string; platform?: string }[],
+    ): Promise<ImportResult> {
       return request("POST", "/admin/accounts/import", { accounts });
     },
     distribute(

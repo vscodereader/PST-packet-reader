@@ -18,6 +18,8 @@ import { notifications } from "@mantine/notifications";
 import { IconDeviceDesktop } from "@tabler/icons-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { parseCafeArticleUrl } from "@/features/posts/comment-jobs";
+import { parseCafeBoardLink } from "@/features/posts/publish-helpers";
 import { nowParts, scheduleMoment, toEpochMs } from "@/shared/schedule";
 import { DateTimePicker } from "@/shared/ui/date-time-picker";
 import { Icon } from "@/shared/ui/icons";
@@ -58,7 +60,7 @@ function postKindOf(p: { kind?: string }): PostKind {
 type Target = "forum" | "cafe" | "blog" | "band";
 const TARGETS: { key: Target; label: string; soon: boolean }[] = [
   { key: "forum", label: "종목토론방", soon: false },
-  { key: "cafe", label: "네이버카페", soon: true },
+  { key: "cafe", label: "네이버카페", soon: false },
   { key: "blog", label: "네이버블로그", soon: true },
   { key: "band", label: "네이버밴드", soon: true },
 ];
@@ -123,6 +125,11 @@ function mockPosts(
 function mockAccounts(deviceId: string): string[] {
   const base = ["stock_id041", "invest_king7", "money_flow22", "trader_lee9"];
   // 하위마다 살짝 다르게 — 섞이지 않음을 눈으로 보이게.
+  return base.map((a) => `${a}_${deviceId.slice(-1)}`);
+}
+// 카페 계정 더미(오프라인 미리보기) — 카페는 로그인 실패해도 보이므로 상태 무관하게 몇 개 보여준다.
+function mockCafeAccounts(deviceId: string): string[] {
+  const base = ["cafe_writer1", "cafe_pen22", "cafe_daily9"];
   return base.map((a) => `${a}_${deviceId.slice(-1)}`);
 }
 // 종목 미리보기 더미 — 불꽃🔥 섞고, 삼성전자/하이닉스도 넣어 제외가 눈에 보이게 한다.
@@ -192,6 +199,8 @@ export function PublishCommand({
       {
         posts: { id: string; title: string; kind?: string; excerpt?: string }[];
         accounts: string[];
+        // 전체 계정(platform·status) — 카페는 로그인 무관 카페 계정을 전부 보여준다.
+        accountRows: { loginId: string; platform?: string; status?: string }[];
       }
     >
   >({});
@@ -235,7 +244,11 @@ export function PublishCommand({
             if (cancelled) return;
             setInvByDev((prev) => ({
               ...prev,
-              [d.id]: { posts: inv.posts, accounts: inv.accounts },
+              [d.id]: {
+                posts: inv.posts,
+                accounts: inv.accounts,
+                accountRows: inv.accountRows ?? [],
+              },
             }));
           })
           .catch(() => {
@@ -266,8 +279,18 @@ export function PublishCommand({
     const p = postsFor(deviceId).find((x) => x.id === pid);
     return p ? postDisplay(p) : null;
   };
-  const accountsFor = (deviceId: string): string[] =>
-    invByDev[deviceId]?.accounts ?? mockAccounts(deviceId);
+  // 게시 대상별 계정 목록. 종토=로그인 성공(Active)만(기존). 카페=로그인 성공/실패 무관
+  // 카페(naver) 계정 전부(카페는 게시 순간 재로그인하므로 상태를 안 본다 — 요구서).
+  const accountsFor = (deviceId: string, target: Target | null): string[] => {
+    if (target === "cafe") {
+      const rows = invByDev[deviceId]?.accountRows;
+      if (rows && rows.length > 0) {
+        return rows.filter((r) => r.platform === "naver").map((r) => r.loginId);
+      }
+      return mockCafeAccounts(deviceId); // 오프라인/미보고 → 더미
+    }
+    return invByDev[deviceId]?.accounts ?? mockAccounts(deviceId);
+  };
 
   const toggleDev = (id: string) =>
     setSelDev((prev) => {
@@ -407,7 +430,7 @@ export function PublishCommand({
                 kind={kindByDev[d.id] ?? "post"}
                 postTitle={postLabelFor(d.id)}
                 postId={postByDev[d.id] ?? null}
-                accounts={accountsFor(d.id)}
+                accounts={accountsFor(d.id, targetByDev[d.id] ?? null)}
                 target={targetByDev[d.id] ?? null}
                 onSetTarget={(t) =>
                   setTargetByDev((prev) => ({ ...prev, [d.id]: t }))
@@ -518,7 +541,18 @@ function DeviceBlock({
           onSchedule={onSchedule}
         />
       )}
-      {target != null && target !== "forum" && (
+      {/* 카페: 글/댓글/글+댓글 모두 게시판 링크 입력(요구서). 댓글 대상/개수는 글에 동결. */}
+      {target === "cafe" && (
+        <CafeConfig
+          device={device}
+          kind={kind}
+          postId={postId}
+          postTitle={postTitle}
+          accounts={accounts}
+          onSchedule={onSchedule}
+        />
+      )}
+      {target != null && target !== "forum" && target !== "cafe" && (
         <Text size="sm" c="dimmed">
           {TARGETS.find((t) => t.key === target)?.label} 상세 구성은 추후
           구현됩니다.
@@ -1122,6 +1156,349 @@ function ForumCommentConfig({
           <Paper withBorder radius="md" p="sm" bg="var(--mantine-color-gray-0)">
             <Text fz={12} fw={700} mb={6}>
               댓글 예약 — 게시 시각 선택
+            </Text>
+            <Group gap="sm" wrap="wrap">
+              <DateTimePicker
+                date={sched.date}
+                time={sched.time}
+                onChange={setSched}
+              />
+              <Button size="sm" color="grape" onClick={confirmSchedule}>
+                예약 확정
+              </Button>
+              <Button
+                size="sm"
+                variant="subtle"
+                color="gray"
+                onClick={() => setArmed(false)}
+              >
+                취소
+              </Button>
+            </Group>
+          </Paper>
+        )}
+      </Stack>
+    </Box>
+  );
+}
+
+// ── 네이버 카페 게시판 대상(게시판 링크 파싱 결과) ──
+// 데스크톱 publish-modal 카페 카드와 동일: 링크를 붙여넣으면 cafeId+menuId(게시판) 또는
+// cafeId+articleId(특정 글)를 파싱해 목록에 쌓고, 고른 게시판이 동그라미 배지로 뜬다.
+// board_type은 게시 시점 백엔드가 menu_id로 해석하므로 여기선 파싱만 한다(네트워크 불필요).
+interface ResolvedCafeBoard {
+  cafeId: number;
+  menuId: number; // 게시판(글쓰기 대상). 0=글 링크만.
+  articleId: number; // 특정 글(url 댓글 대상). 0=게시판 링크.
+  link: string;
+}
+function cafeBoardKey(b: ResolvedCafeBoard): string {
+  return `${b.cafeId}-${b.menuId}-${b.articleId}`;
+}
+function cafeBoardLabel(b: ResolvedCafeBoard): string {
+  return b.articleId > 0
+    ? `카페 ${b.cafeId} · 글 ${b.articleId}`
+    : `카페 ${b.cafeId} · 게시판 ${b.menuId}`;
+}
+
+// 네이버 카페 상세 구성(글/댓글/글+댓글 모두 게시판 링크). 카페는 로그인 성공/실패 무관 계정을
+// 전부 쓰고(상위 accountsFor가 이미 카페 계정 전부를 넘김), 게시 시점에 하위가 재로그인해 올린다.
+// 댓글 대상/개수는 글(LibraryPost)에 동결돼 있어 여기선 고르지 않는다(엔진이 글에서 읽음).
+function CafeConfig({
+  device,
+  kind,
+  postId,
+  postTitle,
+  accounts,
+  onSchedule,
+}: {
+  device: PubDevice;
+  kind: PostKind;
+  postId: string | null;
+  postTitle: string | null;
+  accounts: string[];
+  onSchedule: (item: ScheduledItem) => void;
+}) {
+  const [link, setLink] = useState("");
+  const [resolved, setResolved] = useState<ResolvedCafeBoard[]>([]);
+  const [selected, setSelected] = useState<string[]>([]); // cafeBoardKey 목록
+  const [accts, setAccts] = useState<string[]>([]);
+  const [armed, setArmed] = useState<boolean>(false);
+  const [sched, setSched] = useState(() => nowParts());
+
+  const selectedBoards = resolved.filter((b) => selected.includes(cafeBoardKey(b)));
+  const valid =
+    postTitle != null && selectedBoards.length > 0 && accts.length > 0;
+  const detail = `게시판 ${selectedBoards.length}개 · 계정 ${accts.length}`;
+
+  // 게시판 링크 추가: cafeId+menuId(게시판) 또는 cafeId+articleId(특정 글)를 파싱해 목록에 쌓는다.
+  const addLink = () => {
+    const raw = link.trim();
+    if (!raw) return;
+    const board = parseCafeBoardLink(raw);
+    const article = parseCafeArticleUrl(raw);
+    if (!board && !article) {
+      notifications.show({
+        title: "링크 인식 실패",
+        message: "카페 게시판/글 링크를 확인하세요.",
+        color: "red",
+      });
+      return;
+    }
+    const b: ResolvedCafeBoard = {
+      cafeId: board?.cafeId ?? article?.cafeId ?? 0,
+      menuId: board?.menuId ?? 0,
+      articleId: article?.articleId ?? 0,
+      link: raw,
+    };
+    const key = cafeBoardKey(b);
+    setResolved((prev) =>
+      prev.some((x) => cafeBoardKey(x) === key) ? prev : [...prev, b],
+    );
+    setLink("");
+  };
+  const onSelect = (key: string) =>
+    setSelected((prev) => (prev.includes(key) ? prev : [...prev, key]));
+  const onRemove = (key: string) =>
+    setSelected((prev) => prev.filter((k) => k !== key));
+
+  const cafeBoardsPayload = () =>
+    selectedBoards.map((b) => ({
+      cafeId: b.cafeId,
+      menuId: b.menuId,
+      articleId: b.articleId,
+      link: b.link,
+    }));
+  const assignments = () => accts.map((loginId) => ({ loginId, stocks: [] }));
+
+  const runNow = () => {
+    void (async () => {
+      try {
+        await api.publish.send({
+          deviceId: device.id,
+          postId: postId ?? "",
+          postTitle: postTitle ?? "",
+          targetLabel: "네이버 카페",
+          split: false,
+          mode: kind,
+          target: "naver",
+          cafeBoards: cafeBoardsPayload(),
+          assignments: assignments(),
+        });
+        notifications.show({
+          title: `${device.name} · 카페 게시 명령 전송`,
+          message: `"${shortTitle(postTitle ?? "")}" · ${detail}`,
+          color: "blue",
+        });
+      } catch (e) {
+        if (isOffline(e)) {
+          notifications.show({
+            title: `${device.name} · 카페 게시(미리보기)`,
+            message: `${detail} · 서버 오프라인(전송 안 됨)`,
+            color: "gray",
+          });
+        } else {
+          notifications.show({
+            title: "카페 게시 명령 실패",
+            message: e instanceof Error ? e.message : String(e),
+            color: "red",
+          });
+        }
+      }
+    })();
+  };
+
+  const confirmSchedule = () => {
+    const at = toEpochMs(sched.date, sched.time);
+    const when = scheduleMoment(sched.date, sched.time).when;
+    setArmed(false);
+    void (async () => {
+      try {
+        await api.scheduled.create({
+          deviceId: device.id,
+          postId: postId ?? "",
+          postTitle: postTitle ?? "",
+          targetLabel: "네이버 카페",
+          split: false,
+          mode: kind,
+          target: "naver",
+          cafeBoards: cafeBoardsPayload(),
+          assignments: assignments(),
+          at,
+          detail,
+        });
+        notifications.show({
+          title: `${device.name} 카페 예약`,
+          message: `${when} · ${detail}`,
+          color: "grape",
+        });
+      } catch (e) {
+        if (isOffline(e)) {
+          onSchedule({
+            id: `sch-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+            deviceName: device.name,
+            postTitle: postTitle ?? "-",
+            targetLabel: "네이버 카페",
+            detail,
+            at,
+          });
+          notifications.show({
+            title: `${device.name} 카페 예약(미리보기)`,
+            message: `${when} · ${detail} · 서버 오프라인(로컬에만 표시)`,
+            color: "gray",
+          });
+        } else {
+          notifications.show({
+            title: "카페 예약 실패",
+            message: e instanceof Error ? e.message : String(e),
+            color: "red",
+          });
+        }
+      }
+    })();
+  };
+
+  return (
+    <Box>
+      {/* 게시판 링크 입력 + 추가(데스크톱 publish-modal 카페 카드와 동일 UX) */}
+      <Text size="xs" c="dimmed" mb={4}>
+        게시판 링크 (넣은 게시판/글에 {kind === "comment" ? "댓글을" : "글을"} 올립니다)
+      </Text>
+      <Group gap={8} align="flex-end" wrap="nowrap" mb="sm">
+        <TextInput
+          size="xs"
+          style={{ flex: 1 }}
+          placeholder="https://cafe.naver.com/f-e/cafes/31732304/menus/1"
+          value={link}
+          onChange={(e) => setLink(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") addLink();
+          }}
+          styles={{ input: { fontFamily: "monospace" } }}
+          aria-label="카페 게시판 링크"
+        />
+        <Button
+          size="xs"
+          variant="light"
+          color="teal"
+          disabled={!link.trim()}
+          onClick={addLink}
+        >
+          추가
+        </Button>
+      </Group>
+      <Select
+        size="xs"
+        mb="sm"
+        placeholder={
+          resolved.length > 0
+            ? "게시할 게시판 선택"
+            : "게시판 링크를 추가하면 여기 표시됩니다"
+        }
+        data={resolved.map((b) => ({
+          value: cafeBoardKey(b),
+          label: cafeBoardLabel(b),
+        }))}
+        value={null}
+        disabled={resolved.length === 0}
+        comboboxProps={{ withinPortal: true }}
+        onChange={(k) => {
+          if (k) onSelect(k);
+        }}
+        aria-label="카페 게시판 선택"
+      />
+      {selectedBoards.length > 0 ? (
+        <Group gap={6} mb="sm">
+          {selectedBoards.map((b) => {
+            const key = cafeBoardKey(b);
+            return (
+              <Badge
+                key={key}
+                color="teal"
+                variant="light"
+                radius="sm"
+                rightSection={
+                  <ActionIcon
+                    size={14}
+                    variant="transparent"
+                    color="teal"
+                    aria-label={`${cafeBoardLabel(b)} 제거`}
+                    onClick={() => onRemove(key)}
+                  >
+                    <Icon.x size={10} />
+                  </ActionIcon>
+                }
+              >
+                {cafeBoardLabel(b)}
+              </Badge>
+            );
+          })}
+        </Group>
+      ) : (
+        <Text fz={12} c="orange.7" mb="sm">
+          게시할 게시판을 선택하세요.
+        </Text>
+      )}
+
+      {/* 계정 선택 — 카페는 로그인 성공/실패 무관 카페 계정 전부(게시 순간 재로그인). */}
+      <Text size="xs" c="dimmed" mb={4}>
+        계정 (이 하위의 카페 계정 · 로그인 성공/실패 무관 · {accts.length}명 선택)
+      </Text>
+      <Group gap={6}>
+        {accounts.length === 0 ? (
+          <Text size="xs" c="dimmed">
+            이 하위에 카페 계정이 없습니다(계정 분배에서 플랫폼=네이버 카페로 분배하세요).
+          </Text>
+        ) : (
+          accounts.map((a) => {
+            const on = accts.includes(a);
+            return (
+              <Button
+                key={a}
+                size="xs"
+                variant={on ? "filled" : "default"}
+                color={on ? "teal" : "gray"}
+                onClick={() =>
+                  setAccts((prev) =>
+                    on ? prev.filter((x) => x !== a) : [...prev, a],
+                  )
+                }
+              >
+                {maskId(a)}
+              </Button>
+            );
+          })
+        )}
+      </Group>
+
+      {/* 지금/예약 게시(로그인 상태 안 봄 — 카페는 게시 때 재로그인) */}
+      <Stack gap={8} mt="md">
+        <Group grow gap="xs">
+          <Button
+            size="sm"
+            fw={700}
+            disabled={!valid}
+            leftSection={<Icon.bolt size={15} />}
+            onClick={runNow}
+          >
+            지금 게시
+          </Button>
+          <Button
+            size="sm"
+            fw={700}
+            variant={armed ? "filled" : "light"}
+            color="grape"
+            disabled={!valid}
+            leftSection={<Icon.calendar size={15} />}
+            onClick={() => setArmed(true)}
+          >
+            예약 게시
+          </Button>
+        </Group>
+        {armed && (
+          <Paper withBorder radius="md" p="sm" bg="var(--mantine-color-gray-0)">
+            <Text fz={12} fw={700} mb={6}>
+              카페 예약 — 게시 시각 선택
             </Text>
             <Group gap="sm" wrap="wrap">
               <DateTimePicker

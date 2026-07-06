@@ -261,6 +261,7 @@ mod tests {
                 })
                 .collect(),
             accounts: accounts.iter().map(|s| (*s).to_string()).collect(),
+            account_rows: vec![],
             // received_at은 비교 제외 대상이므로 일부러 채워 넣어도 결과가 같아야 한다.
             received_at: Some("2026-07-03T00:00:00Z".into()),
         }

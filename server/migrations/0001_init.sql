@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS device_codes (
 CREATE TABLE IF NOT EXISTS staged_accounts (
   id        UUID PRIMARY KEY,
   login_id  TEXT NOT NULL,
-  pw_cipher TEXT NOT NULL
+  pw_cipher TEXT NOT NULL,
+  platform  TEXT NOT NULL DEFAULT 'forum'
 );
 
 -- 감사로그 = 통신로그 화면 출처(§10-5).

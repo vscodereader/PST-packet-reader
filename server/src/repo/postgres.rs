@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS device_codes (
 CREATE TABLE IF NOT EXISTS staged_accounts (
   id UUID PRIMARY KEY,
   login_id TEXT NOT NULL,
-  pw_cipher TEXT NOT NULL
+  pw_cipher TEXT NOT NULL,
+  platform TEXT NOT NULL DEFAULT 'forum'
 );
 CREATE TABLE IF NOT EXISTS audit_log (
   id UUID PRIMARY KEY,
@@ -337,11 +338,14 @@ impl Repository for PostgresRepo {
                 skipped += 1;
                 continue;
             }
-            sqlx::query("INSERT INTO staged_accounts (id,login_id,pw_cipher) VALUES ($1,$2,$3)")
-                .bind(a.id)
-                .bind(&a.login_id)
-                .bind(&a.pw_cipher)
-                .execute(&self.pool)
+            sqlx::query(
+                "INSERT INTO staged_accounts (id,login_id,pw_cipher,platform) VALUES ($1,$2,$3,$4)",
+            )
+            .bind(a.id)
+            .bind(&a.login_id)
+            .bind(&a.pw_cipher)
+            .bind(&a.platform)
+            .execute(&self.pool)
                 .await
                 .map_err(db_err)?;
             imported += 1;
@@ -359,6 +363,7 @@ impl Repository for PostgresRepo {
                 id: r.get("id"),
                 login_id: r.get("login_id"),
                 pw_cipher: r.get("pw_cipher"),
+                platform: r.get("platform"),
             })
             .collect())
     }
@@ -368,7 +373,7 @@ impl Repository for PostgresRepo {
         }
         // MOVE: 삭제하면서 삭제된 행을 그대로 반환(§7).
         let rows = sqlx::query(
-            "DELETE FROM staged_accounts WHERE id = ANY($1) RETURNING id, login_id, pw_cipher",
+            "DELETE FROM staged_accounts WHERE id = ANY($1) RETURNING id, login_id, pw_cipher, platform",
         )
         .bind(ids)
         .fetch_all(&self.pool)
@@ -380,6 +385,7 @@ impl Repository for PostgresRepo {
                 id: r.get("id"),
                 login_id: r.get("login_id"),
                 pw_cipher: r.get("pw_cipher"),
+                platform: r.get("platform"),
             })
             .collect())
     }

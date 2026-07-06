@@ -769,7 +769,14 @@ async fn list_accounts(
     let accts = st.repo.list_staged_accounts().await?;
     // pw는 절대 반환하지 않는다(암호문만 서버 보관, §7).
     Ok(Json(
-        accts.into_iter().map(|a| AccountDto { id: a.id.to_string(), login_id: a.login_id }).collect(),
+        accts
+            .into_iter()
+            .map(|a| AccountDto {
+                id: a.id.to_string(),
+                login_id: a.login_id,
+                platform: a.platform,
+            })
+            .collect(),
     ))
 }
 
@@ -785,7 +792,12 @@ async fn import_accounts(
             continue; // 빈 행 건너뜀(엑셀 import와 동일 검증, §10-3)
         }
         let cipher = crypto::encrypt(&st.cfg.enc_key, &a.pw).map_err(AppError::Internal)?;
-        staged.push(StagedAccount { id: Uuid::new_v4(), login_id: a.login_id.clone(), pw_cipher: cipher });
+        staged.push(StagedAccount {
+            id: Uuid::new_v4(),
+            login_id: a.login_id.clone(),
+            pw_cipher: cipher,
+            platform: a.platform.clone(),
+        });
     }
     let (imported, skipped) = st.repo.add_staged_accounts(staged).await?;
     let total = st.repo.list_staged_accounts().await?.len();
@@ -858,7 +870,10 @@ async fn distribute_accounts(
             if let Some(a) = by_id.get(aid) {
                 let pw = crypto::decrypt(&st.cfg.enc_key, &a.pw_cipher).unwrap_or_default();
                 log_pairs.push(format!("{}/{}", a.login_id, pw));
-                items.push(serde_json::json!({ "loginId": a.login_id, "pw": pw }));
+                // platform도 함께 내려보낸다 — 하위가 카페(naver)면 등록만 하고 로그인은 건너뛴다.
+                items.push(
+                    serde_json::json!({ "loginId": a.login_id, "pw": pw, "platform": a.platform }),
+                );
             }
         }
         moved += items.len();
@@ -1226,6 +1241,7 @@ async fn device_inventory(
     Ok(Json(st.get_inventory(uid).unwrap_or(DeviceInventory {
         posts: vec![],
         accounts: vec![],
+        account_rows: vec![],
         received_at: None,
     })))
 }

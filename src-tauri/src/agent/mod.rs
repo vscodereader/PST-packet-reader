@@ -21,10 +21,10 @@ use tokio::sync::mpsc;
 
 use crate::ipc::accounts::{Account, AccountStatus, PlatformId};
 use crate::ipc::log_batches::LogBatch;
-use crate::ipc::posts::ModeValue;
+use crate::ipc::posts::{CommentTarget, ModeValue};
 use crate::ipc::queue::{
-    apply_priority_order, as_fresh_now_item, ForumTarget, LoginTarget, PublishPlan, QueueLocation,
-    QueueNowItem, QueueState,
+    apply_priority_order, as_fresh_now_item, CommentTargetSpec, ForumTarget, LoginTarget,
+    NaverTarget, PublishPlan, QueueLocation, QueueNowItem, QueueState,
 };
 use crate::ipc::queue_runner::{start_if_idle, NowQueueRunner};
 use crate::store::JsonStore;
@@ -65,6 +65,57 @@ struct KillCmd {
 struct AccountIn {
     login_id: String,
     pw: String,
+    /// 계정 플랫폼("forum"/"naver"/"blog"/"clip"/"band"). 빈값=forum(하위호환). 카페("naver")는
+    /// 분배 시 로그인하지 않고 등록만 한다(카페는 게시 순간 로그인). 그 외는 종전대로 자동 로그인.
+    #[serde(default)]
+    platform: String,
+}
+
+/// 계정 플랫폼 문자열 → PlatformId(빈값·미상=Forum). 카페=naver.
+fn platform_from_str(s: &str) -> PlatformId {
+    match s {
+        "naver" => PlatformId::Naver,
+        "blog" => PlatformId::Blog,
+        "clip" => PlatformId::Clip,
+        "band" => PlatformId::Band,
+        "instagram" => PlatformId::Instagram,
+        "threads" => PlatformId::Threads,
+        _ => PlatformId::Forum,
+    }
+}
+
+/// PlatformId → 인벤토리/명령용 문자열(프론트 PlatformId 리터럴과 동일, lowercase).
+fn platform_to_str(p: &PlatformId) -> &'static str {
+    match p {
+        PlatformId::Forum => "forum",
+        PlatformId::Naver => "naver",
+        PlatformId::Blog => "blog",
+        PlatformId::Clip => "clip",
+        PlatformId::Band => "band",
+        PlatformId::Instagram => "instagram",
+        PlatformId::Threads => "threads",
+    }
+}
+
+/// 카페(네이버 카페) 계정인지 — 분배 시 로그인 건너뛰기 판정용.
+fn is_cafe_platform(s: &str) -> bool {
+    s == "naver"
+}
+
+/// 계정 상태 → 인벤토리용 문자열(AccountStatus serde camelCase와 동일).
+fn status_to_str(s: &AccountStatus) -> &'static str {
+    match s {
+        AccountStatus::New => "new",
+        AccountStatus::Active => "active",
+        AccountStatus::Waiting => "waiting",
+        AccountStatus::OnHold => "onHold",
+        AccountStatus::TimedOut => "timedOut",
+        AccountStatus::BadCredentials => "badCredentials",
+        AccountStatus::Challenge => "challenge",
+        AccountStatus::Relogin => "relogin",
+        AccountStatus::Blocked => "blocked",
+        AccountStatus::Error => "error",
+    }
 }
 
 /// 게시 명령 페이로드 — 서버가 계정×종목을 확정해 내려보낸다(하위는 그대로 ForumTarget으로 조립).
@@ -84,7 +135,28 @@ struct PublishCmd {
     /// 댓글 모드의 특정 게시글 URL들(종토 댓글=특정게시글, 사용자 확정 2026-07-06).
     #[serde(default)]
     comment_urls: Vec<String>,
+    /// 게시 대상 플랫폼("forum"=종토(기본)·"naver"=네이버 카페). 빈값=forum(하위호환).
+    /// forum이면 계정×종목(assignments.stocks), naver면 계정×게시판(cafe_boards)로 조립한다.
+    #[serde(default)]
+    target: String,
+    /// 카페 게시판 링크에서 파싱한 대상들(target=="naver"일 때). 각 계정이 이 게시판(들)에
+    /// 글/댓글을 올린다(계정×게시판). board_type은 게시 시점 백엔드가 menu_id로 해석한다.
+    #[serde(default)]
+    cafe_boards: Vec<CafeBoardIn>,
     assignments: Vec<PublishAssign>,
+}
+/// 카페 게시판/글 링크 파싱 결과(Admin이 parseCafeBoardLink/parseCafeArticleUrl로 파싱해 보냄).
+/// menu_id는 게시판(글쓰기 대상), article_id는 특정 글(url 댓글 대상). 둘 다 0이면 무시.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CafeBoardIn {
+    cafe_id: u64,
+    #[serde(default)]
+    menu_id: u64,
+    #[serde(default)]
+    article_id: u64,
+    #[serde(default)]
+    link: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -202,13 +274,25 @@ fn inventory_body(
             serde_json::json!({ "id": id, "title": title, "kind": kind, "excerpt": excerpt })
         })
         .collect();
-    // 게시 대상 계정 = 로그인 성공(Active)만. 게시명령 화면은 이 계정들만 노출한다.
-    let accounts: Vec<String> = accounts
+    // 전체 계정(loginId·platform·status) — 카페 게시명령은 로그인 성공/실패 무관 카페 계정을 전부
+    // 보여줘야 하므로 상태를 그대로 싣는다(Admin이 platform==naver 전부 노출). 종토는 아래 active만.
+    let account_rows: Vec<serde_json::Value> = accounts
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "loginId": a.login_id,
+                "platform": platform_to_str(&a.platform),
+                "status": status_to_str(&a.status),
+            })
+        })
+        .collect();
+    // 게시 대상 계정 = 로그인 성공(Active)만(종토 화면 기존 동작 유지). 카페는 accountRows를 쓴다.
+    let active: Vec<String> = accounts
         .iter()
         .filter(|a| matches!(a.status, AccountStatus::Active))
         .map(|a| a.login_id.clone())
         .collect();
-    serde_json::json!({ "posts": posts, "accounts": accounts })
+    serde_json::json!({ "posts": posts, "accounts": active, "accountRows": account_rows })
 }
 
 // ───────────────────────── 실시간 실행큐 스냅샷 보고 루프(설계서 08 §10-2) ─────────────────────────
@@ -382,11 +466,21 @@ fn dispatch<R: Runtime>(app: &AppHandle<R>, cmd: &Command) -> (&'static str, Str
     match cmd.kind.as_str() {
         "distribute_accounts" => {
             let (added, visible) = add_accounts(app, &cmd.accounts);
-            let login_ids: Vec<String> = cmd.accounts.iter().map(|a| a.login_id.clone()).collect();
+            // 카페(naver)는 분배 시 로그인하지 않고 등록만 한다(카페는 게시 순간 id/pw로 로그인).
+            // 그 외(종토·밴드 등)만 분배 직후 자동 로그인 큐에 태운다.
+            let login_ids: Vec<String> = cmd
+                .accounts
+                .iter()
+                .filter(|a| !is_cafe_platform(&a.platform))
+                .map(|a| a.login_id.clone())
+                .collect();
+            let cafe_only = cmd.accounts.len().saturating_sub(login_ids.len());
             let queue_id = enqueue_login(app, &login_ids);
             (
                 "ok",
-                format!("계정 {added}건 등록(로그인 대상 {visible}건) + 자동 로그인 시작(종토)"),
+                format!(
+                    "계정 {added}건 등록(로그인 대상 {visible}건) + 자동 로그인 시작 · 카페 등록만 {cafe_only}건"
+                ),
                 queue_id.map(|q| Followup {
                     queue_id: q,
                     login_ids,
@@ -563,45 +657,68 @@ fn enqueue_publish<R: Runtime>(
         "[AGENT] publish_posts 수신 — 게시 큐 적재(계정×종목/댓글URL 원문)"
     );
 
-    let (title, body, comments) = load_post(app, &p.post_id);
+    let post = load_post(app, &p.post_id);
     let mode = mode_from_str(&p.mode);
     let plan_title = if p.post_title.is_empty() {
-        title.clone()
+        post.title.clone()
     } else {
         p.post_title.clone()
     };
-    let effective_title = if title.is_empty() {
+    let effective_title = if post.title.is_empty() {
         plan_title.clone()
     } else {
-        title.clone()
+        post.title.clone()
     };
 
     // ★ 대원칙: **한 계정 = 한 큐**(사용자 지시·데스크톱 dispatchSplitNow와 동일). 서버가 이미 계정별로
     // 종목을 나눠 보냈으므로(전체=각 계정 전 종목, 나눠서=계정별 분배분), assignment 하나당 QueueNowItem
     // 하나를 만든다. 그러면 워커가 계정별로 **독립·병렬** 실행하고(종토=계정별 격리 Chrome), 5계정이면
     // 5개의 큐가 각자 자기 종목만 올린다 — 한 큐에 전 계정이 몰려 직렬 처리되던 것을 고친다.
-    let new_items = build_publish_items(
-        &p.assignments,
-        &p.post_id,
-        &plan_title,
-        &effective_title,
-        &body,
-        mode,
-        &comments,
-        &p.comment_urls,
-        now_ms(),
-    );
+    // 대상 플랫폼 분기: 카페(naver)=계정×게시판(plan.naver), 그 외=종토 계정×종목(plan.forum).
+    // 어느 쪽이든 큐 러너가 기존 엔진으로 게시(카페는 게시 시점에 id/pw로 로그인).
+    let new_items = if p.target == "naver" {
+        build_cafe_publish_items(
+            &p.assignments,
+            &p.cafe_boards,
+            &p.post_id,
+            &plan_title,
+            &effective_title,
+            &post.body,
+            mode,
+            &post.comments,
+            post.comment_target,
+            post.comment_count,
+            now_ms(),
+        )
+    } else {
+        build_publish_items(
+            &p.assignments,
+            &p.post_id,
+            &plan_title,
+            &effective_title,
+            &post.body,
+            mode,
+            &post.comments,
+            &p.comment_urls,
+            now_ms(),
+        )
+    };
     if new_items.is_empty() {
         return (
             "fail",
-            "게시 대상(계정×종목 또는 댓글 URL)이 비었습니다".into(),
+            "게시 대상(계정×종목/게시판 또는 댓글 URL)이 비었습니다".into(),
             None,
         );
     }
     let queue_count = new_items.len();
     let total_targets: usize = new_items
         .iter()
-        .map(|i| i.plan.as_ref().map(|p| p.forum.len()).unwrap_or(0))
+        .map(|i| {
+            i.plan
+                .as_ref()
+                .map(|p| p.forum.len() + p.naver.len())
+                .unwrap_or(0)
+        })
         .sum();
     let now = app.state::<JsonStore<QueueNowItem>>();
     now.mutate(move |mut items| {
@@ -717,19 +834,184 @@ fn build_publish_items(
     items
 }
 
-/// 로컬 글(LibraryPost) 본문 로드(제목·본문·댓글). 없으면 빈 값(best-effort). 댓글은 댓글/글+댓글
-/// 모드에서 forum이 `comments.first()`로 쓴다(엔진 기존 동작 재사용).
-fn load_post<R: Runtime>(app: &AppHandle<R>, post_id: &str) -> (String, String, Vec<String>) {
+/// 카페 게시판 표시 라벨(완료 로그·큐 표시용). 링크가 있으면 링크, 없으면 "카페 {id}".
+fn cafe_label(b: &CafeBoardIn) -> String {
+    if b.link.trim().is_empty() {
+        format!("카페 {}", b.cafe_id)
+    } else {
+        b.link.clone()
+    }
+}
+
+/// 카페 게시 대상 1건(NaverTarget) 조립. board_type은 게시 시점 백엔드가 menu_id로 해석하므로
+/// 빈 문자열(데스크톱과 동일 — 쿠키 없이 게시판 목록을 못 받기 때문).
+fn cafe_target(
+    login_id: &str,
+    b: &CafeBoardIn,
+    menu_id: u64,
+    comment_target: Option<CommentTargetSpec>,
+) -> NaverTarget {
+    NaverTarget {
+        account_id: login_id.to_string(),
+        cafe: b.cafe_id.to_string(),
+        cafe_name: cafe_label(b),
+        menu_id,
+        board_type: String::new(),
+        comment_target,
+    }
+}
+
+/// 카페(네이버 카페) 게시 큐 아이템을 만든다(순수 — 테스트 대상). **계정 하나당 큐 1개**(종토와
+/// 동일)이며, 그 계정이 선택한 게시판(들)에 글/댓글을 올린다(plan.naver). 종목(assignment.stocks)은
+/// 카페에서 쓰지 않는다 — 대상은 게시판 링크다. 댓글 대상/개수는 글(commentTarget/commentCount)에
+/// 동결된 값을 그대로 쓴다(데스크톱과 동일). 큐 러너가 게시 시점에 카페 로그인(id/pw)까지 수행한다.
+#[allow(clippy::too_many_arguments)]
+fn build_cafe_publish_items(
+    assignments: &[PublishAssign],
+    cafe_boards: &[CafeBoardIn],
+    post_id: &str,
+    plan_title: &str,
+    effective_title: &str,
+    body: &str,
+    mode: ModeValue,
+    comments: &[String],
+    comment_target: Option<CommentTarget>,
+    comment_count: Option<u32>,
+    now: u128,
+) -> Vec<QueueNowItem> {
+    if cafe_boards.is_empty() {
+        return Vec::new();
+    }
+    let is_comment = matches!(mode, ModeValue::Comment);
+    // 댓글/글+댓글은 저장된 댓글 텍스트를 plan.comments로 실어 엔진이 쓴다(글+댓글=자기 글에 댓글).
+    let plan_comments: Vec<String> = if matches!(mode, ModeValue::Comment | ModeValue::Both) {
+        comments.to_vec()
+    } else {
+        vec![]
+    };
+    // 댓글 대상 모드/개수는 글에 동결된 값(데스크톱 미러). 없으면 최신 1개.
+    let ct_mode = comment_target.unwrap_or(CommentTarget::Latest);
+    let count = comment_count.unwrap_or(1).max(1);
+
+    let mut items = Vec::new();
+    for (idx, a) in assignments.iter().enumerate() {
+        let mut naver: Vec<NaverTarget> = Vec::new();
+        let mut locs: Vec<QueueLocation> = Vec::new();
+        if is_comment {
+            // 댓글 전용: 글의 commentTarget으로 대상 해석(url=특정 글 / latest·popular=카페 최신·인기 N).
+            match ct_mode {
+                CommentTarget::Url => {
+                    for b in cafe_boards.iter().filter(|b| b.article_id > 0) {
+                        naver.push(cafe_target(
+                            &a.login_id,
+                            b,
+                            0,
+                            Some(CommentTargetSpec {
+                                mode: CommentTarget::Url,
+                                count: None,
+                                cafe_id: Some(b.cafe_id),
+                                article_id: Some(b.article_id),
+                            }),
+                        ));
+                        locs.push(QueueLocation {
+                            p: PlatformId::Naver,
+                            name: "카페 특정 글 댓글".to_string(),
+                            code: None,
+                        });
+                    }
+                }
+                CommentTarget::Latest | CommentTarget::Popular => {
+                    // 최신/인기는 카페 단위라 같은 카페 중복 제거(게시판 여러 개여도 1번).
+                    let mut seen = std::collections::HashSet::new();
+                    for b in cafe_boards.iter() {
+                        if !seen.insert(b.cafe_id) {
+                            continue;
+                        }
+                        naver.push(cafe_target(
+                            &a.login_id,
+                            b,
+                            0,
+                            Some(CommentTargetSpec {
+                                mode: ct_mode.clone(),
+                                count: Some(count),
+                                cafe_id: Some(b.cafe_id),
+                                article_id: None,
+                            }),
+                        ));
+                        locs.push(QueueLocation {
+                            p: PlatformId::Naver,
+                            name: "카페 최신/인기 댓글".to_string(),
+                            code: None,
+                        });
+                    }
+                }
+            }
+        } else {
+            // 글/글+댓글: 게시판(menu_id)에 글을 올린다(both면 자기 글에 댓글까지 엔진이 처리).
+            for b in cafe_boards.iter().filter(|b| b.menu_id > 0) {
+                naver.push(cafe_target(&a.login_id, b, b.menu_id, None));
+                locs.push(QueueLocation {
+                    p: PlatformId::Naver,
+                    name: cafe_label(b),
+                    code: None,
+                });
+            }
+        }
+        if naver.is_empty() {
+            continue;
+        }
+        items.push(QueueNowItem {
+            id: format!("agent-publish-{now}-{idx}"),
+            title: plan_title.to_string(),
+            kind: mode.clone(),
+            state: QueueState::Waiting,
+            batch_id: None,
+            progress: None,
+            locs,
+            plan: Some(PublishPlan {
+                post_id: post_id.to_string(),
+                kind: mode.clone(),
+                title: effective_title.to_string(),
+                body_text: body.to_string(),
+                comments: plan_comments.clone(),
+                link_override: String::new(),
+                naver,
+                forum: vec![],
+                band: vec![],
+                blog: vec![],
+                clip: vec![],
+                login: None,
+            }),
+            items: vec![],
+        });
+    }
+    items
+}
+
+/// 로컬 글(LibraryPost) 로드 결과. 카페 댓글은 대상(commentTarget)/개수(commentCount)가 글에
+/// 동결돼 있어(데스크톱과 동일) 함께 꺼낸다. 없으면 전부 기본값(best-effort).
+#[derive(Default)]
+struct LoadedPost {
+    title: String,
+    body: String,
+    comments: Vec<String>,
+    comment_target: Option<CommentTarget>,
+    comment_count: Option<u32>,
+}
+
+/// 로컬 글(LibraryPost) 본문 로드(제목·본문·댓글 + 댓글대상/개수). 없으면 빈 값. 댓글은 댓글/글+댓글
+/// 모드에서 forum/naver가 `comments.first()`로 쓴다(엔진 기존 동작 재사용).
+fn load_post<R: Runtime>(app: &AppHandle<R>, post_id: &str) -> LoadedPost {
     app.state::<JsonStore<crate::ipc::posts::LibraryPost>>()
         .snapshot()
         .into_iter()
         .find(|p| p.id == post_id)
-        .map(|p| {
-            (
-                p.title,
-                p.body.unwrap_or_default(),
-                p.comments.unwrap_or_default(),
-            )
+        .map(|p| LoadedPost {
+            title: p.title,
+            body: p.body.unwrap_or_default(),
+            comments: p.comments.unwrap_or_default(),
+            comment_target: p.comment_target,
+            comment_count: p.comment_count,
         })
         .unwrap_or_default()
 }
@@ -754,7 +1036,7 @@ fn add_accounts<R: Runtime>(app: &AppHandle<R>, accounts: &[AccountIn]) -> (usiz
             }
             list.push(Account {
                 id: a.login_id.clone(),
-                platform: PlatformId::Forum,
+                platform: platform_from_str(&a.platform),
                 login_id: a.login_id.clone(),
                 pw: a.pw.clone(),
                 status: AccountStatus::New,
@@ -1415,6 +1697,106 @@ mod tests {
         assert_eq!(f1[0].code, "035420");
         // 게시 전용(로그인 잡 아님).
         assert!(items[0].plan.as_ref().unwrap().login.is_none());
+    }
+
+    #[test]
+    fn build_cafe_publish_items_post_maps_accounts_to_boards() {
+        // 카페 글: 계정당 큐 1개, 그 계정이 선택 게시판(들)에 글을 올린다(plan.naver, forum은 빔).
+        let assignments = vec![
+            PublishAssign { login_id: "acc_a".into(), stocks: vec![] },
+            PublishAssign { login_id: "acc_b".into(), stocks: vec![] },
+        ];
+        let boards = vec![
+            CafeBoardIn { cafe_id: 100, menu_id: 5, article_id: 0, link: "L1".into() },
+            CafeBoardIn { cafe_id: 200, menu_id: 7, article_id: 0, link: "L2".into() },
+        ];
+        let items = build_cafe_publish_items(
+            &assignments,
+            &boards,
+            "p1",
+            "제목",
+            "제목",
+            "본문",
+            ModeValue::Post,
+            &[],
+            None,
+            None,
+            1234,
+        );
+        assert_eq!(items.len(), 2);
+        let n0 = &items[0].plan.as_ref().unwrap().naver;
+        assert_eq!(n0.len(), 2, "acc_a × 게시판 2개");
+        assert!(n0.iter().all(|t| t.account_id == "acc_a"));
+        assert_eq!(n0[0].cafe, "100");
+        assert_eq!(n0[0].menu_id, 5);
+        assert!(n0[0].comment_target.is_none());
+        // 카페 경로라 forum은 비어야 한다.
+        assert!(items[0].plan.as_ref().unwrap().forum.is_empty());
+    }
+
+    #[test]
+    fn build_cafe_publish_items_comment_uses_frozen_latest_target() {
+        // 카페 댓글(글에 동결된 대상=Latest·개수=3): 같은 카페 중복 제거 → cafeId로 최신 N 댓글.
+        let assignments = vec![PublishAssign { login_id: "acc_a".into(), stocks: vec![] }];
+        let boards = vec![
+            CafeBoardIn { cafe_id: 100, menu_id: 5, article_id: 0, link: "L1".into() },
+            CafeBoardIn { cafe_id: 100, menu_id: 6, article_id: 0, link: "L2".into() },
+        ];
+        let items = build_cafe_publish_items(
+            &assignments,
+            &boards,
+            "p1",
+            "제목",
+            "제목",
+            "",
+            ModeValue::Comment,
+            &["댓글1".to_string()],
+            Some(CommentTarget::Latest),
+            Some(3),
+            9,
+        );
+        assert_eq!(items.len(), 1);
+        let n = &items[0].plan.as_ref().unwrap().naver;
+        assert_eq!(n.len(), 1, "같은 카페는 1건으로 합침");
+        let ct = n[0].comment_target.as_ref().unwrap();
+        assert!(matches!(ct.mode, CommentTarget::Latest));
+        assert_eq!(ct.count, Some(3));
+        assert_eq!(ct.cafe_id, Some(100));
+        assert_eq!(
+            items[0].plan.as_ref().unwrap().comments,
+            vec!["댓글1".to_string()]
+        );
+    }
+
+    #[test]
+    fn build_cafe_publish_items_comment_url_uses_article() {
+        // 카페 댓글(글에 동결된 대상=Url): 글 링크(article_id)로 그 글에 직접 댓글.
+        let assignments = vec![PublishAssign { login_id: "acc_a".into(), stocks: vec![] }];
+        let boards = vec![CafeBoardIn {
+            cafe_id: 100,
+            menu_id: 0,
+            article_id: 555,
+            link: "A1".into(),
+        }];
+        let items = build_cafe_publish_items(
+            &assignments,
+            &boards,
+            "p1",
+            "제목",
+            "제목",
+            "",
+            ModeValue::Comment,
+            &["c".to_string()],
+            Some(CommentTarget::Url),
+            None,
+            9,
+        );
+        let n = &items[0].plan.as_ref().unwrap().naver;
+        assert_eq!(n.len(), 1);
+        let ct = n[0].comment_target.as_ref().unwrap();
+        assert!(matches!(ct.mode, CommentTarget::Url));
+        assert_eq!(ct.article_id, Some(555));
+        assert_eq!(ct.cafe_id, Some(100));
     }
 
     #[test]

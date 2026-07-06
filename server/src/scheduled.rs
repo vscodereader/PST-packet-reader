@@ -48,7 +48,26 @@ pub struct PublishSpec {
     /// 댓글 모드의 특정 게시글 URL들(종토 댓글=특정게시글).
     #[serde(default)]
     pub comment_urls: Vec<String>,
+    /// 게시 대상 플랫폼("forum"=종토(기본)·"naver"=네이버 카페). 빈값=forum(하위호환).
+    #[serde(default)]
+    pub target: String,
+    /// 카페 게시판/글 링크 파싱 결과(target=="naver"일 때). 하위가 계정×게시판으로 게시한다.
+    #[serde(default)]
+    pub cafe_boards: Vec<PublishCafeBoard>,
     pub assignments: Vec<PublishAssignment>,
+}
+
+/// 카페 게시판/글 대상(Admin이 링크를 파싱해 보냄). menuId=게시판(글쓰기), articleId=특정 글(url 댓글).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishCafeBoard {
+    pub cafe_id: u64,
+    #[serde(default)]
+    pub menu_id: u64,
+    #[serde(default)]
+    pub article_id: u64,
+    #[serde(default)]
+    pub link: String,
 }
 
 impl PublishSpec {
@@ -108,6 +127,23 @@ pub async fn dispatch_publish(
     } else {
         spec.mode.as_str()
     };
+    let target = if spec.target.is_empty() {
+        "forum"
+    } else {
+        spec.target.as_str()
+    };
+    let cafe_boards_json: Vec<serde_json::Value> = spec
+        .cafe_boards
+        .iter()
+        .map(|b| {
+            serde_json::json!({
+                "cafeId": b.cafe_id,
+                "menuId": b.menu_id,
+                "articleId": b.article_id,
+                "link": b.link,
+            })
+        })
+        .collect();
     let payload = serde_json::json!({
         "type": "publish_posts",
         "commandId": cid,
@@ -117,6 +153,8 @@ pub async fn dispatch_publish(
             "targetLabel": target_label,
             "split": spec.split,
             "mode": mode,
+            "target": target,
+            "cafeBoards": cafe_boards_json,
             "commentUrls": spec.comment_urls,
             "assignments": assignments_json,
         }
@@ -283,6 +321,8 @@ mod tests {
                 split: false,
                 mode: String::new(),
                 comment_urls: vec![],
+                target: String::new(),
+                cafe_boards: vec![],
                 assignments: vec![PublishAssignment {
                     login_id: "acc".into(),
                     stocks: vec![PublishStock { code: "005930".into(), name: "삼성전자".into() }],

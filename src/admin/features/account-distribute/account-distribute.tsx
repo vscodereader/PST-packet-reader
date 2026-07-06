@@ -8,6 +8,7 @@ import {
   Paper,
   PasswordInput,
   ScrollArea,
+  Select,
   Stack,
   Table,
   Text,
@@ -18,9 +19,19 @@ import { notifications } from "@mantine/notifications";
 import { IconDeviceDesktop } from "@tabler/icons-react";
 import { useEffect, useState } from "react";
 
+import { ACTIVE_PLATFORMS, PLATFORM } from "@/shared/data/config";
 import { Icon } from "@/shared/ui/icons";
 
 import { api, isOffline } from "../../api";
+
+// 플랫폼 종류(종토/카페/블로그/클립/밴드) — 데스크톱 pstmacro의 PLATFORMS 그대로 재사용(요구서).
+// 카페(naver)로 분배한 계정은 하위가 로그인하지 않고 등록만 한다(카페는 게시 순간 로그인).
+const PLATFORM_OPTS = ACTIVE_PLATFORMS.map((p) => ({ value: p.id, label: p.name }));
+const DEFAULT_PLATFORM = "forum";
+/** 플랫폼 id → 짧은 라벨(배지용). 미상이면 그대로. */
+function platformLabel(id: string): string {
+  return PLATFORM[id]?.short ?? id;
+}
 
 // 계정 분배 화면(§10-3). 상단=계정 풀(스테이징), 하단=연결된 하위. 선택 후 분배하면
 // 균등+랜덤(MOVE)으로 나뉘어 전송되고, 보낸 계정은 풀에서 사라진다.
@@ -29,12 +40,15 @@ import { api, isOffline } from "../../api";
 interface Account {
   id: string;
   loginId: string;
+  platform: string;
 }
 
-// 계정 추가용 인라인 편집 행. 데스크톱 pstmacro와 동일하게, "행 추가 → 그 자리에서 아이디/비밀번호
-// 입력 → 체크박스로 바로 선택"한다. 별도의 "저장" 확정 단계는 없고, 분배 시점에 입력값 그대로 전송한다.
+// 계정 추가용 인라인 편집 행. 데스크톱 pstmacro와 동일하게, "행 추가 → 그 자리에서 플랫폼/아이디/
+// 비밀번호 입력 → 체크박스로 바로 선택"한다. 별도의 "저장" 확정 단계는 없고, 분배 시점에 입력값
+// 그대로 전송한다(플랫폼도 함께 — 카페면 하위가 등록만).
 interface Draft {
   key: string;
+  platform: string;
   loginId: string;
   pw: string;
 }
@@ -51,6 +65,8 @@ interface OnlineDevice {
 const INITIAL_ACCOUNTS: Account[] = Array.from({ length: 12 }, (_, i) => ({
   id: `a${i + 1}`,
   loginId: `stock_id${String(i + 1).padStart(3, "0")}`,
+  // 미리보기 더미 — 한 개는 카페로 둬 배지가 눈에 보이게 한다.
+  platform: i === 1 ? "naver" : "forum",
 }));
 
 const INITIAL_ONLINE_DEVICES: OnlineDevice[] = [
@@ -93,7 +109,13 @@ export function AccountDistribute() {
     api.accounts
       .list()
       .then((list) =>
-        setAccounts(list.map((a) => ({ id: a.id, loginId: a.loginId }))),
+        setAccounts(
+          list.map((a) => ({
+            id: a.id,
+            loginId: a.loginId,
+            platform: a.platform ?? "forum",
+          })),
+        ),
       )
       .catch(() => {
         /* 오프라인 → 더미 유지 */
@@ -122,7 +144,7 @@ export function AccountDistribute() {
     draftSeq += 1;
     setDrafts((prev) => [
       ...prev,
-      { key: `draft-${draftSeq}`, loginId: "", pw: "" },
+      { key: `draft-${draftSeq}`, platform: DEFAULT_PLATFORM, loginId: "", pw: "" },
     ]);
   };
 
@@ -204,10 +226,20 @@ export function AccountDistribute() {
       // 갔다 와야(재조회) 반영되던 버그를 고침.)
       if (selectedDrafts.length > 0) {
         await api.accounts.import(
-          selectedDrafts.map((d) => ({ loginId: d.loginId, pw: d.pw })),
+          selectedDrafts.map((d) => ({
+            loginId: d.loginId,
+            pw: d.pw,
+            platform: d.platform,
+          })),
         );
         const fresh = await api.accounts.list();
-        setAccounts(fresh.map((a) => ({ id: a.id, loginId: a.loginId })));
+        setAccounts(
+          fresh.map((a) => ({
+            id: a.id,
+            loginId: a.loginId,
+            platform: a.platform ?? "forum",
+          })),
+        );
         const wantLogins = new Set(
           selectedDrafts.map((d) => d.loginId.trim()).filter((s) => s !== ""),
         );
@@ -314,9 +346,10 @@ export function AccountDistribute() {
                     aria-label="전체 선택"
                   />
                 </Table.Th>
-                {/* 아이디·비밀번호 칸 길이 동일하게(같은 폭) */}
-                <Table.Th w="45%">아이디</Table.Th>
-                <Table.Th w="45%">비밀번호</Table.Th>
+                {/* 좌측부터: 플랫폼 · 아이디 · 비밀번호 · 휴지통(요구서) */}
+                <Table.Th w={140}>플랫폼</Table.Th>
+                <Table.Th>아이디</Table.Th>
+                <Table.Th>비밀번호</Table.Th>
                 <Table.Th w={44} />
               </Table.Tr>
             </Table.Thead>
@@ -328,6 +361,19 @@ export function AccountDistribute() {
                       checked={selAcc.has(d.key)}
                       onChange={() => toggleAcc(d.key)}
                       aria-label={d.loginId || "새 계정"}
+                    />
+                  </Table.Td>
+                  <Table.Td>
+                    <Select
+                      size="xs"
+                      data={PLATFORM_OPTS}
+                      value={d.platform}
+                      allowDeselect={false}
+                      comboboxProps={{ withinPortal: true }}
+                      aria-label="새 계정 플랫폼"
+                      onChange={(v) =>
+                        updateDraft(d.key, { platform: v ?? DEFAULT_PLATFORM })
+                      }
                     />
                   </Table.Td>
                   <Table.Td>
@@ -383,6 +429,15 @@ export function AccountDistribute() {
                       aria-label={a.loginId}
                     />
                   </Table.Td>
+                  <Table.Td>
+                    <Badge
+                      variant="light"
+                      color={a.platform === "naver" ? "teal" : "gray"}
+                      radius="sm"
+                    >
+                      {platformLabel(a.platform)}
+                    </Badge>
+                  </Table.Td>
                   <Table.Td>{a.loginId}</Table.Td>
                   <Table.Td>
                     <Text c="dimmed">••••••</Text>
@@ -392,7 +447,7 @@ export function AccountDistribute() {
               ))}
               {accounts.length === 0 && drafts.length === 0 && (
                 <Table.Tr>
-                  <Table.Td colSpan={4}>
+                  <Table.Td colSpan={5}>
                     <Text c="dimmed" ta="center" py="md">
                       계정이 비었습니다 — 분배(MOVE)로 모두 하위에 보냈어요.
                     </Text>
