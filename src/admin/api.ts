@@ -136,6 +136,21 @@ export interface DeviceInventoryDto {
   accounts: string[];
   receivedAt: string | null;
 }
+// 실행큐 스냅샷(설계서 08 §10-2) — 하위가 보고한 실행/대기 게시큐. 중지 명령 화면이 폴링해
+// 하위 화면과 동일한 내용을 실시간으로 보여주고, 각 큐 옆 [중지]가 그 id로 kill을 보낸다.
+export interface QueueItemDto {
+  id: string;
+  title: string;
+  kind: string; // 종토/카페/밴드/블로그/클립/로그인/게시
+  state: string; // running | waiting
+  done: number;
+  total: number;
+  loginIds: string[];
+}
+export interface DeviceQueueStateDto {
+  items: QueueItemDto[];
+  receivedAt: string | null;
+}
 // 종목 프록시(§8 신규 데이터흐름, 07-게시명령 2단계) — 서버 DTO와 일치(camelCase).
 export interface ForumStockDto {
   code: string;
@@ -283,6 +298,23 @@ export const api = {
     // 게시명령 화면 실데이터(07-게시명령 3단계) — 이 하위의 글목록·성공계정.
     inventory(id: string): Promise<DeviceInventoryDto> {
       return request("GET", `/devices/${encodeURIComponent(id)}/inventory`);
+    },
+    // 중지 명령 화면 실데이터(설계서 08 §10-2) — 이 하위의 실행/대기 게시큐 스냅샷.
+    queueState(id: string): Promise<DeviceQueueStateDto> {
+      return request("GET", `/devices/${encodeURIComponent(id)}/queue-state`);
+    },
+  },
+  stop: {
+    // 중지 명령(설계서 08 §10) — 실행 중 게시큐 완전 종료. queueId=그 큐 1개, all=디바이스
+    // 전체, loginId=계정. 서버가 그 하위 SSE로 kill_publish를 내려보내고 payload 원문을 통신로그에 남긴다.
+    kill(req: {
+      deviceId: string;
+      commandId?: string;
+      queueId?: string;
+      all?: boolean;
+      loginId?: string;
+    }): Promise<{ ok: boolean; commandId: string }> {
+      return request("POST", "/admin/kill", req);
     },
   },
   forumStocks: {

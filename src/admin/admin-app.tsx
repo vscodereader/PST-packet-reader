@@ -27,6 +27,7 @@ import {
   type ScheduledItem,
 } from "./features/publish-command/scheduled-posts";
 import { ResultReport } from "./features/result-report/result-report";
+import { StopCommand } from "./features/stop-command/stop-command";
 import { AUTH_SCREENS, PREVIEW_SCREENS, type Screen } from "./screens";
 
 interface NavEntry {
@@ -40,6 +41,7 @@ const NAV: NavEntry[] = [
   { id: "devices", icon: "globe", label: "기기 연결" },
   { id: "distribute", icon: "users", label: "계정 분배" },
   { id: "publish-command", icon: "send", label: "게시 명령" },
+  { id: "stop-command", icon: "trash", label: "중지 명령" },
   { id: "scheduled-posts", icon: "calendar", label: "예약된 글" },
   { id: "report", icon: "chart", label: "결과 보고" },
   { id: "operators", icon: "settings", label: "운영자 관리" },
@@ -143,6 +145,8 @@ function AppScreen({
       return <AccountDistribute />;
     case "publish-command":
       return <PublishCommand onSchedule={onSchedule} />;
+    case "stop-command":
+      return <StopCommand />;
     case "scheduled-posts":
       return (
         <ScheduledPosts items={scheduled} onRemove={onRemoveScheduled} />
