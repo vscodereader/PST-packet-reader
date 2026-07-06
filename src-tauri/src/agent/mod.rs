@@ -446,6 +446,13 @@ fn agent_kill<R: Runtime>(app: &AppHandle<R>, k: &KillCmd) -> (&'static str, Str
     for id in &target_ids {
         crate::ipc::kill::kill_one(app, id);
     }
+    // 원문 로그 자기완결(Stage5): "수신 → 각 큐 정지(kill_one 로그) → 완료"가 통신로그·하위
+    // 로그에 그대로 남아, Admin에서 하위가 제대로 멈췄는지 원문으로 확인할 수 있다.
+    tracing::warn!(
+        count = target_ids.len(),
+        ids = ?target_ids,
+        "[AGENT] 중지 명령 완료 — kill 요청 전송(각 큐 정지·Chrome 정리·다음 큐 승계는 위 [QUEUE]/[POST]/[CHROME] 로그 참조)"
+    );
     (
         "ok",
         format!("중지 처리 — {}개 큐 완전 종료(다음 대기 큐 승계)", target_ids.len()),
