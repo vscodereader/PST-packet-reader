@@ -209,12 +209,13 @@ fn blocking_http_status(message: &str) -> bool {
 
 // 선택한 종목들에 글/댓글을 게시하고 종목별 성공/실패 결과를 돌려주는 함수입니다.
 // 한 종목이 실패해도 다음 종목을 계속 진행합니다. 종목 사이에는 1분 대기합니다.
-pub fn run_forum_publish<R, FS, FR, FRT>(
+pub fn run_forum_publish<R, FS, FR, FRT, FC>(
     request: ForumPublishRequest,
     app: tauri::AppHandle<R>,
     mut on_start: FS,
     mut on_result: FR,
     mut on_retry: FRT,
+    should_cancel: FC,
 ) -> Vec<ForumPublishResult>
 where
     R: Runtime,
@@ -226,6 +227,10 @@ where
     // 그 종목 칸을 "재시도중 N/M"으로 갱신해, 오래 걸리는 종목이 "게시 중…"으로 멈춘 듯 보이거나
     // 사라진 것처럼 보이지 않게 한다(사용자 지적).
     FRT: FnMut(usize, usize, usize),
+    // 사용자 완전 종료(kill) 확인(설계서 08). 새 종목을 시작하기 전과 종목 사이 60초 대기 중에
+    // 호출해, true면 남은 종목을 게시하지 않고 안전하게 멈춘다. 진행 중이던 종목 1개는 이미
+    // 게시+결과기록까지 끝난 뒤라 반쪽글·중복이 없다.
+    FC: Fn() -> bool,
 {
     let title = request.title.trim();
     let body = request.body.trim();
@@ -245,6 +250,16 @@ where
     let mut blocked = false;
 
     for (index, stock) in request.stocks.iter().enumerate() {
+        // 사용자 완전 종료(kill, 설계서 08): 새 종목을 시작하기 전에 확인해, 취소됐으면 남은
+        // 종목을 게시하지 않고 멈춘다. 진행 중이던 종목 1개는 이미 게시+결과기록까지 끝난
+        // 상태라 반쪽글·중복이 없고, Chrome은 호출부(run_forum_targets)가 정상 drop한다.
+        if should_cancel() {
+            tracing::info!(
+                "[POST] {who} 종목토론방 {kind} 사용자 중지 — 남은 {}종목 게시 안 함(안전 경계에서 정지)",
+                total - index
+            );
+            break;
+        }
         on_start(index);
 
         // 앞선 글이 차단/로그인 오류로 실패한 뒤라면, 실제 게시 시도도 60초 대기도 없이 건너뛴다.
@@ -316,7 +331,14 @@ where
         // 차단되면 곧장 다음 루프에서 skip하므로 60초를 낭비하지 않는다(#267-9 시간 절약).
         if index + 1 < total && !blocked {
             let _ = app.emit("batch-wait-start", serde_json::json!({ "seconds": 60u64 }));
-            sleep(Duration::from_secs(60));
+            // 60초 대기를 1초 단위로 쪼개, 대기 중 사용자 중지(kill)가 즉시 반영되게 한다(설계서 08).
+            // 취소되면 대기를 끊고, 다음 루프 상단의 should_cancel 검사가 남은 종목을 멈춘다.
+            for _ in 0..60 {
+                if should_cancel() {
+                    break;
+                }
+                sleep(Duration::from_secs(1));
+            }
         }
     }
 

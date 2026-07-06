@@ -7,6 +7,7 @@ pub mod bands;
 pub mod cafes;
 pub mod diagnostics;
 pub mod excel;
+pub mod kill;
 pub mod log_batches;
 pub mod notify;
 pub mod posts;

@@ -363,6 +363,10 @@ async fn finish_item<R: Runtime>(app: &AppHandle<R>, job: &QueueNowItem) {
                 .mutate(|items| apply_yield_now(items, &job.id, *remaining));
         }
     }
+    // 아이템 실행 종료 — 취소 신호 레지스트리에서 제거(메모리 누수 방지, 설계서 08). 양보
+    // (Yielded)로 재대기하는 경우도 다음 실행 때 run_forum_targets가 새 신호를 등록한다.
+    app.state::<crate::ipc::kill::CancelRegistry>()
+        .remove(&job.id);
 }
 
 /// now 큐의 "최대 작동가능 작업 수"(#284) 사용자 설정. 0 = 무제한(기본값). N = 동시에 돌리는
@@ -1925,6 +1929,12 @@ async fn run_forum_targets<R: Runtime>(
     // 고친다(사용자 지적 2026-06-30: #284로 제한을 푼 뒤에도 이 내부 캡이 남아 따로 놀았다).
     // 한도는 묶음마다 다시 읽어, 사용자가 도중에 한도를 바꿔도 다음 묶음부터 반영된다. 결과는
     // 계정(req) 순서대로 모은다(#237).
+    // 사용자 완전 종료(kill, 설계서 08)용 취소 신호를 이 큐 id로 등록/조회한다. 각 계정의
+    // 게시 루프(spawn_blocking→run_forum_publish)가 이 신호를 보고 종목 사이·대기 중에도
+    // 스스로 멈춘다. batch 경계의 item_present(아래)는 코스 취소, 이 신호는 종목 단위 미세 취소다.
+    let cancel = app
+        .state::<crate::ipc::kill::CancelRegistry>()
+        .get_or_create(id);
     let mut outcomes = Vec::new();
     let mut req_iter = reqs.into_iter().enumerate();
     loop {
@@ -1948,6 +1958,11 @@ async fn run_forum_targets<R: Runtime>(
             // 종목 목록을 미리 복제해 둔다(누락 대신 명시 실패).
             let stocks_for_panic = req.stocks.clone();
             let app_for_job = app.clone();
+            // 이 계정 게시 루프에 넘길 취소 확인용 캡처(설계서 08): 신호 flag 또는 큐에서 항목이
+            // 사라짐(협조 취소)이면 남은 종목을 멈춘다.
+            let cancel_job = Arc::clone(&cancel);
+            let app_cancel = app.clone();
+            let id_cancel = id.to_owned();
             // 종목 시작/완료마다(blocking 스레드) 스켈레톤의 해당 칸만 바꾸기 위한 캡처들.
             let off = starts[idx];
             let app_start = app.clone();
@@ -2014,8 +2029,19 @@ async fn run_forum_targets<R: Runtime>(
                         // account_id/port를 미리 복사한다 — req는 run_forum_publish로 move된다.
                         let account_id_done = req.account_id.clone();
                         let port_done = chrome.port;
-                        let results =
-                            run_forum_publish(req, app_for_job, on_start, on_result, on_retry);
+                        // 사용자 완전 종료 확인(설계서 08): 신호가 켜졌거나 큐에서 항목이
+                        // 사라졌으면(협조 취소) 남은 종목을 멈춘다. 진행 중 종목 1개는 게시+
+                        // 결과기록까지 끝낸 뒤라 안전하고, drop(chrome)로 정상 정리된다.
+                        let should_cancel =
+                            move || cancel_job.is_cancelled() || !item_present(&app_cancel, &id_cancel);
+                        let results = run_forum_publish(
+                            req,
+                            app_for_job,
+                            on_start,
+                            on_result,
+                            on_retry,
+                            should_cancel,
+                        );
                         // [가시성/증명] kill이 '게시 도중'이 아니라 '완전 완료 후'에만 일어난다는
                         // 것을 로그만으로 증명할 수 있게, 종목별 실제 결과를 원문 그대로 남긴다.
                         // 종목 N개가 모두 여기 찍힌 뒤에야 아래 "완벽 완료 확인"·Chrome 종료가

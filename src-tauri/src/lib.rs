@@ -388,7 +388,8 @@ async fn run_forum_publish_now<R: Runtime>(
             request.host = FORUM_DEVTOOLS_HOST.to_owned();
             request.port = chrome.port;
             // 즉시 게시 경로는 종목별 진행 콜백이 필요 없어 no-op을 넘긴다(#219는 큐 워커 전용).
-            let results = run_forum_publish(request, app_for_job, |_| {}, |_, _| {}, |_, _, _| {});
+            let results =
+                run_forum_publish(request, app_for_job, |_| {}, |_, _| {}, |_, _, _| {}, || false);
             drop(chrome);
             Ok(results)
         })
@@ -883,6 +884,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         queue::list_queue_now,
         queue::list_queue_scheduled,
         queue::cancel_queue_now,
+        queue::kill_queue_now,
         queue::clear_done_queue_now,
         queue::cancel_queue_scheduled,
         queue::add_queue_now,
@@ -992,6 +994,9 @@ pub fn manage_stores<R: Runtime>(app: &AppHandle<R>, dir: &Path) -> std::io::Res
     ));
     // 게시 큐 실행 워커 상태(promote 시 기동, 이슈 #144).
     app.manage(ipc::queue_runner::NowQueueRunner::default());
+    // 실행 중 게시큐 "완전 종료(kill)"용 취소 신호 레지스트리(설계서 08). 큐 id별 신호를
+    // in-memory로 보관 — 게시 루프가 종목 사이·대기 중에 확인하고 스스로 멈춘다.
+    app.manage(ipc::kill::CancelRegistry::default());
     Ok(())
 }
 

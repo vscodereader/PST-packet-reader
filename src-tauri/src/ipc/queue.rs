@@ -478,6 +478,27 @@ pub fn cancel_queue_now(
     next
 }
 
+/// 실행 중인 게시큐 1개를 **완전 종료(kill)**한다(설계서 08). `cancel_queue_now`는 큐에서
+/// 항목만 지워 그룹/배치 경계에서만 협조적으로 멈췄지만, 이 명령은 취소 신호도 함께 켜서
+/// **종목 사이·대기 중**에도 실행 중 게시 루프가 스스로 멈추게 한다. Chrome은 루프가 정상
+/// 경계로 빠져나오며 기존 `drop`(taskkill /T) 경로로 정리되어 고아가 남지 않는다. 항목을
+/// 큐에서도 제거하므로 워커는 다음 대기 큐를 즉시 승계한다.
+#[tauri::command]
+pub fn kill_queue_now(
+    store: tauri::State<'_, JsonStore<QueueNowItem>>,
+    cancels: tauri::State<'_, crate::ipc::kill::CancelRegistry>,
+    activity: tauri::State<'_, JsonStore<crate::ipc::activity::ActivityItem>>,
+    id: String,
+) -> Vec<QueueNowItem> {
+    // ① 실행 중 루프에 "멈춰라" 신호(종목 사이·대기 중에 확인하고 스스로 정지).
+    cancels.request(&id);
+    // ② 큐에서 제거 — 배치 경계(item_present) 협조 취소도 함께 발동하고, 워커가 재실행하지 않게.
+    let next = store.mutate(|items| apply_cancel_now(items, &id));
+    record(activity.inner(), ActivityType::Info, "실행 작업 완전 종료(중지)됨");
+    tracing::info!(id = %id, "[QUEUE] 사용자 중지(kill) — 취소 신호 set + 큐에서 제거");
+    next
+}
+
 /// 종료(`Done`) 아이템을 모두 큐에서 치운다(#1, "완료 항목 지우기"). 진행 중/대기 작업은
 /// 보존한다. 큐 창에 쌓인 완료 결과 카드를 한 번에 비울 때 쓴다.
 #[tauri::command]
