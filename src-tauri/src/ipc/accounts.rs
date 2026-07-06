@@ -142,25 +142,10 @@ pub fn apply_status_by_login_id(
         .collect()
 }
 
-/// 계정 **id**(login_id 아님)로 상태·메시지를 설정한다. 좋아요 경로는 계정 id로 도므로 이 함수를
-/// 쓴다([`apply_status_by_login_id`]는 로그인 흐름이 login_id로 여러 행을 갱신할 때 쓴다).
-pub fn apply_status_by_id(
-    accounts: Vec<Account>,
-    id: &str,
-    status: AccountStatus,
-    status_msg: Option<String>,
-) -> Vec<Account> {
-    accounts
-        .into_iter()
-        .map(|mut a| {
-            if a.id == id {
-                a.status = status.clone();
-                a.status_msg = status_msg.clone();
-            }
-            a
-        })
-        .collect()
-}
+// (제거됨) `apply_status_by_id` — 계정 상태를 account.id로 매칭해 갱신하던 옛 함수. 좋아요 경로가
+// 프론트에서 넘어온 **loginId**로 매칭해야 하는데 id로 매칭해 상태가 안 바뀌던 #383 회귀의 원인이라,
+// 전 경로가 `apply_status_by_login_id`(login_id 매칭)로 통일되며 더는 쓰이지 않는다. 다시 도입하면
+// #383이 재발하므로 삭제한다(누구도 호출하지 않던 죽은 코드).
 
 /// First-run seed, mirroring a slice of the frontend mock data.
 pub fn seed() -> Vec<Account> {

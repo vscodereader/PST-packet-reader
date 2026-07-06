@@ -1264,9 +1264,11 @@ impl NaverPacketClient {
     }
 
     // 글쓰기 add 패킷에 필요한 txId를 form 패킷으로 발급받는 함수입니다.
+    // page_url은 시그니처 일관성(issue_cbox_token 등과 동일 호출부)상 받지만, form 요청은
+    // DEFAULT_REFERER를 쓰므로 이 함수에선 사용하지 않는다(의도적 미사용 → `_` 접두).
     fn issue_post_tx_id(
         &self,
-        page_url: &str,
+        _page_url: &str,
         target: &DiscussionTarget,
     ) -> AutomationResult<String> {
         let form_url = format!(
