@@ -484,7 +484,8 @@ pub fn cancel_queue_now(
 /// 경계로 빠져나오며 기존 `drop`(taskkill /T) 경로로 정리되어 고아가 남지 않는다. 항목을
 /// 큐에서도 제거하므로 워커는 다음 대기 큐를 즉시 승계한다.
 #[tauri::command]
-pub fn kill_queue_now(
+pub fn kill_queue_now<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     store: tauri::State<'_, JsonStore<QueueNowItem>>,
     cancels: tauri::State<'_, crate::ipc::kill::CancelRegistry>,
     activity: tauri::State<'_, JsonStore<crate::ipc::activity::ActivityItem>>,
@@ -496,6 +497,15 @@ pub fn kill_queue_now(
     let next = store.mutate(|items| apply_cancel_now(items, &id));
     record(activity.inner(), ActivityType::Info, "실행 작업 완전 종료(중지)됨");
     tracing::info!(id = %id, "[QUEUE] 사용자 중지(kill) — 취소 신호 set + 큐에서 제거");
+    // ③ Stage2 강제 종료 감시(설계서 08): 협조 정지가 타임아웃 안에 안 끝나면(hang) 등록된
+    //    Chrome PID를 taskkill한다. 신호가 등록돼 있을 때만(=Chrome 띄운 종토 실행 중) 띄운다.
+    if let Some(sig) = cancels.get(&id) {
+        let app_bg = app.clone();
+        let id_bg = id.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::ipc::kill::escalate_kill(app_bg, id_bg, sig).await;
+        });
+    }
     next
 }
 

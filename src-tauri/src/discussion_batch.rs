@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use crate::ipc::kill::CancelSignal;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -216,6 +218,7 @@ pub fn run_forum_publish<R, FS, FR, FRT, FC>(
     mut on_result: FR,
     mut on_retry: FRT,
     should_cancel: FC,
+    critical: Arc<CancelSignal>,
 ) -> Vec<ForumPublishResult>
 where
     R: Runtime,
@@ -283,9 +286,14 @@ where
             continue;
         }
 
+        // add POST 임계구역(설계서 08 Stage2): 한 종목의 실제 게시(form→add→응답, 재시도 포함)
+        // 동안 강제 kill(taskkill 에스컬레이션)을 보류시켜 "글은 올라갔는데 기록 못 함=이중게시"
+        // 창을 막는다. 협조적 정지는 이 구간을 건드리지 않고(종목 사이에서만 멈춤) 여기 무관하다.
+        critical.enter_critical();
         let outcome = run_one_forum_stock_with_retry(
             &request, stock, title, body, comment, &app, &who, kind, index, &mut on_retry,
         );
+        critical.leave_critical();
         // 실패면 사용자용 메시지(message)와 캡처된 스택(trace)을 분리해 들고 간다(#199).
         // 성공 시 작성된 글 URL을 메시지에 함께 실어, 완료 로그에서 올라간 글을 확인할 수 있게 한다.
         let (ok, message, trace, posted) = match outcome {

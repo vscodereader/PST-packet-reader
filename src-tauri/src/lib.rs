@@ -388,8 +388,16 @@ async fn run_forum_publish_now<R: Runtime>(
             request.host = FORUM_DEVTOOLS_HOST.to_owned();
             request.port = chrome.port;
             // 즉시 게시 경로는 종목별 진행 콜백이 필요 없어 no-op을 넘긴다(#219는 큐 워커 전용).
-            let results =
-                run_forum_publish(request, app_for_job, |_| {}, |_, _| {}, |_, _, _| {}, || false);
+            // 즉시게시("지금 바로")는 큐 kill 대상이 아니라 취소 없음(|| false) + 더미 임계신호.
+            let results = run_forum_publish(
+                request,
+                app_for_job,
+                |_| {},
+                |_, _| {},
+                |_, _, _| {},
+                || false,
+                std::sync::Arc::new(crate::ipc::kill::CancelSignal::default()),
+            );
             drop(chrome);
             Ok(results)
         })

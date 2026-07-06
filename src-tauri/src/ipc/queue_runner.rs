@@ -2015,6 +2015,11 @@ async fn run_forum_targets<R: Runtime>(
                 };
                 match crate::auth::launch_debug_chrome(true) {
                     Ok(chrome) => {
+                        // 강제 종료(설계서 08 Stage2)용: 이 계정의 Chrome 메인 PID를 취소 신호에
+                        // 등록 — 협조적 정지가 타임아웃 안에 안 끝나면(hang) kill 에스컬레이션이
+                        // 이 PID로 taskkill /T 해 프로세스 트리를 잡는다. 정상 완료 시엔 drop이
+                        // 먼저 정리하므로 이 PID는 이미 죽어 taskkill이 무해한 no-op이 된다.
+                        cancel_job.register_pid(chrome.pid());
                         let mut req = req;
                         // host는 plan_to_forum_requests에서 이미 127.0.0.1; 포트만 띄운 Chrome 값으로.
                         req.port = chrome.port;
@@ -2032,6 +2037,9 @@ async fn run_forum_targets<R: Runtime>(
                         // 사용자 완전 종료 확인(설계서 08): 신호가 켜졌거나 큐에서 항목이
                         // 사라졌으면(협조 취소) 남은 종목을 멈춘다. 진행 중 종목 1개는 게시+
                         // 결과기록까지 끝낸 뒤라 안전하고, drop(chrome)로 정상 정리된다.
+                        // critical_job은 같은 신호의 클론 — run_forum_publish가 한 종목 게시
+                        // 동안 임계구역을 표시해 강제 kill(Stage2)이 그 창을 건드리지 않게 한다.
+                        let critical_job = Arc::clone(&cancel_job);
                         let should_cancel =
                             move || cancel_job.is_cancelled() || !item_present(&app_cancel, &id_cancel);
                         let results = run_forum_publish(
@@ -2041,6 +2049,7 @@ async fn run_forum_targets<R: Runtime>(
                             on_result,
                             on_retry,
                             should_cancel,
+                            critical_job,
                         );
                         // [가시성/증명] kill이 '게시 도중'이 아니라 '완전 완료 후'에만 일어난다는
                         // 것을 로그만으로 증명할 수 있게, 종목별 실제 결과를 원문 그대로 남긴다.

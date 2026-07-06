@@ -20,6 +20,7 @@ pub use accounts::{
 pub use adb::probe_adb_connection;
 // 게시(forum)에서도 로그인과 같은 Chrome 런처를 재사용해, 디버그 포트 Chrome을 앱이 직접 띄운다.
 pub(crate) use chrome::launch as launch_debug_chrome;
+pub(crate) use chrome::force_kill_tree;
 // 잔존(고아) Chrome 개수 조회 — UI가 "실행 중 크롬 N개"를 작업관리자 없이 보여주는 데 쓴다.
 pub(crate) use chrome::running_chrome_count;
 pub use error::OrchestratorError;

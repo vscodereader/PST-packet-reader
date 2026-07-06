@@ -103,6 +103,62 @@ impl CancelRegistry {
     }
 }
 
+/// Stage2 강제 종료 감시(설계서 08 §4-3). 협조적 정지(Stage1)가 `GRACE_SECS` 안에 끝나면
+/// (신호가 레지스트리에서 제거됨 = 아이템 정상 종료) 아무것도 안 한다. 안 끝나면(hang) 등록된
+/// Chrome PID를 `taskkill /T`로 강제 종료한다 — 단 add POST 임계구역(`in_critical`)이면 그 창이
+/// 풀릴 때까지(상한 `CRIT_MAX_SECS`) 기다린 뒤 kill해 "글은 올라갔는데 기록 못 함=이중게시"를
+/// 막는다. `kill_queue_now`가 백그라운드 태스크로 띄운다.
+pub async fn escalate_kill<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    id: String,
+    sig: Arc<CancelSignal>,
+) {
+    use tauri::Manager;
+    const GRACE_SECS: u64 = 10;
+    const CRIT_MAX_SECS: u64 = 30;
+
+    // 신호가 레지스트리에서 사라졌으면(finish_item이 제거) 아이템이 정상 종료된 것 → 강제 불필요.
+    let finished = |app: &tauri::AppHandle<R>| app.state::<CancelRegistry>().get(&id).is_none();
+
+    // ① 협조 정지 유예: 매 초 정상 종료됐는지 확인.
+    for _ in 0..GRACE_SECS {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if finished(&app) {
+            return;
+        }
+    }
+    // ② 아직 안 끝남 → 강제. 단 add POST 임계구역이면 풀릴 때까지(상한) 대기.
+    let mut waited = 0u64;
+    while sig.in_critical() && waited < CRIT_MAX_SECS {
+        if finished(&app) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        waited += 1;
+    }
+    if finished(&app) {
+        return;
+    }
+    // ③ 등록된 Chrome PID를 강제 종료(프로세스 트리 taskkill). PID가 없으면(카페/밴드=HTTP
+    //    이거나 아직 Chrome 미기동) 협조 정지에 의존한다.
+    let pids = sig.take_pids();
+    if pids.is_empty() {
+        tracing::warn!(
+            id = %id,
+            "[QUEUE] 강제 종료 감시: 등록된 Chrome PID 없음 — 협조 정지에 의존(카페/밴드 HTTP이거나 Chrome 미기동)"
+        );
+        return;
+    }
+    tracing::warn!(
+        id = %id,
+        count = pids.len(),
+        "[QUEUE] 협조 정지 타임아웃 — Chrome 강제 종료(taskkill 트리) 에스컬레이션"
+    );
+    for pid in pids {
+        crate::auth::force_kill_tree(pid);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

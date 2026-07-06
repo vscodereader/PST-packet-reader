@@ -23,6 +23,41 @@ pub(crate) struct ChromeHandle {
     user_data_dir: PathBuf,
 }
 
+impl ChromeHandle {
+    /// 우리가 spawn한 메인 Chrome 프로세스의 PID. 실행 중 게시큐 강제 종료(설계서 08 Stage2)에서
+    /// hang 시 이 PID로 프로세스 트리를 taskkill하기 위해 취소 신호에 등록한다.
+    pub(crate) fn pid(&self) -> u32 {
+        self.child.id()
+    }
+}
+
+/// 지정 PID의 Chrome 프로세스 **트리**(렌더러/GPU/crashpad 자식 포함)를 강제 종료한다 —
+/// 실행 중 게시큐 kill이 협조적 정지 타임아웃 안에 안 끝날 때(hang)의 최후수단(설계서 08 Stage2).
+/// `ChromeHandle::drop`의 taskkill과 동일한 방식이며, 이미 죽은 PID면 무해한 no-op이다.
+/// best-effort: 실패해도 로그만 남긴다.
+pub(crate) fn force_kill_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        match cmd.output() {
+            Ok(_) => tracing::warn!(pid, "[CHROME] 강제 종료(kill 에스컬레이션) — taskkill /T /F 프로세스 트리"),
+            Err(error) => tracing::warn!(pid, %error, "[CHROME] 강제 taskkill 실행 실패"),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        // 개발/테스트(비-Windows): 프로세스 그룹까지는 못 잡지만 메인 PID는 kill한다.
+        let _ = Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .output();
+        tracing::warn!(pid, "[CHROME] 강제 종료(kill 에스컬레이션, 비-Windows: 메인 PID kill -9)");
+    }
+}
+
 impl Drop for ChromeHandle {
     fn drop(&mut self) {
         // "완전 종료"의 판단 근거를 로그로 드러낸다(사수 질문): kill 신호 전송 결과 →
