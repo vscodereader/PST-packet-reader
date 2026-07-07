@@ -189,7 +189,7 @@ impl CdpClient {
             ));
         }
 
-        let user_agent = self.evaluate_string("navigator.userAgent")?;
+        let user_agent = sanitize_user_agent(&self.evaluate_string("navigator.userAgent")?);
         let client = Client::builder()
             .timeout(Duration::from_secs(20))
             .redirect(reqwest::redirect::Policy::limited(10))
@@ -2345,6 +2345,15 @@ fn sec_ch_ua_from_user_agent(user_agent: &str) -> String {
     format!("\"Google Chrome\";v=\"{major}\", \"Chromium\";v=\"{major}\", \"Not)A;Brand\";v=\"24\"")
 }
 
+/// 게시용 Chrome은 headless(`--headless=new`)로 뜨므로 `navigator.userAgent`가
+/// `...HeadlessChrome/150...`이 된다. 이 UA를 그대로 요청 헤더에 실으면 네이버 봇탐지가
+/// "헤드리스 자동화"로 즉시 플래그한다(실측: 우리 요청 `HeadlessChrome/150` ↔ 브라우저
+/// `Chrome/149`). 실제 데스크톱 Chrome처럼 보이도록 `HeadlessChrome`을 `Chrome`으로 되돌린다
+/// (좋아요 경로 `from_storage_state`가 데스크톱 UA를 쓰는 것과 일관). 순수 함수.
+fn sanitize_user_agent(user_agent: &str) -> String {
+    user_agent.replace("HeadlessChrome", "Chrome")
+}
+
 /// 단일 Set-Cookie 헤더 한 줄을 (도메인·이름·값)으로 파싱한다(순수 함수). `name=value; domain=.naver.com;
 /// path=/; ...` 형태에서 이름/값과 domain 속성만 취한다. domain 속성이 없으면 응답 호스트(host-only)로
 /// 스코프한다(브라우저 규칙). 이름이 비면 `None`. 만료/삭제 속성은 다루지 않는다 — 가입 체인(수초)에선
@@ -2725,6 +2734,20 @@ mod tests {
         // Chrome 버전을 못 찾으면 기본값(빈 값·봇 탐지 유발 방지).
         let fallback = sec_ch_ua_from_user_agent("curl/8.0");
         assert!(fallback.contains("v=\"149\""), "{fallback}");
+    }
+
+    #[test]
+    fn sanitize_user_agent_strips_headless_marker() {
+        // headless Chrome이 노출하는 "HeadlessChrome"을 "Chrome"으로 되돌린다(봇 신호 제거).
+        let headless = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/150.0.0.0 Safari/537.36";
+        let cleaned = sanitize_user_agent(headless);
+        assert!(!cleaned.contains("Headless"), "{cleaned}");
+        assert!(cleaned.contains("Chrome/150.0.0.0"), "{cleaned}");
+        // sec-ch-ua 버전 파싱도 정화 후 UA에서 그대로 동작(UA↔hint 버전 일치 유지).
+        assert_eq!(chrome_major_from_user_agent(&cleaned), "150");
+        // 이미 정상인 UA는 그대로 둔다(불필요한 변형 없음).
+        let normal = "Mozilla/5.0 ... Chrome/149.0.0.0 Safari/537.36";
+        assert_eq!(sanitize_user_agent(normal), normal);
     }
 
     #[test]
