@@ -366,6 +366,9 @@ export const ipc = {
      * accountIds는 계정의 loginId(쿠키 파일 키). (계정×링크)별 성공/실패를 돌려준다. */
     like: (postUrls: string[], accountIds: string[]) =>
       call<LikeOutcome[]>("like_discussion_post", { postUrls, accountIds }),
+    /** 좋아요와 동일한 경로로 **싫어요**(reactionType="bad")를 누른다 — 패킷상 API만 다르다. */
+    dislike: (postUrls: string[], accountIds: string[]) =>
+      call<LikeOutcome[]>("dislike_discussion_post", { postUrls, accountIds }),
   },
   // 엑셀(.xlsx) 내보내기/가져오기 — Rust에서 파일 처리, 프론트에서 경로 공급.
   excel: {

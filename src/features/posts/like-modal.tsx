@@ -27,6 +27,9 @@ import { AccountRow } from "./publish-modal";
 export interface LikeModalProps {
   open: boolean;
   onClose: () => void;
+  /** 반응 종류 — `"good"`=좋아요(기본) / `"bad"`=싫어요. 좋아요/싫어요가 패킷상 reactionType만
+   * 다르므로(URL·헤더 동일) 이 모달 하나를 공유한다. */
+  reaction?: "good" | "bad";
 }
 
 /** 게시글 링크에서 사람이 읽을 postId(끝의 숫자)를 뽑는다. 칩 라벨용(없으면 링크 자체). */
@@ -35,14 +38,23 @@ function postLabel(url: string): string {
   return m ? `글 #${m[1]}` : url;
 }
 
-/** 글 관리 화면의 "좋아요" 버튼이 여는 모달.
+/** 글 관리 화면의 "좋아요"/"싫어요" 버튼이 여는 모달(`reaction` prop으로 공유).
  *
  * "특정 게시글 댓글"처럼 게시글 링크를 여러 개 넣을 수 있다(엔터/추가 → 칩으로 쌓이고 입력칸이
  * 비워진다). 아래에는 댓글 대신 로그인된 종목토론방 계정을 체크박스([`AccountRow`] 재사용)로
- * 고른다. "좋아요"를 누르면 선택한 계정들이 넣은 링크 글마다 좋아요를 누른다(페이지 이동 없이
- * reactions API 전용 — 백엔드 `like_discussion_post`). 완료 시 토스트로 성공/실패 수를 알린다.
+ * 고른다. 버튼을 누르면 선택한 계정들이 넣은 링크 글마다 반응을 누른다(페이지 이동 없이
+ * reactions API 전용 — 백엔드 `like_discussion_post`/`dislike_discussion_post`). 완료 시 토스트로
+ * 성공/실패 수를 알린다. 좋아요=빨강, 싫어요=남색으로만 구분(로직·화면 동일).
  */
-export function LikeModal({ open, onClose }: LikeModalProps) {
+export function LikeModal({
+  open,
+  onClose,
+  reaction = "good",
+}: LikeModalProps) {
+  const isDislike = reaction === "bad";
+  const label = isDislike ? "싫어요" : "좋아요";
+  const color = isDislike ? "indigo" : "red";
+
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [links, setLinks] = useState<string[]>([]);
@@ -64,7 +76,7 @@ export function LikeModal({ open, onClose }: LikeModalProps) {
   const removeLink = (link: string) =>
     setLinks((prev) => prev.filter((l) => l !== link));
 
-  // 좋아요는 종목토론방(네이버 증권) 로그인 계정으로만 누른다 — 게시 가능한 상태(active/new)만.
+  // 반응은 종목토론방(네이버 증권) 로그인 계정으로만 누른다 — 게시 가능한 상태(active/new)만.
   const forumAccounts = accounts.filter(
     (a) => a.platform === "forum" && isPostable(a.status),
   );
@@ -96,17 +108,20 @@ export function LikeModal({ open, onClose }: LikeModalProps) {
     if (!canSubmit) return;
     setFlow("running");
     try {
-      const outcomes = await ipc.forum.like(links, selectedLoginIds);
+      const outcomes = isDislike
+        ? await ipc.forum.dislike(links, selectedLoginIds)
+        : await ipc.forum.like(links, selectedLoginIds);
       setFlow(outcomes);
       const ok = outcomes.filter((o) => o.success).length;
       notifications.show({
-        message: `좋아요 ${outcomes.length}건 중 ${ok}건 성공`,
+        message: `${label} ${outcomes.length}건 중 ${ok}건 성공`,
         color: ok === outcomes.length ? "green" : ok === 0 ? "red" : "yellow",
       });
     } catch (err) {
       notifications.show({
         message:
-          "좋아요 실패: " + (err instanceof Error ? err.message : String(err)),
+          `${label} 실패: ` +
+          (err instanceof Error ? err.message : String(err)),
         color: "red",
       });
       setFlow(null);
@@ -130,11 +145,11 @@ export function LikeModal({ open, onClose }: LikeModalProps) {
       onClose={close}
       title={
         <Group gap={8}>
-          <ThemeIcon size={26} radius="xl" variant="light" color="red">
+          <ThemeIcon size={26} radius="xl" variant="light" color={color}>
             <Icon.heart size={16} />
           </ThemeIcon>
           <Text fw={800} fz={17}>
-            좋아요
+            {label}
           </Text>
         </Group>
       }
@@ -145,7 +160,7 @@ export function LikeModal({ open, onClose }: LikeModalProps) {
       <Stack gap={16}>
         <Text fz={13} c="dimmed">
           게시글 링크를 넣고(여러 개 가능) 계정을 고르면, 선택한 계정들이 그
-          글들에 좋아요를 누릅니다(페이지 이동 없이 바로 처리).
+          글들에 {label}를 누릅니다(페이지 이동 없이 바로 처리).
         </Text>
 
         {/* "특정 게시글 댓글"처럼 링크를 여러 개 추가 — 엔터/추가 → 칩으로 쌓이고 입력칸 비움. */}
@@ -164,11 +179,11 @@ export function LikeModal({ open, onClose }: LikeModalProps) {
                 }
               }}
               leftSection={<Icon.link size={14} />}
-              aria-label="좋아요를 누를 게시글 링크"
+              aria-label={`${label}를 누를 게시글 링크`}
             />
             <Button
               variant="light"
-              color="red"
+              color={color}
               onClick={addLink}
               disabled={!linkInput.trim()}
             >
@@ -180,7 +195,7 @@ export function LikeModal({ open, onClose }: LikeModalProps) {
               {links.map((link) => (
                 <Badge
                   key={link}
-                  color="red"
+                  color={color}
                   variant="light"
                   radius="xl"
                   size="lg"
@@ -188,7 +203,7 @@ export function LikeModal({ open, onClose }: LikeModalProps) {
                     <ActionIcon
                       size={15}
                       variant="transparent"
-                      color="red"
+                      color={color}
                       aria-label={`${link} 제거`}
                       onClick={() => removeLink(link)}
                     >
@@ -202,12 +217,12 @@ export function LikeModal({ open, onClose }: LikeModalProps) {
             </Group>
           ) : (
             <Text fz={12} c="orange.7">
-              좋아요를 누를 게시글 링크를 추가하세요.
+              {label}를 누를 게시글 링크를 추가하세요.
             </Text>
           )}
         </Stack>
 
-        <Divider label="좋아요를 누를 계정" labelPosition="left" />
+        <Divider label={`${label}를 누를 계정`} labelPosition="left" />
 
         {/* 종목선택 화면과 같은 계정 체크박스(AccountRow) 재사용. */}
         <Stack gap={4}>
@@ -215,7 +230,7 @@ export function LikeModal({ open, onClose }: LikeModalProps) {
             <Group gap={8} px={4} py={10}>
               <PlatformLogo id="forum" size={22} />
               <Text fz={13} c="orange.7">
-                좋아요를 누를 수 있는 종목토론방 로그인 계정이 없습니다. 먼저
+                {label}를 누를 수 있는 종목토론방 로그인 계정이 없습니다. 먼저
                 로그인하세요.
               </Text>
             </Group>
@@ -312,7 +327,7 @@ export function LikeModal({ open, onClose }: LikeModalProps) {
             닫기
           </Button>
           <Button
-            color="red"
+            color={color}
             leftSection={
               running ? (
                 <Loader size={14} color="white" />
@@ -323,7 +338,7 @@ export function LikeModal({ open, onClose }: LikeModalProps) {
             onClick={submit}
             disabled={!canSubmit}
           >
-            {running ? "좋아요 누르는 중…" : "좋아요"}
+            {running ? `${label} 누르는 중…` : label}
           </Button>
         </Group>
       </Stack>

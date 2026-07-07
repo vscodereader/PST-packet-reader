@@ -135,6 +135,20 @@ fn cdp_trace_enabled() -> bool {
     }
 }
 
+/// 로그인 CDP **네트워크 원문 로깅** on/off. **기본 OFF(opt-in)** — 로그인은 봇탐지 표면을 줄이려
+/// Network/Runtime 도메인을 일부러 끈다(`enable_page_only` 주석 참고: naver wtm 의 CDP 탐지 =
+/// navigator.webdriver·타이핑과 무관하게 캡차를 띄우는 최강 신호). 진단이 필요할 때만 환경변수
+/// `PSTMACRO_LOGIN_NETLOG=1`(또는 `true`/`on`)로 켜면, 로그인 브라우저가 네이버와 실제로 주고받는
+/// 요청/응답/쿠키를 CDP `Network.*` 이벤트로 받아 기존 `cdp:` 트레이스에 **원문 그대로** 남긴다.
+/// ⚠️ 켜면 Network 도메인 활성화로 탐지 표면이 늘어 **캡차율이 오를 수 있다**(그래서 기본 OFF).
+/// 실제 통신을 리스크 0으로 뜨려면 브라우저를 안 건드리는 tshark 패킷 캡처(+TLS keylog)를 쓸 것.
+fn login_netlog_enabled() -> bool {
+    matches!(
+        std::env::var("PSTMACRO_LOGIN_NETLOG"),
+        Ok(v) if { let v = v.trim(); v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on") }
+    )
+}
+
 /// 트레이스에 남길 파라미터를 문자열로 만든다. `Input.dispatchKeyEvent` 의 실제 글자
 /// (`text`/`key`/`unmodifiedText`)만 `•` 로 가린다 — 아이디/비밀번호 원문이 로그 파일에 남아
 /// 공유 시 유출되는 것을 막기 위함(진단에 필요한 code·keyCode·modifiers·응답은 그대로 남는다).
@@ -276,7 +290,7 @@ fn clarify_profile_status_error(
 
 /// 좋아요 전용 흐름은 [`like_flow`] 모듈에 있다(게시 경로와 분리 — 게시의 npay/프로필 로직을
 /// 건드리지 않는다). 여기서 재수출해 기존 호출부(`lib.rs`)의 import 경로를 유지한다.
-pub use like_flow::{run_naver_like, LikeVerdict};
+pub use like_flow::{run_naver_dislike, run_naver_like, LikeVerdict};
 
 pub fn run_naver_discussion_macro(
     request: NaverDiscussionRequest,
@@ -586,6 +600,21 @@ impl CdpClient {
     pub(crate) fn enable_page_only(&mut self) -> AutomationResult<()> {
         self.call("Page.enable", json!({}))
             .map_err(|error| AutomationError::new(format!("Page.enable 실패: {error}")))?;
+        // 진단 옵트인(기본 OFF): PSTMACRO_LOGIN_NETLOG 가 켜졌을 때만 Network 도메인을 활성화해,
+        // 로그인 브라우저가 네이버와 실제로 주고받는 요청/응답/쿠키를 CDP 이벤트로 받아 기존 cdp
+        // 트레이스(← {text})에 원문 그대로 남긴다(로그인 통신을 게시처럼 원문으로 보기 위함). 평소엔
+        // 끈다 — Network.enable 은 위 주석대로 봇탐지 표면을 늘려 캡차율을 올릴 수 있다. 실패는 비치명적.
+        if login_netlog_enabled() {
+            match self.call("Network.enable", json!({})) {
+                Ok(_) => tracing::warn!(
+                    "[LOGIN][netlog] PSTMACRO_LOGIN_NETLOG=on — Network 도메인 활성(요청/응답 원문 로깅). \
+                     ⚠️ 봇탐지 표면 증가로 캡차율이 오를 수 있음(진단 전용). 리스크 0 캡처는 tshark 사용."
+                ),
+                Err(error) => {
+                    tracing::warn!("[LOGIN][netlog] Network.enable 실패 — 네트워크 원문 없이 계속: {error}")
+                }
+            }
+        }
         Ok(())
     }
 

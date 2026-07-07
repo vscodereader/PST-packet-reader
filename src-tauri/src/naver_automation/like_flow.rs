@@ -26,16 +26,30 @@ pub enum LikeVerdict {
     Failed(String),
 }
 
-/// 저장된 로그인 쿠키만으로 종목토론방 게시글에 **좋아요**를 누른다(Chrome·페이지 이동 없이 reactions
-/// API 전용). 이미 좋아요면 성공(멱등). 결과를 [`LikeVerdict`]로 돌려준다.
+/// 저장된 로그인 쿠키만으로 종목토론방 게시글에 **좋아요**를 누른다. [`run_naver_reaction`] 래퍼.
 pub fn run_naver_like(account_id: &str, post_url: &str) -> LikeVerdict {
+    run_naver_reaction(account_id, post_url, "good")
+}
+
+/// 저장된 로그인 쿠키만으로 종목토론방 게시글에 **싫어요**를 누른다. 좋아요와 동일 경로이고
+/// reactions API의 reactionType만 `"bad"`다(패킷 실측). [`run_naver_reaction`] 래퍼.
+pub fn run_naver_dislike(account_id: &str, post_url: &str) -> LikeVerdict {
+    run_naver_reaction(account_id, post_url, "bad")
+}
+
+/// 좋아요·싫어요 **공용** 흐름(Chrome·페이지 이동 없이 reactions API 전용). `reaction_type`:
+/// `"good"`=좋아요 / `"bad"`=싫어요. 이미 같은 반응이면 성공(멱등). 결과를 [`LikeVerdict`]로 돌려준다.
+/// 쿠키 로드·세션 확인(getProfile)·npay 재시도·차단/만료 원문 판정은 좋아요와 100% 동일하며,
+/// 마지막에 호출하는 reactions API의 reactionType만 다르다.
+fn run_naver_reaction(account_id: &str, post_url: &str, reaction_type: &str) -> LikeVerdict {
+    let label = if reaction_type == "bad" { "싫어요" } else { "좋아요" };
     let post_url = post_url.trim();
     if post_url.is_empty() {
-        return LikeVerdict::Failed("좋아요를 누를 게시글 링크가 비어 있습니다.".to_owned());
+        return LikeVerdict::Failed(format!("{label}를 누를 게시글 링크가 비어 있습니다."));
     }
     tracing::info!(
         account = %crate::auth::mask_id(account_id),
-        "종토방 좋아요 시작(API 전용, 페이지 이동 없음)"
+        "종토방 {label} 시작(API 전용, 페이지 이동 없음)"
     );
 
     let storage = match crate::auth::read_account_cookies(account_id) {
@@ -51,23 +65,23 @@ pub fn run_naver_like(account_id: &str, post_url: &str) -> LikeVerdict {
     };
     let mut client = match packet_client::NaverPacketClient::from_storage_state(&storage) {
         Ok(client) => client,
-        Err(error) => return LikeVerdict::Failed(format!("좋아요 클라이언트 생성 실패: {error}")),
+        Err(error) => return LikeVerdict::Failed(format!("{label} 클라이언트 생성 실패: {error}")),
     };
     // 로드된 인증 쿠키 원문을 남긴다(재로그인 후 새 문자열과 대조 — 사용자 요청 2026-07-03).
-    client.log_auth_cookies_raw("좋아요-시작-로드된쿠키");
+    client.log_auth_cookies_raw(&format!("{label}-시작-로드된쿠키"));
 
     // 0) 세션 생존 확인(getProfile). 로그아웃이면 원문 프로브로 차단/만료를 확정한다(추측 금지).
     let logged_out = matches!(client.read_login_profile(), Ok(profile) if !profile.logged_in);
     if logged_out {
         tracing::warn!(
             account = %crate::auth::mask_id(account_id),
-            "좋아요 전 세션 확인 — 로그아웃 상태(getProfile) → 원문(form)으로 차단/만료 확정"
+            "{label} 전 세션 확인 — 로그아웃 상태(getProfile) → 원문(form)으로 차단/만료 확정"
         );
         return verdict_from_probe(&client, "getProfile 로그아웃");
     }
 
-    // 1) 세션이 살아있으면 그대로 좋아요를 시도한다 — 이미 가입된 계정은 npay 없이 바로 눌린다.
-    let first_error = match client.like_post(post_url) {
+    // 1) 세션이 살아있으면 그대로 반응을 시도한다 — 이미 가입된 계정은 npay 없이 바로 눌린다.
+    let first_error = match client.react_post(post_url, reaction_type) {
         Ok(()) => return LikeVerdict::Liked,
         Err(error) => error,
     };
@@ -81,7 +95,7 @@ pub fn run_naver_like(account_id: &str, post_url: &str) -> LikeVerdict {
     if !is_session_expired_error(&first_error) {
         match client.try_npay_join_preserving_cookies() {
             NpayJoinStatus::Completed | NpayJoinStatus::TermsPending | NpayJoinStatus::Unknown => {
-                match client.like_post(post_url) {
+                match client.react_post(post_url, reaction_type) {
                     Ok(()) => return LikeVerdict::Liked,
                     Err(error) if is_blocked_error(&error) => {
                         return LikeVerdict::Blocked(format!("계정 차단(비활성) — {}", error.message()));
@@ -94,7 +108,7 @@ pub fn run_naver_like(account_id: &str, post_url: &str) -> LikeVerdict {
     }
 
     // 4) 여기까지 막혔으면 **원문(form)으로 차단/만료를 확정**한다(자르지 않은 응답을 로그에 남기고 판정).
-    verdict_from_probe(&client, &format!("좋아요 실패({})", first_error.message()))
+    verdict_from_probe(&client, &format!("{label} 실패({})", first_error.message()))
 }
 
 /// `probe_restriction_raw`(폼 원문 판정)를 [`LikeVerdict`]로 옮긴다. Healthy(정상·비차단)면 계정 문제가
