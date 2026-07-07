@@ -114,8 +114,7 @@ pub(super) enum RestrictionVerdict {
 pub(super) struct PostReaction {
     /// 내가 이 글에 "좋아요"(recommend)를 눌러 둔 상태인지.
     recommended: bool,
-    /// 내가 이 글에 "싫어요"(notRecommend)를 눌러 둔 상태인지(현재는 좋아요 기능만 쓰지만 대칭 보존).
-    #[allow(dead_code)]
+    /// 내가 이 글에 "싫어요"(notRecommend)를 눌러 둔 상태인지(싫어요 멱등 판정에 사용).
     not_recommended: bool,
     /// 내가 눌러 둔 기존 반응의 id(없으면 `None` — 최초 반응이라 POST로 생성).
     reaction_id: Option<String>,
@@ -987,21 +986,30 @@ impl NaverPacketClient {
         Ok(())
     }
 
-    /// 게시글 URL에 **좋아요**를 누른다(페이지 이동 없이 reactions API만 사용). 이미 좋아요면 그대로
-    /// 성공 처리하고, 싫어요/무반응이면 좋아요로 만든다(최초=POST, 기존 반응 있으면=PUT). URL에서
-    /// postId는 기존 [`object_id_from_url`]로 파싱한다(댓글 경로와 동일 규칙 재사용).
-    pub(super) fn like_post(&self, post_url: &str) -> AutomationResult<()> {
+    /// 게시글 URL에 반응을 남긴다 — **좋아요(reaction_type="good")·싫어요("bad") 공용**.
+    /// 패킷 실측(2026-07-01)상 URL·메서드·헤더가 전부 동일하고 요청 바디의 `reactionType`만 다르므로
+    /// 좋아요/싫어요가 이 함수 하나를 공유한다. 이미 같은 반응이면 멱등 성공, 무반응이면 최초=POST,
+    /// 다른 반응이 있으면=PUT으로 전환(마지막 누른 상태가 표시된다). postId는 기존
+    /// [`object_id_from_url`]로 파싱(댓글 경로와 동일 규칙 재사용).
+    pub(super) fn react_post(&self, post_url: &str, reaction_type: &str) -> AutomationResult<()> {
+        let is_dislike = reaction_type == "bad";
+        let label = if is_dislike { "싫어요" } else { "좋아요" };
         let post_id = object_id_from_url(post_url)?;
         let current = self.read_post_reaction(&post_id)?;
-        if current.recommended {
-            tracing::info!(post_id = %post_id, "이미 좋아요 상태 — 건너뜀");
+        let already = if is_dislike {
+            current.not_recommended
+        } else {
+            current.recommended
+        };
+        if already {
+            tracing::info!(post_id = %post_id, "이미 {label} 상태 — 건너뜀");
             return Ok(());
         }
         match current.reaction_id {
-            Some(reaction_id) => self.update_reaction(&post_id, &reaction_id, "good")?,
-            None => self.create_reaction(&post_id, "good")?,
+            Some(reaction_id) => self.update_reaction(&post_id, &reaction_id, reaction_type)?,
+            None => self.create_reaction(&post_id, reaction_type)?,
         }
-        tracing::info!(post_id = %post_id, "좋아요 완료");
+        tracing::info!(post_id = %post_id, "{label} 완료");
         Ok(())
     }
 

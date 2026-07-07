@@ -46,6 +46,7 @@ export function Posts({ go }: { go: GoFn }) {
   const [writerDoc, setWriterDoc] = useState<LibraryPost | null>(null);
   const [publishDoc, setPublishDoc] = useState<LibraryPost | null>(null);
   const [likeOpen, setLikeOpen] = useState(false);
+  const [dislikeOpen, setDislikeOpen] = useState(false);
 
   const upsert = (doc: LibraryPost) => {
     void ipc.posts.upsert(doc).then(setPosts);
@@ -153,6 +154,15 @@ export function Posts({ go }: { go: GoFn }) {
             onClick={() => setLikeOpen(true)}
           >
             좋아요
+          </Button>
+          <Button
+            size="sm"
+            variant="default"
+            color="indigo"
+            leftSection={<Icon.heart size={16} />}
+            onClick={() => setDislikeOpen(true)}
+          >
+            싫어요
           </Button>
           <Button
             size="sm"
@@ -358,6 +368,11 @@ export function Posts({ go }: { go: GoFn }) {
         go={go}
       />
       <LikeModal open={likeOpen} onClose={() => setLikeOpen(false)} />
+      <LikeModal
+        open={dislikeOpen}
+        reaction="bad"
+        onClose={() => setDislikeOpen(false)}
+      />
     </Container>
   );
 }
