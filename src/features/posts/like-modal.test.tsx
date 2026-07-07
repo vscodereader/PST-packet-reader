@@ -126,4 +126,32 @@ describe("LikeModal", () => {
     const counter = await screen.findByText(/\/\d+개 선택됨/);
     expect(within(counter).queryByText(/^0\//)).not.toBeInTheDocument();
   });
+
+  it("reaction='bad' — labels 싫어요 and calls dislike_discussion_post", async () => {
+    const { invoke } = await import("@/test/ipc");
+    renderLike({ reaction: "bad" });
+    await screen.findByText("invest_king7");
+    // 라벨·버튼·aria-label 이 전부 '싫어요'로 바뀐다.
+    expect(screen.getByRole("button", { name: "싫어요" })).toBeInTheDocument();
+    const input = screen.getByLabelText("싫어요를 누를 게시글 링크");
+    await userEvent.type(input, LINK1 + "{enter}");
+    await userEvent.click(screen.getByText("invest_king7"));
+    await userEvent.click(screen.getByRole("button", { name: "싫어요" }));
+
+    await waitFor(() =>
+      expect(
+        (invoke as unknown as { mock: { calls: unknown[][] } }).mock.calls.some(
+          (c) => {
+            // 좋아요가 아니라 싫어요 커맨드로 나가야 한다(패킷상 reactionType='bad').
+            if (c[0] !== "dislike_discussion_post") return false;
+            const a = c[1] as { postUrls: string[]; accountIds: string[] };
+            return (
+              a.postUrls.includes(LINK1) &&
+              a.accountIds.includes("invest_king7")
+            );
+          },
+        ),
+      ).toBe(true),
+    );
+  });
 });

@@ -37,7 +37,8 @@ use discussion_batch::{
     StockCandidate, TemplateColumns,
 };
 use naver_automation::{
-    run_naver_discussion_macro, run_naver_like, AutomationReport, AutomationTarget, LikeVerdict,
+    run_naver_discussion_macro, run_naver_dislike, run_naver_like, AutomationReport,
+    AutomationTarget, LikeVerdict,
     NaverDiscussionRequest,
 };
 
@@ -122,7 +123,7 @@ fn mark_account_status<R: Runtime>(
     }
 }
 
-fn record_like_batch<R: Runtime>(app: &tauri::AppHandle<R>, outcomes: &[LikeOutcome]) {
+fn record_like_batch<R: Runtime>(app: &tauri::AppHandle<R>, outcomes: &[LikeOutcome], label: &str) {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use ipc::accounts::PlatformId;
@@ -157,8 +158,8 @@ fn record_like_batch<R: Runtime>(app: &tauri::AppHandle<R>, outcomes: &[LikeOutc
         })
         .collect();
     let batch = LogBatch {
-        id: format!("lb-like-{at}-{seq}"),
-        title: "좋아요".to_owned(),
+        id: format!("lb-react-{at}-{seq}"),
+        title: label.to_owned(),
         body: None,
         comment: None,
         kind: ipc::posts::ModeValue::Post,
@@ -174,11 +175,15 @@ fn record_like_batch<R: Runtime>(app: &tauri::AppHandle<R>, outcomes: &[LikeOutc
     });
 }
 
-#[tauri::command]
-async fn like_discussion_post<R: Runtime>(
+/// 좋아요·싫어요 **공용** 배치 실행 — 계정×링크마다 reactions API를 눌러 결과를 모은다. 좋아요와
+/// 싫어요는 패킷상 reactionType만 다르므로(URL·헤더 동일) 이 하나를 공유한다. `reaction_type`:
+/// `"good"`=좋아요 / `"bad"`=싫어요, `label`: 사용자 메시지·알림 제목용(좋아요/싫어요).
+async fn run_reaction_batch<R: Runtime>(
     app: tauri::AppHandle<R>,
     post_urls: Vec<String>,
     account_ids: Vec<String>,
+    reaction_type: &'static str,
+    label: &'static str,
 ) -> Result<Vec<LikeOutcome>, String> {
     let post_urls: Vec<String> = post_urls
         .into_iter()
@@ -186,26 +191,32 @@ async fn like_discussion_post<R: Runtime>(
         .filter(|u| !u.is_empty())
         .collect();
     if post_urls.is_empty() {
-        return Err("좋아요를 누를 게시글 링크를 한 개 이상 입력하세요.".to_owned());
+        return Err(format!("{label}를 누를 게시글 링크를 한 개 이상 입력하세요."));
     }
     if account_ids.is_empty() {
-        return Err("좋아요를 누를 계정을 한 개 이상 선택하세요.".to_owned());
+        return Err(format!("{label}를 누를 계정을 한 개 이상 선택하세요."));
     }
-    // 좋아요 판정이 재로그인/비활성이면 계정 상태를 바꾸고 쿠키를 지워야 하므로 store 접근용으로
+    // 반응 판정이 재로그인/비활성이면 계정 상태를 바꾸고 쿠키를 지워야 하므로 store 접근용으로
     // app을 블로킹 클로저에 함께 넘긴다(로그 배치 기록은 클로저 밖 record_like_batch가 담당).
     let app_for_status = app.clone();
+    let is_dislike = reaction_type == "bad";
     let outcomes = tauri::async_runtime::spawn_blocking(move || {
         let mut outcomes = Vec::with_capacity(account_ids.len() * post_urls.len());
         let mut first = true;
         for account_id in &account_ids {
             for post_url in &post_urls {
-                // 연속요청 도배 차단 회피용 간격(첫 호출 제외). 좋아요는 순식간이라 호출마다 텀을 둔다.
+                // 연속요청 도배 차단 회피용 간격(첫 호출 제외). 반응은 순식간이라 호출마다 텀을 둔다.
                 if !first {
                     std::thread::sleep(std::time::Duration::from_millis(1500));
                 }
                 first = false;
-                let (success, message) = match run_naver_like(account_id, post_url) {
-                    LikeVerdict::Liked => (true, "좋아요 완료".to_owned()),
+                let verdict = if is_dislike {
+                    run_naver_dislike(account_id, post_url)
+                } else {
+                    run_naver_like(account_id, post_url)
+                };
+                let (success, message) = match verdict {
+                    LikeVerdict::Liked => (true, format!("{label} 완료")),
                     // 세션 만료 → 상태 '재로그인' + 쿠키 삭제(재로그인해야 회복).
                     LikeVerdict::Relogin(msg) => {
                         mark_account_status(
@@ -240,10 +251,28 @@ async fn like_discussion_post<R: Runtime>(
         outcomes
     })
     .await
-    .map_err(|error| format!("좋아요 작업 실행 실패: {error}"))?;
-    // 좋아요 결과를 알림 로그에 기록 — 게시처럼 알림 패널에 남게 한다(사용자 지적: 토스트만 뜨고 알림엔 안 남음).
-    record_like_batch(&app, &outcomes);
+    .map_err(|error| format!("{label} 작업 실행 실패: {error}"))?;
+    // 반응 결과를 알림 로그에 기록 — 게시처럼 알림 패널에 남게 한다(사용자 지적: 토스트만 뜨고 알림엔 안 남음).
+    record_like_batch(&app, &outcomes, label);
     Ok(outcomes)
+}
+
+#[tauri::command]
+async fn like_discussion_post<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    post_urls: Vec<String>,
+    account_ids: Vec<String>,
+) -> Result<Vec<LikeOutcome>, String> {
+    run_reaction_batch(app, post_urls, account_ids, "good", "좋아요").await
+}
+
+#[tauri::command]
+async fn dislike_discussion_post<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    post_urls: Vec<String>,
+    account_ids: Vec<String>,
+) -> Result<Vec<LikeOutcome>, String> {
+    run_reaction_batch(app, post_urls, account_ids, "bad", "싫어요").await
 }
 
 #[tauri::command]
@@ -916,6 +945,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         run_naver_discussion,
         parse_template_csv,
         like_discussion_post,
+        dislike_discussion_post,
         search_stocks,
         forum_stocks::list_forum_stocks,
         forum_stocks::search_forum_stocks,

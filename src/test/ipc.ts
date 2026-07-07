@@ -1369,8 +1369,10 @@ export const invoke = vi.fn(
         );
       }
 
-      // --- 좋아요(reactions) — (계정×링크)별 성공 결과 모킹 -----------------
-      case "like_discussion_post": {
+      // --- 좋아요/싫어요(reactions) — (계정×링크)별 성공 결과 모킹 ----------
+      case "like_discussion_post":
+      case "dislike_discussion_post": {
+        const label = cmd === "dislike_discussion_post" ? "싫어요" : "좋아요";
         const ids = Array.isArray(args?.accountIds)
           ? (args!.accountIds as string[])
           : [];
@@ -1382,7 +1384,7 @@ export const invoke = vi.fn(
             accountId,
             postUrl,
             success: true,
-            message: "좋아요 완료",
+            message: `${label} 완료`,
           })),
         );
         return clone(outcomes);
