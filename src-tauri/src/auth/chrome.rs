@@ -186,6 +186,13 @@ pub(crate) fn launch(headless: bool) -> Result<ChromeHandle, OrchestratorError> 
         // "Chrome이 자동화 소프트웨어의 제어를 받고 있습니다" 신호를 노출하는 것을 끈다.
         // 실제 키 이벤트(login_flow)만으로는 점수형 캡차를 못 피하므로 자동화 지문도 함께 낮춘다.
         "--disable-blink-features=AutomationControlled",
+        // 봇탐지 지문 일치(패킷 대조 2026-07-07): 빈 incognito 프로필은 UI 언어가 ko-KR 1개뿐이라
+        // Accept-Language 헤더가 `ko-KR,ko`(2개)로 나가는데, login_flow의 스텔스 스크립트는
+        // navigator.languages 를 `ko-KR,ko,en-US,en`(4개)로 위조한다 → JS와 헤더가 불일치해
+        // wtm/ncaptcha 가 봇 신호로 읽는다. 실행 언어를 맞춰 Accept-Language 헤더도 같은 4개로
+        // 내보내 navigator.languages 위조본과 **일치**시킨다(수동 브라우저처럼 JS↔헤더 동일).
+        "--lang=ko-KR",
+        "--accept-lang=ko-KR,ko,en-US,en",
         "about:blank",
     ];
     if headless {
