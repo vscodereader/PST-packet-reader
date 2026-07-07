@@ -39,26 +39,23 @@ const CLICK_SETTLE: Duration = Duration::from_millis(800);
 // 내 성공이라 6초면 안전하다.
 const PENDING_STALL: Duration = Duration::from_secs(6);
 
-// 봇탐지(ncaptcha/wtm) 완화용 스텔스 스크립트. 페이지 스크립트보다 먼저 모든 새 문서에서
-// 실행되어 자동화 흔적을 일반 크롬과 동일하게 맞춘다.
+// 봇탐지(ncaptcha/wtm) 완화용 스텔스 주입 지점. 페이지 스크립트보다 먼저 모든 새 문서에서 실행된다.
 //
-// 네이버 안티봇 번들(wtm.pstatic.net)의 검사는
-//   getWebdriver(){ return void 0!==navigator.webdriver ? Boolean(navigator.webdriver).toString() : "" }
-// 형태다. 일반(비자동화) 크롬은 `navigator.webdriver === false` 라 "false"를 보고한다.
-//
-// ⚠️ 핵심(지문 비교로 실측, 2026-06-29): 예전엔 `Object.defineProperty(navigator,'webdriver',…)`로
-// **인스턴스에 직접** 박았는데, 그러면 `navigator.hasOwnProperty('webdriver')===true`가 되어
-// **일반 크롬(프로토타입에만 존재 → own=false)과 달라지는 탐지 흔적**을 스스로 남겼다(매크로만
-// 캡차가 뜨던 직접 원인 후보). 그래서 일반 크롬과 **위치까지 동일**하도록 `Navigator.prototype`에
-// 정의한다(인스턴스에는 own 속성을 만들지 않는다). 값은 그대로 `false`.
-//
-// languages 도 빈 incognito 프로필에선 `["ko-KR"]` 1개뿐이라 일반 크롬(`ko-KR,ko,en-US,en`)과
-// 달라 탐지 표면이 된다(같은 실측). 프로토타입에 4개 배열로 맞춰 인스턴스 own 흔적 없이 정렬한다.
-const STEALTH_INIT_JS: &str = "(()=>{try{\
-    Object.defineProperty(Navigator.prototype,'webdriver',\
-        {get:()=>false,configurable:true,enumerable:true});}catch(e){}\
-    try{Object.defineProperty(Navigator.prototype,'languages',\
-        {get:()=>['ko-KR','ko','en-US','en'],configurable:true,enumerable:true});}catch(e){}})();";
+// [실험 B — override 제거, 2026-07-08] 기존엔 여기서 `Navigator.prototype`에 webdriver(get→false)와
+// languages(get→['ko-KR','ko','en-US','en'])를 defineProperty 로 박았다(도입 0bda79e#100, 정교화
+// 60d149a). 그 목적은 당시 실측된 두 지문 차이(webdriverOwn true, languages 1개)를 정상 크롬과
+// 맞추는 것이었다. 그런데 그 뒤 상황이 바뀌었다:
+//   ① #393(chrome.rs `--accept-lang=ko-KR,ko,en-US,en`) 으로 **native navigator.languages 가 이미 4개**,
+//      `--disable-blink-features=AutomationControlled` 로 **native navigator.webdriver 가 이미 false** →
+//      override 의 '값 맞추기' 목적을 크롬 플래그가 네이티브로 달성 = override 는 이제 중복.
+//   ② override 는 값은 맞지만 **JS 게터**라 `getOwnPropertyDescriptor(...).get.toString()` 이 `()=>false`
+//      로 나온다(네이티브는 `[native code]`). wtm WASM 의 _setFunctionErrorKey/_setPrototype 는 이 게터
+//      네이티브성까지 본다. 06-29 A/B 는 webdriverOwn(bool)·languages(개수)만 봤고 게터 네이티브성은
+//      **안 봤다** → 이 tell 이 그대로 남아 있었다. override 를 빼면 네이티브 게터로 복귀해 이 tell 제거.
+// 검증: 빌드 후 🕵 지문 로그가 override 없이도 webdriver=false / webdriverOwn=false / languages=4 면
+// override 는 중복이었고 제거가 안전(게터 tell 까지 제거). languages 가 1개로 회귀하면 --accept-lang 이
+// native 를 못 채운 것이니 되돌린다.
+const STEALTH_INIT_JS: &str = "(()=>{})();";
 
 /// 챌린지(추가 인증) 종류.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
