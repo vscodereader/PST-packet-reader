@@ -107,6 +107,15 @@ pub const ADB_PROBE_TIMEOUT_SECS: u64 = 10;
 /// 행이면 `cmd.output()`이 무한 블록돼 로그인 큐가 멈추므로, 명령 1건마다 이 시간으로
 /// 끊어 실패로 처리하고 다음 계정으로 진행한다. 정상 명령은 거의 즉시 끝난다.
 pub const ADB_STEP_TIMEOUT_SECS: u64 = 15;
+/// [실험 A] 비행기모드 ON 후 라디오가 끊긴 걸 확인한 뒤, OFF 하기 전에 이만큼 더 대기(ms).
+/// 라디오를 <1초만 내리면 통신사(KT)가 PDP 컨텍스트를 유지해 같은 IP/앞대역을 재할당하는
+/// 경우가 있어(패킷 실측 2026-07-07: 캡차 판은 앞대역 동일), 대역이 실제로 바뀌도록 충분히 내린다.
+pub const ADB_AIRPLANE_DWELL_MS: u64 = 5_000;
+/// [실험 A] '같은 대역(앞대역)' 판정 시 비교할 IP 앞 옥텟 수(/16 = 2). 성공 로그인들은
+/// 110.70.x ↔ 175.223.x 처럼 앞 2옥텟이 달랐다.
+pub const ADB_IP_PREFIX_OCTETS: usize = 2;
+/// [실험 A] 앞대역이 before 와 같으면(같은 NAT 풀 → velocity 누적) 토글을 최대 이 횟수까지 재시도.
+pub const ADB_IP_ROTATE_MAX_ATTEMPTS: u32 = 3;
 
 // 쿠키 저장 확인
 pub const COOKIE_WRITE_POLL_INTERVAL_MS: u64 = 200;

@@ -83,40 +83,66 @@ pub async fn toggle_airplane_mode() -> Result<IpRotation, OrchestratorError> {
     let before = fetch_external_ip().await;
     // 원격제어 에이전트에 IP 회전 시작 신호(§4-2). 등록 안 됐으면 no-op(추가만, 기존 로직 무영향).
     crate::agent::report_state_change("rotating", None);
-    tracing::info!("[ADB] ✈ 비행기모드 ON");
-    run_adb_timed(
-        airplane_mode_args(true)
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    )
-    .await?;
-    // ON 동안 라디오가 실제로 끊긴 걸(폰 인터넷 차단) 확인할 때까지 기다린다(고정 대기 없음).
-    wait_until_phone_offline().await;
-    tracing::info!("[ADB] ✈ 비행기모드 OFF — 인터넷 복구 대기");
-    run_adb_timed(
-        airplane_mode_args(false)
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    )
-    .await?;
-    // OFF 후: 인터넷 복구를 기다렸다가, 외부 IP가 실제로 바뀔 때까지 폴링해 바뀌면 즉시 반환한다.
-    wait_for_internet_connection().await?;
-    let after = wait_for_ip_change(&before).await;
+    let mut after = before.clone();
+    // [실험 A] 앞대역까지 실제로 바뀔 때까지 토글을 재시도한다. 라디오를 dwell 만큼 내려 통신사가
+    // PDP 컨텍스트를 해제하게 하고, 결과 IP가 같은 앞대역(같은 NAT 풀)이면 다시 토글한다.
+    for attempt in 1..=config::ADB_IP_ROTATE_MAX_ATTEMPTS {
+        tracing::info!(
+            "[ADB] ✈ 비행기모드 ON (시도 {attempt}/{})",
+            config::ADB_IP_ROTATE_MAX_ATTEMPTS
+        );
+        run_adb_timed(
+            airplane_mode_args(true)
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        )
+        .await?;
+        // ON 동안 라디오가 실제로 끊긴 걸(폰 인터넷 차단) 확인할 때까지 기다린다(고정 대기 없음).
+        wait_until_phone_offline().await;
+        // 라디오가 끊긴 채로 dwell — 통신사가 PDP 컨텍스트를 해제해 새 IP/대역을 주도록 충분히 내린다.
+        tracing::info!(
+            "[ADB]   └ 라디오 끊김 유지 {}ms(대역 해제 대기)",
+            config::ADB_AIRPLANE_DWELL_MS
+        );
+        sleep(Duration::from_millis(config::ADB_AIRPLANE_DWELL_MS)).await;
+        tracing::info!("[ADB] ✈ 비행기모드 OFF — 인터넷 복구 대기");
+        run_adb_timed(
+            airplane_mode_args(false)
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        )
+        .await?;
+        // OFF 후: 인터넷 복구를 기다렸다가, 외부 IP가 실제로 바뀔 때까지 폴링해 바뀌면 반환한다.
+        wait_for_internet_connection().await?;
+        after = wait_for_ip_change(&before).await;
+        // 앞대역까지 달라졌으면 성공. 같은 대역이면 재토글(같은 NAT 풀에 velocity 누적 방지).
+        if is_valid_changed_ip(&before, &after)
+            && !same_ip_prefix(&before, &after, config::ADB_IP_PREFIX_OCTETS)
+        {
+            break;
+        }
+        if attempt < config::ADB_IP_ROTATE_MAX_ATTEMPTS {
+            tracing::info!("[ADB]   ⚠ 앞대역 동일/미변경({before} → {after}) — 재토글");
+        }
+    }
 
     tracing::info!("[ADB] ─────────── IP 회전 결과 ───────────");
     tracing::info!("[ADB]   기존 IP: {before}");
     tracing::info!("[ADB]   바뀐 IP: {after}");
-    let changed = !before.starts_with('(') && !after.starts_with('(') && before != after;
+    // [실험 A] '변경됨'을 앞대역(/16)까지 달라진 경우로만 인정한다(뒷자리만 바뀐 같은 NAT 풀 제외).
+    let changed = is_valid_changed_ip(&before, &after)
+        && !same_ip_prefix(&before, &after, config::ADB_IP_PREFIX_OCTETS);
     if before.starts_with('(') || after.starts_with('(') {
         tracing::info!("[ADB]   (IP 확인 실패 — PC 인터넷/테더링 확인)");
     } else if !changed {
         tracing::info!(
-            "[ADB]   ⚠ IP가 그대로 — USB 테더링이 PC 기본 경로인지 / 통신사 CGNAT인지 확인 필요"
+            "[ADB]   ⚠ 앞대역이 그대로 — 통신사 CGNAT/테더링 경로 확인 필요(재시도 {}회 소진)",
+            config::ADB_IP_ROTATE_MAX_ATTEMPTS
         );
     } else {
-        tracing::info!("[ADB]   ✓ IP 변경됨!");
+        tracing::info!("[ADB]   ✓ IP(앞대역) 변경됨!");
     }
     tracing::info!("[ADB] ────────────────────────────────────");
     // 회전 직후 폰의 실제 네트워크 세대·통신사·DNS를 원문 그대로 남긴다(LTE→3G 변경 시 비교용).
@@ -220,6 +246,18 @@ fn is_valid_changed_ip(before: &str, candidate: &str) -> bool {
     !candidate.is_empty() && !candidate.starts_with('(') && candidate != before
 }
 
+/// [실험 A] `a`와 `b`의 앞 `octets`개 옥텟이 같은지(= 같은 대역/NAT 풀). 하나라도 비정상('('로
+/// 시작)·빈 값이거나 옥텟 수가 모자라면 "같은 대역 아님"(false)으로 본다 — 재토글을 부당하게
+/// 막지 않기 위해 보수적으로 판정한다(순수 함수).
+fn same_ip_prefix(a: &str, b: &str, octets: usize) -> bool {
+    if a.is_empty() || b.is_empty() || a.starts_with('(') || b.starts_with('(') {
+        return false;
+    }
+    let pa: Vec<&str> = a.split('.').take(octets).collect();
+    let pb: Vec<&str> = b.split('.').take(octets).collect();
+    pa.len() == octets && pb.len() == octets && pa == pb
+}
+
 /// 표준 adb CLI를 실행하고 stdout을 반환한다. 실행 실패/비-0 종료는 에러로 변환한다.
 fn run_adb(args: &[&str]) -> Result<String, OrchestratorError> {
     let mut cmd = Command::new(ADB_BIN);
@@ -316,6 +354,7 @@ fn internet_probe_command() -> String {
 mod tests {
     use super::{
         airplane_mode_args, has_authorized_device, internet_probe_command, is_valid_changed_ip,
+        same_ip_prefix,
     };
 
     #[test]
@@ -327,6 +366,21 @@ mod tests {
         assert!(!is_valid_changed_ip("1.1.1.1", "")); // 빈 값 → 아직
         // before가 비정상이었어도, 유효 IP를 새로 받으면 바뀐 것으로 본다.
         assert!(is_valid_changed_ip("(확인 실패)", "3.3.3.3"));
+    }
+
+    #[test]
+    fn same_ip_prefix_detects_same_band() {
+        // 앞 2옥텟(/16)이 같으면 같은 대역 → 재토글 대상.
+        assert!(same_ip_prefix("110.70.27.92", "110.70.30.1", 2));
+        // 앞대역이 다르면(성공 로그인 사례 110.70 ↔ 175.223) 같은 대역 아님.
+        assert!(!same_ip_prefix("110.70.27.92", "175.223.11.180", 2));
+        // 두 번째 옥텟만 달라도 다른 대역.
+        assert!(!same_ip_prefix("110.70.27.92", "110.71.0.1", 2));
+        // 비정상/빈 값은 "같은 대역 아님"으로 봐 재시도를 막지 않는다.
+        assert!(!same_ip_prefix("(확인 실패)", "110.70.1.1", 2));
+        assert!(!same_ip_prefix("110.70.1.1", "", 2));
+        // /8(첫 옥텟)만 볼 때는 첫 옥텟만 비교.
+        assert!(same_ip_prefix("110.70.1.1", "110.99.2.2", 1));
     }
 
     #[test]
