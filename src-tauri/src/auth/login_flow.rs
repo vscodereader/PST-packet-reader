@@ -38,6 +38,13 @@ const CLICK_SETTLE: Duration = Duration::from_millis(800);
 // 전체 타임아웃(12초)까지 기다리지 않고 빠르게 실패시킨다. 정상 로그인은 보통 클릭 후 수 초
 // 내 성공이라 6초면 안전하다.
 const PENDING_STALL: Duration = Duration::from_secs(6);
+// 실험(PSTMACRO_BLOCK_WASM) 전용: wasm 엔진 호스트(wtm)를 DNS로 막으면 ncaptcha SDK 가 엔진 로드를
+// 재시도하느라 window.wtmncapt(토큰 생성기) 생성이 늦다. 제출이 빠르면 default_ecc.js 가
+// `error1|ReferenceError|wtmncapt is not defined` 를 실어 티켓 없이 폴백 캡차로 떨어진다(실측
+// 2026-07-08). 제출 직전 wtmncapt 준비를 이 상한까지 기다려, 재시도.pcapng 처럼 진짜 SDK 토큰이
+// 나가게 한다. 스위치 OFF 면 대기 자체를 건너뛰어 기존 타이밍을 그대로 둔다.
+const WTMNCAPT_WAIT: Duration = Duration::from_secs(10);
+const WTMNCAPT_POLL: Duration = Duration::from_millis(200);
 
 // 봇탐지(ncaptcha/wtm) 완화용 스텔스 스크립트. 페이지 스크립트보다 먼저 모든 새 문서에서
 // 실행되어 자동화 흔적을 일반 크롬과 동일하게 맞춘다.
@@ -368,6 +375,9 @@ fn run_inner(
     // 비밀번호 입력 후 사람처럼 잠깐 멈췄다가 로그인 버튼을 누른다(2초→0.8초, #14).
     sleep(FIELD_PAUSE);
     throttle_pause();
+    // 실험(BLOCK_WASM): wasm 차단 시 SDK 토큰 생성기(wtmncapt) 준비가 늦어 제출이 빠르면 error
+    // 토큰이 나가 폴백 캡차로 떨어지는 레이스를 없앤다. 스위치 OFF 면 즉시 반환(기존 타이밍 무변경).
+    wait_wtmncapt_ready_for_block_wasm(client);
     // 로그인 버튼을 사람처럼 좌표 마우스 클릭(JS .click() 대신 진짜 mouse 이벤트). 좌표를 못
     // 구하면 .click()으로 폴백한다.
     click_login_button(client)?;
@@ -1018,6 +1028,51 @@ fn enable_keep_signed_in(client: &mut CdpClient) {
         Err(error) => {
             tracing::warn!(error = %error, "[LOGIN][상태유지] 설정 실패 — 건너뜀(로그인은 계속)")
         }
+    }
+}
+
+/// 실험(`PSTMACRO_BLOCK_WASM`) 전용 대기: wasm 엔진 호스트(wtm)를 DNS로 막으면 ncaptcha SDK 가
+/// 엔진 로드를 재시도하느라 `window.wtmncapt`(토큰 생성기) 생성이 늦다. 매크로가 그 전에 제출하면
+/// default_ecc.js 가 `error1|ReferenceError|wtmncapt is not defined` 를 실어 **티켓 없이** 폴백
+/// 캡차로 떨어진다(실측 2026-07-08 `wasm 완전통제`: /v2/tokens 0 · wtoken=error1…). 제출 직전
+/// wtmncapt 준비를 최대 [`WTMNCAPT_WAIT`]까지 폴링해, `재시도.pcapng` 처럼 진짜 SDK 토큰이 나가게
+/// 한다 — 그래야 캡차가 떠도 그게 우리가 쫓는 **누적 캡차**지 토큰-없음 폴백이 아니게 된다.
+///
+/// 스위치가 꺼져 있으면 **즉시 반환**해 기존 로그인 타이밍을 바이트 단위로 그대로 둔다(기본 동작
+/// 무변경). best-effort — 준비를 못 해도 경고만 남기고 제출은 계속한다(실험자가 로그로 원인 파악).
+fn wait_wtmncapt_ready_for_block_wasm(client: &mut CdpClient) {
+    if std::env::var("PSTMACRO_BLOCK_WASM").is_err() {
+        return; // 실험 스위치 OFF — 기존 타이밍 무변경.
+    }
+    // typeof 가드로 ReferenceError 없이, 생성 완료(truthy)까지 확인한다.
+    const READY: &str = "(()=>{try{return typeof window.wtmncapt!=='undefined'&&!!window.wtmncapt;}\
+         catch(e){return false;}})()";
+    let start = Instant::now();
+    let deadline = start + WTMNCAPT_WAIT;
+    loop {
+        match client.evaluate_bool(READY) {
+            Ok(true) => {
+                tracing::info!(
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "[LOGIN][실험] wtmncapt 준비 확인 — 제출 진행(진짜 SDK 토큰 생성 경로)"
+                );
+                return;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(%error, "[LOGIN][실험] wtmncapt 준비 평가 실패 — 그대로 제출 진행");
+                return;
+            }
+        }
+        if Instant::now() >= deadline {
+            tracing::warn!(
+                waited_ms = start.elapsed().as_millis() as u64,
+                "[LOGIN][실험] wtmncapt 준비 대기 초과 — wasm 차단으로 SDK 토큰 생성기가 안 떴을 수 있음. \
+                 error 토큰→폴백 캡차 가능성이 있으니 결과 해석 주의(제출은 계속)."
+            );
+            return;
+        }
+        sleep(WTMNCAPT_POLL);
     }
 }
 
