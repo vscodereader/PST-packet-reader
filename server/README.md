@@ -25,6 +25,25 @@ cargo run
 
 기본 바인드 `0.0.0.0:8080`. Admin 웹은 `VITE_ADMIN_API`로 이 주소를 가리킨다(기본 `http://localhost:8080`).
 
+### 빠른 DB 연결(로컬 PostgreSQL, 턴키)
+
+`DATABASE_URL`이 설정되면 서버가 **연결 즉시 스키마(테이블 7개)를 자동 생성**하고 SuperAdmin을
+시드한다. 로컬은 옆의 `docker-compose.yml`로 PG를 한 번에 띄운다:
+
+```bash
+cd server
+cp .env.example .env                 # 값(시크릿) 채우기
+docker compose up -d                 # PostgreSQL 기동(pstmacro/pstmacro/pstmacro)
+# 운영 모드는 JWT/ENC 시크릿이 기본값이면 기동 거부 → 함께 주입:
+export DATABASE_URL=postgres://pstmacro:pstmacro@localhost:5432/pstmacro
+export PSTMACRO_JWT_SECRET=$(openssl rand -hex 32)
+export PSTMACRO_ENC_KEY=$(openssl rand -hex 32)
+cargo run
+```
+
+로그에 `PostgreSQL 연결됨`이 뜨면 연결 성공(미설정이면 `DATABASE_URL 미설정 → in-memory …`
+경고와 함께 개발 폴백). 운영은 이 compose가 아니라 **실제 PG의 접속 문자열**을 `DATABASE_URL`로 준다.
+
 ## 환경변수
 
 | 변수                    | 용도                                  | 비고                        |
