@@ -52,7 +52,7 @@ fn attempt(
     headless: bool,
     manual_captcha: bool,
 ) -> Result<(LoginOutcome, Option<String>), OrchestratorError> {
-    let handle = chrome::launch(headless)?;
+    let handle = chrome::launch_for_login(headless)?;
     // CDP 연결/Page 활성화 실패는 AutomationError(백트레이스 보유)다. 인프라 Err로 뭉개
     // 백트레이스를 잃지 않도록, 메시지를 사용자 사유로·trace를 "자세히 보기"로 보존해
     // 로그인 실패(Error)로 흘린다(#199 게시 trace와 동일 철학).
@@ -71,6 +71,17 @@ fn attempt(
             LoginOutcome::Error(error.message().to_owned()),
             Some(error.trace()),
         ));
+    }
+
+    // 봇탐지 fpHash 묶음 완화 실험(2026-07-08): 이 판의 launch UA 와 일관되게 페이지 UA·Client
+    // Hints 를 오버라이드한다(navigate 전 필수 — 초기 요청부터 반영되게). --user-agent 플래그가
+    // 브라우저 전역 UA 문자열을 이미 통일했고, 여기서 페이지의 sec-ch-ua/userAgentData 를 같은
+    // 버전으로 맞춰 불일치를 없앤다. 실패는 비치명적(로그인은 계속 진행).
+    if let Some(ua) = &handle.ua {
+        let _ = client.call(
+            "Emulation.setUserAgentOverride",
+            super::ua::set_user_agent_override_params(ua),
+        );
     }
 
     // headed(=!headless)면 사용자가 캡차/2차 인증을 직접 풀 동안 기다린다. manual_captcha는
@@ -100,13 +111,21 @@ pub(crate) fn manual_add(
     paths: &RuntimePaths,
 ) -> Result<Option<ManualAddResult>, OrchestratorError> {
     // 사람이 창을 보고 입력해야 하므로 headed 고정. IP 회전(ADB)은 하지 않는다.
-    let handle = chrome::launch(false)?;
+    let handle = chrome::launch_for_login(false)?;
     let mut client = CdpClient::connect_to_existing_chrome("127.0.0.1", handle.port)
         .map_err(|error| OrchestratorError::CommandFailed(error.message().to_owned()))?;
     // 로그인과 동일하게 Runtime.enable 없이 Page 도메인만 켠다(CDP 탐지 누출 방지).
     client
         .enable_page_only()
         .map_err(|error| OrchestratorError::CommandFailed(error.message().to_owned()))?;
+
+    // 자동로그인과 동일하게, 페이지 UA·Client Hints 를 이 판의 launch UA 와 일관되게 맞춘다.
+    if let Some(ua) = &handle.ua {
+        let _ = client.call(
+            "Emulation.setUserAgentOverride",
+            super::ua::set_user_agent_override_params(ua),
+        );
+    }
 
     let captured = login_flow::manual_add_wait(&mut client)
         .map_err(|error| OrchestratorError::CommandFailed(error.message().to_owned()))?;
