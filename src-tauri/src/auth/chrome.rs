@@ -193,6 +193,25 @@ fn installed_chrome_full_version(chrome_path: &str) -> Option<String> {
     }
 }
 
+/// 실험용(옵트인, 기본 OFF): `PSTMACRO_BLOCK_WASM` 이 설정되면 로그인 Chrome 이 네이버 봇탐지
+/// WASM 엔진 호스트(`wtm.pstatic.net`)를 **DNS 단계에서 못 찾게** 막는다. 그러면 wtm 의
+/// 로더(`3e66f2f…js`)와 엔진(`353dfc…wasm`)이 아예 로드되지 않아, ncaptcha SDK(`ncpt.naver.com`)
+/// **단독 경로**로 강제된다(실측 2026-07-08: wtm SNI/DNS 0 이어도 SDK 혼자 cipherText·wtoken 을
+/// 만들어 로그인 통과). "기기지문(fpHash)이 캡차 누적의 앵커인지"를 20판 버스트로 규명하기 위한
+/// 실험 스위치다.
+///
+/// ⚠️ CDP 표면을 늘리지 않으려고 `Network.setBlockedURLs`(→ `Network.enable` 필요) 대신 Chrome
+/// `--host-resolver-rules` 를 쓴다 — `Network.enable` 은 봇탐지 표면을 늘려 캡차율을 올릴 수 있어
+/// (「enable_page_only」주석) 실험 결과를 오염시킨다. `~NOTFOUND` 는 해당 호스트 해석을 실패
+/// (`ERR_NAME_NOT_RESOLVED`)시켜, 사용자가 수동으로 재현한 "wtm SNI/DNS 0" 조건과 동일하게 만든다.
+/// `ncpt.naver.com`(SDK)·`ssl.pstatic.net`(폰트/이미지) 등 다른 호스트는 건드리지 않는다.
+const WASM_HOST_BLOCK_ARG: &str = "--host-resolver-rules=MAP wtm.pstatic.net ~NOTFOUND";
+
+/// 실험 스위치(위 상수 참고)의 옵트인 여부. 기본 OFF — 값과 무관하게 존재만 하면 켜진 것으로 본다.
+fn block_wasm_enabled() -> bool {
+    std::env::var("PSTMACRO_BLOCK_WASM").is_ok()
+}
+
 /// 시스템 Chrome을 띄운다(게시·밴드 공용 — UA 오버라이드 없이 **네이티브 UA 유지**).
 pub(crate) fn launch(headless: bool) -> Result<ChromeHandle, OrchestratorError> {
     launch_inner(headless, None)
@@ -267,6 +286,17 @@ fn launch_inner(headless: bool, ua: Option<UaProfile>) -> Result<ChromeHandle, O
     if let Some(arg) = &ua_arg {
         let url_idx = args.len() - 1;
         args.insert(url_idx, arg.as_str());
+    }
+    // 실험(옵트인): 로그인 경로(ua=Some)에서 PSTMACRO_BLOCK_WASM 이 켜지면 봇탐지 WASM 엔진
+    // 호스트(wtm.pstatic.net)를 DNS 로 막아 SDK 단독 경로를 강제한다(WASM_HOST_BLOCK_ARG 주석 참고).
+    // 게시/밴드(ua=None)엔 적용하지 않아 카페/밴드 흐름은 무영향.
+    if ua.is_some() && block_wasm_enabled() {
+        let url_idx = args.len() - 1;
+        args.insert(url_idx, WASM_HOST_BLOCK_ARG);
+        tracing::warn!(
+            "[CHROME][실험] PSTMACRO_BLOCK_WASM=on — wtm.pstatic.net(봇탐지 WASM 엔진) DNS 차단. \
+             ncaptcha SDK 단독 경로 강제(지문 앵커 규명 20판 버스트용). ⚠️ 실험 전용 스위치."
+        );
     }
     if headless {
         args.insert(0, "--headless=new");
@@ -374,5 +404,18 @@ chrome.exe --user-data-dir=C:\\Users\\me\\AppData\\Chrome\\Default";
     fn counts_zero_when_no_marker() {
         assert_eq!(count_profile_lines(""), 0);
         assert_eq!(count_profile_lines("chrome.exe\nnotepad.exe\n"), 0);
+    }
+
+    #[test]
+    fn wasm_block_arg_targets_only_engine_host() {
+        // 봇탐지 WASM 엔진 호스트(wtm)만 해석 실패시키고, SDK(ncpt)·정적자원(ssl.pstatic.net)은
+        // 건드리지 않아야 SDK 단독 경로 실험이 성립한다. 와일드카드로 pstatic 전체를 막으면 폰트/
+        // 이미지까지 죽어 로그인 UI가 깨지므로, 정확히 wtm.pstatic.net 만 대상이어야 한다.
+        assert!(WASM_HOST_BLOCK_ARG.contains("--host-resolver-rules="));
+        assert!(WASM_HOST_BLOCK_ARG.contains("wtm.pstatic.net"));
+        assert!(WASM_HOST_BLOCK_ARG.contains("~NOTFOUND"));
+        assert!(!WASM_HOST_BLOCK_ARG.contains("ncpt"));
+        assert!(!WASM_HOST_BLOCK_ARG.contains("ssl.pstatic.net"));
+        assert!(!WASM_HOST_BLOCK_ARG.contains('*'));
     }
 }
