@@ -9,6 +9,7 @@ mod login_flow;
 pub(crate) mod outcome;
 mod paths;
 mod types;
+mod ua;
 mod util;
 
 use tauri::{AppHandle, Runtime};
