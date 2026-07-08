@@ -54,6 +54,9 @@ pub struct PublishSpec {
     /// 카페 게시판/글 링크 파싱 결과(target=="naver"일 때). 하위가 계정×게시판으로 게시한다.
     #[serde(default)]
     pub cafe_boards: Vec<PublishCafeBoard>,
+    /// 블로그 댓글 링크 파싱 결과(target=="blog"일 때). 하위가 계정×블로그링크로 댓글을 단다.
+    #[serde(default)]
+    pub blog_links: Vec<PublishBlogLink>,
     pub assignments: Vec<PublishAssignment>,
 }
 
@@ -66,6 +69,22 @@ pub struct PublishCafeBoard {
     pub menu_id: u64,
     #[serde(default)]
     pub article_id: u64,
+    #[serde(default)]
+    pub link: String,
+}
+
+/// 블로그 댓글 대상(Admin이 링크를 파싱해 보냄). logNo가 있으면 특정 글, 없으면 최신 N개
+/// (count=글 수, categoryNo=글 목록 카테고리). blogId는 문자열 식별자(예: "press02").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishBlogLink {
+    pub blog_id: String,
+    #[serde(default)]
+    pub log_no: String,
+    #[serde(default)]
+    pub category_no: u32,
+    #[serde(default)]
+    pub count: u32,
     #[serde(default)]
     pub link: String,
 }
@@ -144,6 +163,19 @@ pub async fn dispatch_publish(
             })
         })
         .collect();
+    let blog_links_json: Vec<serde_json::Value> = spec
+        .blog_links
+        .iter()
+        .map(|b| {
+            serde_json::json!({
+                "blogId": b.blog_id,
+                "logNo": b.log_no,
+                "categoryNo": b.category_no,
+                "count": b.count,
+                "link": b.link,
+            })
+        })
+        .collect();
     let payload = serde_json::json!({
         "type": "publish_posts",
         "commandId": cid,
@@ -155,6 +187,7 @@ pub async fn dispatch_publish(
             "mode": mode,
             "target": target,
             "cafeBoards": cafe_boards_json,
+            "blogLinks": blog_links_json,
             "commentUrls": spec.comment_urls,
             "assignments": assignments_json,
         }

@@ -19,7 +19,11 @@ import { IconDeviceDesktop } from "@tabler/icons-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { parseCafeArticleUrl } from "@/features/posts/comment-jobs";
-import { parseCafeBoardLink } from "@/features/posts/publish-helpers";
+import {
+  parseBlogLink,
+  parseBlogPostLink,
+  parseCafeBoardLink,
+} from "@/features/posts/publish-helpers";
 import { nowParts, scheduleMoment, toEpochMs } from "@/shared/schedule";
 import { DateTimePicker } from "@/shared/ui/date-time-picker";
 import { Icon } from "@/shared/ui/icons";
@@ -61,7 +65,7 @@ type Target = "forum" | "cafe" | "blog" | "band";
 const TARGETS: { key: Target; label: string; soon: boolean }[] = [
   { key: "forum", label: "종목토론방", soon: false },
   { key: "cafe", label: "네이버카페", soon: false },
-  { key: "blog", label: "네이버블로그", soon: true },
+  { key: "blog", label: "네이버블로그", soon: false },
   { key: "band", label: "네이버밴드", soon: true },
 ];
 
@@ -288,6 +292,17 @@ export function PublishCommand({
         return rows.filter((r) => r.platform === "naver").map((r) => r.loginId);
       }
       return mockCafeAccounts(deviceId); // 오프라인/미보고 → 더미
+    }
+    if (target === "blog") {
+      // 블로그는 댓글 전용 — 유효 쿠키(로그인 성공=active)가 필요하다(종토와 동일한 Active
+      // 필터, 카페의 로그인 무관 전부와 다름). 블로그 플랫폼 계정 중 active만 쓴다.
+      const rows = invByDev[deviceId]?.accountRows;
+      if (rows && rows.length > 0) {
+        return rows
+          .filter((r) => r.platform === "blog" && r.status === "active")
+          .map((r) => r.loginId);
+      }
+      return mockAccounts(deviceId); // 오프라인/미보고 → 더미
     }
     return invByDev[deviceId]?.accounts ?? mockAccounts(deviceId);
   };
@@ -552,12 +567,25 @@ function DeviceBlock({
           onSchedule={onSchedule}
         />
       )}
-      {target != null && target !== "forum" && target !== "cafe" && (
-        <Text size="sm" c="dimmed">
-          {TARGETS.find((t) => t.key === target)?.label} 상세 구성은 추후
-          구현됩니다.
-        </Text>
+      {/* 블로그: 댓글 전용(특정 게시글 / 최신글 / 인기글). 데스크톱 blog 카드 미러. */}
+      {target === "blog" && (
+        <BlogConfig
+          device={device}
+          postId={postId}
+          postTitle={postTitle}
+          accounts={accounts}
+          onSchedule={onSchedule}
+        />
       )}
+      {target != null &&
+        target !== "forum" &&
+        target !== "cafe" &&
+        target !== "blog" && (
+          <Text size="sm" c="dimmed">
+            {TARGETS.find((t) => t.key === target)?.label} 상세 구성은 추후
+            구현됩니다.
+          </Text>
+        )}
     </Paper>
   );
 }
@@ -1499,6 +1527,395 @@ function CafeConfig({
           <Paper withBorder radius="md" p="sm" bg="var(--mantine-color-gray-0)">
             <Text fz={12} fw={700} mb={6}>
               카페 예약 — 게시 시각 선택
+            </Text>
+            <Group gap="sm" wrap="wrap">
+              <DateTimePicker
+                date={sched.date}
+                time={sched.time}
+                onChange={setSched}
+              />
+              <Button size="sm" color="grape" onClick={confirmSchedule}>
+                예약 확정
+              </Button>
+              <Button
+                size="sm"
+                variant="subtle"
+                color="gray"
+                onClick={() => setArmed(false)}
+              >
+                취소
+              </Button>
+            </Group>
+          </Paper>
+        )}
+      </Stack>
+    </Box>
+  );
+}
+
+// ── 네이버 블로그 댓글 대상(글/블로그 링크 파싱 결과) ──
+// 데스크톱 publish-modal 블로그 카드와 동일: 블로그는 댓글 전용(#271/#279). 두 모드가 있다:
+//   - 특정 게시글: 글 링크 → parseBlogPostLink → {blogId, logNo}. 그 글 1개에 댓글.
+//   - 최신글 / 인기글: 블로그 링크 → parseBlogLink → {blogId, categoryNo?} + 개수 N. 최신 N개에 댓글.
+// ⚠️ 최신글/인기글 버튼은 둘 다 **동일한 최신 N개 대상**을 만든다(백엔드에 인기 정렬이 없음).
+type BlogMode = "specific" | "latest" | "popular";
+const BLOG_MODES: { key: BlogMode; label: string }[] = [
+  { key: "specific", label: "특정 게시글" },
+  { key: "latest", label: "최신글" },
+  { key: "popular", label: "인기글" },
+];
+
+/** 블로그 댓글 대상 1건 — 특정 글(logNo) 또는 최신 N개(count[, categoryNo]). */
+interface BlogItem {
+  blogId: string;
+  logNo?: string; // 특정 글(있으면). 없으면 최신 N개.
+  categoryNo?: number; // 최신 N개 글 목록 카테고리(있으면).
+  count?: number; // 최신 N개(logNo 없을 때).
+  link: string;
+}
+function blogItemKey(it: BlogItem): string {
+  return it.logNo !== undefined
+    ? `${it.blogId}/post/${it.logNo}`
+    : `${it.blogId}/latest/${it.categoryNo ?? ""}`;
+}
+function blogItemLabel(it: BlogItem): string {
+  if (it.logNo !== undefined) return `${it.blogId} · 글 ${it.logNo}`;
+  const cat = it.categoryNo !== undefined ? ` · 카테고리 ${it.categoryNo}` : "";
+  return `${it.blogId} · 최신 ${it.count ?? 1}개${cat}`;
+}
+
+// 네이버 블로그 상세 구성(댓글 전용). 특정 게시글=글 링크에 댓글, 최신글/인기글=블로그 링크의
+// 최신 N개에 댓글. 블로그는 유효 쿠키가 필요해 로그인 성공(active) 블로그 계정만 쓴다(상위
+// accountsFor가 이미 걸러 넘김). 댓글 본문은 글(LibraryPost)에 저장된 댓글을 엔진이 읽어 단다.
+function BlogConfig({
+  device,
+  postId,
+  postTitle,
+  accounts,
+  onSchedule,
+}: {
+  device: PubDevice;
+  postId: string | null;
+  postTitle: string | null;
+  accounts: string[];
+  onSchedule: (item: ScheduledItem) => void;
+}) {
+  const [blogMode, setBlogMode] = useState<BlogMode>("specific");
+  const [link, setLink] = useState("");
+  const [count, setCount] = useState<number | "">(1);
+  const [items, setItems] = useState<BlogItem[]>([]);
+  const [accts, setAccts] = useState<string[]>([]);
+  const [armed, setArmed] = useState<boolean>(false);
+  const [sched, setSched] = useState(() => nowParts());
+
+  const isList = blogMode !== "specific"; // 최신글/인기글 = 최신 N개(동일 동작).
+  const valid = postTitle != null && items.length > 0 && accts.length > 0;
+  const detail = `${isList ? "블로그" : "특정 글"} ${items.length}개 · 계정 ${accts.length}`;
+
+  // 링크 추가: 특정 게시글=글 링크(parseBlogPostLink), 최신글/인기글=블로그 링크(parseBlogLink).
+  const addLink = () => {
+    const raw = link.trim();
+    if (!raw) return;
+    let it: BlogItem | null = null;
+    if (blogMode === "specific") {
+      const p = parseBlogPostLink(raw);
+      if (p) it = { blogId: p.blogId, logNo: p.logNo, link: raw };
+    } else {
+      const p = parseBlogLink(raw);
+      if (p) {
+        const n = typeof count === "number" && count > 0 ? Math.floor(count) : 1;
+        it =
+          p.categoryNo !== undefined
+            ? { blogId: p.blogId, categoryNo: p.categoryNo, count: n, link: raw }
+            : { blogId: p.blogId, count: n, link: raw };
+      }
+    }
+    if (!it) {
+      notifications.show({
+        title: "링크 인식 실패",
+        message:
+          blogMode === "specific"
+            ? "블로그 글 링크를 확인하세요."
+            : "블로그 링크를 확인하세요.",
+        color: "red",
+      });
+      return;
+    }
+    const added = it;
+    const key = blogItemKey(added);
+    setItems((prev) =>
+      prev.some((x) => blogItemKey(x) === key) ? prev : [...prev, added],
+    );
+    setLink("");
+  };
+  const onRemove = (key: string) =>
+    setItems((prev) => prev.filter((x) => blogItemKey(x) !== key));
+
+  // 와이어 계약: 특정 글={blogId,logNo,link}, 최신 N개={blogId,categoryNo?,count,link}.
+  const blogLinksPayload = () =>
+    items.map((it) =>
+      it.logNo !== undefined
+        ? { blogId: it.blogId, logNo: it.logNo, link: it.link }
+        : it.categoryNo !== undefined
+          ? {
+              blogId: it.blogId,
+              categoryNo: it.categoryNo,
+              count: it.count ?? 1,
+              link: it.link,
+            }
+          : { blogId: it.blogId, count: it.count ?? 1, link: it.link },
+    );
+  const assignments = () => accts.map((loginId) => ({ loginId, stocks: [] }));
+
+  const runNow = () => {
+    void (async () => {
+      try {
+        await api.publish.send({
+          deviceId: device.id,
+          postId: postId ?? "",
+          postTitle: postTitle ?? "",
+          targetLabel: "네이버 블로그",
+          split: false,
+          mode: "comment",
+          target: "blog",
+          blogLinks: blogLinksPayload(),
+          assignments: assignments(),
+        });
+        notifications.show({
+          title: `${device.name} · 블로그 댓글 명령 전송`,
+          message: `"${shortTitle(postTitle ?? "")}" · ${detail}`,
+          color: "blue",
+        });
+      } catch (e) {
+        if (isOffline(e)) {
+          notifications.show({
+            title: `${device.name} · 블로그 댓글(미리보기)`,
+            message: `${detail} · 서버 오프라인(전송 안 됨)`,
+            color: "gray",
+          });
+        } else {
+          notifications.show({
+            title: "블로그 댓글 명령 실패",
+            message: e instanceof Error ? e.message : String(e),
+            color: "red",
+          });
+        }
+      }
+    })();
+  };
+
+  const confirmSchedule = () => {
+    const at = toEpochMs(sched.date, sched.time);
+    const when = scheduleMoment(sched.date, sched.time).when;
+    setArmed(false);
+    void (async () => {
+      try {
+        await api.scheduled.create({
+          deviceId: device.id,
+          postId: postId ?? "",
+          postTitle: postTitle ?? "",
+          targetLabel: "네이버 블로그",
+          split: false,
+          mode: "comment",
+          target: "blog",
+          blogLinks: blogLinksPayload(),
+          assignments: assignments(),
+          at,
+          detail,
+        });
+        notifications.show({
+          title: `${device.name} 블로그 예약`,
+          message: `${when} · ${detail}`,
+          color: "grape",
+        });
+      } catch (e) {
+        if (isOffline(e)) {
+          onSchedule({
+            id: `sch-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+            deviceName: device.name,
+            postTitle: postTitle ?? "-",
+            targetLabel: "네이버 블로그",
+            detail,
+            at,
+          });
+          notifications.show({
+            title: `${device.name} 블로그 예약(미리보기)`,
+            message: `${when} · ${detail} · 서버 오프라인(로컬에만 표시)`,
+            color: "gray",
+          });
+        } else {
+          notifications.show({
+            title: "블로그 예약 실패",
+            message: e instanceof Error ? e.message : String(e),
+            color: "red",
+          });
+        }
+      }
+    })();
+  };
+
+  return (
+    <Box>
+      {/* 댓글 대상 모드 — 특정 게시글 / 최신글 / 인기글(최신글·인기글은 동일 동작). */}
+      <Text size="xs" c="dimmed" mb={4}>
+        댓글 대상
+      </Text>
+      <Group gap="xs" mb="sm">
+        {BLOG_MODES.map((m) => (
+          <Button
+            key={m.key}
+            size="xs"
+            variant={blogMode === m.key ? "filled" : "default"}
+            color={blogMode === m.key ? "blue" : "gray"}
+            onClick={() => {
+              setBlogMode(m.key);
+              setLink("");
+            }}
+          >
+            {m.label}
+          </Button>
+        ))}
+      </Group>
+
+      {/* 링크 입력 + 추가. 특정 게시글=글 링크, 최신글/인기글=블로그 링크 + 개수 N. */}
+      <Text size="xs" c="dimmed" mb={4}>
+        {isList
+          ? "블로그 링크 (블로그의 최신 N개 글에 댓글을 답니다)"
+          : "글 링크 (넣은 글에 저장된 댓글을 답니다)"}
+      </Text>
+      <Group gap={8} align="flex-end" wrap="nowrap" mb="sm">
+        <TextInput
+          size="xs"
+          style={{ flex: 1 }}
+          placeholder={
+            isList
+              ? "https://blog.naver.com/press02"
+              : "https://blog.naver.com/press02/224311392458"
+          }
+          value={link}
+          onChange={(e) => setLink(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") addLink();
+          }}
+          styles={{ input: { fontFamily: "monospace" } }}
+          aria-label={isList ? "블로그 링크" : "블로그 글 링크"}
+        />
+        {isList && (
+          <NumberInput
+            size="xs"
+            label="개수"
+            w={90}
+            min={1}
+            max={50}
+            value={count}
+            onChange={(v) => setCount(typeof v === "number" ? v : "")}
+            aria-label="최신 글 개수"
+          />
+        )}
+        <Button
+          size="xs"
+          variant="light"
+          color="blue"
+          disabled={!link.trim()}
+          onClick={addLink}
+        >
+          추가
+        </Button>
+      </Group>
+
+      {items.length > 0 ? (
+        <Group gap={6} mb="sm">
+          {items.map((it) => {
+            const key = blogItemKey(it);
+            return (
+              <Badge
+                key={key}
+                color="blue"
+                variant="light"
+                radius="sm"
+                rightSection={
+                  <ActionIcon
+                    size={14}
+                    variant="transparent"
+                    color="blue"
+                    aria-label={`${blogItemLabel(it)} 제거`}
+                    onClick={() => onRemove(key)}
+                  >
+                    <Icon.x size={10} />
+                  </ActionIcon>
+                }
+              >
+                {blogItemLabel(it)}
+              </Badge>
+            );
+          })}
+        </Group>
+      ) : (
+        <Text fz={12} c="orange.7" mb="sm">
+          댓글을 달 {isList ? "블로그를" : "블로그 글을"} 추가하세요.
+        </Text>
+      )}
+
+      {/* 계정 선택 — 블로그는 유효 쿠키 필요(로그인 성공 계정만). */}
+      <Text size="xs" c="dimmed" mb={4}>
+        계정 (이 하위의 블로그 로그인 성공 계정만 · {accts.length}명 선택)
+      </Text>
+      <Group gap={6}>
+        {accounts.length === 0 ? (
+          <Text size="xs" c="dimmed">
+            이 하위에 로그인 성공한 블로그 계정이 없습니다(계정 분배에서
+            플랫폼=네이버 블로그로 분배·로그인하세요).
+          </Text>
+        ) : (
+          accounts.map((a) => {
+            const on = accts.includes(a);
+            return (
+              <Button
+                key={a}
+                size="xs"
+                variant={on ? "filled" : "default"}
+                color={on ? "blue" : "gray"}
+                onClick={() =>
+                  setAccts((prev) =>
+                    on ? prev.filter((x) => x !== a) : [...prev, a],
+                  )
+                }
+              >
+                {maskId(a)}
+              </Button>
+            );
+          })
+        )}
+      </Group>
+
+      {/* 지금/예약 게시(블로그 댓글은 나눠서 없음 — 계정마다 같은 대상에 단다). */}
+      <Stack gap={8} mt="md">
+        <Group grow gap="xs">
+          <Button
+            size="sm"
+            fw={700}
+            disabled={!valid}
+            leftSection={<Icon.bolt size={15} />}
+            onClick={runNow}
+          >
+            지금 게시
+          </Button>
+          <Button
+            size="sm"
+            fw={700}
+            variant={armed ? "filled" : "light"}
+            color="grape"
+            disabled={!valid}
+            leftSection={<Icon.calendar size={15} />}
+            onClick={() => setArmed(true)}
+          >
+            예약 게시
+          </Button>
+        </Group>
+        {armed && (
+          <Paper withBorder radius="md" p="sm" bg="var(--mantine-color-gray-0)">
+            <Text fz={12} fw={700} mb={6}>
+              블로그 예약 — 게시 시각 선택
             </Text>
             <Group gap="sm" wrap="wrap">
               <DateTimePicker

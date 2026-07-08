@@ -395,6 +395,13 @@ export const api = {
         link?: string;
       }[]; // 카페 게시판/글 링크 파싱 결과(target=="naver")
       commentUrls?: string[]; // 댓글 모드(종토=특정게시글) URL들
+      blogLinks?: {
+        blogId: string;
+        logNo?: string; // 특정 글(있으면). 없으면 최신 N개.
+        categoryNo?: number; // 최신 N개 글 목록 카테고리(있으면).
+        count?: number; // 최신 N개(logNo 없을 때).
+        link: string;
+      }[]; // 블로그 댓글 대상(target=="blog")
       assignments: { loginId: string; stocks: { code: string; name: string }[] }[];
     }): Promise<{ ok: boolean; commandId: string }> {
       return request("POST", "/admin/publish", req);
@@ -417,6 +424,13 @@ export const api = {
         link?: string;
       }[];
       commentUrls?: string[];
+      blogLinks?: {
+        blogId: string;
+        logNo?: string;
+        categoryNo?: number;
+        count?: number;
+        link: string;
+      }[]; // 블로그 댓글 대상(target=="blog")
       assignments: { loginId: string; stocks: { code: string; name: string }[] }[];
       at: number; // 발송 시각 epoch ms
       detail: string;

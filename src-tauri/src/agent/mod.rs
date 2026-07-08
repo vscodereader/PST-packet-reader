@@ -23,8 +23,8 @@ use crate::ipc::accounts::{Account, AccountStatus, PlatformId};
 use crate::ipc::log_batches::LogBatch;
 use crate::ipc::posts::{CommentTarget, ModeValue};
 use crate::ipc::queue::{
-    apply_priority_order, as_fresh_now_item, CommentTargetSpec, ForumTarget, LoginTarget,
-    NaverTarget, PublishPlan, QueueLocation, QueueNowItem, QueueState,
+    apply_priority_order, as_fresh_now_item, BlogTarget, CommentTargetSpec, ForumTarget,
+    LoginTarget, NaverTarget, PublishPlan, QueueLocation, QueueNowItem, QueueState,
 };
 use crate::ipc::queue_runner::{start_if_idle, NowQueueRunner};
 use crate::store::JsonStore;
@@ -143,6 +143,10 @@ struct PublishCmd {
     /// 글/댓글을 올린다(계정×게시판). board_type은 게시 시점 백엔드가 menu_id로 해석한다.
     #[serde(default)]
     cafe_boards: Vec<CafeBoardIn>,
+    /// 블로그 댓글 링크 파싱 결과(target=="blog"일 때). 각 계정이 이 블로그(들)에 댓글을 단다
+    /// (계정×블로그링크). logNo가 있으면 특정 글, 없으면 최신 N개(count/categoryNo) 대상이다.
+    #[serde(default)]
+    blog_links: Vec<BlogLinkIn>,
     assignments: Vec<PublishAssign>,
 }
 /// 카페 게시판/글 링크 파싱 결과(Admin이 parseCafeBoardLink/parseCafeArticleUrl로 파싱해 보냄).
@@ -155,6 +159,22 @@ struct CafeBoardIn {
     menu_id: u64,
     #[serde(default)]
     article_id: u64,
+    #[serde(default)]
+    link: String,
+}
+/// 블로그 댓글 링크 파싱 결과(Admin이 parseBlogPostLink/parseBlogLink로 파싱해 보냄). logNo가
+/// 비어있지 않으면 특정 글 1개 댓글(count/categoryNo 미사용), 비어있으면 최신 N개 댓글
+/// (count=글 수, categoryNo=글 목록 카테고리). blogId는 문자열 식별자(예: "press02").
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlogLinkIn {
+    blog_id: String,
+    #[serde(default)]
+    log_no: String,
+    #[serde(default)]
+    category_no: u32,
+    #[serde(default)]
+    count: u32,
     #[serde(default)]
     link: String,
 }
@@ -690,6 +710,19 @@ fn enqueue_publish<R: Runtime>(
             post.comment_count,
             now_ms(),
         )
+    } else if p.target == "blog" {
+        // 블로그는 댓글 전용 — 계정×블로그링크로 plan.blog(BlogTarget)를 조립한다(카페 미러).
+        build_blog_publish_items(
+            &p.assignments,
+            &p.blog_links,
+            &p.post_id,
+            &plan_title,
+            &effective_title,
+            &post.body,
+            mode,
+            &post.comments,
+            now_ms(),
+        )
     } else {
         build_publish_items(
             &p.assignments,
@@ -716,7 +749,7 @@ fn enqueue_publish<R: Runtime>(
         .map(|i| {
             i.plan
                 .as_ref()
-                .map(|p| p.forum.len() + p.naver.len())
+                .map(|p| p.forum.len() + p.naver.len() + p.blog.len())
                 .unwrap_or(0)
         })
         .sum();
@@ -979,6 +1012,94 @@ fn build_cafe_publish_items(
                 forum: vec![],
                 band: vec![],
                 blog: vec![],
+                clip: vec![],
+                login: None,
+            }),
+            items: vec![],
+        });
+    }
+    items
+}
+
+/// 블로그(네이버 블로그) 댓글 큐 아이템을 만든다(순수 — 테스트 대상). 블로그는 **댓글 전용**이라
+/// 카페와 같은 네이버 쿠키를 재사용한다(별도 로그인 없음). **계정 하나당 큐 1개**(카페·종토와 동일)
+/// 이며, 그 계정이 고른 블로그 링크(들)에 댓글을 단다(plan.blog=BlogTarget). 종목(assignment.stocks)은
+/// 블로그에서 쓰지 않는다. 각 블로그 링크: log_no가 비어있지 않으면 특정 글 1개 댓글(count=None),
+/// 비어있으면 최신 N개 댓글(count=Some(count.max(1)), category_no=Some). 댓글 본문은 plan.comments를
+/// 그대로 실어 러너(run_blog_targets)가 cafe/band와 동일하게 이어붙여 쓴다.
+#[allow(clippy::too_many_arguments)]
+fn build_blog_publish_items(
+    assignments: &[PublishAssign],
+    blog_links: &[BlogLinkIn],
+    post_id: &str,
+    plan_title: &str,
+    effective_title: &str,
+    body: &str,
+    mode: ModeValue,
+    comments: &[String],
+    now: u128,
+) -> Vec<QueueNowItem> {
+    if blog_links.is_empty() {
+        return Vec::new();
+    }
+    let mut items = Vec::new();
+    for (idx, a) in assignments.iter().enumerate() {
+        let mut blog: Vec<BlogTarget> = Vec::new();
+        let mut locs: Vec<QueueLocation> = Vec::new();
+        for b in blog_links.iter() {
+            let name = if b.blog_id.is_empty() {
+                b.link.clone()
+            } else {
+                b.blog_id.clone()
+            };
+            // 특정 글(log_no 있음)=count None / 최신 N개(log_no 없음)=count Some(N), category_no Some.
+            let (count, category_no) = if b.log_no.is_empty() {
+                (Some(b.count.max(1)), Some(b.category_no))
+            } else {
+                (None, None)
+            };
+            blog.push(BlogTarget {
+                account_id: a.login_id.clone(),
+                name: name.clone(),
+                blog_id: b.blog_id.clone(),
+                log_no: b.log_no.clone(),
+                link: b.link.clone(),
+                count,
+                category_no,
+            });
+            locs.push(QueueLocation {
+                p: PlatformId::Blog,
+                name: if b.log_no.is_empty() {
+                    format!("블로그 최신글 댓글 · {name}")
+                } else {
+                    format!("블로그 글 댓글 · {name}")
+                },
+                code: None,
+            });
+        }
+        if blog.is_empty() {
+            continue;
+        }
+        items.push(QueueNowItem {
+            id: format!("agent-publish-{now}-{idx}"),
+            title: plan_title.to_string(),
+            kind: mode.clone(),
+            state: QueueState::Waiting,
+            batch_id: None,
+            progress: None,
+            locs,
+            plan: Some(PublishPlan {
+                post_id: post_id.to_string(),
+                kind: mode.clone(),
+                title: effective_title.to_string(),
+                body_text: body.to_string(),
+                // 블로그는 댓글 전용 — 저장된 댓글 텍스트를 그대로 실어 러너가 쓴다.
+                comments: comments.to_vec(),
+                link_override: String::new(),
+                naver: vec![],
+                forum: vec![],
+                band: vec![],
+                blog,
                 clip: vec![],
                 login: None,
             }),
@@ -1797,6 +1918,92 @@ mod tests {
         assert!(matches!(ct.mode, CommentTarget::Url));
         assert_eq!(ct.article_id, Some(555));
         assert_eq!(ct.cafe_id, Some(100));
+    }
+
+    #[test]
+    fn build_blog_publish_items_one_queue_per_account() {
+        // 블로그 댓글: 계정당 큐 1개, 그 계정이 고른 블로그 링크(들)에 댓글을 단다(plan.blog).
+        // 특정 글(logNo 있음)=count None, 최신 N개(logNo 없음)=count Some·category_no Some.
+        let assignments = vec![
+            PublishAssign { login_id: "acc_a".into(), stocks: vec![] },
+            PublishAssign { login_id: "acc_b".into(), stocks: vec![] },
+        ];
+        let links = vec![
+            // 특정 글: log_no 있음 → count None.
+            BlogLinkIn {
+                blog_id: "press02".into(),
+                log_no: "224311392458".into(),
+                category_no: 0,
+                count: 0,
+                link: "https://blog.naver.com/press02/224311392458".into(),
+            },
+            // 최신 N개: log_no 없음 → count Some(N), category_no Some.
+            BlogLinkIn {
+                blog_id: "cho41004".into(),
+                log_no: String::new(),
+                category_no: 7,
+                count: 5,
+                link: "https://blog.naver.com/cho41004?categoryNo=7".into(),
+            },
+        ];
+        let items = build_blog_publish_items(
+            &assignments,
+            &links,
+            "p1",
+            "제목",
+            "제목",
+            "",
+            ModeValue::Comment,
+            &["댓글1".to_string()],
+            1234,
+        );
+        // 계정당 큐 1개(빈 계정 없음).
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id, "agent-publish-1234-0");
+        assert_eq!(items[1].id, "agent-publish-1234-1");
+        // 큐0 = acc_a의 블로그 대상 2건, 계정끼리 안 섞임.
+        let b0 = &items[0].plan.as_ref().unwrap().blog;
+        assert_eq!(b0.len(), 2);
+        assert!(b0.iter().all(|t| t.account_id == "acc_a"));
+        // 특정 글: log_no 채워지고 count None.
+        assert_eq!(b0[0].blog_id, "press02");
+        assert_eq!(b0[0].log_no, "224311392458");
+        assert_eq!(b0[0].count, None);
+        assert_eq!(b0[0].category_no, None);
+        // 최신 N개: log_no 빈값, count Some(5), category_no Some(7).
+        assert_eq!(b0[1].blog_id, "cho41004");
+        assert!(b0[1].log_no.is_empty());
+        assert_eq!(b0[1].count, Some(5));
+        assert_eq!(b0[1].category_no, Some(7));
+        // 댓글 본문은 그대로 실린다(블로그=댓글 전용).
+        assert_eq!(
+            items[0].plan.as_ref().unwrap().comments,
+            vec!["댓글1".to_string()]
+        );
+        // 블로그 경로라 forum/naver는 비어야 한다.
+        assert!(items[0].plan.as_ref().unwrap().forum.is_empty());
+        assert!(items[0].plan.as_ref().unwrap().naver.is_empty());
+        // 게시 전용(로그인 잡 아님).
+        assert!(items[0].plan.as_ref().unwrap().login.is_none());
+        // count=0 입력은 최신 1개로 방어(max(1)).
+        let items2 = build_blog_publish_items(
+            &[PublishAssign { login_id: "acc_a".into(), stocks: vec![] }],
+            &[BlogLinkIn {
+                blog_id: "x".into(),
+                log_no: String::new(),
+                category_no: 0,
+                count: 0,
+                link: "https://blog.naver.com/x".into(),
+            }],
+            "p1",
+            "제목",
+            "제목",
+            "",
+            ModeValue::Comment,
+            &[],
+            9,
+        );
+        assert_eq!(items2[0].plan.as_ref().unwrap().blog[0].count, Some(1));
     }
 
     #[test]
