@@ -118,7 +118,10 @@ impl PostgresRepo {
             .connect(url)
             .await
             .map_err(db_err)?;
-        sqlx::query(SCHEMA).execute(&pool).await.map_err(db_err)?;
+        // SCHEMA는 여러 문장(CREATE TABLE 7개)이라 prepared statement(`query`)로는
+        // "cannot insert multiple commands into a prepared statement"로 실패한다 →
+        // 다중 문장을 비-prepared로 실행하는 raw_sql을 쓴다.
+        sqlx::raw_sql(SCHEMA).execute(&pool).await.map_err(db_err)?;
         Ok(Self { pool })
     }
 }
