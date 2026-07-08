@@ -9,7 +9,11 @@ use std::process::{Child, Command};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use super::{config, error::OrchestratorError};
+use super::{
+    config,
+    error::OrchestratorError,
+    ua::{self, UaProfile},
+};
 
 const PORT_FILE: &str = "DevToolsActivePort";
 const PORT_WAIT: Duration = Duration::from_secs(20);
@@ -21,6 +25,9 @@ pub(crate) struct ChromeHandle {
     child: Child,
     pub(crate) port: u16,
     user_data_dir: PathBuf,
+    /// 로그인 경로면 이 실행에 쓴 UA 한 벌(Some). 게시/밴드 등 네이티브 UA 실행이면 None.
+    /// login.rs 가 페이지 Client Hints 를 이 버전과 같게 맞출 때 쓴다.
+    pub(crate) ua: Option<UaProfile>,
 }
 
 impl ChromeHandle {
@@ -186,8 +193,83 @@ fn count_profile_lines(process_listing: &str) -> usize {
 /// 임시 프로필 디렉토리 이름의 공통 접두사. 프로세스 명령줄에서 우리 Chrome을 식별하는 마커.
 const PROFILE_MARKER: &str = "pstmacro-login-";
 
-/// 시스템 Chrome을 디버그 포트로 띄우고 포트가 확정될 때까지 기다린다.
+/// 설치된 크롬의 **실제 풀버전**("149.0.7827.201")을 최선노력으로 읽는다. UA 로테이션이
+/// 설치 버전보다 높은 버전을 주장하지 않도록(기능탐지 회피) 상한으로 쓴다. 못 읽으면 None.
+/// Windows: `chrome.exe --version`은 GUI 앱이라 콘솔 출력이 없을 수 있어 레지스트리 BLBeacon
+/// (자동업데이트가 기록하는 현재 설치 버전)을 읽는다. 비-Windows(개발): `--version` 출력을 파싱.
+fn installed_chrome_full_version(chrome_path: &str) -> Option<String> {
+    fn first_version_token(text: &str) -> Option<String> {
+        text.split_whitespace()
+            .find(|t| {
+                t.split('.').count() >= 3 && t.chars().next().is_some_and(|c| c.is_ascii_digit())
+            })
+            .map(ToOwned::to_owned)
+    }
+    #[cfg(windows)]
+    {
+        let _ = chrome_path;
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut cmd = Command::new("reg");
+        cmd.args([
+            "query",
+            r"HKEY_CURRENT_USER\Software\Google\Chrome\BLBeacon",
+            "/v",
+            "version",
+        ]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        let out = cmd.output().ok()?;
+        first_version_token(&String::from_utf8_lossy(&out.stdout))
+    }
+    #[cfg(not(windows))]
+    {
+        let out = Command::new(chrome_path).arg("--version").output().ok()?;
+        first_version_token(&String::from_utf8_lossy(&out.stdout))
+    }
+}
+
+/// 실험용(옵트인, 기본 OFF): `PSTMACRO_BLOCK_WASM` 이 설정되면 로그인 Chrome 이 네이버 봇탐지
+/// WASM 엔진 호스트(`wtm.pstatic.net`)를 **DNS 단계에서 못 찾게** 막는다. 그러면 wtm 의
+/// 로더(`3e66f2f…js`)와 엔진(`353dfc…wasm`)이 아예 로드되지 않아, ncaptcha SDK(`ncpt.naver.com`)
+/// **단독 경로**로 강제된다(실측 2026-07-08: wtm SNI/DNS 0 이어도 SDK 혼자 cipherText·wtoken 을
+/// 만들어 로그인 통과). "기기지문(fpHash)이 캡차 누적의 앵커인지"를 20판 버스트로 규명하기 위한
+/// 실험 스위치다.
+///
+/// ⚠️ CDP 표면을 늘리지 않으려고 `Network.setBlockedURLs`(→ `Network.enable` 필요) 대신 Chrome
+/// `--host-resolver-rules` 를 쓴다 — `Network.enable` 은 봇탐지 표면을 늘려 캡차율을 올릴 수 있어
+/// (「enable_page_only」주석) 실험 결과를 오염시킨다. `~NOTFOUND` 는 해당 호스트 해석을 실패
+/// (`ERR_NAME_NOT_RESOLVED`)시켜, 사용자가 수동으로 재현한 "wtm SNI/DNS 0" 조건과 동일하게 만든다.
+/// `ncpt.naver.com`(SDK)·`ssl.pstatic.net`(폰트/이미지) 등 다른 호스트는 건드리지 않는다.
+const WASM_HOST_BLOCK_ARG: &str = "--host-resolver-rules=MAP wtm.pstatic.net ~NOTFOUND";
+
+/// 실험 스위치(위 상수 참고)의 옵트인 여부. 기본 OFF — 값과 무관하게 존재만 하면 켜진 것으로 본다.
+fn block_wasm_enabled() -> bool {
+    std::env::var("PSTMACRO_BLOCK_WASM").is_ok()
+}
+
+/// 시스템 Chrome을 띄운다(게시·밴드 공용 — UA 오버라이드 없이 **네이티브 UA 유지**).
 pub(crate) fn launch(headless: bool) -> Result<ChromeHandle, OrchestratorError> {
+    launch_inner(headless, None)
+}
+
+/// 로그인 전용 런처: 설치 크롬 버전 **이하**에서 최신 실존 UA 를 골라 브라우저 전역 UA 문자열을
+/// 통일해 띄운다(fpHash 묶음 완화 실험, 2026-07-08). 게시/밴드(`launch`)는 이걸 쓰지 않아 UA 무영향.
+/// 이 경로는 항상 blocking 스레드에서 도므로 UA 버전 조회(네트워크)도 안전하다.
+pub(crate) fn launch_for_login(headless: bool) -> Result<ChromeHandle, OrchestratorError> {
+    let chrome = config::chrome_path().map_err(OrchestratorError::CommandFailed)?;
+    let installed = installed_chrome_full_version(&chrome);
+    let ua = ua::pick_for_installed(installed.as_deref());
+    tracing::info!(
+        installed = %installed.as_deref().unwrap_or("(확인 실패)"),
+        chosen = %ua.full_version,
+        "[CHROME] 로그인 UA 로테이션 — 설치 크롬 버전 이하에서 선택"
+    );
+    launch_inner(headless, Some(ua))
+}
+
+/// 공통 런처 본체. `ua`가 Some(로그인)이면 `--user-agent` 로 브라우저 전역 UA 문자열을 통일한다.
+/// 포트가 확정될 때까지 기다린다.
+fn launch_inner(headless: bool, ua: Option<UaProfile>) -> Result<ChromeHandle, OrchestratorError> {
     let chrome = config::chrome_path().map_err(OrchestratorError::CommandFailed)?;
     let user_data_dir = std::env::temp_dir().join(format!("pstmacro-login-{}", unique_suffix()));
     std::fs::create_dir_all(&user_data_dir)?;
@@ -200,6 +282,11 @@ pub(crate) fn launch(headless: bool) -> Result<ChromeHandle, OrchestratorError> 
     }
 
     let profile_arg = format!("--user-data-dir={}", user_data_dir.display());
+    // 로그인 경로면(ua=Some) --user-agent 로 브라우저 전역 UA 문자열을 통일한다(페이지·iframe·
+    // 서비스워커·요청 헤더까지 같은 문자열). 페이지의 Client Hints(sec-ch-ua/userAgentData)는
+    // login.rs 가 Emulation.setUserAgentOverride 로 같은 버전에 맞춘다 — 문자열만 바꾸면 Client
+    // Hints·서비스워커 UA 와 어긋나 봇탐지(_setHasLiedBrowser/NCAPTCHA_UA_DETECTION)에 걸린다.
+    let ua_arg = ua.as_ref().map(|u| format!("--user-agent={}", u.user_agent));
     let mut args = vec![
         "--remote-debugging-port=0",
         profile_arg.as_str(),
@@ -230,6 +317,22 @@ pub(crate) fn launch(headless: bool) -> Result<ChromeHandle, OrchestratorError> 
         "--accept-lang=ko-KR,ko,en-US,en",
         "about:blank",
     ];
+    // 로그인 UA 오버라이드가 있으면 URL(about:blank) 바로 앞에 --user-agent 를 끼운다.
+    if let Some(arg) = &ua_arg {
+        let url_idx = args.len() - 1;
+        args.insert(url_idx, arg.as_str());
+    }
+    // 실험(옵트인): 로그인 경로(ua=Some)에서 PSTMACRO_BLOCK_WASM 이 켜지면 봇탐지 WASM 엔진
+    // 호스트(wtm.pstatic.net)를 DNS 로 막아 SDK 단독 경로를 강제한다(WASM_HOST_BLOCK_ARG 주석 참고).
+    // 게시/밴드(ua=None)엔 적용하지 않아 카페/밴드 흐름은 무영향.
+    if ua.is_some() && block_wasm_enabled() {
+        let url_idx = args.len() - 1;
+        args.insert(url_idx, WASM_HOST_BLOCK_ARG);
+        tracing::warn!(
+            "[CHROME][실험] PSTMACRO_BLOCK_WASM=on — wtm.pstatic.net(봇탐지 WASM 엔진) DNS 차단. \
+             ncaptcha SDK 단독 경로 강제(지문 앵커 규명 20판 버스트용). ⚠️ 실험 전용 스위치."
+        );
+    }
     if headless {
         args.insert(0, "--headless=new");
     }
@@ -248,6 +351,7 @@ pub(crate) fn launch(headless: bool) -> Result<ChromeHandle, OrchestratorError> 
         child,
         port: 0,
         user_data_dir: user_data_dir.clone(),
+        ua,
     };
 
     match wait_for_port(&user_data_dir) {
@@ -335,5 +439,18 @@ chrome.exe --user-data-dir=C:\\Users\\me\\AppData\\Chrome\\Default";
     fn counts_zero_when_no_marker() {
         assert_eq!(count_profile_lines(""), 0);
         assert_eq!(count_profile_lines("chrome.exe\nnotepad.exe\n"), 0);
+    }
+
+    #[test]
+    fn wasm_block_arg_targets_only_engine_host() {
+        // 봇탐지 WASM 엔진 호스트(wtm)만 해석 실패시키고, SDK(ncpt)·정적자원(ssl.pstatic.net)은
+        // 건드리지 않아야 SDK 단독 경로 실험이 성립한다. 와일드카드로 pstatic 전체를 막으면 폰트/
+        // 이미지까지 죽어 로그인 UI가 깨지므로, 정확히 wtm.pstatic.net 만 대상이어야 한다.
+        assert!(WASM_HOST_BLOCK_ARG.contains("--host-resolver-rules="));
+        assert!(WASM_HOST_BLOCK_ARG.contains("wtm.pstatic.net"));
+        assert!(WASM_HOST_BLOCK_ARG.contains("~NOTFOUND"));
+        assert!(!WASM_HOST_BLOCK_ARG.contains("ncpt"));
+        assert!(!WASM_HOST_BLOCK_ARG.contains("ssl.pstatic.net"));
+        assert!(!WASM_HOST_BLOCK_ARG.contains('*'));
     }
 }
