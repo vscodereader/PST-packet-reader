@@ -3,9 +3,11 @@
 //! 한 링크당 다음을 `repeats`번 **순차** 반복한다(사용자 명세):
 //!   1. 보이는 시크릿창 실행(고유 임시 프로필 · `--incognito` — 로그인/게시와 동일한
 //!      [`launch_debug_chrome`] 재사용, 매번 완전히 새 세션).
-//!   2. 링크로 이동한 뒤 **`document.readyState === "complete"`(완전 로딩)** 까지 기다린다.
-//!      ([`CdpClient::navigate`]는 `interactive`에서도 반환하므로, 여기서 한 번 더 조인다.)
-//!   3. 페이지를 새로고침(`Page.reload`)하고 다시 완전 로딩을 기다린다.
+//!   2. 링크로 이동한 뒤 **새 `Page.loadEventFired`(브라우저 window.load 완료)** 까지 기다린다.
+//!      (readyState 폴링은 직전 페이지의 stale `"complete"`에 속아 창을 일찍 닫으므로, CDP 이벤트
+//!      기준으로 "진짜 완전 로딩"을 확인한다.) 로드 후 잠시 머물러(dwell) 조회 등록 beacon 이 나갈
+//!      여유를 준다 — 이게 없으면 로드 직후 "칼같이" 닫혀 조회가 등록되지 않는다.
+//!   3. 페이지를 새로고침(`Page.reload`)하고 다시 새 load 이벤트까지 기다린 뒤 또 잠시 머문다.
 //!   4. 그 시크릿창을 닫는다 — [`ChromeHandle`]의 `Drop`이 **그 프로세스 트리(자식 헬퍼 포함)만**
 //!      `taskkill /PID <pid> /T /F`로 종료하고 `wait()`로 회수한 뒤 임시 프로필을 지운다.
 //!      전체 Chrome을 닫지 않고, 다음 창을 열기 전에 완전 종료를 보장한다(고아 프로세스 방지).
@@ -14,7 +16,7 @@
 //! 블로그·밴드 등 다른 기능은 건드리지 않는다.
 
 use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::json;
@@ -24,10 +26,22 @@ use crate::naver_automation::CdpClient;
 
 /// CDP 연결 시 붙는 로컬 DevTools 호스트(포트는 `launch_debug_chrome`가 확정).
 const DEVTOOLS_HOST: &str = "127.0.0.1";
-/// `readyState === "complete"`(완전 로딩)를 기다리는 상한. 초과하면 이번 회차를 실패 처리한다.
-const LOAD_COMPLETE_TIMEOUT: Duration = Duration::from_secs(30);
-/// 완전 로딩 폴링 간격.
-const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// 새 `Page.loadEventFired`(window.load 완료)를 기다리는 상한. 초과하면 이번 회차를 실패 처리한다.
+const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+/// 완전 로딩 후 창을 닫기 전 기본 체류 시간(ms). 조회수 등록 등 비동기 요청(beacon)이 나갈 여유를
+/// 준다 — 없으면 로드 직후 창을 닫아(사용자 관측 "칼같이 종료") 조회가 등록되지 않을 수 있다.
+/// `PSTMACRO_VIEW_DWELL_MS` 환경변수로 조정 가능(재빌드 없이 튜닝).
+const DEFAULT_DWELL_MS: u64 = 3000;
+
+/// 완전 로딩 후 창을 닫기 전 머무는 시간. `PSTMACRO_VIEW_DWELL_MS`(정수 ms)로 덮어쓸 수 있고,
+/// 없거나 파싱 실패면 [`DEFAULT_DWELL_MS`].
+fn dwell_after_load() -> Duration {
+    let ms = std::env::var("PSTMACRO_VIEW_DWELL_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_DWELL_MS);
+    Duration::from_millis(ms)
+}
 
 /// 한 링크의 조회수 부스트 결과(프론트 표시용 — TS `ViewBoostOutcome` 미러).
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -129,6 +143,8 @@ fn single_cycle(link: &str) -> Result<(), String> {
     let handle =
         launch_debug_chrome(false).map_err(|error| format!("시크릿창 실행 실패: {error}"))?;
 
+    let dwell = dwell_after_load();
+
     // 창 조작은 클로저로 묶어, 성공/실패와 무관하게 아래에서 handle을 반드시 drop(종료)한다.
     let result = (|| -> Result<(), String> {
         let mut client = CdpClient::connect_to_existing_chrome(DEVTOOLS_HOST, handle.port)
@@ -137,17 +153,28 @@ fn single_cycle(link: &str) -> Result<(), String> {
             .enable_page_only()
             .map_err(|error| format!("Page 도메인 활성화 실패: {error}"))?;
 
-        // 링크로 이동 + 완전 로딩 대기(navigate는 interactive에서도 반환하므로 한 번 더 조인다).
+        // 1) 링크로 이동 — Page.navigate 후 **실제 load 이벤트**가 뜰 때까지 기다린다. readyState
+        //    폴링(직전 페이지의 stale complete 오판)이 아니라 Page.loadEventFired 기준이라 창을
+        //    너무 일찍 닫지 않는다.
+        let before_nav = client.page_load_count();
         client
-            .navigate(link)
+            .call("Page.navigate", json!({ "url": link }))
             .map_err(|error| format!("페이지 이동 실패: {error}"))?;
-        wait_for_load_complete(&mut client)?;
+        client
+            .wait_for_new_load(before_nav, LOAD_TIMEOUT)
+            .map_err(|error| format!("페이지 완전 로딩 대기 실패: {error}"))?;
+        // 완전 로딩 후 잠시 머문다 — 조회 등록 beacon 이 나갈 여유("칼같이 종료" 방지).
+        sleep(dwell);
 
-        // 새로고침 한 번 + 다시 완전 로딩 대기.
+        // 2) 새로고침 한 번 — 마찬가지로 새 load 이벤트까지 기다린 뒤 머문다.
+        let before_reload = client.page_load_count();
         client
             .call("Page.reload", json!({ "ignoreCache": false }))
             .map_err(|error| format!("새로고침 실패: {error}"))?;
-        wait_for_load_complete(&mut client)?;
+        client
+            .wait_for_new_load(before_reload, LOAD_TIMEOUT)
+            .map_err(|error| format!("새로고침 완전 로딩 대기 실패: {error}"))?;
+        sleep(dwell);
 
         Ok(())
     })();
@@ -155,27 +182,6 @@ fn single_cycle(link: &str) -> Result<(), String> {
     // 시크릿창 완전 종료 — ChromeHandle Drop이 그 PID 트리만 taskkill /T /F + wait 회수 + 프로필 삭제.
     drop(handle);
     result
-}
-
-/// `document.readyState === "complete"`(페이지 **완전** 로딩)가 될 때까지 기다린다.
-/// `navigate`가 쓰는 `wait_for_ready_state`는 `interactive`에서도 통과하지만, 여기서는
-/// 사용자 명세대로 `complete`만 인정한다.
-fn wait_for_load_complete(client: &mut CdpClient) -> Result<(), String> {
-    let deadline = Instant::now() + LOAD_COMPLETE_TIMEOUT;
-    loop {
-        let state = client
-            .evaluate_string("document.readyState")
-            .map_err(|error| format!("readyState 확인 실패: {error}"))?;
-        if state == "complete" {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "페이지 완전 로딩(readyState=complete) 대기 시간 초과 (마지막 상태: {state})"
-            ));
-        }
-        sleep(LOAD_POLL_INTERVAL);
-    }
 }
 
 #[cfg(test)]
