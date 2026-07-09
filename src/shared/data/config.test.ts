@@ -87,6 +87,8 @@ describe("label tables", () => {
     expect(STATUS_ACCOUNT_CYCLE).not.toContain("badCredentials");
     expect(STATUS_ACCOUNT_CYCLE).not.toContain("challenge");
     expect(STATUS_ACCOUNT_CYCLE).not.toContain("error");
+    // 보류(onHold)는 수동 설정 가능해야 한다(#398) — 캡차 수동해결(WaitCaptcha) 흐름 진입용.
+    expect(STATUS_ACCOUNT_CYCLE).toContain("onHold");
   });
 
   it("isProblemStatus flags the same set as backend stats (error/badCredentials/blocked)", () => {

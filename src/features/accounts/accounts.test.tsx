@@ -170,13 +170,18 @@ describe("Accounts", () => {
     const row = screen.getAllByRole("row")[1]!;
     // 배지는 상태 라벨 텍스트로 찾는다(title은 이제 상태별 안내 문구로 동적).
     expect(within(row).getByText("활성")).toBeInTheDocument();
+    // 수동 순환(#398): 활성 → 대기 → 보류 → 활성.
     await userEvent.click(within(row).getByText("활성"));
-    // 수동 순환(new→active→waiting→blocked): 활성 다음은 대기(#267-3 활성 배지 클릭→대기).
     await waitFor(() =>
       expect(within(row).getByText("대기")).toBeInTheDocument(),
     );
-    // 대기 배지를 누르면 곧장 활성으로 되돌린다(#267-3 재활성).
+    // 대기 다음은 보류 — 계정을 수동 보류로 두면 캡차 수동해결 창(WaitCaptcha)이 열린다.
     await userEvent.click(within(row).getByText("대기"));
+    await waitFor(() =>
+      expect(within(row).getByText("보류")).toBeInTheDocument(),
+    );
+    // 보류 배지를 누르면 활성으로 되돌린다(순환 한 바퀴).
+    await userEvent.click(within(row).getByText("보류"));
     await waitFor(() =>
       expect(within(row).getByText("활성")).toBeInTheDocument(),
     );
