@@ -1252,21 +1252,43 @@ async fn collect_comment_targets(
     out
 }
 
-/// plan의 종목토론방 대상을 계정별로 묶어 `ForumPublishRequest`로 만든다. 본문은
-/// 동결된 평문(`body_text`)을 쓰고(토론방은 평문만 지원), 댓글은 풀의 첫 항목을 쓴다
-/// (즉시게시 forum 경로와 동일). host/port는 호출부가 띄운 Chrome 값으로 채운다.
+/// plan의 종목토론방 대상을 `ForumPublishRequest`로 만든다. 본문은 동결된 평문(`body_text`)을
+/// 쓴다(토론방은 평문만 지원). host/port는 호출부가 띄운 Chrome 값으로 채운다.
+///
+/// 댓글 처리(#403): "요청 1건 = 댓글 1개" 엔진(`run_forum_publish`)을 그대로 쓰되 요청을 여러 개
+/// 만들어 여러 댓글을 단다.
+/// - **일반 대상(빈 comment_url)**: 기존처럼 계정별 종목 묶음 1요청, 댓글=풀 첫 항목(무변경).
+/// - **"특정 게시글"(comment_url) 대상**:
+///   - 정상: 각 (계정 × 링크)에 **작성한 모든 댓글**을 작성 순서대로(댓글 수만큼 요청).
+///   - 나눠서(`forum_comment_distribute`): **링크마다** 댓글을 계정에 1:1 무작위 배정(겹침 없음,
+///     링크마다 재셔플) — `naver_cafe::distribute::distribute_comments` 재사용.
 fn plan_to_forum_requests(plan: &PublishPlan) -> Vec<ForumPublishRequest> {
     use std::collections::BTreeMap;
 
     let run_post = runs_post(plan);
     let run_comment = runs_comment(plan);
-    let comment = plan.comments.first().cloned().unwrap_or_default();
+    let first_comment = plan.comments.first().cloned().unwrap_or_default();
 
-    // "특정 게시글" 댓글(comment_url 지정) 대상은 종목별 랜덤 글이 아니라 그 글 하나에만
-    // 댓글을 단다. 계정 묶음 없이 대상 1건 = 요청 1건으로 만들고(글 1개 단위 댓글), 강제로
-    // 댓글 전용(run_post=false)으로 둔다. comment_url 없는 일반 대상은 기존처럼 계정별로
-    // 종목을 묶어 한 요청에 싣는다(per-종목 동작 무변경).
-    let mut url_reqs: Vec<ForumPublishRequest> = Vec::new();
+    // "특정 게시글" 댓글 요청 1건을 만든다(댓글 전용, run_post=false). 그 글 URL에 직접 단다.
+    let make_url_req = |account_id: &str, url: &str, stock: DiscussionStock, comment: String| {
+        ForumPublishRequest {
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            account_id: account_id.to_owned(),
+            run_post: false,
+            run_comment: true,
+            title: plan.title.clone(),
+            body: plan.body_text.clone(),
+            comment,
+            stocks: vec![stock],
+            link_override: plan.link_override.clone(),
+            comment_url: Some(url.to_owned()),
+        }
+    };
+
+    // 특정글(url) 대상은 **링크(url)별**로 (계정, stock)을 모은다(등장 순서 보존 — 분배 단위가
+    // 링크이므로). 일반 대상(빈 url)은 계정별 종목 묶음으로 모은다(기존 동작).
+    let mut url_by_link: Vec<(String, Vec<(String, DiscussionStock)>)> = Vec::new();
     let mut by_account: BTreeMap<String, Vec<DiscussionStock>> = BTreeMap::new();
     for f in &plan.forum {
         let url = f.comment_url.trim();
@@ -1281,19 +1303,37 @@ fn plan_to_forum_requests(plan: &PublishPlan) -> Vec<ForumPublishRequest> {
                 .or_default()
                 .push(stock);
         } else {
-            url_reqs.push(ForumPublishRequest {
-                host: "127.0.0.1".to_owned(),
-                port: 0,
-                account_id: f.account_id.clone(),
-                run_post: false,
-                run_comment: true,
-                title: plan.title.clone(),
-                body: plan.body_text.clone(),
-                comment: comment.clone(),
-                stocks: vec![stock],
-                link_override: plan.link_override.clone(),
-                comment_url: Some(url.to_owned()),
-            });
+            match url_by_link.iter_mut().find(|(u, _)| u == url) {
+                Some((_, accs)) => accs.push((f.account_id.clone(), stock)),
+                None => url_by_link.push((url.to_owned(), vec![(f.account_id.clone(), stock)])),
+            }
+        }
+    }
+
+    let mut url_reqs: Vec<ForumPublishRequest> = Vec::new();
+    if plan.forum_comment_distribute && !plan.comments.is_empty() {
+        // 나눠서 게시: 링크마다 댓글 풀을 셔플해 계정에 1개씩 배정한다(#댓글==#계정이면 겹침 없이
+        // 전량 소진). 링크마다 rng가 진행돼 매칭이 재무작위화된다.
+        let mut rng = mulberry32(seed_from_clock());
+        for (url, accs) in &url_by_link {
+            let assigned = distribute_comments(accs.len(), &plan.comments, &mut rng);
+            for (i, (account_id, stock)) in accs.iter().enumerate() {
+                let comment = assigned.get(i).cloned().unwrap_or_default();
+                url_reqs.push(make_url_req(account_id, url, stock.clone(), comment));
+            }
+        }
+    } else {
+        // 정상: 각 (계정 × 링크)에 작성한 모든 댓글을 작성 순서대로. 댓글이 없으면 빈 댓글 1건.
+        for (url, accs) in &url_by_link {
+            for (account_id, stock) in accs {
+                if plan.comments.is_empty() {
+                    url_reqs.push(make_url_req(account_id, url, stock.clone(), String::new()));
+                } else {
+                    for c in &plan.comments {
+                        url_reqs.push(make_url_req(account_id, url, stock.clone(), c.clone()));
+                    }
+                }
+            }
         }
     }
 
@@ -1307,7 +1347,7 @@ fn plan_to_forum_requests(plan: &PublishPlan) -> Vec<ForumPublishRequest> {
             run_comment,
             title: plan.title.clone(),
             body: plan.body_text.clone(),
-            comment: comment.clone(),
+            comment: first_comment.clone(),
             stocks,
             link_override: plan.link_override.clone(),
             comment_url: None,
@@ -1536,6 +1576,7 @@ fn retain_plan_accounts(
             .cloned()
             .collect(),
         login,
+        forum_comment_distribute: plan.forum_comment_distribute,
     }
 }
 
@@ -1591,6 +1632,7 @@ fn retain_forum_only(
         blog: Vec::new(),
         clip: Vec::new(),
         login: None,
+        forum_comment_distribute: plan.forum_comment_distribute,
     }
 }
 
@@ -3995,6 +4037,7 @@ mod tests {
             blog: vec![],
             clip: vec![],
             login: None,
+            forum_comment_distribute: false,
         }
     }
 
@@ -5177,6 +5220,98 @@ mod tests {
         assert_eq!(r.stocks.len(), 1);
         assert_eq!(r.stocks[0].code, "035720"); // URL의 종목코드
         assert_eq!(r.comment, "좋은 글이네요");
+    }
+
+    // #403 정상 게시: 특정글 1개·계정 1개라도 댓글을 여러 개 쓰면 **댓글 수만큼** 요청이 생겨
+    // 모든 댓글이(작성 순서대로) 달린다. (기존 버그: 첫 댓글만.)
+    #[test]
+    fn forum_url_posts_all_comments_in_order_one_request_each() {
+        use crate::ipc::queue::ForumTarget;
+        let url = "https://stock.naver.com/domestic/stock/005930/discussion/1";
+        let mut p = plan(ModeValue::Comment, vec![]);
+        p.comments = vec!["안녕하세요".into(), "반갑습니다".into(), "저두요".into()];
+        p.forum = vec![ForumTarget {
+            account_id: "u0".into(),
+            name: "글 #1".into(),
+            code: "005930".into(),
+            comment_url: url.into(),
+        }];
+        let reqs = plan_to_forum_requests(&p);
+        assert_eq!(reqs.len(), 3, "댓글 3개 → 요청 3개");
+        assert!(reqs.iter().all(|r| r.account_id == "u0" && r.comment_url.as_deref() == Some(url)));
+        // 작성 순서 보존.
+        let got: Vec<&str> = reqs.iter().map(|r| r.comment.as_str()).collect();
+        assert_eq!(got, vec!["안녕하세요", "반갑습니다", "저두요"]);
+    }
+
+    // #403 정상 게시: 링크 2 × 계정 2 × 댓글 2 = 각 (계정×링크)가 모든 댓글을 단다 → 8 요청.
+    #[test]
+    fn forum_url_all_comments_across_accounts_and_links() {
+        use crate::ipc::queue::ForumTarget;
+        let url_a = "https://stock.naver.com/domestic/stock/005930/discussion/1";
+        let url_b = "https://stock.naver.com/domestic/stock/000660/discussion/2";
+        let mut p = plan(ModeValue::Comment, vec![]);
+        p.comments = vec!["c1".into(), "c2".into()];
+        let mk = |acc: &str, url: &str| ForumTarget {
+            account_id: acc.into(),
+            name: "글".into(),
+            code: "005930".into(),
+            comment_url: url.into(),
+        };
+        p.forum = vec![mk("A", url_a), mk("B", url_a), mk("A", url_b), mk("B", url_b)];
+        let reqs = plan_to_forum_requests(&p);
+        assert_eq!(reqs.len(), 8, "(계정2×링크2)×댓글2 = 8");
+        // 각 (계정, 링크) 쌍이 정확히 두 댓글(c1,c2)을 갖는다.
+        for acc in ["A", "B"] {
+            for url in [url_a, url_b] {
+                let mut cs: Vec<&str> = reqs
+                    .iter()
+                    .filter(|r| r.account_id == acc && r.comment_url.as_deref() == Some(url))
+                    .map(|r| r.comment.as_str())
+                    .collect();
+                cs.sort();
+                assert_eq!(cs, vec!["c1", "c2"], "{acc}×{url}");
+            }
+        }
+    }
+
+    // #403 나눠서 게시: #댓글==#계정이면 링크마다 계정에 **서로 다른** 댓글 1개씩(겹침 없음).
+    #[test]
+    fn forum_distribute_one_distinct_comment_per_account_per_link() {
+        use crate::ipc::queue::ForumTarget;
+        use std::collections::BTreeSet;
+        let url_a = "https://stock.naver.com/domestic/stock/005930/discussion/1";
+        let url_b = "https://stock.naver.com/domestic/stock/000660/discussion/2";
+        let mut p = plan(ModeValue::Comment, vec![]);
+        p.comments = vec!["안녕".into(), "반가워".into(), "저두".into()]; // 3
+        p.forum_comment_distribute = true;
+        let mk = |acc: &str, url: &str| ForumTarget {
+            account_id: acc.into(),
+            name: "글".into(),
+            code: "005930".into(),
+            comment_url: url.into(),
+        };
+        // 계정 3개(A,B,C) × 링크 2개.
+        p.forum = vec![
+            mk("A", url_a), mk("B", url_a), mk("C", url_a),
+            mk("A", url_b), mk("B", url_b), mk("C", url_b),
+        ];
+        let reqs = plan_to_forum_requests(&p);
+        assert_eq!(reqs.len(), 6, "링크2 × 계정3 = 6 (계정당 1개)");
+        for url in [url_a, url_b] {
+            let for_url: Vec<&ForumPublishRequest> = reqs
+                .iter()
+                .filter(|r| r.comment_url.as_deref() == Some(url))
+                .collect();
+            assert_eq!(for_url.len(), 3, "링크당 계정수만큼");
+            // 계정마다 정확히 1개.
+            let accts: BTreeSet<&str> = for_url.iter().map(|r| r.account_id.as_str()).collect();
+            assert_eq!(accts.len(), 3, "A,B,C 각 1개");
+            // 댓글이 겹치지 않고 풀을 전량 소진(순열).
+            let cs: BTreeSet<&str> = for_url.iter().map(|r| r.comment.as_str()).collect();
+            assert_eq!(cs.len(), 3, "겹침 없음");
+            assert!(cs.iter().all(|c| ["안녕", "반가워", "저두"].contains(c)));
+        }
     }
 
     #[test]

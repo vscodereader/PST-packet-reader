@@ -1546,6 +1546,26 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     stockCodes.length > 1 &&
     stockCodes.length >= forumLoginIds.length;
 
+  // "나눠서 게시"(댓글 분배, #403): 종토 "특정 게시글"(url 댓글) 대상 계정들 — 이 맥락 전용.
+  const forumUrlLoginIds = [
+    ...new Set(
+      jobs
+        .filter((j) => j.platform === "forum" && !!j.commentUrl)
+        .map((j) => j.loginId),
+    ),
+  ];
+  // 특정글+댓글+저장 맥락에서만 노출: 댓글(또는 글+댓글) 모드 + url 대상 + 종토 특정글 계정 + 댓글 존재.
+  const showCommentDistribute =
+    (mode === "comment" || mode === "both") &&
+    commentTargetMode === "url" &&
+    forumUrlLoginIds.length > 0 &&
+    comments.length > 0;
+  // 활성: 작성 댓글 수 == 선택 계정 수일 때만(그때만 1:1 겹침 없이 분배). 아니면 회색 안내만.
+  const canCommentDistribute =
+    canPublish &&
+    showCommentDistribute &&
+    comments.length === forumUrlLoginIds.length;
+
   // 선택 종목을 forum 계정별로 균등 분배해(#267-5), 각 계정이 자기 몫의 종목 잡만 갖도록 정상
   // jobs에서 forum 종목 잡을 필터링한다. forum 외(카페/밴드)·forum "특정글 댓글" 잡은 그대로 둔다.
   const distributeForumJobs = (allJobs: PublishJob[]): PublishJob[] => {
@@ -1611,7 +1631,10 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   // cafe/menuId는 잡에 동결된(게시판 링크 파싱) 값이고, band 링크는 잡에서 가져온다.
   // jobs를 인자로 받아 plan을 만든다(#267-5: 분배 게시는 분배된 jobs로 호출). 정상 게시는
   // 화면의 jobs(비분배)를 그대로 넘긴다.
-  const buildPlanFromJobs = (jobs: PublishJob[]): PublishPlan => {
+  const buildPlanFromJobs = (
+    jobs: PublishJob[],
+    opts?: { forumCommentDistribute?: boolean },
+  ): PublishPlan => {
     const naver: NaverTarget[] = jobs
       .filter((j) => j.platform === "naver")
       .map((j) => {
@@ -1723,6 +1746,8 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       blog,
       clip,
       login: [...loginByAccount.values()],
+      // "나눠서 게시"(#403): 종토 특정글 댓글을 계정에 1:1 분배(백엔드가 링크마다 배정). 기본 false.
+      forumCommentDistribute: opts?.forumCommentDistribute ?? false,
     };
   };
 
@@ -1745,7 +1770,11 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
 
   // jobs와 when을 인자로 받아 즉시/예약 큐에 적재한다(#267-5). 정상 게시는 dispatchPublish(jobs,
   // when)으로, "나눠서 게시"는 분배된 jobs로 호출한다 — 디스패치 로직은 완전히 동일하게 재사용한다.
-  const dispatchPublish = (jobs: PublishJob[], when: "now" | "schedule") => {
+  const dispatchPublish = (
+    jobs: PublishJob[],
+    when: "now" | "schedule",
+    opts?: { forumCommentDistribute?: boolean },
+  ) => {
     // 게시 위치(표시용 locs)는 즉시·예약 공통이다. 같은 플랫폼·대상·코드는 한 번만 싣는다.
     const seen = new Set<string>();
     const locs: QueueLocation[] = [];
@@ -1772,7 +1801,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
         locs,
         // 대상별 라이브 상태는 워커가 채운다(적재 시점엔 빈 배열).
         items: [],
-        plan: buildPlanFromJobs(jobs),
+        plan: buildPlanFromJobs(jobs, opts),
       };
       setFlow("running");
       void persistCredentials(jobs)
@@ -1811,7 +1840,7 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       at: toEpochMs(date, time),
       missed: false,
       locs,
-      plan: buildPlanFromJobs(jobs),
+      plan: buildPlanFromJobs(jobs, opts),
     };
     // Defense-in-depth: the backend rejects a past time even though the picker
     // already prevents it. 예약도 게시 시점에 백엔드가 로그인하므로 자격증명을 먼저 저장한다.
@@ -2262,6 +2291,31 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
               </Text>
             )}
         </Stack>
+
+        {/* 나눠서 게시(댓글 분배, #403): 종토 "특정 게시글"+댓글 맥락에서만 노출. #댓글==#계정일 때만
+            활성 — 각 링크에서 계정에 서로 다른 댓글 1개씩 무작위 배정. 아니면 회색 카운트 안내. */}
+        {showCommentDistribute && (
+          <Stack gap={6} mt={14}>
+            <Button
+              variant="light"
+              color="teal"
+              fullWidth
+              disabled={!canCommentDistribute}
+              leftSection={<Icon.send size={16} />}
+              onClick={() =>
+                dispatchPublish(jobs, "now", { forumCommentDistribute: true })
+              }
+            >
+              나눠서 게시
+            </Button>
+            {!canCommentDistribute && (
+              <Text fz={11.5} c="dimmed" ta="center">
+                댓글 : {comments.length}개 &nbsp; 계정 :{" "}
+                {forumUrlLoginIds.length}개
+              </Text>
+            )}
+          </Stack>
+        )}
       </Box>
 
       {/* footer */}

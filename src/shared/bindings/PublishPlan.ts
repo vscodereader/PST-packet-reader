@@ -24,4 +24,9 @@ linkOverride: string, naver: Array<NaverTarget>, forum: Array<ForumTarget>, band
  * 워커(`execute_item`)는 이 필드가 채워진 아이템을 게시 대신 계정별 로그인으로 처리한다
  * (배치 1개 = 아이템 1개, 진행률 분모 = 계정 수). 일원화: 로그인도 now 큐로 흐른다(#210).
  */
-login?: Array<LoginTarget>, };
+login?: Array<LoginTarget>,
+/**
+ * "나눠서 게시"(#403): 종토 "특정 게시글" 댓글을 계정에 1:1 무작위 분배할지.
+ * false/미지정=정상(각 계정이 모든 댓글). true=링크마다 계정에 댓글 1개씩(겹침 없음).
+ */
+forumCommentDistribute?: boolean, };
