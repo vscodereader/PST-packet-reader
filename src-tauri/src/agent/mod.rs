@@ -1147,7 +1147,18 @@ fn build_cafe_publish_items(
                 band: vec![],
                 blog: vec![],
                 clip: vec![],
-                login: None,
+                // 카페는 분배 때 로그인하지 않으므로(사용자 지침 — 카페만 로그인 없이 분배) 게시
+                // 순간에 로그인해 쿠키를 확보해야 한다. 데스크톱 publish-modal(#225)처럼 이 계정의
+                // 로그인 스펙을 동봉하면 러너의 prepare_group_login이 게시 직전 [IP회전→로그인→
+                // 게시]를 원자 실행한다(카페 10004 회피). 그래야 최신/인기 글목록 조회·댓글이 그
+                // 갓 로그인한 쿠키로 동작한다(저장 쿠키가 없어 NO_COOKIES로 죽던 문제 수정).
+                login: Some(vec![LoginTarget {
+                    account_id: a.login_id.clone(),
+                    platform: PlatformId::Naver,
+                    headless: false,
+                    use_adb: true,
+                    force: true,
+                }]),
                 forum_comment_distribute: false,
             }),
             items: vec![],
@@ -2245,6 +2256,40 @@ mod tests {
         assert!(matches!(ct.mode, CommentTarget::Url));
         assert_eq!(ct.article_id, Some(555));
         assert_eq!(ct.cafe_id, Some(100));
+    }
+
+    #[test]
+    fn build_cafe_publish_items_attaches_publish_time_login() {
+        // 카페는 분배 때 로그인 안 함 → 게시 순간 로그인이 필요. plan.login에 그 계정의 네이버
+        // 로그인 스펙(force+use_adb)이 동봉돼야 러너 prepare_group_login이 로그인→쿠키 확보→
+        // 최신/인기 글목록 조회가 된다(NO_COOKIES 회귀 방지, 데스크톱 #225 미러).
+        let assignments = vec![PublishAssign { login_id: "acc_a".into(), stocks: vec![] }];
+        let boards = vec![CafeBoardIn {
+            cafe_id: 100,
+            menu_id: 0,
+            article_id: 0,
+            link: "https://cafe.naver.com/f-e/cafes/100".into(),
+        }];
+        let items = build_cafe_publish_items(
+            &assignments,
+            &boards,
+            "p1",
+            "제목",
+            "제목",
+            "",
+            ModeValue::Comment,
+            &["c".to_string()],
+            Some(CommentTarget::Latest),
+            Some(20),
+            9,
+        );
+        let plan = items[0].plan.as_ref().unwrap();
+        let login = plan.login.as_ref().expect("카페 plan은 게시 순간 로그인 동봉");
+        assert_eq!(login.len(), 1);
+        assert_eq!(login[0].account_id, "acc_a");
+        assert!(matches!(login[0].platform, PlatformId::Naver));
+        assert!(login[0].force, "force 재로그인이어야 쿠키를 새로 확보");
+        assert!(login[0].use_adb, "게시 IP=로그인 IP(카페 10004 회피)");
     }
 
     #[test]

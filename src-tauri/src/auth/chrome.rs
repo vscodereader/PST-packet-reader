@@ -412,16 +412,34 @@ pub(crate) fn parse_devtools_active_port(content: &str) -> Option<u16> {
 
 // 임시 프로필 디렉토리 이름에 쓸 충돌 적은 접미사(PID + 나노초).
 fn unique_suffix() -> String {
+    // 프로세스 내 단조 증가 카운터로 **동시 호출 고유성**을 보장한다. 예전엔 `process::id()`(앱이
+    // 도는 내내 상수)+나노초만 썼는데, 종토 계정별 병렬 게시(#238)로 두 계정이 같은 나노초 창에
+    // 동시에 Chrome을 띄우면 suffix가 겹쳐 **같은 user-data-dir → 같은 DevToolsActivePort → 같은
+    // Chrome 세션**을 공유했다(쿠키가 뒤섞여 두 계정이 한 네이버 세션으로 동작 → 종토 프로필 생성이
+    // 충돌해 한쪽이 HTTP 500 "Failed to create profile user"). 원자 카운터를 더해 나노초가 겹쳐도
+    // user-data-dir가 절대 겹치지 않게 한다(계정별 Chrome/세션 완전 격리).
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or_default();
-    format!("{}-{}", std::process::id(), nanos)
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{}-{}", std::process::id(), nanos, seq)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unique_suffix_is_distinct_across_rapid_calls() {
+        // 같은 나노초 창에 여러 번 불려도(동시 Chrome 기동) 절대 겹치면 안 된다 — 겹치면 두
+        // 계정이 같은 user-data-dir/세션을 공유해 프로필 충돌(HTTP 500)이 난다(#238 회귀).
+        let n = 1000;
+        let set: std::collections::HashSet<String> = (0..n).map(|_| unique_suffix()).collect();
+        assert_eq!(set.len(), n, "unique_suffix가 빠른 연속 호출에서 중복됨");
+    }
 
     #[test]
     fn parses_port_from_first_line() {
