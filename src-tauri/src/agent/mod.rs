@@ -171,9 +171,16 @@ struct PublishCmd {
     #[serde(default)]
     clip_links: Vec<ClipLinkIn>,
     /// 밴드 게시 대상(target=="band"일 때). 각 계정이 이 밴드(들)에 글/댓글을 올린다(계정×밴드).
-    /// 글/글+댓글=새 글, 댓글=글에 동결된 대상(최신/인기/특정글URL)로 엔진이 처리.
+    /// 글/글+댓글=새 글, 댓글=아래 comment_mode/comment_count로 엔진이 최신/인기/특정글URL 해석.
     #[serde(default)]
     band_targets: Vec<BandTargetIn>,
+    /// 카페·밴드 댓글 대상 모드(Admin 게시 명령에서 운영자가 고른 값). "url"(특정 글)·"latest"(최신)·
+    /// "popular"(인기). 빈값이면 글(LibraryPost)에 저장된 commentTarget으로 폴백(하위호환).
+    #[serde(default)]
+    comment_mode: String,
+    /// 카페·밴드 최신/인기 댓글 개수(상위 N). 0이면 글에 저장된 commentCount로 폴백(하위호환).
+    #[serde(default)]
+    comment_count: u32,
     assignments: Vec<PublishAssign>,
 }
 /// 카페 게시판/글 링크 파싱 결과(Admin이 parseCafeBoardLink/parseCafeArticleUrl로 파싱해 보냄).
@@ -752,6 +759,14 @@ fn enqueue_publish<R: Runtime>(
     // 대상 플랫폼 분기: 카페(naver)=계정×게시판(plan.naver), 그 외=종토 계정×종목(plan.forum).
     // 어느 쪽이든 큐 러너가 기존 엔진으로 게시(카페는 게시 시점에 id/pw로 로그인).
     let new_items = if p.target == "naver" {
+        // 댓글 대상/개수는 Admin 명령값 우선(운영자가 최신/인기/특정글 + 개수를 게시 시점에 고름),
+        // 없으면 글에 저장된 값으로 폴백. build 함수는 그대로 재사용(엔진 무변경).
+        let (ct, cc) = resolve_comment_spec(
+            &p.comment_mode,
+            p.comment_count,
+            post.comment_target,
+            post.comment_count,
+        );
         build_cafe_publish_items(
             &p.assignments,
             &p.cafe_boards,
@@ -761,8 +776,8 @@ fn enqueue_publish<R: Runtime>(
             &post.body,
             mode,
             &post.comments,
-            post.comment_target,
-            post.comment_count,
+            ct,
+            cc,
             now_ms(),
         )
     } else if p.target == "blog" {
@@ -793,7 +808,13 @@ fn enqueue_publish<R: Runtime>(
         )
     } else if p.target == "band" {
         // 밴드는 글/댓글/글+댓글 전부 — 계정×밴드로 plan.band(BandTarget)를 조립한다(카페 미러).
-        // 댓글 대상 모드/개수는 글에 동결된 값(commentTarget/commentCount)을 그대로 쓴다.
+        // 댓글 대상 모드/개수는 Admin 명령값 우선(최신/인기/특정글URL + 개수), 없으면 글 저장값 폴백.
+        let (ct, cc) = resolve_comment_spec(
+            &p.comment_mode,
+            p.comment_count,
+            post.comment_target,
+            post.comment_count,
+        );
         build_band_publish_items(
             &p.assignments,
             &p.band_targets,
@@ -803,8 +824,8 @@ fn enqueue_publish<R: Runtime>(
             &post.body,
             mode,
             &post.comments,
-            post.comment_target,
-            post.comment_count,
+            ct,
+            cc,
             now_ms(),
         )
     } else {
@@ -984,6 +1005,34 @@ fn cafe_target(
 /// 카페에서 쓰지 않는다 — 대상은 게시판 링크다. 댓글 대상/개수는 글(commentTarget/commentCount)에
 /// 동결된 값을 그대로 쓴다(데스크톱과 동일). 큐 러너가 게시 시점에 카페 로그인(id/pw)까지 수행한다.
 #[allow(clippy::too_many_arguments)]
+/// Admin 게시 명령의 댓글 대상 모드 문자열 → `CommentTarget`. 빈값/미인식은 `None`(글 저장값 폴백).
+fn parse_comment_target(s: &str) -> Option<CommentTarget> {
+    match s {
+        "url" => Some(CommentTarget::Url),
+        "latest" => Some(CommentTarget::Latest),
+        "popular" => Some(CommentTarget::Popular),
+        _ => None,
+    }
+}
+
+/// 카페·밴드 댓글 대상/개수를 결정한다. **Admin 게시 명령의 값이 우선**(운영자가 게시 시점에 고른
+/// 최신/인기/특정글 + 개수), 명령이 비어 있으면 글(LibraryPost)에 저장된 값으로 폴백한다(하위호환).
+/// 데스크톱은 대상/개수를 글 템플릿에 동결하지만, Admin은 블로그·클립처럼 게시 명령에서 직접 고른다.
+fn resolve_comment_spec(
+    cmd_mode: &str,
+    cmd_count: u32,
+    post_target: Option<CommentTarget>,
+    post_count: Option<u32>,
+) -> (Option<CommentTarget>, Option<u32>) {
+    let target = parse_comment_target(cmd_mode).or(post_target);
+    let count = if cmd_count > 0 {
+        Some(cmd_count)
+    } else {
+        post_count
+    };
+    (target, count)
+}
+
 fn build_cafe_publish_items(
     assignments: &[PublishAssign],
     cafe_boards: &[CafeBoardIn],
@@ -2372,6 +2421,44 @@ mod tests {
             comments[0].plan.as_ref().unwrap().comments,
             vec!["댓글1".to_string()]
         );
+    }
+
+    #[test]
+    fn parse_comment_target_maps_admin_modes() {
+        assert_eq!(parse_comment_target("url"), Some(CommentTarget::Url));
+        assert_eq!(parse_comment_target("latest"), Some(CommentTarget::Latest));
+        assert_eq!(parse_comment_target("popular"), Some(CommentTarget::Popular));
+        // 빈값·미인식은 None(글 저장값으로 폴백).
+        assert_eq!(parse_comment_target(""), None);
+        assert_eq!(parse_comment_target("bogus"), None);
+    }
+
+    #[test]
+    fn resolve_comment_spec_prefers_command_over_post() {
+        // 명령이 인기 5개를 고르면 글 저장값(최신 1)을 무시하고 명령값을 쓴다.
+        let (t, c) = resolve_comment_spec("popular", 5, Some(CommentTarget::Latest), Some(1));
+        assert_eq!(t, Some(CommentTarget::Popular));
+        assert_eq!(c, Some(5));
+    }
+
+    #[test]
+    fn resolve_comment_spec_falls_back_to_post_when_command_empty() {
+        // 명령이 비면(빈 모드·개수0) 글에 저장된 값으로 폴백(하위호환).
+        let (t, c) = resolve_comment_spec("", 0, Some(CommentTarget::Popular), Some(3));
+        assert_eq!(t, Some(CommentTarget::Popular));
+        assert_eq!(c, Some(3));
+    }
+
+    #[test]
+    fn resolve_comment_spec_partial_command_override() {
+        // 모드만 명령(url), 개수는 명령 없음(0) → 개수는 글값 폴백.
+        let (t, c) = resolve_comment_spec("url", 0, Some(CommentTarget::Latest), Some(2));
+        assert_eq!(t, Some(CommentTarget::Url));
+        assert_eq!(c, Some(2));
+        // 둘 다 없으면 둘 다 None(build 함수가 최신 1개로 기본 처리).
+        let (t2, c2) = resolve_comment_spec("", 0, None, None);
+        assert_eq!(t2, None);
+        assert_eq!(c2, None);
     }
 
     #[test]

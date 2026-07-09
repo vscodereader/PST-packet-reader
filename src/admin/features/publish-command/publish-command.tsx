@@ -62,6 +62,29 @@ function postKindOf(p: { kind?: string }): PostKind {
   return p.kind === "comment" || p.kind === "both" ? p.kind : "post";
 }
 
+// 카페·밴드 댓글 대상 모드. url=특정 글 URL, latest=최신 N개, popular=인기 N개.
+// (엔진 지원: 카페 collect_comment_targets / 밴드 band_comment·band_comment_on_post.)
+export type CommentTargetMode = "url" | "latest" | "popular";
+const COMMENT_MODE_OPTS: { value: CommentTargetMode; label: string }[] = [
+  { value: "url", label: "특정 글" },
+  { value: "latest", label: "최신글" },
+  { value: "popular", label: "인기글" },
+];
+
+/** 카페·밴드 게시 명령에 실을 댓글 대상 필드(commentMode/commentCount)를 만든다. 순수 함수라
+ *  단위 테스트로 검증한다. 댓글(comment) 모드에서만 대상 모드를 싣고, 최신/인기일 때만 개수를
+ *  싣는다(특정 글·글·글+댓글은 개수 무의미). 개수는 최소 1로 보정한다. */
+export function commentTargetPayload(
+  kind: PostKind,
+  mode: CommentTargetMode,
+  count: number,
+): { commentMode?: string; commentCount?: number } {
+  if (kind !== "comment") return {};
+  if (mode === "url") return { commentMode: "url" };
+  const n = Number.isFinite(count) ? Math.floor(count) : 1;
+  return { commentMode: mode, commentCount: Math.max(1, n) };
+}
+
 type Target = "forum" | "cafe" | "blog" | "clip" | "band";
 const TARGETS: { key: Target; label: string; soon: boolean }[] = [
   { key: "forum", label: "종목토론방", soon: false },
@@ -395,7 +418,10 @@ export function PublishCommand({
                   value={devKind}
                   onChange={(v) => {
                     if (!v) return;
-                    setKindByDev((prev) => ({ ...prev, [d.id]: v as PostKind }));
+                    setKindByDev((prev) => ({
+                      ...prev,
+                      [d.id]: v as PostKind,
+                    }));
                     // 종류가 바뀌면 이전에 고른 글 선택을 초기화(다른 종류 글이 남지 않게).
                     setPostByDev((prev) => ({ ...prev, [d.id]: null }));
                   }}
@@ -637,7 +663,11 @@ function ForumConfig({
   useEffect(() => {
     let cancelled = false;
     api.forumStocks
-      .list({ category: cfg.category, exchange: "krx", market: effectiveMarket })
+      .list({
+        category: cfg.category,
+        exchange: "krx",
+        market: effectiveMarket,
+      })
       .then((p) => {
         if (cancelled) return;
         setPool(
@@ -1013,7 +1043,8 @@ function ForumCommentConfig({
   const detail = `특정 게시글 ${cleanUrls.length}개 · 계정 ${accts.length}`;
 
   // 댓글은 계정마다 같은 URL들에 단다(나눠서 없음). assignment는 계정만(종목 없음).
-  const buildAssignments = () => accts.map((loginId) => ({ loginId, stocks: [] }));
+  const buildAssignments = () =>
+    accts.map((loginId) => ({ loginId, stocks: [] }));
 
   const setUrl = (i: number, v: string) =>
     setUrls((prev) => prev.map((u, idx) => (idx === i ? v : u)));
@@ -1268,11 +1299,26 @@ function CafeConfig({
   const [accts, setAccts] = useState<string[]>([]);
   const [armed, setArmed] = useState<boolean>(false);
   const [sched, setSched] = useState(() => nowParts());
+  // 댓글 대상 모드/개수(댓글 모드에서만 의미). url=특정 글, latest=최신 N, popular=인기 N.
+  const [commentMode, setCommentMode] = useState<CommentTargetMode>("latest");
+  const [count, setCount] = useState<number | "">(20);
 
-  const selectedBoards = resolved.filter((b) => selected.includes(cafeBoardKey(b)));
+  const isComment = kind === "comment";
+  const isList = isComment && commentMode !== "url"; // 최신/인기=개수 N 필요.
+  const commentFields = () =>
+    commentTargetPayload(
+      kind,
+      commentMode,
+      typeof count === "number" ? count : 1,
+    );
+  const selectedBoards = resolved.filter((b) =>
+    selected.includes(cafeBoardKey(b)),
+  );
   const valid =
     postTitle != null && selectedBoards.length > 0 && accts.length > 0;
-  const detail = `게시판 ${selectedBoards.length}개 · 계정 ${accts.length}`;
+  const detail = isComment
+    ? `${COMMENT_MODE_OPTS.find((m) => m.value === commentMode)?.label} · 게시판 ${selectedBoards.length}개 · 계정 ${accts.length}`
+    : `게시판 ${selectedBoards.length}개 · 계정 ${accts.length}`;
 
   // 게시판 링크 추가: cafeId+menuId(게시판) 또는 cafeId+articleId(특정 글)를 파싱해 목록에 쌓는다.
   const addLink = () => {
@@ -1326,6 +1372,7 @@ function CafeConfig({
           mode: kind,
           target: "naver",
           cafeBoards: cafeBoardsPayload(),
+          ...commentFields(),
           assignments: assignments(),
         });
         notifications.show({
@@ -1366,6 +1413,7 @@ function CafeConfig({
           mode: kind,
           target: "naver",
           cafeBoards: cafeBoardsPayload(),
+          ...commentFields(),
           assignments: assignments(),
           at,
           detail,
@@ -1403,15 +1451,58 @@ function CafeConfig({
 
   return (
     <Box>
-      {/* 게시판 링크 입력 + 추가(데스크톱 publish-modal 카페 카드와 동일 UX) */}
+      {/* 댓글 대상 모드(댓글 모드에서만) — 특정 글 / 최신글 / 인기글. 엔진이 실제로 지원하는
+          카페 댓글 대상(collect_comment_targets: url·latest·popular)을 그대로 노출한다. */}
+      {isComment && (
+        <>
+          <Text size="xs" c="dimmed" mb={4}>
+            댓글 대상
+          </Text>
+          <Group gap={8} align="flex-end" wrap="nowrap" mb="sm">
+            {COMMENT_MODE_OPTS.map((m) => (
+              <Button
+                key={m.value}
+                size="xs"
+                variant={commentMode === m.value ? "filled" : "default"}
+                color={commentMode === m.value ? "teal" : "gray"}
+                onClick={() => setCommentMode(m.value)}
+                aria-label={`카페 댓글 대상 ${m.label}`}
+              >
+                {m.label}
+              </Button>
+            ))}
+            {isList && (
+              <NumberInput
+                size="xs"
+                label="개수"
+                w={90}
+                min={1}
+                max={50}
+                value={count}
+                onChange={(v) => setCount(typeof v === "number" ? v : "")}
+                aria-label="카페 최신/인기 댓글 개수"
+              />
+            )}
+          </Group>
+        </>
+      )}
+      {/* 게시판/글 링크 입력 + 추가(데스크톱 publish-modal 카페 카드와 동일 UX) */}
       <Text size="xs" c="dimmed" mb={4}>
-        게시판 링크 (넣은 게시판/글에 {kind === "comment" ? "댓글을" : "글을"} 올립니다)
+        {isComment && commentMode === "url"
+          ? "글 링크 (넣은 특정 글에 저장된 댓글을 답니다)"
+          : isList
+            ? "게시판/카페 링크 (그 카페의 최신/인기 상위 N개 글에 댓글을 답니다)"
+            : `게시판 링크 (넣은 게시판/글에 ${kind === "comment" ? "댓글을" : "글을"} 올립니다)`}
       </Text>
       <Group gap={8} align="flex-end" wrap="nowrap" mb="sm">
         <TextInput
           size="xs"
           style={{ flex: 1 }}
-          placeholder="https://cafe.naver.com/f-e/cafes/31732304/menus/1"
+          placeholder={
+            isComment && commentMode === "url"
+              ? "https://cafe.naver.com/f-e/cafes/31732304/articles/12345"
+              : "https://cafe.naver.com/f-e/cafes/31732304/menus/1"
+          }
           value={link}
           onChange={(e) => setLink(e.currentTarget.value)}
           onKeyDown={(e) => {
@@ -1485,12 +1576,14 @@ function CafeConfig({
 
       {/* 계정 선택 — 카페는 로그인 성공/실패 무관 카페 계정 전부(게시 순간 재로그인). */}
       <Text size="xs" c="dimmed" mb={4}>
-        계정 (이 하위의 카페 계정 · 로그인 성공/실패 무관 · {accts.length}명 선택)
+        계정 (이 하위의 카페 계정 · 로그인 성공/실패 무관 · {accts.length}명
+        선택)
       </Text>
       <Group gap={6}>
         {accounts.length === 0 ? (
           <Text size="xs" c="dimmed">
-            이 하위에 카페 계정이 없습니다(계정 분배에서 플랫폼=네이버 카페로 분배하세요).
+            이 하위에 카페 계정이 없습니다(계정 분배에서 플랫폼=네이버 카페로
+            분배하세요).
           </Text>
         ) : (
           accounts.map((a) => {
@@ -1638,10 +1731,16 @@ function BlogConfig({
     } else {
       const p = parseBlogLink(raw);
       if (p) {
-        const n = typeof count === "number" && count > 0 ? Math.floor(count) : 1;
+        const n =
+          typeof count === "number" && count > 0 ? Math.floor(count) : 1;
         it =
           p.categoryNo !== undefined
-            ? { blogId: p.blogId, categoryNo: p.categoryNo, count: n, link: raw }
+            ? {
+                blogId: p.blogId,
+                categoryNo: p.categoryNo,
+                count: n,
+                link: raw,
+              }
             : { blogId: p.blogId, count: n, link: raw };
       }
     }
@@ -2032,7 +2131,12 @@ function ClipConfig({
   const clipLinksPayload = () =>
     items.map((it) =>
       it.mediaType !== undefined
-        ? { handle: it.handle, mediaType: it.mediaType, count: it.count, link: it.link }
+        ? {
+            handle: it.handle,
+            mediaType: it.mediaType,
+            count: it.count,
+            link: it.link,
+          }
         : { handle: it.handle, count: it.count, link: it.link },
     );
   const assignments = () => accts.map((loginId) => ({ loginId, stocks: [] }));
@@ -2331,11 +2435,25 @@ function BandConfig({
   const [accts, setAccts] = useState<string[]>([]);
   const [armed, setArmed] = useState<boolean>(false);
   const [sched, setSched] = useState(() => nowParts());
+  // 댓글 대상 모드/개수(댓글 모드에서만). url=특정 글 URL(band_comment_on_post),
+  // latest/popular=최신/인기 상위 N개(band_comment). 엔진이 실제 지원하는 대상을 그대로 노출.
+  const [commentMode, setCommentMode] = useState<CommentTargetMode>("latest");
+  const [count, setCount] = useState<number | "">(20);
 
+  const isComment = kind === "comment";
+  const isList = isComment && commentMode !== "url";
+  const commentFields = () =>
+    commentTargetPayload(
+      kind,
+      commentMode,
+      typeof count === "number" ? count : 1,
+    );
   const selectedBands = resolved.filter((b) => selected.includes(bandKey(b)));
   const valid =
     postTitle != null && selectedBands.length > 0 && accts.length > 0;
-  const detail = `밴드 ${selectedBands.length}개 · 계정 ${accts.length}`;
+  const detail = isComment
+    ? `${COMMENT_MODE_OPTS.find((m) => m.value === commentMode)?.label} · 밴드 ${selectedBands.length}개 · 계정 ${accts.length}`
+    : `밴드 ${selectedBands.length}개 · 계정 ${accts.length}`;
 
   // 링크 추가: band_no 파싱해 목록에 쌓는다(밴드 홈 또는 특정 글 URL — 게시 시점 백엔드가 해석).
   const addLink = () => {
@@ -2378,6 +2496,7 @@ function BandConfig({
           mode: kind,
           target: "band",
           bandTargets: bandTargetsPayload(),
+          ...commentFields(),
           assignments: assignments(),
         });
         notifications.show({
@@ -2418,6 +2537,7 @@ function BandConfig({
           mode: kind,
           target: "band",
           bandTargets: bandTargetsPayload(),
+          ...commentFields(),
           assignments: assignments(),
           at,
           detail,
@@ -2455,16 +2575,58 @@ function BandConfig({
 
   return (
     <Box>
+      {/* 댓글 대상 모드(댓글 모드에서만) — 특정 글 / 최신글 / 인기글. 엔진이 실제 지원하는
+          밴드 댓글 대상(band_comment_on_post=url · band_comment=latest/popular)을 그대로 노출. */}
+      {isComment && (
+        <>
+          <Text size="xs" c="dimmed" mb={4}>
+            댓글 대상
+          </Text>
+          <Group gap={8} align="flex-end" wrap="nowrap" mb="sm">
+            {COMMENT_MODE_OPTS.map((m) => (
+              <Button
+                key={m.value}
+                size="xs"
+                variant={commentMode === m.value ? "filled" : "default"}
+                color={commentMode === m.value ? "teal" : "gray"}
+                onClick={() => setCommentMode(m.value)}
+                aria-label={`밴드 댓글 대상 ${m.label}`}
+              >
+                {m.label}
+              </Button>
+            ))}
+            {isList && (
+              <NumberInput
+                size="xs"
+                label="개수"
+                w={90}
+                min={1}
+                max={50}
+                value={count}
+                onChange={(v) => setCount(typeof v === "number" ? v : "")}
+                aria-label="밴드 최신/인기 댓글 개수"
+              />
+            )}
+          </Group>
+        </>
+      )}
       {/* 밴드 링크 입력 + 추가(데스크톱 밴드 카드와 동일 UX) */}
       <Text size="xs" c="dimmed" mb={4}>
-        밴드 링크 (넣은 밴드에 {kind === "comment" ? "댓글을" : "글을"} 올립니다
-        {kind === "comment" ? " · 최신/인기/특정글은 글에 저장된 대로" : ""})
+        {isComment && commentMode === "url"
+          ? "밴드 글 링크 (넣은 특정 글에 저장된 댓글을 답니다)"
+          : isList
+            ? "밴드 링크 (그 밴드의 최신/인기 상위 N개 글에 댓글을 답니다)"
+            : `밴드 링크 (넣은 밴드에 ${kind === "comment" ? "댓글을" : "글을"} 올립니다)`}
       </Text>
       <Group gap={8} align="flex-end" wrap="nowrap" mb="sm">
         <TextInput
           size="xs"
           style={{ flex: 1 }}
-          placeholder="https://band.us/band/103043410"
+          placeholder={
+            isComment && commentMode === "url"
+              ? "https://band.us/band/103043410/post/9"
+              : "https://band.us/band/103043410"
+          }
           value={link}
           onChange={(e) => setLink(e.currentTarget.value)}
           onKeyDown={(e) => {

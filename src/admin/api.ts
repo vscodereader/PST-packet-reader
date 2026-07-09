@@ -412,7 +412,12 @@ export const api = {
         bandNo: string; // 밴드 식별자(라벨용)
         link: string; // 밴드 홈 또는 특정 글 URL(백엔드가 band_no/post_no 추출)
       }[]; // 밴드 게시 대상(target=="band")
-      assignments: { loginId: string; stocks: { code: string; name: string }[] }[];
+      commentMode?: string; // 카페·밴드 댓글 대상: "url"(특정글)|"latest"(최신)|"popular"(인기)
+      commentCount?: number; // 카페·밴드 최신/인기 댓글 개수(상위 N)
+      assignments: {
+        loginId: string;
+        stocks: { code: string; name: string }[];
+      }[];
     }): Promise<{ ok: boolean; commandId: string }> {
       return request("POST", "/admin/publish", req);
     },
@@ -451,7 +456,12 @@ export const api = {
         bandNo: string;
         link: string;
       }[]; // 밴드 게시 대상(target=="band")
-      assignments: { loginId: string; stocks: { code: string; name: string }[] }[];
+      commentMode?: string; // 카페·밴드 댓글 대상: "url"|"latest"|"popular"
+      commentCount?: number; // 카페·밴드 최신/인기 댓글 개수(상위 N)
+      assignments: {
+        loginId: string;
+        stocks: { code: string; name: string }[];
+      }[];
       at: number; // 발송 시각 epoch ms
       detail: string;
     }): Promise<{ ok: boolean; id: string }> {

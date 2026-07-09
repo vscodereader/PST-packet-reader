@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { maskId, postDisplay, shortTitle } from "./publish-command";
+import {
+  commentTargetPayload,
+  maskId,
+  postDisplay,
+  shortTitle,
+} from "./publish-command";
 
 // 렌더/네트워크 비의존 순수 헬퍼만 검증(다른 Admin 테스트와 동일 방침). 선택 알고리즘은
 // stock-select.test.ts 참조.
@@ -28,25 +33,70 @@ describe("publish-command 헬퍼", () => {
   describe("postDisplay (댓글=내용, 글=제목)", () => {
     it("댓글은 제목이 없어도 작성한 댓글 내용(excerpt)을 보여준다", () => {
       expect(
-        postDisplay({ title: "제목 없음", kind: "comment", excerpt: "오늘 흐름 좋네요 👍" }),
+        postDisplay({
+          title: "제목 없음",
+          kind: "comment",
+          excerpt: "오늘 흐름 좋네요 👍",
+        }),
       ).toBe("오늘 흐름 좋네요 👍");
     });
     it("댓글인데 내용이 비면 제목으로 폴백", () => {
-      expect(postDisplay({ title: "제목 없음", kind: "comment", excerpt: "  " })).toBe(
+      expect(
+        postDisplay({ title: "제목 없음", kind: "comment", excerpt: "  " }),
+      ).toBe("제목 없음");
+      expect(postDisplay({ title: "제목 없음", kind: "comment" })).toBe(
         "제목 없음",
       );
-      expect(postDisplay({ title: "제목 없음", kind: "comment" })).toBe("제목 없음");
     });
     it("글/글+댓글은 제목을 쓴다(내용 무시)", () => {
       expect(
-        postDisplay({ title: "급등주 분석", kind: "post", excerpt: "본문 요약" }),
+        postDisplay({
+          title: "급등주 분석",
+          kind: "post",
+          excerpt: "본문 요약",
+        }),
       ).toBe("급등주 분석");
       expect(
-        postDisplay({ title: "모멘텀 글+댓글", kind: "both", excerpt: "댓글 내용" }),
+        postDisplay({
+          title: "모멘텀 글+댓글",
+          kind: "both",
+          excerpt: "댓글 내용",
+        }),
       ).toBe("모멘텀 글+댓글");
     });
     it("kind 없으면 post로 보고 제목 사용(옛 하위 하위호환)", () => {
       expect(postDisplay({ title: "제목", excerpt: "내용" })).toBe("제목");
+    });
+  });
+
+  describe("commentTargetPayload (카페·밴드 댓글 대상 → 명령 페이로드)", () => {
+    it("댓글 아닌 모드(글/글+댓글)는 대상 필드를 싣지 않는다", () => {
+      expect(commentTargetPayload("post", "latest", 5)).toEqual({});
+      expect(commentTargetPayload("both", "popular", 5)).toEqual({});
+    });
+    it("최신/인기는 mode + 개수(N)를 싣는다", () => {
+      expect(commentTargetPayload("comment", "latest", 20)).toEqual({
+        commentMode: "latest",
+        commentCount: 20,
+      });
+      expect(commentTargetPayload("comment", "popular", 3)).toEqual({
+        commentMode: "popular",
+        commentCount: 3,
+      });
+    });
+    it("특정글(url)은 mode만 싣고 개수는 싣지 않는다", () => {
+      expect(commentTargetPayload("comment", "url", 20)).toEqual({
+        commentMode: "url",
+      });
+    });
+    it("개수는 최소 1로 보정(0·음수·소수 방어)", () => {
+      expect(commentTargetPayload("comment", "latest", 0).commentCount).toBe(1);
+      expect(commentTargetPayload("comment", "latest", -5).commentCount).toBe(
+        1,
+      );
+      expect(commentTargetPayload("comment", "latest", 2.9).commentCount).toBe(
+        2,
+      );
     });
   });
 });

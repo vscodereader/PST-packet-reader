@@ -63,6 +63,13 @@ pub struct PublishSpec {
     /// 밴드 게시 링크 파싱 결과(target=="band"일 때). 하위가 계정×밴드로 글/댓글을 올린다.
     #[serde(default)]
     pub band_targets: Vec<PublishBandTarget>,
+    /// 카페·밴드 댓글 대상 모드("url"=특정 글·"latest"=최신·"popular"=인기). 빈값이면 하위가 글에
+    /// 저장된 commentTarget으로 폴백(하위호환). 운영자가 게시 명령에서 직접 고른 값.
+    #[serde(default)]
+    pub comment_mode: String,
+    /// 카페·밴드 최신/인기 댓글 개수(상위 N). 0이면 하위가 글의 commentCount로 폴백.
+    #[serde(default)]
+    pub comment_count: u32,
     pub assignments: Vec<PublishAssignment>,
 }
 
@@ -244,6 +251,8 @@ pub async fn dispatch_publish(
             "clipLinks": clip_links_json,
             "bandTargets": band_targets_json,
             "commentUrls": spec.comment_urls,
+            "commentMode": spec.comment_mode,
+            "commentCount": spec.comment_count,
             "assignments": assignments_json,
         }
     });
@@ -414,6 +423,8 @@ mod tests {
                 blog_links: vec![],
                 clip_links: vec![],
                 band_targets: vec![],
+                comment_mode: String::new(),
+                comment_count: 0,
                 assignments: vec![PublishAssignment {
                     login_id: "acc".into(),
                     stocks: vec![PublishStock { code: "005930".into(), name: "삼성전자".into() }],
