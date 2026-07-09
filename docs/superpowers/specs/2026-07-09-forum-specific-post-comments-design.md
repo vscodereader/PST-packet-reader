@@ -47,14 +47,14 @@ Status: Proposed (구현 전 리뷰용)
 
 ## 재사용 원칙 (없는 것만 신규)
 
-| 필요 | 재사용할 기존 자산 | 위치 |
-| --- | --- | --- |
+| 필요                          | 재사용할 기존 자산                                                   | 위치                                                                            |
+| ----------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | 댓글 1:1 무작위·겹침없는 분배 | `distribute_comments` + `mulberry32` + `shuffle` + `seed_from_clock` | `src-tauri/src/naver_cafe/distribute.rs` (이미 `queue_runner.rs:34`에서 import) |
-| 즉시/예약 큐 적재 | `dispatchPublish(jobs, when)` | `src/features/posts/publish-modal.tsx:1748` |
-| 계정별 1큐 분배 적재 | `dispatchSplitNow(jobs)` | `publish-modal.tsx:1838` |
-| 종토 특정글 잡 생성 | 기존 `commentUrl` 잡 빌드 | `publish-modal.tsx:1288` |
-| 종토 요청 실행 엔진 | `run_forum_publish` (요청당 댓글 1개) | `discussion_batch.rs:219` |
-| 계정 체크박스 UI | `AccountRow` | `publish-modal.tsx` |
+| 즉시/예약 큐 적재             | `dispatchPublish(jobs, when)`                                        | `src/features/posts/publish-modal.tsx:1748`                                     |
+| 계정별 1큐 분배 적재          | `dispatchSplitNow(jobs)`                                             | `publish-modal.tsx:1838`                                                        |
+| 종토 특정글 잡 생성           | 기존 `commentUrl` 잡 빌드                                            | `publish-modal.tsx:1288`                                                        |
+| 종토 요청 실행 엔진           | `run_forum_publish` (요청당 댓글 1개)                                | `discussion_batch.rs:219`                                                       |
+| 계정 체크박스 UI              | `AccountRow`                                                         | `publish-modal.tsx`                                                             |
 
 **무손상**: 기존 "나눠서 게시"(= **종목**을 계정에 분배, `canDistribute`
 `publish-modal.tsx:1543` / `distributeForumJobs:1551` / `dispatchSplitNow`)는 **종목 잡

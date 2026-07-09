@@ -222,6 +222,11 @@ pub struct PublishPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub login: Option<Vec<LoginTarget>>,
+    /// "나눠서 게시"(#403): 종토 "특정 게시글" 댓글을 계정에 **1:1 무작위**로 분배할지.
+    /// `false`(기본)=정상(각 계정이 모든 댓글을 단다). `true`=링크마다 재셔플해 계정마다 댓글
+    /// 1개씩(겹침 없음). 특정글(comment_url) 대상에만 적용 — 그 외엔 무시. 기본값 허용(호환).
+    #[serde(default)]
+    pub forum_comment_distribute: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -913,6 +918,7 @@ mod tests {
             }],
             clip: vec![],
             login: None,
+            forum_comment_distribute: false,
         }
     }
 
@@ -1070,6 +1076,7 @@ mod tests {
             blog: vec![],
             clip: vec![],
             login: None,
+            forum_comment_distribute: false,
         }
     }
 
