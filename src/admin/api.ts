@@ -402,6 +402,16 @@ export const api = {
         count?: number; // 최신 N개(logNo 없을 때).
         link: string;
       }[]; // 블로그 댓글 대상(target=="blog")
+      clipLinks?: {
+        handle: string; // 창작자 핸들(@ 제외)
+        mediaType?: string; // "video"면 영상만, 그 외/빈값=전체
+        count?: number; // 최신 미디어 개수
+        link: string;
+      }[]; // 클립 댓글 대상(target=="clip")
+      bandTargets?: {
+        bandNo: string; // 밴드 식별자(라벨용)
+        link: string; // 밴드 홈 또는 특정 글 URL(백엔드가 band_no/post_no 추출)
+      }[]; // 밴드 게시 대상(target=="band")
       assignments: { loginId: string; stocks: { code: string; name: string }[] }[];
     }): Promise<{ ok: boolean; commandId: string }> {
       return request("POST", "/admin/publish", req);
@@ -431,6 +441,16 @@ export const api = {
         count?: number;
         link: string;
       }[]; // 블로그 댓글 대상(target=="blog")
+      clipLinks?: {
+        handle: string;
+        mediaType?: string;
+        count?: number;
+        link: string;
+      }[]; // 클립 댓글 대상(target=="clip")
+      bandTargets?: {
+        bandNo: string;
+        link: string;
+      }[]; // 밴드 게시 대상(target=="band")
       assignments: { loginId: string; stocks: { code: string; name: string }[] }[];
       at: number; // 발송 시각 epoch ms
       detail: string;

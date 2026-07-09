@@ -57,6 +57,12 @@ pub struct PublishSpec {
     /// 블로그 댓글 링크 파싱 결과(target=="blog"일 때). 하위가 계정×블로그링크로 댓글을 단다.
     #[serde(default)]
     pub blog_links: Vec<PublishBlogLink>,
+    /// 클립 댓글 링크 파싱 결과(target=="clip"일 때). 하위가 계정×창작자로 최신 N개에 댓글을 단다.
+    #[serde(default)]
+    pub clip_links: Vec<PublishClipLink>,
+    /// 밴드 게시 링크 파싱 결과(target=="band"일 때). 하위가 계정×밴드로 글/댓글을 올린다.
+    #[serde(default)]
+    pub band_targets: Vec<PublishBandTarget>,
     pub assignments: Vec<PublishAssignment>,
 }
 
@@ -85,6 +91,31 @@ pub struct PublishBlogLink {
     pub category_no: u32,
     #[serde(default)]
     pub count: u32,
+    #[serde(default)]
+    pub link: String,
+}
+
+/// 클립 댓글 대상(Admin이 parseClipLink로 파싱해 보냄). handle=창작자 핸들(@ 제외),
+/// mediaType="video"면 영상만, count=최신 미디어 개수. 클립은 최신 N개 단일 모드.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishClipLink {
+    pub handle: String,
+    #[serde(default)]
+    pub media_type: String,
+    #[serde(default)]
+    pub count: u32,
+    #[serde(default)]
+    pub link: String,
+}
+
+/// 밴드 게시 대상(Admin이 bandNoFromLink/parseBandPostUrl로 파싱해 보냄). bandNo=밴드 식별자(라벨용),
+/// link=게시 시점 백엔드가 band_no/post_no를 뽑는 원본 링크(밴드 홈 또는 특정 글 URL).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishBandTarget {
+    #[serde(default)]
+    pub band_no: String,
     #[serde(default)]
     pub link: String,
 }
@@ -176,6 +207,28 @@ pub async fn dispatch_publish(
             })
         })
         .collect();
+    let clip_links_json: Vec<serde_json::Value> = spec
+        .clip_links
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "handle": c.handle,
+                "mediaType": c.media_type,
+                "count": c.count,
+                "link": c.link,
+            })
+        })
+        .collect();
+    let band_targets_json: Vec<serde_json::Value> = spec
+        .band_targets
+        .iter()
+        .map(|b| {
+            serde_json::json!({
+                "bandNo": b.band_no,
+                "link": b.link,
+            })
+        })
+        .collect();
     let payload = serde_json::json!({
         "type": "publish_posts",
         "commandId": cid,
@@ -188,6 +241,8 @@ pub async fn dispatch_publish(
             "target": target,
             "cafeBoards": cafe_boards_json,
             "blogLinks": blog_links_json,
+            "clipLinks": clip_links_json,
+            "bandTargets": band_targets_json,
             "commentUrls": spec.comment_urls,
             "assignments": assignments_json,
         }
@@ -356,6 +411,9 @@ mod tests {
                 comment_urls: vec![],
                 target: String::new(),
                 cafe_boards: vec![],
+                blog_links: vec![],
+                clip_links: vec![],
+                band_targets: vec![],
                 assignments: vec![PublishAssignment {
                     login_id: "acc".into(),
                     stocks: vec![PublishStock { code: "005930".into(), name: "삼성전자".into() }],

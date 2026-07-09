@@ -23,8 +23,8 @@ use crate::ipc::accounts::{Account, AccountStatus, PlatformId};
 use crate::ipc::log_batches::LogBatch;
 use crate::ipc::posts::{CommentTarget, ModeValue};
 use crate::ipc::queue::{
-    apply_priority_order, as_fresh_now_item, BlogTarget, CommentTargetSpec, ForumTarget,
-    LoginTarget, NaverTarget, PublishPlan, QueueLocation, QueueNowItem, QueueState,
+    apply_priority_order, as_fresh_now_item, BandTarget, BlogTarget, ClipTarget, CommentTargetSpec,
+    ForumTarget, LoginTarget, NaverTarget, PublishPlan, QueueLocation, QueueNowItem, QueueState,
 };
 use crate::ipc::queue_runner::{start_if_idle, NowQueueRunner};
 use crate::store::JsonStore;
@@ -102,6 +102,25 @@ fn is_cafe_platform(s: &str) -> bool {
     s == "naver"
 }
 
+/// 로그인 엔진 선택용 플랫폼: **밴드만 Band**(band.us 로그인=process_band_account), 그 외(종토/
+/// 블로그/클립 등)는 **Naver**(process_account). 러너가 LoginTarget.platform으로 분기하므로
+/// (queue_runner.rs), 밴드 계정은 반드시 Band로 태워야 band.us 로그인이 돈다. 문자열(AccountIn) 판.
+fn login_platform_from_str(s: &str) -> PlatformId {
+    if s == "band" {
+        PlatformId::Band
+    } else {
+        PlatformId::Naver
+    }
+}
+
+/// 위와 동일하되 저장된 계정의 PlatformId 판(import_then_login_all 재로그인용).
+fn login_platform_for(p: &PlatformId) -> PlatformId {
+    match p {
+        PlatformId::Band => PlatformId::Band,
+        _ => PlatformId::Naver,
+    }
+}
+
 /// 계정 상태 → 인벤토리용 문자열(AccountStatus serde camelCase와 동일).
 fn status_to_str(s: &AccountStatus) -> &'static str {
     match s {
@@ -147,6 +166,14 @@ struct PublishCmd {
     /// (계정×블로그링크). logNo가 있으면 특정 글, 없으면 최신 N개(count/categoryNo) 대상이다.
     #[serde(default)]
     blog_links: Vec<BlogLinkIn>,
+    /// 클립 댓글 대상(target=="clip"일 때). 각 계정이 이 창작자(들)의 최신 N개 미디어에 댓글을 단다
+    /// (계정×클립링크). 클립은 최신 N개 단일 모드다(특정 영상·인기 정렬 없음).
+    #[serde(default)]
+    clip_links: Vec<ClipLinkIn>,
+    /// 밴드 게시 대상(target=="band"일 때). 각 계정이 이 밴드(들)에 글/댓글을 올린다(계정×밴드).
+    /// 글/글+댓글=새 글, 댓글=글에 동결된 대상(최신/인기/특정글URL)로 엔진이 처리.
+    #[serde(default)]
+    band_targets: Vec<BandTargetIn>,
     assignments: Vec<PublishAssign>,
 }
 /// 카페 게시판/글 링크 파싱 결과(Admin이 parseCafeBoardLink/parseCafeArticleUrl로 파싱해 보냄).
@@ -175,6 +202,31 @@ struct BlogLinkIn {
     category_no: u32,
     #[serde(default)]
     count: u32,
+    #[serde(default)]
+    link: String,
+}
+/// 클립 댓글 링크 파싱 결과(Admin이 parseClipLink로 파싱해 보냄). handle=창작자 핸들(@ 제외),
+/// media_type="video"면 영상만·그 외/빈값=전체, count=최신 미디어 개수(기본 1). 클립은 최신 N개
+/// 단일 모드라 특정 영상/인기 정렬 대상은 없다.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClipLinkIn {
+    handle: String,
+    #[serde(default)]
+    media_type: String,
+    #[serde(default)]
+    count: u32,
+    #[serde(default)]
+    link: String,
+}
+/// 밴드 게시 링크 파싱 결과(Admin이 bandNoFromLink/parseBandPostUrl로 파싱해 보냄). band_no=밴드
+/// 식별자(표시·라벨용), link=게시 시점 백엔드가 band_no/post_no를 뽑는 원본 링크(밴드 홈 또는
+/// 특정 글 URL). 댓글 대상 모드/개수는 글(commentTarget/commentCount)에 동결된 값을 쓴다.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BandTargetIn {
+    #[serde(default)]
+    band_no: String,
     #[serde(default)]
     link: String,
 }
@@ -487,15 +539,17 @@ fn dispatch<R: Runtime>(app: &AppHandle<R>, cmd: &Command) -> (&'static str, Str
         "distribute_accounts" => {
             let (added, visible) = add_accounts(app, &cmd.accounts);
             // 카페(naver)는 분배 시 로그인하지 않고 등록만 한다(카페는 게시 순간 id/pw로 로그인).
-            // 그 외(종토·밴드 등)만 분배 직후 자동 로그인 큐에 태운다.
-            let login_ids: Vec<String> = cmd
+            // 그 외(종토·블로그·클립·밴드)만 분배 직후 자동 로그인 큐에 태운다. 로그인 엔진은 계정
+            // 플랫폼별로 다르다 — 밴드=band.us(Band), 그 외=네이버(Naver). login_platform_for로 정한다.
+            let logins: Vec<(String, PlatformId)> = cmd
                 .accounts
                 .iter()
                 .filter(|a| !is_cafe_platform(&a.platform))
-                .map(|a| a.login_id.clone())
+                .map(|a| (a.login_id.clone(), login_platform_from_str(&a.platform)))
                 .collect();
-            let cafe_only = cmd.accounts.len().saturating_sub(login_ids.len());
-            let queue_id = enqueue_login(app, &login_ids);
+            let cafe_only = cmd.accounts.len().saturating_sub(logins.len());
+            let login_ids: Vec<String> = logins.iter().map(|(id, _)| id.clone()).collect();
+            let queue_id = enqueue_login(app, &logins);
             (
                 "ok",
                 format!(
@@ -510,9 +564,10 @@ fn dispatch<R: Runtime>(app: &AppHandle<R>, cmd: &Command) -> (&'static str, Str
             )
         }
         "import_then_login_all" => {
-            let ids = all_login_ids(app);
+            let logins = all_logins(app);
+            let ids: Vec<String> = logins.iter().map(|(id, _)| id.clone()).collect();
             let n = ids.len();
-            let queue_id = enqueue_login(app, &ids);
+            let queue_id = enqueue_login(app, &logins);
             (
                 "ok",
                 format!("전체 로그인 시작 — {n}건"),
@@ -723,6 +778,35 @@ fn enqueue_publish<R: Runtime>(
             &post.comments,
             now_ms(),
         )
+    } else if p.target == "clip" {
+        // 클립도 댓글 전용 — 계정×클립링크로 plan.clip(ClipTarget) 최신 N개를 조립한다(블로그 미러).
+        build_clip_publish_items(
+            &p.assignments,
+            &p.clip_links,
+            &p.post_id,
+            &plan_title,
+            &effective_title,
+            &post.body,
+            mode,
+            &post.comments,
+            now_ms(),
+        )
+    } else if p.target == "band" {
+        // 밴드는 글/댓글/글+댓글 전부 — 계정×밴드로 plan.band(BandTarget)를 조립한다(카페 미러).
+        // 댓글 대상 모드/개수는 글에 동결된 값(commentTarget/commentCount)을 그대로 쓴다.
+        build_band_publish_items(
+            &p.assignments,
+            &p.band_targets,
+            &p.post_id,
+            &plan_title,
+            &effective_title,
+            &post.body,
+            mode,
+            &post.comments,
+            post.comment_target,
+            post.comment_count,
+            now_ms(),
+        )
     } else {
         build_publish_items(
             &p.assignments,
@@ -749,7 +833,7 @@ fn enqueue_publish<R: Runtime>(
         .map(|i| {
             i.plan
                 .as_ref()
-                .map(|p| p.forum.len() + p.naver.len() + p.blog.len())
+                .map(|p| p.forum.len() + p.naver.len() + p.blog.len() + p.clip.len() + p.band.len())
                 .unwrap_or(0)
         })
         .sum();
@@ -1109,6 +1193,192 @@ fn build_blog_publish_items(
     items
 }
 
+/// 클립(네이버 클립) 댓글 큐 아이템을 만든다(순수 — 테스트 대상). 클립은 **댓글 전용**이며 블로그와
+/// 같은 네이버 쿠키를 재사용한다(별도 로그인 없음). **계정 하나당 큐 1개**(블로그·카페·종토와 동일)
+/// 이며, 그 계정이 고른 창작자(들)의 **최신 N개** 미디어에 댓글을 단다(plan.clip=ClipTarget). 종목
+/// (assignment.stocks)은 클립에서 쓰지 않는다. 클립은 최신 N개 단일 모드다(특정 영상·인기 정렬 없음).
+/// media_type="video"면 영상만, 그 외/빈값이면 전체(None). 댓글 본문은 plan.comments를 그대로 실어
+/// 러너(run_clip_targets)가 cafe/band/blog와 동일하게 이어붙여 쓴다.
+#[allow(clippy::too_many_arguments)]
+fn build_clip_publish_items(
+    assignments: &[PublishAssign],
+    clip_links: &[ClipLinkIn],
+    post_id: &str,
+    plan_title: &str,
+    effective_title: &str,
+    body: &str,
+    mode: ModeValue,
+    comments: &[String],
+    now: u128,
+) -> Vec<QueueNowItem> {
+    if clip_links.is_empty() {
+        return Vec::new();
+    }
+    let mut items = Vec::new();
+    for (idx, a) in assignments.iter().enumerate() {
+        let mut clip: Vec<ClipTarget> = Vec::new();
+        let mut locs: Vec<QueueLocation> = Vec::new();
+        for c in clip_links.iter() {
+            let name = if c.handle.is_empty() {
+                c.link.clone()
+            } else {
+                c.handle.clone()
+            };
+            // media_type은 "video"만 영상 전용, 그 외/빈값은 전체(None → 엔진 기본=전체).
+            let media_type = if c.media_type == "video" {
+                Some("video".to_string())
+            } else {
+                None
+            };
+            clip.push(ClipTarget {
+                account_id: a.login_id.clone(),
+                name: name.clone(),
+                handle: c.handle.clone(),
+                link: c.link.clone(),
+                count: Some(c.count.max(1)),
+                media_type,
+            });
+            locs.push(QueueLocation {
+                p: PlatformId::Clip,
+                name: format!("클립 최신글 댓글 · @{name}"),
+                code: None,
+            });
+        }
+        if clip.is_empty() {
+            continue;
+        }
+        items.push(QueueNowItem {
+            id: format!("agent-publish-{now}-{idx}"),
+            title: plan_title.to_string(),
+            kind: mode.clone(),
+            state: QueueState::Waiting,
+            batch_id: None,
+            progress: None,
+            locs,
+            plan: Some(PublishPlan {
+                post_id: post_id.to_string(),
+                kind: mode.clone(),
+                title: effective_title.to_string(),
+                body_text: body.to_string(),
+                // 클립은 댓글 전용 — 저장된 댓글 텍스트를 그대로 실어 러너가 쓴다.
+                comments: comments.to_vec(),
+                link_override: String::new(),
+                naver: vec![],
+                forum: vec![],
+                band: vec![],
+                blog: vec![],
+                clip,
+                login: None,
+            }),
+            items: vec![],
+        });
+    }
+    items
+}
+
+/// 밴드(band.us) 게시 큐 아이템을 만든다(순수 — 테스트 대상). 밴드는 **글/댓글/글+댓글 전부** 지원
+/// 하며 band.us 쿠키를 쓴다(분배 시 로그인해 확보). **계정 하나당 큐 1개**(카페·종토와 동일)이며,
+/// 그 계정이 고른 밴드(들)에 글/댓글을 올린다(plan.band=BandTarget). 종목(assignment.stocks)은 밴드에서
+/// 쓰지 않는다. 글/글+댓글=comment_target None(새 글, both면 자기 글에 댓글까지 엔진이). 댓글=글에
+/// 동결된 commentTarget(최신/인기/특정글URL)/commentCount를 CommentTargetSpec으로 실어 러너가 처리
+/// (url이면 band_comment_on_post가 link의 특정 글에, latest/popular면 band_comment가 최신/인기 N개에).
+#[allow(clippy::too_many_arguments)]
+fn build_band_publish_items(
+    assignments: &[PublishAssign],
+    band_targets: &[BandTargetIn],
+    post_id: &str,
+    plan_title: &str,
+    effective_title: &str,
+    body: &str,
+    mode: ModeValue,
+    comments: &[String],
+    comment_target: Option<CommentTarget>,
+    comment_count: Option<u32>,
+    now: u128,
+) -> Vec<QueueNowItem> {
+    if band_targets.is_empty() {
+        return Vec::new();
+    }
+    let is_comment = matches!(mode, ModeValue::Comment);
+    // 댓글/글+댓글은 저장된 댓글 텍스트를 plan.comments로 실어 엔진이 쓴다(글+댓글=자기 글에 댓글).
+    let plan_comments: Vec<String> = if matches!(mode, ModeValue::Comment | ModeValue::Both) {
+        comments.to_vec()
+    } else {
+        vec![]
+    };
+    // 댓글 대상 모드/개수는 글에 동결된 값(카페 미러). 없으면 최신 1개.
+    let ct_mode = comment_target.unwrap_or(CommentTarget::Latest);
+    let count = comment_count.unwrap_or(1).max(1);
+
+    let mut items = Vec::new();
+    for (idx, a) in assignments.iter().enumerate() {
+        let mut band: Vec<BandTarget> = Vec::new();
+        let mut locs: Vec<QueueLocation> = Vec::new();
+        for b in band_targets.iter() {
+            let name = if b.band_no.is_empty() {
+                b.link.clone()
+            } else {
+                format!("밴드 {}", b.band_no)
+            };
+            // 댓글 전용이면 글에 동결된 대상 모드/개수를 실어 러너가 최신/인기/특정글URL로 해석한다.
+            // 글/글+댓글이면 comment_target None(새 글 게시).
+            let target_spec = if is_comment {
+                Some(CommentTargetSpec {
+                    mode: ct_mode.clone(),
+                    count: Some(count),
+                    cafe_id: None,
+                    article_id: None,
+                })
+            } else {
+                None
+            };
+            band.push(BandTarget {
+                account_id: a.login_id.clone(),
+                name: name.clone(),
+                link: b.link.clone(),
+                comment_target: target_spec,
+            });
+            locs.push(QueueLocation {
+                p: PlatformId::Band,
+                name: if is_comment {
+                    format!("밴드 댓글 · {name}")
+                } else {
+                    format!("밴드 글 · {name}")
+                },
+                code: None,
+            });
+        }
+        if band.is_empty() {
+            continue;
+        }
+        items.push(QueueNowItem {
+            id: format!("agent-publish-{now}-{idx}"),
+            title: plan_title.to_string(),
+            kind: mode.clone(),
+            state: QueueState::Waiting,
+            batch_id: None,
+            progress: None,
+            locs,
+            plan: Some(PublishPlan {
+                post_id: post_id.to_string(),
+                kind: mode.clone(),
+                title: effective_title.to_string(),
+                body_text: body.to_string(),
+                comments: plan_comments.clone(),
+                link_override: String::new(),
+                naver: vec![],
+                forum: vec![],
+                band,
+                blog: vec![],
+                clip: vec![],
+                login: None,
+            }),
+            items: vec![],
+        });
+    }
+    items
+}
+
 /// 로컬 글(LibraryPost) 로드 결과. 카페 댓글은 대상(commentTarget)/개수(commentCount)가 글에
 /// 동결돼 있어(데스크톱과 동일) 함께 꺼낸다. 없으면 전부 기본값(best-effort).
 #[derive(Default)]
@@ -1209,11 +1479,12 @@ fn add_accounts<R: Runtime>(app: &AppHandle<R>, accounts: &[AccountIn]) -> (usiz
     (added, visible)
 }
 
-fn all_login_ids<R: Runtime>(app: &AppHandle<R>) -> Vec<String> {
+/// 전체 계정을 (loginId, 로그인엔진 플랫폼)로 반환(재로그인용). 밴드=Band, 그 외=Naver.
+fn all_logins<R: Runtime>(app: &AppHandle<R>) -> Vec<(String, PlatformId)> {
     app.state::<JsonStore<Account>>()
         .snapshot()
         .into_iter()
-        .map(|a| a.login_id)
+        .map(|a| (a.login_id, login_platform_for(&a.platform)))
         .collect()
 }
 
@@ -1232,26 +1503,27 @@ fn delete_by_login_ids<R: Runtime>(app: &AppHandle<R>, login_ids: &[String]) -> 
     removed
 }
 
-/// 선택 로그인(종토) 큐 아이템 1개를 만들어 기존 now 큐에 적재 + 러너 기동. 큐 아이템 id 반환.
-fn enqueue_login<R: Runtime>(app: &AppHandle<R>, login_ids: &[String]) -> Option<String> {
-    if login_ids.is_empty() {
+/// 선택 로그인 큐 아이템 1개를 만들어 기존 now 큐에 적재 + 러너 기동. 큐 아이템 id 반환. 각 계정은
+/// (loginId, 로그인엔진 플랫폼) 쌍으로 오며, 러너가 LoginTarget.platform으로 네이버/밴드를 분기한다.
+fn enqueue_login<R: Runtime>(app: &AppHandle<R>, logins: &[(String, PlatformId)]) -> Option<String> {
+    if logins.is_empty() {
         return None;
     }
-    let login: Vec<LoginTarget> = login_ids
+    let login: Vec<LoginTarget> = logins
         .iter()
-        .map(|id| LoginTarget {
+        .map(|(id, platform)| LoginTarget {
             account_id: id.clone(),
-            platform: PlatformId::Naver,
+            platform: platform.clone(),
             headless: false,
             use_adb: true,
             force: true,
         })
         .collect();
-    let locs: Vec<QueueLocation> = login_ids
+    let locs: Vec<QueueLocation> = logins
         .iter()
-        .map(|id| QueueLocation { p: PlatformId::Forum, name: id.clone(), code: None })
+        .map(|(id, _)| QueueLocation { p: PlatformId::Forum, name: id.clone(), code: None })
         .collect();
-    let title = format!("계정 로그인 {}건", login_ids.len());
+    let title = format!("계정 로그인 {}건", logins.len());
     let id = format!("agent-login-{}", now_ms());
     let item = QueueNowItem {
         id: id.clone(),
@@ -2004,6 +2276,106 @@ mod tests {
             9,
         );
         assert_eq!(items2[0].plan.as_ref().unwrap().blog[0].count, Some(1));
+    }
+
+    #[test]
+    fn build_clip_publish_items_one_queue_per_account_latest_only() {
+        // 클립 댓글: 계정당 큐 1개, 그 계정이 고른 창작자(들)의 최신 N개에 댓글(plan.clip). 전체/영상.
+        let assignments = vec![
+            PublishAssign { login_id: "acc_a".into(), stocks: vec![] },
+            PublishAssign { login_id: "acc_b".into(), stocks: vec![] },
+        ];
+        let links = vec![
+            ClipLinkIn {
+                handle: "dongzzi_chef".into(),
+                media_type: String::new(), // 전체
+                count: 5,
+                link: "https://clip.naver.com/@dongzzi_chef".into(),
+            },
+            ClipLinkIn {
+                handle: "mugidaebackgwa".into(),
+                media_type: "video".into(), // 영상만
+                count: 0,                   // 방어 → 최신 1개
+                link: "https://clip.naver.com/@mugidaebackgwa?tab=video".into(),
+            },
+        ];
+        let items = build_clip_publish_items(
+            &assignments,
+            &links,
+            "p1",
+            "제목",
+            "제목",
+            "",
+            ModeValue::Comment,
+            &["댓글1".to_string()],
+            1234,
+        );
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id, "agent-publish-1234-0");
+        let c0 = &items[0].plan.as_ref().unwrap().clip;
+        assert_eq!(c0.len(), 2);
+        assert!(c0.iter().all(|t| t.account_id == "acc_a"));
+        // 전체=media_type None, count Some(5).
+        assert_eq!(c0[0].handle, "dongzzi_chef");
+        assert_eq!(c0[0].media_type, None);
+        assert_eq!(c0[0].count, Some(5));
+        // 영상만=media_type Some("video"), count=0 방어 → Some(1).
+        assert_eq!(c0[1].media_type, Some("video".to_string()));
+        assert_eq!(c0[1].count, Some(1));
+        // 댓글 본문 실림, 클립 경로라 forum/naver/blog/band 빈다.
+        assert_eq!(
+            items[0].plan.as_ref().unwrap().comments,
+            vec!["댓글1".to_string()]
+        );
+        let p0 = items[0].plan.as_ref().unwrap();
+        assert!(p0.forum.is_empty() && p0.naver.is_empty() && p0.blog.is_empty() && p0.band.is_empty());
+        assert!(p0.login.is_none());
+    }
+
+    #[test]
+    fn build_band_publish_items_post_none_target_and_comment_frozen_target() {
+        let assignments = vec![
+            PublishAssign { login_id: "acc_a".into(), stocks: vec![] },
+            PublishAssign { login_id: "acc_b".into(), stocks: vec![] },
+        ];
+        let bands = vec![
+            BandTargetIn { band_no: "103043410".into(), link: "https://band.us/band/103043410".into() },
+            BandTargetIn { band_no: String::new(), link: "https://band.us/band/200/post/9".into() },
+        ];
+        // 글 모드: comment_target None(새 글 게시), 계정당 큐 1개.
+        let posts = build_band_publish_items(
+            &assignments, &bands, "p1", "제목", "제목", "본문",
+            ModeValue::Post, &[], None, None, 1,
+        );
+        assert_eq!(posts.len(), 2);
+        let pb = &posts[0].plan.as_ref().unwrap().band;
+        assert_eq!(pb.len(), 2);
+        assert!(pb.iter().all(|t| t.comment_target.is_none()));
+        assert_eq!(pb[0].link, "https://band.us/band/103043410");
+        // 댓글 모드: 글에 동결된 대상(인기 3개)을 CommentTargetSpec으로 실어 보낸다.
+        let comments = build_band_publish_items(
+            &assignments, &bands, "p1", "제목", "제목", "",
+            ModeValue::Comment, &["댓글1".to_string()],
+            Some(CommentTarget::Popular), Some(3), 2,
+        );
+        let cb = &comments[0].plan.as_ref().unwrap().band;
+        let spec = cb[0].comment_target.as_ref().expect("댓글 모드는 대상 있음");
+        assert_eq!(spec.mode, CommentTarget::Popular);
+        assert_eq!(spec.count, Some(3));
+        assert_eq!(
+            comments[0].plan.as_ref().unwrap().comments,
+            vec!["댓글1".to_string()]
+        );
+    }
+
+    #[test]
+    fn login_platform_maps_band_only() {
+        assert_eq!(login_platform_from_str("band"), PlatformId::Band);
+        assert_eq!(login_platform_from_str("clip"), PlatformId::Naver);
+        assert_eq!(login_platform_from_str("blog"), PlatformId::Naver);
+        assert_eq!(login_platform_from_str("forum"), PlatformId::Naver);
+        assert_eq!(login_platform_for(&PlatformId::Band), PlatformId::Band);
+        assert_eq!(login_platform_for(&PlatformId::Clip), PlatformId::Naver);
     }
 
     #[test]
