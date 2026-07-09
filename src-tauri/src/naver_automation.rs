@@ -501,6 +501,10 @@ pub(crate) struct CdpClient {
     net_inflight: std::collections::HashMap<String, (String, Option<u16>)>,
     // 최근 끝난 요청 중 *실패/4xx·5xx* 만 요약해 모은다(정상 2xx는 노이즈라 제외, 상한 있음).
     net_recent: Vec<String>,
+    // 지금까지 관측한 `Page.loadEventFired`(브라우저의 window.load 이벤트) 횟수. navigate/reload 가
+    // "직전 페이지의 stale readyState=complete" 를 오판하지 않도록, 폴링 대신 이 이벤트 카운터로
+    // "새 문서 로드 완료" 를 판정한다(조회수 부스트 view_boost 등에서 사용). Page.enable 필요.
+    page_loads: u64,
 }
 
 impl CdpClient {
@@ -514,6 +518,7 @@ impl CdpClient {
             port,
             net_inflight: std::collections::HashMap::new(),
             net_recent: Vec::new(),
+            page_loads: 0,
         })
     }
 
@@ -729,6 +734,11 @@ impl CdpClient {
                 // 우리 명령 응답이 아니면(브라우저가 보낸 method 이벤트) 네트워크 진단용으로 수집하고
                 // 계속 읽는다 — 페이지 로드 멈춤의 진짜 원인(어떤 요청이 멈췄나)을 잡기 위함.
                 if let Some(method) = value.get("method").and_then(Value::as_str) {
+                    if method == "Page.loadEventFired" {
+                        // 새 페이지의 window.load 가 실제로 발생 — 카운터로 남겨, 대기 로직이
+                        // stale readyState 오판 없이 "진짜 로드 완료"를 판정하게 한다.
+                        self.page_loads = self.page_loads.wrapping_add(1);
+                    }
                     self.record_network_event(method, &value);
                 }
                 continue;
@@ -1015,6 +1025,42 @@ impl CdpClient {
         Err(AutomationError::new(format!(
             "페이지 로드 대기 시간이 초과되었습니다. (멈춘 페이지: {stuck_url})"
         )))
+    }
+
+    // 지금까지 관측한 `Page.loadEventFired`(브라우저 window.load) 횟수. navigate/reload 직전에
+    // 스냅샷을 찍고 `wait_for_new_load`에 넘겨, 그 이후에 발생한 *새* load 이벤트만 기다린다.
+    pub(crate) fn page_load_count(&self) -> u64 {
+        self.page_loads
+    }
+
+    // `since`(대기 시작 전 `page_load_count` 스냅샷) 이후에 **새 `Page.loadEventFired` 이벤트가 한 번
+    // 이상** 발생할 때까지 기다린다. `readyState` 폴링과 달리 직전 페이지의 stale "complete"에 속지
+    // 않는다 — navigate/reload 가 실제로 새 문서를 다 로드했을 때만 통과한다(조회수 부스트에서 창을
+    // 너무 일찍 닫는 문제를 막는다).
+    //
+    // CDP 이벤트는 `call` 응답을 읽는 도중에만 소켓에서 흘러오므로, 가벼운 멱등 호출
+    // (`Runtime.evaluate "0"`)로 메시지 펌프를 돌려 그 사이 큐된 load 이벤트를 읽어들인다(그 read
+    // 루프에서 `page_loads` 가 증가한다). 이동 중 execution context 파괴로 evaluate 가 실패해도
+    // 무해 — 어차피 카운터만 보고 판단하며 재시도한다.
+    pub(crate) fn wait_for_new_load(
+        &mut self,
+        since: u64,
+        timeout: Duration,
+    ) -> AutomationResult<()> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.page_loads > since {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(AutomationError::new(
+                    "페이지 load 이벤트(Page.loadEventFired) 대기 시간이 초과되었습니다.",
+                ));
+            }
+            // 메시지 펌프: 가벼운 호출의 read 루프가 큐된 load 이벤트를 처리한다. 실패는 무시.
+            let _ = self.evaluate("0");
+            sleep(Duration::from_millis(150));
+        }
     }
 }
 
