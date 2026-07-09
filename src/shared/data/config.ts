@@ -133,12 +133,12 @@ export const STATUS_ACCOUNT_ORDER = [
   "error",
 ];
 
-// 사용자가 배지를 클릭해 순환시킬 수 있는 "사람이 정하는" 상태만 둔다. 비번오류/인증필요/
-// 에러는 로그인 워커가 자동으로 설정하는 표시 전용 상태라 수동 순환에서 제외한다.
-// 사용자가 배지를 클릭해 직접 순환시킬 수 있는 상태(#267-3). "active" 다음에 "waiting"을 둬
-// 활성 배지를 누르면 대기로 바꿀 수 있게 한다. "waiting" 배지를 누르면 StatusBadge가 곧장
-// 활성으로 되돌린다(특수 처리)므로, 여기 순환상 waiting 다음(blocked)으로는 넘어가지 않는다.
-export const STATUS_ACCOUNT_CYCLE = ["new", "active", "waiting", "blocked"];
+// 사용자가 배지를 클릭해 순환시킬 수 있는 "사람이 정하는" 상태. 비번오류/인증필요/에러 등
+// 로그인 워커가 자동 설정하는 표시 전용 상태는 제외한다. 순환: 활성→대기→보류→활성(#398).
+// "보류"(onHold)를 수동 설정할 수 있어야 캡차가 떠도 사용자가 직접 풀 시간(WaitCaptcha, 120초)이
+// 주어진다 — 백엔드(auth/mod.rs)가 저장된 OnHold 상태를 읽어 그 경로를 켠다. 순환 밖 상태(사용전/
+// 차단 등)에서 클릭하면 StatusBadge가 첫 값(활성)으로 보낸다.
+export const STATUS_ACCOUNT_CYCLE = ["active", "waiting", "onHold"];
 
 // 상태별 사용자 조치 안내(정적). 백엔드 `auth::outcome::guide`와 의미를 맞춘다. 배지
 // tooltip에 보여, 사용자가 다음에 무엇을 해야 할지 알 수 있게 한다.

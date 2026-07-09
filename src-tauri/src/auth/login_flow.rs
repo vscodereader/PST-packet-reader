@@ -1041,8 +1041,8 @@ fn enable_keep_signed_in(client: &mut CdpClient) {
 /// 스위치가 꺼져 있으면 **즉시 반환**해 기존 로그인 타이밍을 바이트 단위로 그대로 둔다(기본 동작
 /// 무변경). best-effort — 준비를 못 해도 경고만 남기고 제출은 계속한다(실험자가 로그로 원인 파악).
 fn wait_wtmncapt_ready_for_block_wasm(client: &mut CdpClient) {
-    if std::env::var("PSTMACRO_BLOCK_WASM").is_err() {
-        return; // 실험 스위치 OFF — 기존 타이밍 무변경.
+    if !super::chrome::block_wasm_enabled() {
+        return; // wasm 차단 OFF(PSTMACRO_BLOCK_WASM=0) — 기존 타이밍 무변경.
     }
     // typeof 가드로 ReferenceError 없이, 생성 완료(truthy)까지 확인한다.
     const READY: &str = "(()=>{try{return typeof window.wtmncapt!=='undefined'&&!!window.wtmncapt;}\
