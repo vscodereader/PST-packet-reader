@@ -7,8 +7,8 @@
 //!      (readyState 폴링은 직전 페이지의 stale `"complete"`에 속아 창을 일찍 닫으므로, CDP 이벤트
 //!      기준으로 "진짜 완전 로딩"을 확인한다.) 로드 후 잠시 머물러(dwell) 조회 등록 beacon 이 나갈
 //!      여유를 준다 — 이게 없으면 로드 직후 "칼같이" 닫혀 조회가 등록되지 않는다.
-//!   3. 페이지를 새로고침(`Page.reload`)하고 다시 새 load 이벤트까지 기다린 뒤 또 잠시 머문다.
-//!   4. 그 시크릿창을 닫는다 — [`ChromeHandle`]의 `Drop`이 **그 프로세스 트리(자식 헬퍼 포함)만**
+//!      (새로고침은 사용자 요청으로 제거 — 페이지 완전 로딩만으로 조회가 카운트되므로 불필요.)
+//!   3. 그 시크릿창을 닫는다 — [`ChromeHandle`]의 `Drop`이 **그 프로세스 트리(자식 헬퍼 포함)만**
 //!      `taskkill /PID <pid> /T /F`로 종료하고 `wait()`로 회수한 뒤 임시 프로필을 지운다.
 //!      전체 Chrome을 닫지 않고, 다음 창을 열기 전에 완전 종료를 보장한다(고아 프로세스 방지).
 //!
@@ -51,7 +51,7 @@ pub struct ViewBoostOutcome {
     pub link: String,
     /// 요청한 반복 횟수(N).
     pub requested: u32,
-    /// 실제로 "열기→완전로딩→새로고침→완전로딩→종료"까지 끝낸 횟수.
+    /// 실제로 "열기→완전로딩→종료"까지 끝낸 횟수.
     pub completed: u32,
     /// `completed == requested`(요청 전량 성공)인지.
     pub success: bool,
@@ -134,7 +134,7 @@ fn finalize_outcome(
     }
 }
 
-/// 한 번의 "열기→완전로딩→새로고침→완전로딩→종료" 사이클. 성공하면 `Ok(())`.
+/// 한 번의 "열기→완전로딩→(체류)→종료" 사이클. 성공하면 `Ok(())`.
 ///
 /// 핵심: `handle`(시크릿창)은 이 함수가 끝나며 **명시적으로 `drop`** 되어, 그 프로세스 트리만
 /// 강제 종료·회수된다. `drop`은 `wait()`로 블로킹하므로, 이 함수가 반환한 시점엔 창이 완전히
@@ -153,9 +153,9 @@ fn single_cycle(link: &str) -> Result<(), String> {
             .enable_page_only()
             .map_err(|error| format!("Page 도메인 활성화 실패: {error}"))?;
 
-        // 1) 링크로 이동 — Page.navigate 후 **실제 load 이벤트**가 뜰 때까지 기다린다. readyState
-        //    폴링(직전 페이지의 stale complete 오판)이 아니라 Page.loadEventFired 기준이라 창을
-        //    너무 일찍 닫지 않는다.
+        // 링크로 이동 — Page.navigate 후 **실제 load 이벤트**가 뜰 때까지 기다린다. readyState
+        // 폴링(직전 페이지의 stale complete 오판)이 아니라 Page.loadEventFired 기준이라 창을
+        // 너무 일찍 닫지 않는다.
         let before_nav = client.page_load_count();
         client
             .call("Page.navigate", json!({ "url": link }))
@@ -163,17 +163,8 @@ fn single_cycle(link: &str) -> Result<(), String> {
         client
             .wait_for_new_load(before_nav, LOAD_TIMEOUT)
             .map_err(|error| format!("페이지 완전 로딩 대기 실패: {error}"))?;
-        // 완전 로딩 후 잠시 머문다 — 조회 등록 beacon 이 나갈 여유("칼같이 종료" 방지).
-        sleep(dwell);
-
-        // 2) 새로고침 한 번 — 마찬가지로 새 load 이벤트까지 기다린 뒤 머문다.
-        let before_reload = client.page_load_count();
-        client
-            .call("Page.reload", json!({ "ignoreCache": false }))
-            .map_err(|error| format!("새로고침 실패: {error}"))?;
-        client
-            .wait_for_new_load(before_reload, LOAD_TIMEOUT)
-            .map_err(|error| format!("새로고침 완전 로딩 대기 실패: {error}"))?;
+        // 완전 로딩 후 잠시 머문다 — 조회 등록 beacon 이 나갈 여유("칼같이 종료" 방지). 페이지
+        // 완전 로딩만으로 조회가 카운트되므로 새로고침은 하지 않는다(사용자 요청으로 제거).
         sleep(dwell);
 
         Ok(())
