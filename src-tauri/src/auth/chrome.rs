@@ -373,7 +373,10 @@ fn launch_inner(headless: bool, ua: Option<UaProfile>) -> Result<ChromeHandle, O
     match wait_for_port(&user_data_dir) {
         Ok(port) => {
             handle.port = port;
-            tracing::info!("[CHROME] ✓ Chrome 실행 완료 — 디버그 포트 {port} (완전 로딩됨)");
+            tracing::info!(
+                "[CHROME] ✓ Chrome 실행 완료 — 디버그 포트 {port}, 프로필 {} (완전 로딩됨)",
+                user_data_dir.display()
+            );
             Ok(handle)
         }
         // handle이 Drop되며 프로세스/임시 디렉토리를 정리한다.
