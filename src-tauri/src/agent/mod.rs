@@ -944,6 +944,7 @@ fn build_publish_items(
                 blog: vec![],
                 clip: vec![],
                 login: None,
+                forum_comment_distribute: false,
             }),
             items: vec![],
         });
@@ -1098,6 +1099,7 @@ fn build_cafe_publish_items(
                 blog: vec![],
                 clip: vec![],
                 login: None,
+                forum_comment_distribute: false,
             }),
             items: vec![],
         });
@@ -1186,6 +1188,7 @@ fn build_blog_publish_items(
                 blog,
                 clip: vec![],
                 login: None,
+                forum_comment_distribute: false,
             }),
             items: vec![],
         });
@@ -1269,6 +1272,7 @@ fn build_clip_publish_items(
                 blog: vec![],
                 clip,
                 login: None,
+                forum_comment_distribute: false,
             }),
             items: vec![],
         });
@@ -1372,6 +1376,7 @@ fn build_band_publish_items(
                 blog: vec![],
                 clip: vec![],
                 login: None,
+                forum_comment_distribute: false,
             }),
             items: vec![],
         });
@@ -1546,6 +1551,7 @@ fn enqueue_login<R: Runtime>(app: &AppHandle<R>, logins: &[(String, PlatformId)]
             blog: vec![],
             clip: vec![],
             login: Some(login),
+            forum_comment_distribute: false,
         }),
         items: vec![],
     };
