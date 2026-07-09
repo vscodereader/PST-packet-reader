@@ -1390,6 +1390,23 @@ export const invoke = vi.fn(
         return clone(outcomes);
       }
 
+      // --- 조회수 부스트 (모킹 — 실제 시크릿창 실행 없이 링크별 성공 반환) --
+      case "boost_view_count": {
+        const links = Array.isArray(args?.links)
+          ? (args!.links as string[])
+          : [];
+        const repeats =
+          typeof args?.repeats === "number" ? (args!.repeats as number) : 0;
+        const outcomes = links.map((link) => ({
+          link,
+          requested: repeats,
+          completed: repeats,
+          success: true,
+          message: `${repeats}회 조회수 부스트 완료`,
+        }));
+        return clone(outcomes);
+      }
+
       // --- 엑셀 내보내기 (모킹 — 실제 파일 쓰기 없이 성공 반환) -----------
       case "export_accounts_xlsx":
       case "export_activity_xlsx":

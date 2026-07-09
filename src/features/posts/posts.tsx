@@ -25,6 +25,7 @@ import { Icon } from "@/shared/ui/icons";
 
 import { LikeModal } from "./like-modal";
 import { PublishModal } from "./publish-modal";
+import { ViewCountModal } from "./view-count-modal";
 import { WriterModal } from "./writer-modal";
 
 const PER_PAGE = 10;
@@ -47,6 +48,7 @@ export function Posts({ go }: { go: GoFn }) {
   const [publishDoc, setPublishDoc] = useState<LibraryPost | null>(null);
   const [likeOpen, setLikeOpen] = useState(false);
   const [dislikeOpen, setDislikeOpen] = useState(false);
+  const [viewCountOpen, setViewCountOpen] = useState(false);
 
   const upsert = (doc: LibraryPost) => {
     void ipc.posts.upsert(doc).then(setPosts);
@@ -145,6 +147,15 @@ export function Posts({ go }: { go: GoFn }) {
             }}
           >
             엑셀 가져오기
+          </Button>
+          <Button
+            size="sm"
+            variant="default"
+            color="teal"
+            leftSection={<Icon.eye size={16} />}
+            onClick={() => setViewCountOpen(true)}
+          >
+            조회수
           </Button>
           <Button
             size="sm"
@@ -372,6 +383,10 @@ export function Posts({ go }: { go: GoFn }) {
         open={dislikeOpen}
         reaction="bad"
         onClose={() => setDislikeOpen(false)}
+      />
+      <ViewCountModal
+        open={viewCountOpen}
+        onClose={() => setViewCountOpen(false)}
       />
     </Container>
   );
