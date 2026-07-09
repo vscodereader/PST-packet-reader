@@ -320,6 +320,13 @@ fn run_inner(
         "Page.addScriptToEvaluateOnNewDocument",
         json!({ "source": STEALTH_INIT_JS }),
     );
+    // [진단] 지문·행동 재료 트레이스(기본 OFF). 스텔스와 같은 방식으로 페이지 로드 전 '추가만' 주입.
+    if fp_trace_enabled() {
+        let _ = client.call(
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({ "source": FP_TRACE_INSTALL_JS }),
+        );
+    }
 
     client.navigate(LOGIN_URL)?;
     // navigate가 readyState까지 기다려도, 로그인 폼이 렌더되고 네이버의 keydown 암호화
@@ -378,6 +385,26 @@ fn run_inner(
     // 실험(BLOCK_WASM): wasm 차단 시 SDK 토큰 생성기(wtmncapt) 준비가 늦어 제출이 빠르면 error
     // 토큰이 나가 폴백 캡차로 떨어지는 레이스를 없앤다. 스위치 OFF 면 즉시 반환(기존 타이밍 무변경).
     wait_wtmncapt_ready_for_block_wasm(client);
+    // [진단] 제출 직전 지문·행동 재료 스냅샷(PSTMACRO_FP_TRACE ON 일 때만). 이 시점이 엔진이 토큰용
+    // ciphertext 를 만드는 순간과 가장 가까워, 캡차 판/성공 판의 재료를 pcap 토큰크기와 사후 대조한다.
+    if fp_trace_enabled() {
+        let masked: String = id.chars().take(3).collect::<String>() + "****";
+        // 정직성: 이 값은 봇탐지 엔진이 암호화해 보낸 payload 가 아니라 같은 신호를 우리가 따로 읽은
+        // 것이다(정적 지문=독립 read, behavior=엔진과 같은 DOM 이벤트 카운트). 측정 실패는 성공처럼
+        // 남기지 않고 WARN 으로 구분하고, behavior.installed=false 면 미측정(수치 -1)이라 진짜 0 과
+        // 혼동하지 않게 한다.
+        match client.evaluate_string(FP_TRACE_SNAPSHOT_JS) {
+            Ok(snap) if snap.contains("\"err\"") => tracing::warn!(
+                "[LOGIN][FP] 재료 스냅샷 내부 오류(부분 실패, 값 신뢰 금지) account={masked} {snap}"
+            ),
+            Ok(snap) => tracing::info!(
+                "[LOGIN][FP] 제출직전 재료(독립 read·엔진 payload 아님) account={masked} {snap}"
+            ),
+            Err(error) => {
+                tracing::warn!(%error, "[LOGIN][FP] 재료 스냅샷 평가 실패(미측정) account={masked}")
+            }
+        }
+    }
     // 로그인 버튼을 사람처럼 좌표 마우스 클릭(JS .click() 대신 진짜 mouse 이벤트). 좌표를 못
     // 구하면 .click()으로 폴백한다.
     click_login_button(client)?;
@@ -711,6 +738,67 @@ const AUTOMATION_FINGERPRINT_JS: &str = "(async()=>{try{\
         permMismatch:permMismatch,\
         cdpConsoleTrap:cdpConsoleTrap,\
         glVendor:glVendor,glRenderer:glRenderer\
+    });\
+}catch(e){return '{\"err\":\"'+String(e)+'\"}';}})()";
+
+// [진단] 지문·행동 재료 트레이스(`PSTMACRO_FP_TRACE`, 기본 OFF). 봇탐지 엔진(ncaptcha wasm)에
+// 들어가는 재료를 **암호화 전에** 캡처한다(/v2/tokens ciphertext 는 wasm 내부 랜덤키 암호화라 복호화
+// 불가). ⚠️ 탐지 회피 원칙: 함수/프로토타입 override 절대 금지(엔진의 `_setFunctionErrorKey`(native
+// code 검사)·`_detectFixedCanvas/Webgl`·`_setPrototype` 역탐지). 오직 (a) capture 리스너 **추가**
+// (b) 우리가 값을 **따로 읽기**만 — 엔진이 읽는 값에 영향 0(기존 AUTOMATION_FINGERPRINT_JS 와 동일한
+// 읽기전용 방식). ciphertext 크기는 fetch/Network.enable(탐지표면↑) 대신 pcap 에서 사후 대조.
+fn fp_trace_from_value(value: Option<&str>) -> bool {
+    match value {
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "off" | "no"
+        ),
+        None => false,
+    }
+}
+
+/// 재료 트레이스 활성 여부. **기본 OFF** — `PSTMACRO_FP_TRACE` 를 truthy 로 켤 때만.
+fn fp_trace_enabled() -> bool {
+    fp_trace_from_value(std::env::var("PSTMACRO_FP_TRACE").ok().as_deref())
+}
+
+// 페이지 로드 전 주입: 행동 이벤트를 capture 단계 **리스너 추가만**으로 집계(기존 함수 무변경,
+// preventDefault 안 함, mousemove/scroll 은 passive). 엔진은 "리스너가 더 있는지"는 검사하지 않는다.
+const FP_TRACE_INSTALL_JS: &str = "(()=>{try{if(window.__pmFpTrace)return;\
+    var B={kd:0,ku:0,md:0,mm:0,mu:0,cl:0,scr:0,kt:[],mt:[]};window.__pmFpTrace=B;\
+    var P=function(a,v){if(a.length<800)a.push(v);};\
+    document.addEventListener('keydown',function(){B.kd++;P(B.kt,Math.round(performance.now()));},true);\
+    document.addEventListener('keyup',function(){B.ku++;},true);\
+    document.addEventListener('mousedown',function(){B.md++;},true);\
+    document.addEventListener('mousemove',function(){B.mm++;P(B.mt,Math.round(performance.now()));},{capture:true,passive:true});\
+    document.addEventListener('mouseup',function(){B.mu++;},true);\
+    document.addEventListener('click',function(){B.cl++;},true);\
+    document.addEventListener('scroll',function(){B.scr++;},{capture:true,passive:true});\
+}catch(e){}})()";
+
+// 제출 직전 스냅샷: 정적 지문을 우리가 **따로 읽고**(엔진 호출 가로채지 않음), 행동 카운터를 반환.
+// canvas 는 우리 offscreen 요소라 엔진 canvas 와 무관. 전부 읽기 전용이라 역탐지에 안 걸린다.
+const FP_TRACE_SNAPSHOT_JS: &str = "(async()=>{try{\
+    var B=window.__pmFpTrace;var installed=!!B;\
+    if(!B)B={kd:-1,ku:-1,md:-1,mm:-1,mu:-1,cl:-1,scr:-1,kt:[],mt:[]};\
+    var canvasHash='';\
+    try{var c=document.createElement('canvas');c.width=220;c.height=30;var x=c.getContext('2d');\
+        x.textBaseline='top';x.font='14px Arial';x.fillStyle='#f60';x.fillRect(1,1,62,20);\
+        x.fillStyle='#069';x.fillText('pm-fp',4,4);var u=c.toDataURL();\
+        var h=0;for(var i=0;i<u.length;i++){h=(h*31+u.charCodeAt(i))>>>0;}canvasHash=h.toString(16);}catch(e){}\
+    var audioRate=0;try{var A=window.AudioContext||window.webkitAudioContext;\
+        if(A){var a=new A();audioRate=a.sampleRate;if(a.close)a.close();}}catch(e){}\
+    var he=null;try{if(navigator.userAgentData&&navigator.userAgentData.getHighEntropyValues){\
+        he=await navigator.userAgentData.getHighEntropyValues(['platform','platformVersion','architecture','model','bitness','uaFullVersion']);}}catch(e){}\
+    var n=navigator;var tz='';try{tz=Intl.DateTimeFormat().resolvedOptions().timeZone;}catch(e){}\
+    return JSON.stringify({\
+        hw:{cores:n.hardwareConcurrency,mem:n.deviceMemory,maxTouch:n.maxTouchPoints,\
+            screen:[screen.width,screen.height,screen.colorDepth,window.devicePixelRatio].join('x'),\
+            tz:tz+'|'+new Date().getTimezoneOffset(),platform:n.platform,\
+            langs:(n.languages||[]).join(','),plugins:n.plugins?n.plugins.length:-1},\
+        canvasHash:canvasHash,audioRate:audioRate,highEntropy:he,\
+        behavior:{installed:installed,keydown:B.kd,keyup:B.ku,mousedown:B.md,mousemove:B.mm,\
+                  mouseup:B.mu,click:B.cl,scroll:B.scr,kdTimes:B.kt||[],mmCount:(B.mt?B.mt.length:0)}\
     });\
 }catch(e){return '{\"err\":\"'+String(e)+'\"}';}})()";
 
@@ -2211,5 +2299,34 @@ mod tests {
         assert!(has_session_cookies(&cookies));
         assert!(!has_session_cookies(&[json!({ "name": "NID_AUT" })]));
         assert!(!has_session_cookies(&[]));
+    }
+
+    #[test]
+    fn fp_trace_defaults_off_and_opts_in() {
+        // 기본 OFF — 미설정/빈값/falsy 는 꺼진 채(평소 로그인 무영향).
+        assert!(!fp_trace_from_value(None));
+        assert!(!fp_trace_from_value(Some("")));
+        assert!(!fp_trace_from_value(Some("0")));
+        assert!(!fp_trace_from_value(Some("false")));
+        assert!(!fp_trace_from_value(Some("  OFF ")));
+        // truthy 로 명시할 때만 ON.
+        assert!(fp_trace_from_value(Some("1")));
+        assert!(fp_trace_from_value(Some("on")));
+    }
+
+    #[test]
+    fn fp_trace_js_is_additive_only_no_overrides() {
+        // 탐지 회피 핵심 불변식: 엔진 역탐지(_setFunctionErrorKey/_detectFixed*/_setPrototype)가
+        // 잡는 override/변조 패턴이 트레이스 JS 에 있으면 안 된다(=측정이 봇점수를 올리면 안 됨).
+        for js in [FP_TRACE_INSTALL_JS, FP_TRACE_SNAPSHOT_JS] {
+            assert!(!js.contains("defineProperty"), "프로토타입/속성 변조 금지");
+            assert!(!js.contains(".prototype"), "프로토타입 변조 금지");
+            assert!(!js.contains("preventDefault"), "이벤트 동작 변경 금지");
+            assert!(!js.contains("toDataURL="), "지문 함수 재할당 금지");
+            assert!(!js.contains("getParameter="), "지문 함수 재할당 금지");
+            assert!(!js.contains("fetch="), "fetch 후킹 금지");
+        }
+        // 행동 수집은 리스너 '추가'만.
+        assert!(FP_TRACE_INSTALL_JS.contains("addEventListener"));
     }
 }
