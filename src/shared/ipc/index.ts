@@ -86,6 +86,18 @@ export interface LikeOutcome {
   message: string;
 }
 
+/** "조회수" 부스트의 링크별 결과(백엔드 ViewBoostOutcome 미러). */
+export interface ViewBoostOutcome {
+  link: string;
+  /** 요청한 반복 횟수(N). */
+  requested: number;
+  /** 실제로 "열기→완전로딩→새로고침→완전로딩→종료"까지 끝낸 횟수. */
+  completed: number;
+  /** requested 전량 성공 여부. */
+  success: boolean;
+  message: string;
+}
+
 /** 밴드 가입+게시 요청. accountId는 band 로그인 쿠키 키(loginId). */
 export interface BandPublishRequest {
   accountId: string;
@@ -369,6 +381,13 @@ export const ipc = {
     /** 좋아요와 동일한 경로로 **싫어요**(reactionType="bad")를 누른다 — 패킷상 API만 다르다. */
     dislike: (postUrls: string[], accountIds: string[]) =>
       call<LikeOutcome[]>("dislike_discussion_post", { postUrls, accountIds }),
+  },
+  // 조회수 부스트 — 각 링크를 시크릿창으로 repeats번 여닫아 조회수를 올린다(#400). 로그인 불필요.
+  viewCount: {
+    /** 여러 게시글 링크를 각각 `repeats`번 시크릿창으로 여닫는다(열기→완전로딩→새로고침→종료).
+     * 링크별 성공/진행 결과를 돌려준다. */
+    boost: (links: string[], repeats: number) =>
+      call<ViewBoostOutcome[]>("boost_view_count", { links, repeats }),
   },
   // 엑셀(.xlsx) 내보내기/가져오기 — Rust에서 파일 처리, 프론트에서 경로 공급.
   excel: {

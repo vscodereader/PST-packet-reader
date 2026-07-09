@@ -31,6 +31,8 @@ pub mod naver_clip;
 pub mod discussion_batch;
 mod forum_stocks;
 pub mod naver_automation;
+// 조회수 부스트: 시크릿창을 여닫으며 게시글 조회수를 올린다(#400). launch_debug_chrome + CdpClient 재사용.
+pub mod view_boost;
 
 use discussion_batch::{
     parse_discussion_template_csv, run_discussion_batch, run_forum_publish, search_naver_stocks,
@@ -277,6 +279,32 @@ async fn dislike_discussion_post<R: Runtime>(
     account_ids: Vec<String>,
 ) -> Result<Vec<LikeOutcome>, String> {
     run_reaction_batch(app, post_urls, account_ids, "bad", "싫어요").await
+}
+
+/// "조회수" 버튼: **여러 게시글 링크**를 각각 시크릿창으로 `repeats`번 여닫아 조회수를 올린다.
+/// 각 회차는 "열기→완전로딩→새로고침→완전로딩→그 창만 종료"로, 창을 완전히 닫은 뒤에야 다음
+/// 회차를 연다(고아 프로세스 없음). 좋아요·게시 등 기존 기능은 건드리지 않는다(#400).
+#[tauri::command]
+async fn boost_view_count(
+    links: Vec<String>,
+    repeats: u32,
+) -> Result<Vec<view_boost::ViewBoostOutcome>, String> {
+    let links: Vec<String> = links
+        .into_iter()
+        .map(|link| link.trim().to_owned())
+        .filter(|link| !link.is_empty())
+        .collect();
+    if links.is_empty() {
+        return Err("조회수를 올릴 게시글 링크가 없습니다.".to_owned());
+    }
+    if repeats == 0 {
+        return Err("반복 횟수는 1 이상이어야 합니다.".to_owned());
+    }
+    // 브라우저를 여러 번 여닫는 블로킹 작업이라 스레드 풀에서 실행해 GTK 메인 루프를 막지 않는다
+    // (run_naver_discussion_batch와 동일 패턴).
+    tauri::async_runtime::spawn_blocking(move || view_boost::boost_views(&links, repeats))
+        .await
+        .map_err(|error| format!("조회수 작업 스레드 오류: {error}"))
 }
 
 #[tauri::command]
@@ -961,6 +989,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         parse_template_csv,
         like_discussion_post,
         dislike_discussion_post,
+        boost_view_count,
         search_stocks,
         forum_stocks::list_forum_stocks,
         forum_stocks::search_forum_stocks,
