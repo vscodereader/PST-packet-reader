@@ -205,14 +205,11 @@ function StatusBadge({
   // tooltip: 상태별 조치 안내 + (있으면) 백엔드가 남긴 상세 사유.
   const guide = STATUS_GUIDE[value] ?? "클릭하여 상태 변경";
   const tip = statusMsg ? `${guide}\n${statusMsg}` : guide;
-  // 클릭 순환은 사용자 의미 상태(STATUS_ACCOUNT_CYCLE)만 돈다. 현재 값이 cycle 밖(로그인
-  // 워커가 자동 설정한 badCredentials/challenge/error)이면 첫 값으로 보낸다.
+  // 클릭 순환은 사용자 의미 상태(STATUS_ACCOUNT_CYCLE)만 돈다: 활성→대기→보류→활성(#398).
+  // "보류"를 수동 설정하면 다음 로그인에서 캡차가 떠도 사용자가 직접 풀 시간(백엔드 WaitCaptcha,
+  // 120초)이 주어진다. 현재 값이 순환 밖(사용전/차단, 또는 워커가 자동 설정한
+  // 비번오류/인증필요/에러/재로그인/대기초과)이면 첫 값(활성)으로 보낸다.
   const cycle = () => {
-    // 대기(글 게시 성공 후, #267-3)는 클릭하면 곧장 활성으로 되돌린다 — 다시 게시에 쓸 수 있게.
-    if (value === "waiting") {
-      onChange("active");
-      return;
-    }
     const i = STATUS_ACCOUNT_CYCLE.indexOf(value);
     const next =
       i === -1
@@ -357,7 +354,7 @@ export function Accounts({ go }: { go: GoFn }) {
 
   // 계정 목록이 바뀌면 각 계정의 쿠키 만료 시각을 조회해 카운트다운의 기준값으로 쓴다.
   // 만료 시각은 재로그인 때만 바뀌므로 매초가 아니라 목록 변경 시에만 다시 읽는다.
-  const loginIdsKey = rows.map((r) => r.loginId).join(" ");
+  const loginIdsKey = rows.map((r) => r.loginId).join(",");
   useEffect(() => {
     let alive = true;
     const ids = rows.map((r) => r.loginId).filter((id) => id.trim());

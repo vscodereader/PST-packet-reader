@@ -242,9 +242,25 @@ fn installed_chrome_full_version(chrome_path: &str) -> Option<String> {
 /// `ncpt.naver.com`(SDK)·`ssl.pstatic.net`(폰트/이미지) 등 다른 호스트는 건드리지 않는다.
 const WASM_HOST_BLOCK_ARG: &str = "--host-resolver-rules=MAP wtm.pstatic.net ~NOTFOUND";
 
-/// 실험 스위치(위 상수 참고)의 옵트인 여부. 기본 OFF — 값과 무관하게 존재만 하면 켜진 것으로 본다.
-fn block_wasm_enabled() -> bool {
-    std::env::var("PSTMACRO_BLOCK_WASM").is_ok()
+/// wtm 차단 활성 여부를 환경변수 값(있으면 `Some`)에서 판정하는 순수 함수(테스트용).
+/// 기본 ON — 명시적으로 끄려면 `0`/`false`/`off`/`no`(대소문자·공백 무시). 그 외 값(빈 문자열
+/// 포함)은 ON. env 변이 없이 로직만 검증할 수 있게 분리한다(`ua.rs` 순수함수 패턴).
+fn block_wasm_from_value(value: Option<&str>) -> bool {
+    match value {
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        None => true,
+    }
+}
+
+/// wtm(봇탐지 WASM 엔진 호스트) DNS 차단 활성 여부. **기본 ON**(2026-07-09) — 배포 exe 를 그냥
+/// 실행해도 켜지도록(패킷·로그 대조로 차단 켠 기계만 20+판 무캡차 확인). 끄려면
+/// `PSTMACRO_BLOCK_WASM=0`(B실험: wtm 차단 없이 대조군). 예전 옵트인(존재만 하면 ON) 동작과
+/// 상위호환 — `=1`/임의값도 여전히 ON.
+pub(crate) fn block_wasm_enabled() -> bool {
+    block_wasm_from_value(std::env::var("PSTMACRO_BLOCK_WASM").ok().as_deref())
 }
 
 /// 시스템 Chrome을 띄운다(게시·밴드 공용 — UA 오버라이드 없이 **네이티브 UA 유지**).
@@ -322,15 +338,15 @@ fn launch_inner(headless: bool, ua: Option<UaProfile>) -> Result<ChromeHandle, O
         let url_idx = args.len() - 1;
         args.insert(url_idx, arg.as_str());
     }
-    // 실험(옵트인): 로그인 경로(ua=Some)에서 PSTMACRO_BLOCK_WASM 이 켜지면 봇탐지 WASM 엔진
-    // 호스트(wtm.pstatic.net)를 DNS 로 막아 SDK 단독 경로를 강제한다(WASM_HOST_BLOCK_ARG 주석 참고).
+    // 로그인 경로(ua=Some)에서 봇탐지 WASM 엔진 호스트(wtm.pstatic.net)를 DNS 로 막아 SDK 단독
+    // 경로를 강제한다(WASM_HOST_BLOCK_ARG 주석 참고). 기본 ON(끄려면 PSTMACRO_BLOCK_WASM=0).
     // 게시/밴드(ua=None)엔 적용하지 않아 카페/밴드 흐름은 무영향.
     if ua.is_some() && block_wasm_enabled() {
         let url_idx = args.len() - 1;
         args.insert(url_idx, WASM_HOST_BLOCK_ARG);
-        tracing::warn!(
-            "[CHROME][실험] PSTMACRO_BLOCK_WASM=on — wtm.pstatic.net(봇탐지 WASM 엔진) DNS 차단. \
-             ncaptcha SDK 단독 경로 강제(지문 앵커 규명 20판 버스트용). ⚠️ 실험 전용 스위치."
+        tracing::info!(
+            "[CHROME] wtm.pstatic.net(봇탐지 WASM 엔진) DNS 차단 — 기본 ON(끄려면 \
+             PSTMACRO_BLOCK_WASM=0). ncaptcha SDK 단독 경로 강제(캡차 대응)."
         );
     }
     if headless {
@@ -452,5 +468,21 @@ chrome.exe --user-data-dir=C:\\Users\\me\\AppData\\Chrome\\Default";
         assert!(!WASM_HOST_BLOCK_ARG.contains("ncpt"));
         assert!(!WASM_HOST_BLOCK_ARG.contains("ssl.pstatic.net"));
         assert!(!WASM_HOST_BLOCK_ARG.contains('*'));
+    }
+
+    #[test]
+    fn block_wasm_defaults_on_and_opts_out_only_on_falsy() {
+        // 환경변수 미설정(None) = 기본 ON — 배포 exe 만 실행해도 wtm 차단이 켜져야 한다(#398).
+        assert!(block_wasm_from_value(None));
+        // 예전 옵트인 상위호환: 임의값/빈문자열도 ON.
+        assert!(block_wasm_from_value(Some("1")));
+        assert!(block_wasm_from_value(Some("on")));
+        assert!(block_wasm_from_value(Some("")));
+        // 명시적 falsy 만 OFF(대소문자·공백 무시) — B실험(wtm 차단 없이 대조)용.
+        assert!(!block_wasm_from_value(Some("0")));
+        assert!(!block_wasm_from_value(Some("false")));
+        assert!(!block_wasm_from_value(Some("off")));
+        assert!(!block_wasm_from_value(Some("no")));
+        assert!(!block_wasm_from_value(Some("  FALSE  ")));
     }
 }
