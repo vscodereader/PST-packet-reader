@@ -585,10 +585,21 @@ async fn drain_events<R: Runtime>(
         let Ok(cmd) = serde_json::from_str::<Command>(data) else {
             continue;
         };
-        let cid = cmd.command_id.clone().unwrap_or_else(|| format!("c-{}", now_ms()));
+        let cid = cmd
+            .command_id
+            .clone()
+            .unwrap_or_else(|| format!("c-{}", now_ms()));
         // 동기 디스패치(기존 스토어/큐 호출) → 즉시 응답.
         let (level, msg, followup) = dispatch(app, &cmd);
-        let _ = net::post_result(client, &cfg.server_url, &cfg.device_token, &cid, level, &msg).await;
+        let _ = net::post_result(
+            client,
+            &cfg.server_url,
+            &cfg.device_token,
+            &cid,
+            level,
+            &msg,
+        )
+        .await;
         // 로그인이 걸렸으면 끝날 때까지 지켜보고 §10-4 결과를 같은 commandId로 보고(백그라운드).
         if let Some(f) = followup {
             let (app2, client2, cfg2, cid2) =
@@ -601,7 +612,10 @@ async fn drain_events<R: Runtime>(
 }
 
 /// 명령 디스패치(동기). 반환: (level, 즉시 메시지, 로그인 결과 후속).
-fn dispatch<R: Runtime>(app: &AppHandle<R>, cmd: &Command) -> (&'static str, String, Option<Followup>) {
+fn dispatch<R: Runtime>(
+    app: &AppHandle<R>,
+    cmd: &Command,
+) -> (&'static str, String, Option<Followup>) {
     match cmd.kind.as_str() {
         "distribute_accounts" => {
             let (added, visible) = add_accounts(app, &cmd.accounts);
@@ -661,7 +675,11 @@ fn dispatch<R: Runtime>(app: &AppHandle<R>, cmd: &Command) -> (&'static str, Str
         },
         "kill_publish" => match &cmd.kill {
             Some(k) => agent_kill(app, k),
-            None => ("fail", "kill_publish에 kill 페이로드가 없습니다".into(), None),
+            None => (
+                "fail",
+                "kill_publish에 kill 페이로드가 없습니다".into(),
+                None,
+            ),
         },
         "update_account_meta" => update_account_meta(app, &cmd.account_updates),
         other => ("fail", format!("알 수 없는 명령: {other}"), None),
@@ -726,7 +744,10 @@ fn update_account_meta<R: Runtime>(
 /// 전체 / loginId 계정)을 로컬 실행 중 큐에서 찾아 **로컬 UI와 동일한 kill 경로**(`kill_one`)로
 /// 완전 종료한다. 무엇을 왜 중지하는지 **원문 그대로** 로그에 남긴다(server log-forward로 Admin
 /// 통신로그에 그대로 뜬다 — Stage5 무필터 로그).
-fn agent_kill<R: Runtime>(app: &AppHandle<R>, k: &KillCmd) -> (&'static str, String, Option<Followup>) {
+fn agent_kill<R: Runtime>(
+    app: &AppHandle<R>,
+    k: &KillCmd,
+) -> (&'static str, String, Option<Followup>) {
     let snapshot = app.state::<JsonStore<QueueNowItem>>().snapshot();
     let live: Vec<&QueueNowItem> = snapshot
         .iter()
@@ -735,7 +756,10 @@ fn agent_kill<R: Runtime>(app: &AppHandle<R>, k: &KillCmd) -> (&'static str, Str
     let target_ids: Vec<String> = if k.all {
         live.iter().map(|i| i.id.clone()).collect()
     } else if let Some(qid) = k.queue_id.as_deref() {
-        live.iter().filter(|i| i.id == qid).map(|i| i.id.clone()).collect()
+        live.iter()
+            .filter(|i| i.id == qid)
+            .map(|i| i.id.clone())
+            .collect()
     } else if let Some(lid) = k.login_id.as_deref() {
         live.iter()
             .filter(|i| item_targets_login(i, lid))
@@ -767,7 +791,10 @@ fn agent_kill<R: Runtime>(app: &AppHandle<R>, k: &KillCmd) -> (&'static str, Str
             .unwrap_or_default()
     };
     let mut stop_lines: Vec<serde_json::Value> = Vec::new();
-    for item in live.iter().filter(|i| target_ids.iter().any(|t| t == &i.id)) {
+    for item in live
+        .iter()
+        .filter(|i| target_ids.iter().any(|t| t == &i.id))
+    {
         let (done, total) = item.progress.unwrap_or((0, 0));
         let (_, lids) = plan_summary(item.plan.as_ref());
         let lids = if lids.is_empty() {
@@ -794,8 +821,8 @@ fn agent_kill<R: Runtime>(app: &AppHandle<R>, k: &KillCmd) -> (&'static str, Str
             if let Some(cfg) = config::load() {
                 let client = reqwest::Client::new();
                 let body = serde_json::json!({ "stopped": stop_lines });
-                let _ = net::post_stop_report(&client, &cfg.server_url, &cfg.device_token, &body)
-                    .await;
+                let _ =
+                    net::post_stop_report(&client, &cfg.server_url, &cfg.device_token, &body).await;
             }
         });
     }
@@ -808,7 +835,10 @@ fn agent_kill<R: Runtime>(app: &AppHandle<R>, k: &KillCmd) -> (&'static str, Str
     );
     (
         "ok",
-        format!("중지 처리 — {}개 큐 완전 종료(다음 대기 큐 승계)", target_ids.len()),
+        format!(
+            "중지 처리 — {}개 큐 완전 종료(다음 대기 큐 승계)",
+            target_ids.len()
+        ),
         None,
     )
 }
@@ -1752,7 +1782,10 @@ fn delete_by_login_ids<R: Runtime>(app: &AppHandle<R>, login_ids: &[String]) -> 
 
 /// 선택 로그인 큐 아이템 1개를 만들어 기존 now 큐에 적재 + 러너 기동. 큐 아이템 id 반환. 각 계정은
 /// (loginId, 로그인엔진 플랫폼) 쌍으로 오며, 러너가 LoginTarget.platform으로 네이버/밴드를 분기한다.
-fn enqueue_login<R: Runtime>(app: &AppHandle<R>, logins: &[(String, PlatformId)]) -> Option<String> {
+fn enqueue_login<R: Runtime>(
+    app: &AppHandle<R>,
+    logins: &[(String, PlatformId)],
+) -> Option<String> {
     if logins.is_empty() {
         return None;
     }
@@ -1768,7 +1801,11 @@ fn enqueue_login<R: Runtime>(app: &AppHandle<R>, logins: &[(String, PlatformId)]
         .collect();
     let locs: Vec<QueueLocation> = logins
         .iter()
-        .map(|(id, _)| QueueLocation { p: PlatformId::Forum, name: id.clone(), code: None })
+        .map(|(id, _)| QueueLocation {
+            p: PlatformId::Forum,
+            name: id.clone(),
+            code: None,
+        })
         .collect();
     let title = format!("계정 로그인 {}건", logins.len());
     let id = format!("agent-login-{}", now_ms());
@@ -1815,7 +1852,7 @@ fn enqueue_login<R: Runtime>(app: &AppHandle<R>, logins: &[(String, PlatformId)]
 struct Tally {
     success: usize,
     onhold: Vec<(String, String, String)>, // (loginId, pw, 보류사유)
-    timedout: Vec<(String, String)>,        // (loginId, pw)
+    timedout: Vec<(String, String)>,       // (loginId, pw)
     // (loginId, pw, 실패사유, trace) — trace는 "자세히 보기"용 백트레이스(없으면 None).
     failed: Vec<(String, String, String, Option<String>)>,
 }
@@ -1849,9 +1886,23 @@ async fn report_login_results<R: Runtime>(
     let received = f.login_ids.len();
     let cum = ledger_add(received, &tally);
     let report = format_report(&tally, received, &cum);
-    let _ = net::post_result(&client, &cfg.server_url, &cfg.device_token, &command_id, "ok", &report).await;
+    let _ = net::post_result(
+        &client,
+        &cfg.server_url,
+        &cfg.device_token,
+        &command_id,
+        "ok",
+        &report,
+    )
+    .await;
     // 구조화 로그인 결과도 보고(§10-4-1) → 결과보고 '로그인 결과' 탭이 실데이터로 렌더.
-    let body = login_report_body(&command_id, &tally, &cum, f.registered, f.registered_visible);
+    let body = login_report_body(
+        &command_id,
+        &tally,
+        &cum,
+        f.registered,
+        f.registered_visible,
+    );
     let _ = net::post_login_report(&client, &cfg.server_url, &cfg.device_token, &body).await;
 
     // 실패 계정 자동삭제(§10-1 (4)) — 단, *비밀번호 오류(BadCredentials)*처럼 계정 자체가 무효인
@@ -1860,7 +1911,11 @@ async fn report_login_results<R: Runtime>(
     // 스냅샷에서 다시 확인해 BadCredentials만 고르고, 나머지 실패는 보존하고 로그로 남긴다.
     if !tally.failed.is_empty() {
         let snapshot = app.state::<JsonStore<Account>>().snapshot();
-        let failed_ids: Vec<String> = tally.failed.iter().map(|(id, _, _, _)| id.clone()).collect();
+        let failed_ids: Vec<String> = tally
+            .failed
+            .iter()
+            .map(|(id, _, _, _)| id.clone())
+            .collect();
         let (delete_ids, retained_ids) = partition_auto_delete(&failed_ids, |id| {
             snapshot
                 .iter()
@@ -1886,7 +1941,15 @@ async fn report_login_results<R: Runtime>(
                     .collect::<Vec<_>>()
                     .join(", ")
             );
-            let _ = net::post_result(&client, &cfg.server_url, &cfg.device_token, &command_id, "info", &del_msg).await;
+            let _ = net::post_result(
+                &client,
+                &cfg.server_url,
+                &cfg.device_token,
+                &command_id,
+                "info",
+                &del_msg,
+            )
+            .await;
         }
     }
 }
@@ -1907,7 +1970,12 @@ fn partition_auto_delete(
 
 fn classify_accounts<R: Runtime>(app: &AppHandle<R>, login_ids: &[String]) -> Tally {
     let snapshot = app.state::<JsonStore<Account>>().snapshot();
-    let mut t = Tally { success: 0, onhold: vec![], timedout: vec![], failed: vec![] };
+    let mut t = Tally {
+        success: 0,
+        onhold: vec![],
+        timedout: vec![],
+        failed: vec![],
+    };
     for id in login_ids {
         let Some(acct) = snapshot.iter().find(|a| &a.login_id == id) else {
             // 보낸 계정이 스토어에 없음(중복 스킵·삭제 등). 조용히 빼면 "보낸 N개"와 "보고된 N개"가
@@ -1925,7 +1993,11 @@ fn classify_accounts<R: Runtime>(app: &AppHandle<R>, login_ids: &[String]) -> Ta
         match acct.status {
             AccountStatus::Active => t.success += 1,
             AccountStatus::OnHold => {
-                let reason = if why.is_empty() { "보류".to_string() } else { why };
+                let reason = if why.is_empty() {
+                    "보류".to_string()
+                } else {
+                    why
+                };
                 t.onhold.push((id.clone(), pw, reason));
             }
             AccountStatus::TimedOut => t.timedout.push((id.clone(), pw)),
@@ -1944,7 +2016,8 @@ fn classify_accounts<R: Runtime>(app: &AppHandle<R>, login_ids: &[String]) -> Ta
                 } else {
                     why
                 };
-                t.failed.push((id.clone(), pw, reason, acct.status_trace.clone()));
+                t.failed
+                    .push((id.clone(), pw, reason, acct.status_trace.clone()));
             }
         }
     }
@@ -2036,7 +2109,9 @@ struct Cumulative {
 }
 
 fn ledger_path() -> Option<std::path::PathBuf> {
-    crate::auth::app_data_root().ok().map(|r| r.join("agent-ledger.json"))
+    crate::auth::app_data_root()
+        .ok()
+        .map(|r| r.join("agent-ledger.json"))
 }
 
 fn ledger_add(received: usize, t: &Tally) -> Cumulative {
@@ -2145,8 +2220,19 @@ async fn heartbeat_loop() {
     loop {
         if let Some(cfg) = config::load() {
             let ip = crate::auth::fetch_external_ip().await;
-            let ip_opt = if ip.starts_with('(') { None } else { Some(ip.as_str()) };
-            let _ = net::heartbeat(&client, &cfg.server_url, &cfg.device_token, ip_opt, "online").await;
+            let ip_opt = if ip.starts_with('(') {
+                None
+            } else {
+                Some(ip.as_str())
+            };
+            let _ = net::heartbeat(
+                &client,
+                &cfg.server_url,
+                &cfg.device_token,
+                ip_opt,
+                "online",
+            )
+            .await;
         }
         tokio::time::sleep(Duration::from_secs(30)).await;
     }
@@ -2158,7 +2244,14 @@ async fn state_report_loop(mut rx: mpsc::UnboundedReceiver<(String, Option<Strin
     while let Some((state, ip)) = rx.recv().await {
         let Some(cfg) = config::load() else { continue };
         if state == "online" {
-            let _ = net::heartbeat(&client, &cfg.server_url, &cfg.device_token, ip.as_deref(), "online").await;
+            let _ = net::heartbeat(
+                &client,
+                &cfg.server_url,
+                &cfg.device_token,
+                ip.as_deref(),
+                "online",
+            )
+            .await;
         } else {
             let _ = net::post_state(&client, &cfg.server_url, &cfg.device_token, &state).await;
         }
@@ -2175,13 +2268,20 @@ pub async fn agent_register(server_url: String, code: String) -> Result<AgentSta
     }
     let client = reqwest::Client::new();
     let resp = net::register(&client, &base, code.trim(), None).await?;
-    let device_name = format!("하위-{}", resp.device_id.chars().take(4).collect::<String>());
+    let device_name = format!(
+        "하위-{}",
+        resp.device_id.chars().take(4).collect::<String>()
+    );
     config::save(&AgentConfig {
         server_url: base.clone(),
         device_token: resp.device_token,
         device_name: device_name.clone(),
     })?;
-    Ok(AgentStatus { configured: true, server_url: base, device_name })
+    Ok(AgentStatus {
+        configured: true,
+        server_url: base,
+        device_name,
+    })
 }
 
 #[tauri::command]
@@ -2218,7 +2318,11 @@ mod tests {
             comment: None,
             kind: ModeValue::Post,
             at: 1,
-            state: if running { Some(BatchState::Running) } else { None },
+            state: if running {
+                Some(BatchState::Running)
+            } else {
+                None
+            },
             items: vec![],
         }
     }
@@ -2302,15 +2406,27 @@ mod tests {
             PublishAssign {
                 login_id: "acc_a".into(),
                 stocks: vec![
-                    PublishStockIn { code: "005930".into(), name: "삼성전자".into() },
-                    PublishStockIn { code: "000660".into(), name: "SK하이닉스".into() },
+                    PublishStockIn {
+                        code: "005930".into(),
+                        name: "삼성전자".into(),
+                    },
+                    PublishStockIn {
+                        code: "000660".into(),
+                        name: "SK하이닉스".into(),
+                    },
                 ],
             },
             PublishAssign {
                 login_id: "acc_b".into(),
-                stocks: vec![PublishStockIn { code: "035420".into(), name: "NAVER".into() }],
+                stocks: vec![PublishStockIn {
+                    code: "035420".into(),
+                    name: "NAVER".into(),
+                }],
             },
-            PublishAssign { login_id: "acc_empty".into(), stocks: vec![] },
+            PublishAssign {
+                login_id: "acc_empty".into(),
+                stocks: vec![],
+            },
         ];
         let items = build_publish_items(
             &assignments,
@@ -2348,8 +2464,14 @@ mod tests {
         // 나눠서 게시(#403): 댓글 모드 + distribute=true면 계정별로 쪼개지 말고 **단일 큐**에
         // 전체 계정×URL을 담고 forum_comment_distribute=true여야 한다(엔진이 링크마다 분배).
         let assignments = vec![
-            PublishAssign { login_id: "acc_a".into(), stocks: vec![] },
-            PublishAssign { login_id: "acc_b".into(), stocks: vec![] },
+            PublishAssign {
+                login_id: "acc_a".into(),
+                stocks: vec![],
+            },
+            PublishAssign {
+                login_id: "acc_b".into(),
+                stocks: vec![],
+            },
         ];
         let items = build_publish_items(
             &assignments,
@@ -2376,19 +2498,38 @@ mod tests {
         assert_eq!(accts.len(), 2);
         assert!(accts.contains("acc_a") && accts.contains("acc_b"));
         // 저장된 댓글 풀이 plan.comments로 실린다(엔진이 계정에 1개씩 분배).
-        assert_eq!(plan.comments, vec!["댓글1".to_string(), "댓글2".to_string()]);
+        assert_eq!(
+            plan.comments,
+            vec!["댓글1".to_string(), "댓글2".to_string()]
+        );
     }
 
     #[test]
     fn build_cafe_publish_items_post_maps_accounts_to_boards() {
         // 카페 글: 계정당 큐 1개, 그 계정이 선택 게시판(들)에 글을 올린다(plan.naver, forum은 빔).
         let assignments = vec![
-            PublishAssign { login_id: "acc_a".into(), stocks: vec![] },
-            PublishAssign { login_id: "acc_b".into(), stocks: vec![] },
+            PublishAssign {
+                login_id: "acc_a".into(),
+                stocks: vec![],
+            },
+            PublishAssign {
+                login_id: "acc_b".into(),
+                stocks: vec![],
+            },
         ];
         let boards = vec![
-            CafeBoardIn { cafe_id: 100, menu_id: 5, article_id: 0, link: "L1".into() },
-            CafeBoardIn { cafe_id: 200, menu_id: 7, article_id: 0, link: "L2".into() },
+            CafeBoardIn {
+                cafe_id: 100,
+                menu_id: 5,
+                article_id: 0,
+                link: "L1".into(),
+            },
+            CafeBoardIn {
+                cafe_id: 200,
+                menu_id: 7,
+                article_id: 0,
+                link: "L2".into(),
+            },
         ];
         let items = build_cafe_publish_items(
             &assignments,
@@ -2417,10 +2558,23 @@ mod tests {
     #[test]
     fn build_cafe_publish_items_comment_uses_frozen_latest_target() {
         // 카페 댓글(글에 동결된 대상=Latest·개수=3): 같은 카페 중복 제거 → cafeId로 최신 N 댓글.
-        let assignments = vec![PublishAssign { login_id: "acc_a".into(), stocks: vec![] }];
+        let assignments = vec![PublishAssign {
+            login_id: "acc_a".into(),
+            stocks: vec![],
+        }];
         let boards = vec![
-            CafeBoardIn { cafe_id: 100, menu_id: 5, article_id: 0, link: "L1".into() },
-            CafeBoardIn { cafe_id: 100, menu_id: 6, article_id: 0, link: "L2".into() },
+            CafeBoardIn {
+                cafe_id: 100,
+                menu_id: 5,
+                article_id: 0,
+                link: "L1".into(),
+            },
+            CafeBoardIn {
+                cafe_id: 100,
+                menu_id: 6,
+                article_id: 0,
+                link: "L2".into(),
+            },
         ];
         let items = build_cafe_publish_items(
             &assignments,
@@ -2451,7 +2605,10 @@ mod tests {
     #[test]
     fn build_cafe_publish_items_comment_url_uses_article() {
         // 카페 댓글(글에 동결된 대상=Url): 글 링크(article_id)로 그 글에 직접 댓글.
-        let assignments = vec![PublishAssign { login_id: "acc_a".into(), stocks: vec![] }];
+        let assignments = vec![PublishAssign {
+            login_id: "acc_a".into(),
+            stocks: vec![],
+        }];
         let boards = vec![CafeBoardIn {
             cafe_id: 100,
             menu_id: 0,
@@ -2484,7 +2641,10 @@ mod tests {
         // 카페는 분배 때 로그인 안 함 → 게시 순간 로그인이 필요. plan.login에 그 계정의 네이버
         // 로그인 스펙(force+use_adb)이 동봉돼야 러너 prepare_group_login이 로그인→쿠키 확보→
         // 최신/인기 글목록 조회가 된다(NO_COOKIES 회귀 방지, 데스크톱 #225 미러).
-        let assignments = vec![PublishAssign { login_id: "acc_a".into(), stocks: vec![] }];
+        let assignments = vec![PublishAssign {
+            login_id: "acc_a".into(),
+            stocks: vec![],
+        }];
         let boards = vec![CafeBoardIn {
             cafe_id: 100,
             menu_id: 0,
@@ -2505,7 +2665,10 @@ mod tests {
             9,
         );
         let plan = items[0].plan.as_ref().unwrap();
-        let login = plan.login.as_ref().expect("카페 plan은 게시 순간 로그인 동봉");
+        let login = plan
+            .login
+            .as_ref()
+            .expect("카페 plan은 게시 순간 로그인 동봉");
         assert_eq!(login.len(), 1);
         assert_eq!(login[0].account_id, "acc_a");
         assert!(matches!(login[0].platform, PlatformId::Naver));
@@ -2518,8 +2681,14 @@ mod tests {
         // 블로그 댓글: 계정당 큐 1개, 그 계정이 고른 블로그 링크(들)에 댓글을 단다(plan.blog).
         // 특정 글(logNo 있음)=count None, 최신 N개(logNo 없음)=count Some·category_no Some.
         let assignments = vec![
-            PublishAssign { login_id: "acc_a".into(), stocks: vec![] },
-            PublishAssign { login_id: "acc_b".into(), stocks: vec![] },
+            PublishAssign {
+                login_id: "acc_a".into(),
+                stocks: vec![],
+            },
+            PublishAssign {
+                login_id: "acc_b".into(),
+                stocks: vec![],
+            },
         ];
         let links = vec![
             // 특정 글: log_no 있음 → count None.
@@ -2580,7 +2749,10 @@ mod tests {
         assert!(items[0].plan.as_ref().unwrap().login.is_none());
         // count=0 입력은 최신 1개로 방어(max(1)).
         let items2 = build_blog_publish_items(
-            &[PublishAssign { login_id: "acc_a".into(), stocks: vec![] }],
+            &[PublishAssign {
+                login_id: "acc_a".into(),
+                stocks: vec![],
+            }],
             &[BlogLinkIn {
                 blog_id: "x".into(),
                 log_no: String::new(),
@@ -2603,8 +2775,14 @@ mod tests {
     fn build_clip_publish_items_one_queue_per_account_latest_only() {
         // 클립 댓글: 계정당 큐 1개, 그 계정이 고른 창작자(들)의 최신 N개에 댓글(plan.clip). 전체/영상.
         let assignments = vec![
-            PublishAssign { login_id: "acc_a".into(), stocks: vec![] },
-            PublishAssign { login_id: "acc_b".into(), stocks: vec![] },
+            PublishAssign {
+                login_id: "acc_a".into(),
+                stocks: vec![],
+            },
+            PublishAssign {
+                login_id: "acc_b".into(),
+                stocks: vec![],
+            },
         ];
         let links = vec![
             ClipLinkIn {
@@ -2649,24 +2827,47 @@ mod tests {
             vec!["댓글1".to_string()]
         );
         let p0 = items[0].plan.as_ref().unwrap();
-        assert!(p0.forum.is_empty() && p0.naver.is_empty() && p0.blog.is_empty() && p0.band.is_empty());
+        assert!(
+            p0.forum.is_empty() && p0.naver.is_empty() && p0.blog.is_empty() && p0.band.is_empty()
+        );
         assert!(p0.login.is_none());
     }
 
     #[test]
     fn build_band_publish_items_post_none_target_and_comment_frozen_target() {
         let assignments = vec![
-            PublishAssign { login_id: "acc_a".into(), stocks: vec![] },
-            PublishAssign { login_id: "acc_b".into(), stocks: vec![] },
+            PublishAssign {
+                login_id: "acc_a".into(),
+                stocks: vec![],
+            },
+            PublishAssign {
+                login_id: "acc_b".into(),
+                stocks: vec![],
+            },
         ];
         let bands = vec![
-            BandTargetIn { band_no: "103043410".into(), link: "https://band.us/band/103043410".into() },
-            BandTargetIn { band_no: String::new(), link: "https://band.us/band/200/post/9".into() },
+            BandTargetIn {
+                band_no: "103043410".into(),
+                link: "https://band.us/band/103043410".into(),
+            },
+            BandTargetIn {
+                band_no: String::new(),
+                link: "https://band.us/band/200/post/9".into(),
+            },
         ];
         // 글 모드: comment_target None(새 글 게시), 계정당 큐 1개.
         let posts = build_band_publish_items(
-            &assignments, &bands, "p1", "제목", "제목", "본문",
-            ModeValue::Post, &[], None, None, 1,
+            &assignments,
+            &bands,
+            "p1",
+            "제목",
+            "제목",
+            "본문",
+            ModeValue::Post,
+            &[],
+            None,
+            None,
+            1,
         );
         assert_eq!(posts.len(), 2);
         let pb = &posts[0].plan.as_ref().unwrap().band;
@@ -2675,12 +2876,23 @@ mod tests {
         assert_eq!(pb[0].link, "https://band.us/band/103043410");
         // 댓글 모드: 글에 동결된 대상(인기 3개)을 CommentTargetSpec으로 실어 보낸다.
         let comments = build_band_publish_items(
-            &assignments, &bands, "p1", "제목", "제목", "",
-            ModeValue::Comment, &["댓글1".to_string()],
-            Some(CommentTarget::Popular), Some(3), 2,
+            &assignments,
+            &bands,
+            "p1",
+            "제목",
+            "제목",
+            "",
+            ModeValue::Comment,
+            &["댓글1".to_string()],
+            Some(CommentTarget::Popular),
+            Some(3),
+            2,
         );
         let cb = &comments[0].plan.as_ref().unwrap().band;
-        let spec = cb[0].comment_target.as_ref().expect("댓글 모드는 대상 있음");
+        let spec = cb[0]
+            .comment_target
+            .as_ref()
+            .expect("댓글 모드는 대상 있음");
         assert_eq!(spec.mode, CommentTarget::Popular);
         assert_eq!(spec.count, Some(3));
         assert_eq!(
@@ -2693,7 +2905,10 @@ mod tests {
     fn parse_comment_target_maps_admin_modes() {
         assert_eq!(parse_comment_target("url"), Some(CommentTarget::Url));
         assert_eq!(parse_comment_target("latest"), Some(CommentTarget::Latest));
-        assert_eq!(parse_comment_target("popular"), Some(CommentTarget::Popular));
+        assert_eq!(
+            parse_comment_target("popular"),
+            Some(CommentTarget::Popular)
+        );
         // 빈값·미인식은 None(글 저장값으로 폴백).
         assert_eq!(parse_comment_target(""), None);
         assert_eq!(parse_comment_target("bogus"), None);

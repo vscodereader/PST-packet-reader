@@ -70,7 +70,14 @@ pub async fn heartbeat(
     ip: Option<&str>,
     state: &str,
 ) -> Result<(), String> {
-    post_authed(client, base, token, "/agent/heartbeat", &HeartbeatReq { ip, state }).await
+    post_authed(
+        client,
+        base,
+        token,
+        "/agent/heartbeat",
+        &HeartbeatReq { ip, state },
+    )
+    .await
 }
 
 /// 상태 전이 보고(ROTATING 등, §4). IP는 heartbeat로 보낸다.
