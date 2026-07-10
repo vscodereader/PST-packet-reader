@@ -16,7 +16,7 @@ use std::io::ErrorKind;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
-use tauri::{Emitter, Runtime};
+use tauri::{Emitter, Manager, Runtime};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
@@ -283,25 +283,136 @@ fn clarify_profile_status_error(
 /// 건드리지 않는다). 여기서 재수출해 기존 호출부(`lib.rs`)의 import 경로를 유지한다.
 pub use like_flow::{run_naver_dislike, run_naver_like, LikeVerdict};
 
-/// 글 내용 변경(설계서 §5): `content_change`가 있으면 글 게시(submit_post) 후 `delay_sec`초 뒤
-/// 새 제목/본문으로 edit한다(같은 세션·크롬 kill 전). edit 실패는 로그만 남기고 게시 자체는
-/// 성공으로 둔다(edit 실패가 게시를 실패로 만들지 않게 — 사수 지시). `None`이면 아무것도 안 한다.
-fn maybe_edit_after_post(
-    packet_client: &mut packet_client::NaverPacketClient,
-    post_id: &str,
-    content_change: Option<&crate::ipc::queue::ContentChange>,
+/// 내용 변경(설계서 §5, #400): 원글 게시 성공 직후 호출하면 edit를 **백그라운드**로 돌린다.
+/// `change.delay_sec`초 뒤 저장 쿠키로 새 패킷 클라이언트를 만들어 제목/본문을 새 값으로 교체하고,
+/// 성공하면 알림 패널에 "내용 변경" LogBatch 카드를 남기고 토스트 이벤트(`forum-content-edited`)를
+/// emit한다. 실패는 로그만 남긴다(이미 올라간 원글은 그대로 — edit 실패가 게시를 무르지 않는다,
+/// 사수 지시). 게시큐를 막지 않도록 spawn_blocking으로 떼어내, 원글 게시 직후 1분 텀이 시작되게
+/// 한다(#400: 원글 게시 간격은 수정 기능 켜기 전과 동일한 1분, edit는 그와 별개로 따로 돈다).
+pub fn spawn_forum_content_edit<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    account_id: &str,
+    post_url: &str,
+    stock_name: &str,
+    stock_code: &str,
+    change: &crate::ipc::queue::ContentChange,
 ) {
-    let Some(change) = content_change else {
+    let Some(post_id) = post_id_from_url(post_url) else {
+        tracing::warn!(url = %post_url, "내용 변경 예약 실패 — 글 URL에서 post_id를 찾지 못함");
         return;
     };
-    sleep(Duration::from_secs(u64::from(change.delay_sec)));
-    if let Err(error) = packet_client.edit_post(post_id, &change.title, &change.body) {
-        tracing::warn!(
-            post_id = %post_id,
-            "글 게시 후 내용 변경(edit) 실패 — 게시는 성공으로 둠: {}",
-            error.message()
+    let app = app.clone();
+    let account_id = account_id.to_owned();
+    let post_url = post_url.to_owned();
+    let stock_name = stock_name.to_owned();
+    let stock_code = stock_code.to_owned();
+    let change = change.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        sleep(Duration::from_secs(u64::from(change.delay_sec)));
+        let mut client = match packet_client::NaverPacketClient::from_saved_cookies(&account_id) {
+            Ok(client) => client,
+            Err(error) => {
+                tracing::warn!(
+                    account = %crate::auth::mask_id(&account_id),
+                    "내용 변경 edit 세션 오픈 실패 — 원글은 그대로 둠: {}",
+                    error.message()
+                );
+                return;
+            }
+        };
+        if let Err(error) = client.edit_post(&post_id, &change.title, &change.body) {
+            tracing::warn!(
+                post_id = %post_id,
+                "내용 변경 edit 실패 — 원글은 그대로 둠: {}",
+                error.message()
+            );
+            return;
+        }
+        tracing::info!(post_id = %post_id, "내용 변경 edit 성공 — 알림·토스트 기록");
+        record_forum_edit_batch(
+            &app,
+            &account_id,
+            &post_url,
+            &stock_name,
+            &stock_code,
+            &change,
         );
-    }
+        // 토스트용 이벤트(프론트 app-shell 리스너가 받아 Mantine 토스트를 띄운다).
+        let _ = app.emit(
+            "forum-content-edited",
+            serde_json::json!({
+                "loginId": account_id,
+                "title": change.title,
+                "body": change.body,
+                "url": post_url,
+                "stock": stock_name,
+            }),
+        );
+    });
+}
+
+/// 종토 글 URL(`.../discussion/{post_id}?chip=all`)에서 post_id를 뽑는다. 방(room) URL은
+/// `.../discussion?chip=all`이라 `/discussion/` 뒤 세그먼트가 없어 None이 된다.
+fn post_id_from_url(url: &str) -> Option<String> {
+    let after = url.split("/discussion/").nth(1)?;
+    let id = after.split('?').next().unwrap_or(after).trim();
+    (!id.is_empty()).then(|| id.to_owned())
+}
+
+/// 내용 변경 성공을 알림 패널에 뜨게 한다 — 게시 완료 카드처럼 LogBatch를 하나 추가한다(#400).
+/// 카드에는 **바뀐 내용**과 **원글과 동일한 링크**가 실린다(같은 글을 수정한 것이므로). 프론트는
+/// logBatches를 400ms마다 폴링하므로 곧바로 카드로 뜬다(record_like_batch와 동일 방식).
+fn record_forum_edit_batch<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    account_id: &str,
+    post_url: &str,
+    stock_name: &str,
+    stock_code: &str,
+    change: &crate::ipc::queue::ContentChange,
+) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::ipc::accounts::PlatformId;
+    use crate::ipc::log_batches::{
+        BatchItem, BatchItemStatus, LogBatch, PostedContent, MAX_LOG_BATCHES,
+    };
+    use crate::store::JsonStore;
+
+    static EDIT_LB_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = EDIT_LB_SEQ.fetch_add(1, Ordering::Relaxed);
+    let at = crate::util::now_ms();
+    let item = BatchItem {
+        platform: PlatformId::Forum,
+        target: format!("{stock_name} 내용 변경"),
+        code: Some(stock_code.to_owned()),
+        board: None,
+        login_id: account_id.to_owned(),
+        status: BatchItemStatus::Success,
+        msg: "내용 변경 완료".to_owned(),
+        trace: None,
+        posted: Some(PostedContent {
+            title: change.title.clone(),
+            body: change.body.clone(),
+            comment: None,
+            url: Some(post_url.to_owned()),
+        }),
+    };
+    let batch = LogBatch {
+        id: format!("lb-edit-{at}-{seq}"),
+        title: change.title.clone(),
+        body: Some(change.body.clone()),
+        comment: None,
+        kind: crate::ipc::posts::ModeValue::Post,
+        at,
+        state: None,
+        items: vec![item],
+    };
+    let logs = app.state::<JsonStore<LogBatch>>();
+    logs.mutate(move |mut v| {
+        v.insert(0, batch);
+        v.truncate(MAX_LOG_BATCHES);
+        v
+    });
 }
 
 /// 닉네임 랜덤 댓글(설계서 §2): `used`에 없는 닉네임으로 프로필을 바꾸고 성공한 닉네임을 `used`에
@@ -371,11 +482,8 @@ pub fn run_naver_discussion_macro(
                 // 글쓰기 add 패킷 API로 게시하고, 응답 id로 작성 글 URL을 만든다(브라우저 이동 없음).
                 let post_id = packet_client.submit_post(&room_url, title, body)?;
                 posted_url = Some(packet_client.post_url_from_id(&room_url, &post_id)?);
-                maybe_edit_after_post(
-                    &mut packet_client,
-                    &post_id,
-                    request.content_change.as_ref(),
-                );
+                // 내용 변경(edit)은 여기서 하지 않는다(#400). 원글 게시 직후 호출부(run_one_forum_stock)가
+                // edit를 백그라운드로 예약해, 게시큐의 1분 텀이 원글 시점부터 시작되게 한다.
                 (false, true)
             } else {
                 // 수동 확인 모드(브라우저 폼 채우기)는 종목토론방 Chrome 제거로 더 이상 지원하지
@@ -475,12 +583,8 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
     // 글쓰기 add 패킷 API로 게시하고, 응답 id로 작성 글 URL을 만든다(페이지 이동 없음).
     let post_id = packet_client.submit_post(&room_url, title, body)?;
     let post_url = packet_client.post_url_from_id(&room_url, &post_id)?;
-    // 글 내용 변경(설계서 §5): 글→edit→댓글 순서를 유지하려 댓글 전에 여기서 edit한다.
-    maybe_edit_after_post(
-        &mut packet_client,
-        &post_id,
-        request.content_change.as_ref(),
-    );
+    // 내용 변경(edit)은 백그라운드로 분리됐다(#400) — 여기서 하지 않는다. 원글+댓글을 먼저 끝내고
+    // 호출부가 원글 게시 직후 edit를 예약한다(댓글은 원글에 달리고, N초 뒤 원글 내용만 바뀐다).
     let post_report = AutomationReport {
         current_url: room_url.clone(),
         post_url: Some(post_url.clone()),
@@ -1058,6 +1162,29 @@ impl CdpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn post_id_from_url_extracts_id_from_post_url() {
+        // 글 URL(#400 내용변경 edit): /discussion/{post_id}?chip=all 에서 id를 뽑는다.
+        assert_eq!(
+            post_id_from_url(
+                "https://stock.naver.com/domestic/stock/005930/discussion/425202840?chip=all"
+            )
+            .as_deref(),
+            Some("425202840")
+        );
+        // 쿼리가 없어도 뽑는다.
+        assert_eq!(
+            post_id_from_url("https://stock.naver.com/domestic/stock/005930/discussion/123")
+                .as_deref(),
+            Some("123")
+        );
+        // 방(room) URL은 post_id가 없어 None.
+        assert_eq!(
+            post_id_from_url("https://stock.naver.com/domestic/stock/005930/discussion?chip=all"),
+            None
+        );
+    }
 
     #[test]
     fn clarify_profile_status_error_differs_by_npay_status() {

@@ -563,7 +563,7 @@ fn run_one_forum_stock<R: Runtime>(
     let body = crate::template_tokens::resolve_forum(body, &stock.name, &stock.code, &link);
     let comment = crate::template_tokens::resolve_forum(comment, &stock.name, &stock.code, &link);
     let (title, body, comment) = (title.as_str(), body.as_str(), comment.as_str());
-    if request.run_post && request.run_comment {
+    let result = if request.run_post && request.run_comment {
         run_naver_post_with_comment_macro(
             NaverPostWithCommentRequest {
                 title: title.to_owned(),
@@ -631,7 +631,38 @@ fn run_one_forum_stock<R: Runtime>(
                 }
             }
         })
+    };
+
+    // 내용 변경(#400): 원글을 성공적으로 올린 게시(run_post)이고 내용변경이 켜져 있으면, edit를
+    // 백그라운드로 예약한다. 원글 게시 직후 이 함수가 리턴해 게시큐의 1분 텀이 원글 시점부터
+    // 시작되고(사용자 요청 — 원글 간격은 수정 전과 동일), edit는 N초 뒤 따로 돌아 "내용 변경"
+    // 알림·토스트를 남긴다. 또 원글이 올라간 순간 토스트를 띄운다(내용변경 게시에 한함 —
+    // 일반 게시는 토스트 도배 방지). 중지/kill해도 예약된 edit는 그대로 실행된다(사용자 결정).
+    if request.run_post {
+        if let (Ok(posted), Some(change)) = (&result, request.content_change.as_ref()) {
+            if let Some(url) = posted.url.as_deref() {
+                let _ = app.emit(
+                    "forum-content-original",
+                    serde_json::json!({
+                        "loginId": request.account_id,
+                        "title": title,
+                        "body": body,
+                        "url": url,
+                        "stock": stock.name,
+                    }),
+                );
+                crate::naver_automation::spawn_forum_content_edit(
+                    app,
+                    &request.account_id,
+                    url,
+                    &stock.name,
+                    &stock.code,
+                    change,
+                );
+            }
+        }
     }
+    result
 }
 
 // CSV 템플릿 문자열에서 제목, 내용, 댓글내용 컬럼을 파싱하는 함수입니다.
