@@ -7,8 +7,6 @@ use url::Url;
 
 use super::{AutomationError, AutomationResult, DISCUSSION_URL};
 
-const DEFAULT_DEBUG_HOST: &str = "127.0.0.1";
-
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct ChromeTarget {
     #[serde(default)]
@@ -54,20 +52,6 @@ pub(super) fn select_or_create_target(host: &str, port: u16) -> AutomationResult
     }
 
     Ok(target)
-}
-
-// 사용자가 입력한 DevTools host 값을 실제 접속 가능한 host 문자열로 정리하는 함수입니다.
-pub(super) fn normalize_debug_host(host: &str) -> String {
-    let host = host.trim();
-
-    if host.is_empty() {
-        return DEFAULT_DEBUG_HOST.to_owned();
-    }
-
-    host.trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .trim_end_matches('/')
-        .to_owned()
 }
 
 // DevTools가 준 WebSocket URL을 WSL에서 접근 가능한 host/port로 바꾸는 함수입니다.

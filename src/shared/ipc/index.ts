@@ -187,6 +187,12 @@ export const ipc = {
     listNow: () => call<QueueNowItem[]>("list_queue_now"),
     listScheduled: () => call<QueueScheduledItem[]>("list_queue_scheduled"),
     cancelNow: (id: string) => call<QueueNowItem[]>("cancel_queue_now", { id }),
+    /**
+     * 실행 중인 게시큐 1개를 완전 종료(kill)한다(설계서 08). 취소 신호를 켜서 실행 중 게시
+     * 루프가 종목 사이·대기 중에 스스로 멈추고(Chrome은 정상 정리, 고아 없음), 큐에서 항목을
+     * 제거해 다음 대기 큐가 즉시 승계된다. 대기 아이템 취소는 `cancelNow`.
+     */
+    killNow: (id: string) => call<QueueNowItem[]>("kill_queue_now", { id }),
     // 종료(완료/실패) 아이템을 모두 큐에서 치운다(#1, "완료 항목 지우기").
     clearDoneNow: () => call<QueueNowItem[]>("clear_done_queue_now"),
     cancelScheduled: (id: string) =>

@@ -1,60 +1,9 @@
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use super::{AutomationError, AutomationResult, CdpClient};
+use super::{AutomationResult, CdpClient};
 
 impl CdpClient {
-    // 화면에서 지정한 문구가 들어간 버튼이나 링크를 찾아 클릭하는 함수입니다.
-    pub(super) fn click_text(&mut self, text: &str, timeout: Duration) -> AutomationResult<()> {
-        let quoted = serde_json::to_string(text)?;
-        let end = Instant::now() + timeout;
-
-        while Instant::now() < end {
-            let expression = format!(
-                r#"
-                (() => {{
-                  const needle = {quoted};
-                  const visible = el => {{
-                    if (!el) return false;
-                    const r = el.getBoundingClientRect();
-                    const s = getComputedStyle(el);
-                    return r.width > 0
-                      && r.height > 0
-                      && s.display !== 'none'
-                      && s.visibility !== 'hidden'
-                      && !el.disabled;
-                  }};
-                  const text = el => String(el?.innerText || el?.textContent || '')
-                    .replace(/\s+/g, ' ')
-                    .trim();
-
-                  const candidates = [...document.querySelectorAll('button, a, [role="button"]')]
-                    .filter(visible)
-                    .filter(el => text(el).includes(needle));
-
-                  if (!candidates.length) return false;
-
-                  const target = candidates[0];
-                  target.scrollIntoView({{ block: 'center', inline: 'center' }});
-                  target.click();
-                  return true;
-                }})()
-                "#
-            );
-
-            if self.evaluate_bool(&expression)? {
-                sleep(Duration::from_millis(500));
-                return Ok(());
-            }
-
-            sleep(Duration::from_millis(300));
-        }
-
-        Err(AutomationError::new(format!(
-            "'{text}' 버튼을 찾지 못했습니다."
-        )))
-    }
-
     // 네이버 로그인 후 기기 등록 안내가 나오면 "등록안함"을 클릭하는 함수입니다.
     // 로그인 흐름(auth::login_flow)에서도 재사용하므로 crate 범위로 공개한다.
     pub(crate) fn click_device_dontsave_if_present(

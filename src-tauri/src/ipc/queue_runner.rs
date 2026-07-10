@@ -363,6 +363,10 @@ async fn finish_item<R: Runtime>(app: &AppHandle<R>, job: &QueueNowItem) {
                 .mutate(|items| apply_yield_now(items, &job.id, *remaining));
         }
     }
+    // 아이템 실행 종료 — 취소 신호 레지스트리에서 제거(메모리 누수 방지, 설계서 08). 양보
+    // (Yielded)로 재대기하는 경우도 다음 실행 때 run_forum_targets가 새 신호를 등록한다.
+    app.state::<crate::ipc::kill::CancelRegistry>()
+        .remove(&job.id);
 }
 
 /// now 큐의 "최대 작동가능 작업 수"(#284) 사용자 설정. 0 = 무제한(기본값). N = 동시에 돌리는
@@ -959,6 +963,7 @@ fn apply_waiting_for_successful_posts<R: Runtime>(app: &AppHandle<R>, forum: &[F
                     "글 게시 도중 차단되어 큐가 멈췄습니다. 계정이 차단 상태로 전환되었어요."
                         .to_owned(),
                 ),
+                None,
             )
         });
         let list = timed_out.iter().fold(list, |acc, id| {
@@ -970,6 +975,7 @@ fn apply_waiting_for_successful_posts<R: Runtime>(app: &AppHandle<R>, forum: &[F
                     "페이지 대기시간 초과 또는 네이버 서버 오류(HTTP 500)로 게시가 실패했습니다. 잠시 후 다시 시도하세요."
                         .to_owned(),
                 ),
+                None,
             )
         });
         let list = errored.iter().fold(list, |acc, id| {
@@ -979,7 +985,7 @@ fn apply_waiting_for_successful_posts<R: Runtime>(app: &AppHandle<R>, forum: &[F
             } else {
                 "글 게시에 실패해 '에러' 상태로 전환했습니다(약관 동의·세션 등). 자세한 원인은 완료 로그의 '자세히 보기'에서 확인한 뒤, 상태를 눌러 다시 시도하세요.".to_owned()
             };
-            apply_status_by_login_id(acc, id, AccountStatus::Error, Some(msg))
+            apply_status_by_login_id(acc, id, AccountStatus::Error, Some(msg), None)
         });
         waiting.iter().fold(list, |acc, id| {
             apply_status_by_login_id(
@@ -990,6 +996,7 @@ fn apply_waiting_for_successful_posts<R: Runtime>(app: &AppHandle<R>, forum: &[F
                     "글 게시 완료 — 대기 상태입니다. 상태를 눌러 다시 활성으로 바꿀 수 있어요."
                         .to_owned(),
                 ),
+                None,
             )
         })
     });
@@ -1252,21 +1259,45 @@ async fn collect_comment_targets(
     out
 }
 
-/// plan의 종목토론방 대상을 계정별로 묶어 `ForumPublishRequest`로 만든다. 본문은
-/// 동결된 평문(`body_text`)을 쓰고(토론방은 평문만 지원), 댓글은 풀의 첫 항목을 쓴다
-/// (즉시게시 forum 경로와 동일). host/port는 호출부가 띄운 Chrome 값으로 채운다.
+/// plan의 종목토론방 대상을 `ForumPublishRequest`로 만든다. 본문은 동결된 평문(`body_text`)을
+/// 쓴다(토론방은 평문만 지원). host/port는 호출부가 띄운 Chrome 값으로 채운다.
+///
+/// 댓글 처리(#403): "요청 1건 = 댓글 1개" 엔진(`run_forum_publish`)을 그대로 쓰되 요청을 여러 개
+/// 만들어 여러 댓글을 단다.
+/// - **일반 대상(빈 comment_url)**: 기존처럼 계정별 종목 묶음 1요청, 댓글=풀 첫 항목(무변경).
+/// - **"특정 게시글"(comment_url) 대상**:
+///   - 정상: 각 (계정 × 링크)에 **작성한 모든 댓글**을 작성 순서대로(댓글 수만큼 요청).
+///   - 나눠서(`forum_comment_distribute`): **링크마다** 댓글을 계정에 1:1 무작위 배정(겹침 없음,
+///     링크마다 재셔플) — `naver_cafe::distribute::distribute_comments` 재사용.
 fn plan_to_forum_requests(plan: &PublishPlan) -> Vec<ForumPublishRequest> {
     use std::collections::BTreeMap;
 
     let run_post = runs_post(plan);
     let run_comment = runs_comment(plan);
-    let comment = plan.comments.first().cloned().unwrap_or_default();
+    let first_comment = plan.comments.first().cloned().unwrap_or_default();
 
-    // "특정 게시글" 댓글(comment_url 지정) 대상은 종목별 랜덤 글이 아니라 그 글 하나에만
-    // 댓글을 단다. 계정 묶음 없이 대상 1건 = 요청 1건으로 만들고(글 1개 단위 댓글), 강제로
-    // 댓글 전용(run_post=false)으로 둔다. comment_url 없는 일반 대상은 기존처럼 계정별로
-    // 종목을 묶어 한 요청에 싣는다(per-종목 동작 무변경).
-    let mut url_reqs: Vec<ForumPublishRequest> = Vec::new();
+    // "특정 게시글" 댓글 요청 1건을 만든다(댓글 전용, run_post=false). 그 글 URL에 직접 단다.
+    let make_url_req = |account_id: &str, url: &str, stock: DiscussionStock, comment: String| {
+        ForumPublishRequest {
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            account_id: account_id.to_owned(),
+            run_post: false,
+            run_comment: true,
+            title: plan.title.clone(),
+            body: plan.body_text.clone(),
+            comment,
+            stocks: vec![stock],
+            link_override: plan.link_override.clone(),
+            comment_url: Some(url.to_owned()),
+            comment_nickname_random: plan.comment_nickname_random,
+            content_change: plan.content_change.clone(),
+        }
+    };
+
+    // 특정글(url) 대상은 **링크(url)별**로 (계정, stock)을 모은다(등장 순서 보존 — 분배 단위가
+    // 링크이므로). 일반 대상(빈 url)은 계정별 종목 묶음으로 모은다(기존 동작).
+    let mut url_by_link: Vec<(String, Vec<(String, DiscussionStock)>)> = Vec::new();
     let mut by_account: BTreeMap<String, Vec<DiscussionStock>> = BTreeMap::new();
     for f in &plan.forum {
         let url = f.comment_url.trim();
@@ -1281,19 +1312,37 @@ fn plan_to_forum_requests(plan: &PublishPlan) -> Vec<ForumPublishRequest> {
                 .or_default()
                 .push(stock);
         } else {
-            url_reqs.push(ForumPublishRequest {
-                host: "127.0.0.1".to_owned(),
-                port: 0,
-                account_id: f.account_id.clone(),
-                run_post: false,
-                run_comment: true,
-                title: plan.title.clone(),
-                body: plan.body_text.clone(),
-                comment: comment.clone(),
-                stocks: vec![stock],
-                link_override: plan.link_override.clone(),
-                comment_url: Some(url.to_owned()),
-            });
+            match url_by_link.iter_mut().find(|(u, _)| u == url) {
+                Some((_, accs)) => accs.push((f.account_id.clone(), stock)),
+                None => url_by_link.push((url.to_owned(), vec![(f.account_id.clone(), stock)])),
+            }
+        }
+    }
+
+    let mut url_reqs: Vec<ForumPublishRequest> = Vec::new();
+    if plan.forum_comment_distribute && !plan.comments.is_empty() {
+        // 나눠서 게시: 링크마다 댓글 풀을 셔플해 계정에 1개씩 배정한다(#댓글==#계정이면 겹침 없이
+        // 전량 소진). 링크마다 rng가 진행돼 매칭이 재무작위화된다.
+        let mut rng = mulberry32(seed_from_clock());
+        for (url, accs) in &url_by_link {
+            let assigned = distribute_comments(accs.len(), &plan.comments, &mut rng);
+            for (i, (account_id, stock)) in accs.iter().enumerate() {
+                let comment = assigned.get(i).cloned().unwrap_or_default();
+                url_reqs.push(make_url_req(account_id, url, stock.clone(), comment));
+            }
+        }
+    } else {
+        // 정상: 각 (계정 × 링크)에 작성한 모든 댓글을 작성 순서대로. 댓글이 없으면 빈 댓글 1건.
+        for (url, accs) in &url_by_link {
+            for (account_id, stock) in accs {
+                if plan.comments.is_empty() {
+                    url_reqs.push(make_url_req(account_id, url, stock.clone(), String::new()));
+                } else {
+                    for c in &plan.comments {
+                        url_reqs.push(make_url_req(account_id, url, stock.clone(), c.clone()));
+                    }
+                }
+            }
         }
     }
 
@@ -1307,10 +1356,12 @@ fn plan_to_forum_requests(plan: &PublishPlan) -> Vec<ForumPublishRequest> {
             run_comment,
             title: plan.title.clone(),
             body: plan.body_text.clone(),
-            comment: comment.clone(),
+            comment: first_comment.clone(),
             stocks,
             link_override: plan.link_override.clone(),
             comment_url: None,
+            comment_nickname_random: plan.comment_nickname_random,
+            content_change: plan.content_change.clone(),
         });
 
     url_reqs.into_iter().chain(regular).collect()
@@ -1536,6 +1587,9 @@ fn retain_plan_accounts(
             .cloned()
             .collect(),
         login,
+        forum_comment_distribute: plan.forum_comment_distribute,
+        comment_nickname_random: plan.comment_nickname_random,
+        content_change: plan.content_change.clone(),
     }
 }
 
@@ -1591,6 +1645,9 @@ fn retain_forum_only(
         blog: Vec::new(),
         clip: Vec::new(),
         login: None,
+        forum_comment_distribute: plan.forum_comment_distribute,
+        comment_nickname_random: plan.comment_nickname_random,
+        content_change: plan.content_change.clone(),
     }
 }
 
@@ -1701,6 +1758,7 @@ fn synth_forum_failures(
                 trace: Some(format!("{}\n{}", skip.code, skip.trace_body())),
                 posted: None,
                 skipped: false,
+                stopped: false,
             },
         })
         .collect()
@@ -1836,6 +1894,7 @@ async fn do_login_and_capture_ip<R: Runtime>(
                 &login.account_id,
                 status.clone(),
                 Some(msg.clone()),
+                trace.clone(),
             )
         });
     let succeeded = matches!(&result, Ok(res) if res.succeeded);
@@ -1850,13 +1909,13 @@ async fn do_login_and_capture_ip<R: Runtime>(
 }
 
 
-/// 종목토론방 대상을 **계정별로 동시에** 게시한다(#237). 계정마다 디버그 포트 Chrome을 직접
-/// 띄우는데(`launch_debug_chrome` = 빈 포트 자동배정 + 고유 프로필), 포트·프로필이 모두 달라
-/// 여러 개를 동시에 띄워도 충돌이 없다. 카페(9222)·밴드(HTTP)와도 자원이 겹치지 않아, 카페/밴드가
-/// 도는 중에도 종토방은 병렬로 흐른다. 동시 수는 사용자 설정 "최대 작동 가능 작업 수"(#284, 0=무제한)를 따른다. 계정·종목별
-/// 결과를 돌려준다(완료 로그용). Chrome 기동/태스크 실패 시 그 계정의 종목들을 실패 결과로
-/// 합성해 진행률·로그가 조용히 누락되지 않게 한다(거짓 100% 방지). 각 묶음 시작 전 협조적
-/// 취소(item_present)를 확인해, 취소된 아이템의 남은 계정은 게시하지 않는다.
+/// 종목토론방 대상을 **계정별로 동시에** 게시한다(#237). 종토 게시는 Chrome 없이 순수 HTTP 패킷
+/// API로 처리하므로(#344 후속: 저장 쿠키를 패킷 클라이언트에 직접 로드), 계정마다 `spawn_blocking`
+/// 태스크만 띄우면 된다(packet_client는 blocking reqwest). 카페(9222)·밴드(HTTP)와도 자원이 겹치지
+/// 않아, 카페/밴드가 도는 중에도 종토방은 병렬로 흐른다. 동시 수는 사용자 설정 "최대 작동 가능 작업
+/// 수"(#284, 0=무제한)를 따른다. 계정·종목별 결과를 돌려준다(완료 로그용). 태스크 패닉 시 그 계정의
+/// 종목들을 실패 결과로 합성해 진행률·로그가 조용히 누락되지 않게 한다(거짓 100% 방지). 각 묶음 시작
+/// 전 협조적 취소(item_present)를 확인해, 취소된 아이템의 남은 계정은 게시하지 않는다.
 async fn run_forum_targets<R: Runtime>(
     app: &AppHandle<R>,
     plan: &PublishPlan,
@@ -1921,6 +1980,12 @@ async fn run_forum_targets<R: Runtime>(
     // 고친다(사용자 지적 2026-06-30: #284로 제한을 푼 뒤에도 이 내부 캡이 남아 따로 놀았다).
     // 한도는 묶음마다 다시 읽어, 사용자가 도중에 한도를 바꿔도 다음 묶음부터 반영된다. 결과는
     // 계정(req) 순서대로 모은다(#237).
+    // 사용자 완전 종료(kill, 설계서 08)용 취소 신호를 이 큐 id로 등록/조회한다. 각 계정의
+    // 게시 루프(spawn_blocking→run_forum_publish)가 이 신호를 보고 종목 사이·대기 중에도
+    // 스스로 멈춘다. batch 경계의 item_present(아래)는 코스 취소, 이 신호는 종목 단위 미세 취소다.
+    let cancel = app
+        .state::<crate::ipc::kill::CancelRegistry>()
+        .get_or_create(id);
     let mut outcomes = Vec::new();
     let mut req_iter = reqs.into_iter().enumerate();
     loop {
@@ -1944,6 +2009,11 @@ async fn run_forum_targets<R: Runtime>(
             // 종목 목록을 미리 복제해 둔다(누락 대신 명시 실패).
             let stocks_for_panic = req.stocks.clone();
             let app_for_job = app.clone();
+            // 이 계정 게시 루프에 넘길 취소 확인용 캡처(설계서 08): 신호 flag 또는 큐에서 항목이
+            // 사라짐(협조 취소)이면 남은 종목을 멈춘다.
+            let cancel_job = Arc::clone(&cancel);
+            let app_cancel = app.clone();
+            let id_cancel = id.to_owned();
             // 종목 시작/완료마다(blocking 스레드) 스켈레톤의 해당 칸만 바꾸기 위한 캡처들.
             let off = starts[idx];
             let app_start = app.clone();
@@ -1994,87 +2064,69 @@ async fn run_forum_targets<R: Runtime>(
                     }
                     write_live_phase(&app_retry, &id_retry, &base_retry, &live, base_done, total);
                 };
-                match crate::auth::launch_debug_chrome(true) {
-                    Ok(chrome) => {
-                        let mut req = req;
-                        // host는 plan_to_forum_requests에서 이미 127.0.0.1; 포트만 띄운 Chrome 값으로.
-                        req.port = chrome.port;
-                        // [가시성] 이 계정의 게시가 "지금 시작됐다"를 남긴다 — 종목 글 로그가 나오기
-                        // 전(전용 Chrome 띄우고 첫 글 여는 동안)에도 어느 계정이 도는지 보이게 한다.
-                        tracing::info!(
-                            "[POST] {} 종목토론방 게시 시작 — 전용 Chrome(포트 {}) · {}종목",
-                            crate::auth::mask_id(&req.account_id),
-                            chrome.port,
-                            req.stocks.len()
-                        );
-                        // account_id/port를 미리 복사한다 — req는 run_forum_publish로 move된다.
-                        let account_id_done = req.account_id.clone();
-                        let port_done = chrome.port;
-                        let results =
-                            run_forum_publish(req, app_for_job, on_start, on_result, on_retry);
-                        // [가시성/증명] kill이 '게시 도중'이 아니라 '완전 완료 후'에만 일어난다는
-                        // 것을 로그만으로 증명할 수 있게, 종목별 실제 결과를 원문 그대로 남긴다.
-                        // 종목 N개가 모두 여기 찍힌 뒤에야 아래 "완벽 완료 확인"·Chrome 종료가
-                        // 나오므로, 중간에 kill됐다면 이 결과 줄이 불완전할 것이다.
-                        for r in &results {
-                            let url = r
-                                .posted
-                                .as_ref()
-                                .and_then(|p| p.url.as_deref())
-                                .unwrap_or("-");
-                            tracing::info!(
-                                "[POST]   └ [{}] {} — {} · url={} · {}",
-                                r.code,
-                                r.name,
-                                if r.ok {
-                                    "성공"
-                                } else if r.skipped {
-                                    "건너뜀"
-                                } else {
-                                    "실패"
-                                },
-                                url,
-                                r.message
-                            );
-                        }
-                        let ok = results.iter().filter(|r| r.ok).count();
-                        let total = results.len();
-                        tracing::info!(
-                            "[POST] {} 종목토론방 게시 완벽 완료 확인 — {}/{} 성공, 이제 전용 Chrome(포트 {}) 종료",
-                            crate::auth::mask_id(&account_id_done),
-                            ok,
-                            total,
-                            port_done
-                        );
-                        drop(chrome);
-                        results
-                    }
-                    // Chrome 기동 실패 → 이 계정 종목 전부 실패로 기록(누락 대신 명시). on_result로
-                    // 흘려 그 자리들을 즉시 실패로 바꾼다(다음 계정까지 대기 중으로 멈춰 보이지 않게).
-                    Err(error) => {
-                        // 인프라 실패(엔진 진입 전)는 backtrace가 없어 메시지를 trace로도 쓴다.
-                        let synth: Vec<ForumPublishResult> = req
-                            .stocks
-                            .iter()
-                            .map(|s| {
-                                let message = format!("Chrome 실행 실패: {error}");
-                                ForumPublishResult {
-                                    code: s.code.clone(),
-                                    name: s.name.clone(),
-                                    ok: false,
-                                    trace: Some(message.clone()),
-                                    message,
-                                    posted: None,
-                                    skipped: false,
-                                }
-                            })
-                            .collect();
-                        for (i, result) in synth.iter().enumerate() {
-                            on_result(i, result);
-                        }
-                        synth
-                    }
+                // 종목토론방 게시는 Chrome 없이 순수 HTTP 패킷 API로 처리한다(#344 후속). 저장 쿠키를
+                // 패킷 클라이언트에 직접 로드하므로 계정별 전용 Chrome을 띄우지 않는다 — 병렬(#237/#238)은
+                // spawn_blocking으로 그대로 유지한다(packet_client는 blocking reqwest).
+                // req.host/port는 이제 아무도 안 쓰므로(macro가 Chrome을 안 씀) 그대로 둔다.
+                // [가시성] 이 계정의 게시가 "지금 시작됐다"를 남긴다 — 종목 글 로그가 나오기 전에도
+                // 어느 계정이 도는지 보이게 한다.
+                tracing::info!(
+                    "[POST] {} 종목토론방 게시 시작 — {}종목(Chrome 없이 패킷 API)",
+                    crate::auth::mask_id(&req.account_id),
+                    req.stocks.len()
+                );
+                // account_id를 미리 복사한다 — req는 run_forum_publish로 move된다.
+                let account_id_done = req.account_id.clone();
+                // 사용자 완전 종료 확인(설계서 08): 신호가 켜졌거나 큐에서 항목이 사라졌으면(협조
+                // 취소) 남은 종목을 멈춘다. Chrome PID kill(Stage2)은 크롬이 없어 무의미해졌고, 협조적
+                // 취소(item_present/CancelRegistry 신호)만으로 종목 사이에서 안전하게 멈춘다. 진행 중
+                // 종목 1개는 게시+결과기록까지 끝낸 뒤라 안전하다. critical_job은 같은 신호의 클론 —
+                // run_forum_publish가 한 종목 게시 동안 임계구역을 표시해 kill이 그 창을 안 건드리게 한다.
+                let critical_job = Arc::clone(&cancel_job);
+                let should_cancel =
+                    move || cancel_job.is_cancelled() || !item_present(&app_cancel, &id_cancel);
+                let results = run_forum_publish(
+                    req,
+                    app_for_job,
+                    on_start,
+                    on_result,
+                    on_retry,
+                    should_cancel,
+                    critical_job,
+                );
+                // [가시성/증명] kill이 '게시 도중'이 아니라 '완전 완료 후'에만 일어난다는 것을
+                // 로그만으로 증명할 수 있게, 종목별 실제 결과를 원문 그대로 남긴다. 종목 N개가 모두
+                // 여기 찍힌 뒤에야 아래 "완벽 완료 확인"이 나오므로, 중간에 kill됐다면 불완전할 것이다.
+                for r in &results {
+                    let url = r
+                        .posted
+                        .as_ref()
+                        .and_then(|p| p.url.as_deref())
+                        .unwrap_or("-");
+                    tracing::info!(
+                        "[POST]   └ [{}] {} — {} · url={} · {}",
+                        r.code,
+                        r.name,
+                        if r.ok {
+                            "성공"
+                        } else if r.skipped {
+                            "건너뜀"
+                        } else {
+                            "실패"
+                        },
+                        url,
+                        r.message
+                    );
                 }
+                let ok = results.iter().filter(|r| r.ok).count();
+                let total = results.len();
+                tracing::info!(
+                    "[POST] {} 종목토론방 게시 완벽 완료 확인 — {}/{} 성공",
+                    crate::auth::mask_id(&account_id_done),
+                    ok,
+                    total
+                );
+                results
             });
             handles.push((account_id, stocks_for_panic, handle));
         }
@@ -2098,6 +2150,7 @@ async fn run_forum_targets<R: Runtime>(
                             message,
                             posted: None,
                             skipped: false,
+                            stopped: false,
                         }
                     })
                     .collect(),
@@ -2511,7 +2564,7 @@ async fn run_login_targets<R: Runtime>(app: &AppHandle<R>, id: &str, targets: &[
         // 계정 세밀 상태/사유를 accounts 스토어에 반영한다(loginId가 같은 모든 행). 프론트
         // accounts 화면이 이 값을 폴링해 상태 배지/tooltip을 갱신한다.
         app.state::<JsonStore<Account>>().mutate(|list| {
-            apply_status_by_login_id(list, &t.account_id, status.clone(), Some(msg.clone()))
+            apply_status_by_login_id(list, &t.account_id, status.clone(), Some(msg.clone()), trace.clone())
         });
         // 활동 피드에도 상태별 타입으로 남긴다(기존 전용 로그인 큐와 동일 UX).
         record(
@@ -3073,8 +3126,11 @@ fn forum_result_to_item(account_id: &str, result: &ForumPublishResult) -> BatchI
         code: Some(result.code.clone()),
         board: None,
         login_id: account_id.to_owned(),
-        // 차단 계정으로 건너뛴 글(#267-9)은 X(실패)가 아니라 "건너뜀(Skip)"으로 구분한다.
-        status: if result.skipped {
+        // 사용자 중지(kill)로 안 올린 글은 "중지(Stopped)", 차단 건너뜀(#267-9)은 "건너뜀(Skip)",
+        // 그 외는 성공/실패. 셋 다 X(실패)와 구분한다.
+        status: if result.stopped {
+            BatchItemStatus::Stopped
+        } else if result.skipped {
             BatchItemStatus::Skip
         } else {
             status_of(result.ok)
@@ -3082,14 +3138,14 @@ fn forum_result_to_item(account_id: &str, result: &ForumPublishResult) -> BatchI
         // 성공은 엔진 문구("게시 완료"+URL). 실패는 비개발자용 한국어 사유로 변환해 "왜
         // 실패했는지"를 한눈에 보이게 한다(#243: 카페 failure_reason과 동일 철학). 건너뜀은
         // run_forum_publish가 만든 안내문("앞선 글이 …건너뜀")을 그대로 보여준다.
-        msg: if result.skipped || result.ok {
+        msg: if result.stopped || result.skipped || result.ok {
             result.message.clone()
         } else {
             forum_failure_reason(&result.message)
         },
         // 실패 시 친절 사유로 가려진 원본 기술 메시지를 자세히 보기 맨 위에 보존한다(#243). 성공·
         // 건너뜀은 그대로(없음). AutomationError::trace()는 위치+백트레이스만 담아 message가 빠지므로 합친다.
-        trace: if result.skipped || result.ok {
+        trace: if result.stopped || result.skipped || result.ok {
             result.trace.clone()
         } else {
             Some(match &result.trace {
@@ -3995,6 +4051,9 @@ mod tests {
             blog: vec![],
             clip: vec![],
             login: None,
+            forum_comment_distribute: false,
+            comment_nickname_random: false,
+            content_change: None,
         }
     }
 
@@ -4140,6 +4199,7 @@ mod tests {
                 trace: None,
                 posted: None,
                 skipped: false,
+                stopped: false,
             },
         }
     }
@@ -4155,6 +4215,7 @@ mod tests {
                 trace: Some(trace.into()),
                 posted: None,
                 skipped: false,
+                stopped: false,
             },
         }
     }
@@ -4172,6 +4233,7 @@ mod tests {
                 trace: None,
                 posted: None,
                 skipped: false,
+                stopped: false,
             },
         }
     }
@@ -4188,6 +4250,7 @@ mod tests {
                 trace: None,
                 posted: None,
                 skipped: true,
+                stopped: false,
             },
         }
     }
@@ -4204,6 +4267,7 @@ mod tests {
                 trace: None,
                 posted: None,
                 skipped: false,
+                stopped: false,
             },
         }
     }
@@ -5179,6 +5243,153 @@ mod tests {
         assert_eq!(r.comment, "좋은 글이네요");
     }
 
+    // 설계서 §2·§5: plan의 닉네임 랜덤·글 내용 변경 옵션이 종토방 요청(특정글 댓글 req·일반 req
+    // 둘 다)에 그대로 실려야 게시 루프가 실제로 실행한다. 옵션이 흐르지 않으면 UI에서 켜도 무동작.
+    #[test]
+    fn forum_requests_carry_nickname_random_and_content_change() {
+        use crate::ipc::queue::{ContentChange, ForumTarget};
+        let change = ContentChange {
+            title: "새 제목".into(),
+            body: "새 본문".into(),
+            delay_sec: 30,
+        };
+        // 일반(빈 comment_url) 대상 + 특정글(comment_url) 대상을 한 plan에 섞어, 두 생성 경로를 모두 검증.
+        let url = "https://stock.naver.com/domestic/stock/005930/discussion/1";
+        let mut p = plan(ModeValue::Comment, vec![]);
+        p.comments = vec!["댓글".into()];
+        p.comment_nickname_random = true;
+        p.content_change = Some(change.clone());
+        p.forum = vec![
+            ForumTarget {
+                account_id: "u0".into(),
+                name: "삼성전자".into(),
+                code: "005930".into(),
+                comment_url: String::new(),
+            },
+            ForumTarget {
+                account_id: "u1".into(),
+                name: "글 #1".into(),
+                code: "005930".into(),
+                comment_url: url.into(),
+            },
+        ];
+        let reqs = plan_to_forum_requests(&p);
+        assert_eq!(reqs.len(), 2);
+        for r in &reqs {
+            assert!(r.comment_nickname_random, "닉네임 랜덤 옵션이 요청에 실려야 함");
+            assert_eq!(r.content_change.as_ref(), Some(&change), "글 내용 변경 옵션이 요청에 실려야 함");
+        }
+    }
+
+    // 옵션 기본값(false/None)이면 요청도 기본값이라 게시 루프가 기존과 100% 동일하게 동작한다.
+    #[test]
+    fn forum_requests_default_when_options_off() {
+        use crate::ipc::queue::ForumTarget;
+        let mut p = plan(ModeValue::Post, vec![]);
+        p.forum = vec![ForumTarget {
+            account_id: "u0".into(),
+            name: "삼성전자".into(),
+            code: "005930".into(),
+            comment_url: String::new(),
+        }];
+        let reqs = plan_to_forum_requests(&p);
+        assert_eq!(reqs.len(), 1);
+        assert!(!reqs[0].comment_nickname_random);
+        assert_eq!(reqs[0].content_change, None);
+    }
+
+    // #403 정상 게시: 특정글 1개·계정 1개라도 댓글을 여러 개 쓰면 **댓글 수만큼** 요청이 생겨
+    // 모든 댓글이(작성 순서대로) 달린다. (기존 버그: 첫 댓글만.)
+    #[test]
+    fn forum_url_posts_all_comments_in_order_one_request_each() {
+        use crate::ipc::queue::ForumTarget;
+        let url = "https://stock.naver.com/domestic/stock/005930/discussion/1";
+        let mut p = plan(ModeValue::Comment, vec![]);
+        p.comments = vec!["안녕하세요".into(), "반갑습니다".into(), "저두요".into()];
+        p.forum = vec![ForumTarget {
+            account_id: "u0".into(),
+            name: "글 #1".into(),
+            code: "005930".into(),
+            comment_url: url.into(),
+        }];
+        let reqs = plan_to_forum_requests(&p);
+        assert_eq!(reqs.len(), 3, "댓글 3개 → 요청 3개");
+        assert!(reqs.iter().all(|r| r.account_id == "u0" && r.comment_url.as_deref() == Some(url)));
+        // 작성 순서 보존.
+        let got: Vec<&str> = reqs.iter().map(|r| r.comment.as_str()).collect();
+        assert_eq!(got, vec!["안녕하세요", "반갑습니다", "저두요"]);
+    }
+
+    // #403 정상 게시: 링크 2 × 계정 2 × 댓글 2 = 각 (계정×링크)가 모든 댓글을 단다 → 8 요청.
+    #[test]
+    fn forum_url_all_comments_across_accounts_and_links() {
+        use crate::ipc::queue::ForumTarget;
+        let url_a = "https://stock.naver.com/domestic/stock/005930/discussion/1";
+        let url_b = "https://stock.naver.com/domestic/stock/000660/discussion/2";
+        let mut p = plan(ModeValue::Comment, vec![]);
+        p.comments = vec!["c1".into(), "c2".into()];
+        let mk = |acc: &str, url: &str| ForumTarget {
+            account_id: acc.into(),
+            name: "글".into(),
+            code: "005930".into(),
+            comment_url: url.into(),
+        };
+        p.forum = vec![mk("A", url_a), mk("B", url_a), mk("A", url_b), mk("B", url_b)];
+        let reqs = plan_to_forum_requests(&p);
+        assert_eq!(reqs.len(), 8, "(계정2×링크2)×댓글2 = 8");
+        // 각 (계정, 링크) 쌍이 정확히 두 댓글(c1,c2)을 갖는다.
+        for acc in ["A", "B"] {
+            for url in [url_a, url_b] {
+                let mut cs: Vec<&str> = reqs
+                    .iter()
+                    .filter(|r| r.account_id == acc && r.comment_url.as_deref() == Some(url))
+                    .map(|r| r.comment.as_str())
+                    .collect();
+                cs.sort();
+                assert_eq!(cs, vec!["c1", "c2"], "{acc}×{url}");
+            }
+        }
+    }
+
+    // #403 나눠서 게시: #댓글==#계정이면 링크마다 계정에 **서로 다른** 댓글 1개씩(겹침 없음).
+    #[test]
+    fn forum_distribute_one_distinct_comment_per_account_per_link() {
+        use crate::ipc::queue::ForumTarget;
+        use std::collections::BTreeSet;
+        let url_a = "https://stock.naver.com/domestic/stock/005930/discussion/1";
+        let url_b = "https://stock.naver.com/domestic/stock/000660/discussion/2";
+        let mut p = plan(ModeValue::Comment, vec![]);
+        p.comments = vec!["안녕".into(), "반가워".into(), "저두".into()]; // 3
+        p.forum_comment_distribute = true;
+        let mk = |acc: &str, url: &str| ForumTarget {
+            account_id: acc.into(),
+            name: "글".into(),
+            code: "005930".into(),
+            comment_url: url.into(),
+        };
+        // 계정 3개(A,B,C) × 링크 2개.
+        p.forum = vec![
+            mk("A", url_a), mk("B", url_a), mk("C", url_a),
+            mk("A", url_b), mk("B", url_b), mk("C", url_b),
+        ];
+        let reqs = plan_to_forum_requests(&p);
+        assert_eq!(reqs.len(), 6, "링크2 × 계정3 = 6 (계정당 1개)");
+        for url in [url_a, url_b] {
+            let for_url: Vec<&ForumPublishRequest> = reqs
+                .iter()
+                .filter(|r| r.comment_url.as_deref() == Some(url))
+                .collect();
+            assert_eq!(for_url.len(), 3, "링크당 계정수만큼");
+            // 계정마다 정확히 1개.
+            let accts: BTreeSet<&str> = for_url.iter().map(|r| r.account_id.as_str()).collect();
+            assert_eq!(accts.len(), 3, "A,B,C 각 1개");
+            // 댓글이 겹치지 않고 풀을 전량 소진(순열).
+            let cs: BTreeSet<&str> = for_url.iter().map(|r| r.comment.as_str()).collect();
+            assert_eq!(cs.len(), 3, "겹침 없음");
+            assert!(cs.iter().all(|c| ["안녕", "반가워", "저두"].contains(c)));
+        }
+    }
+
     #[test]
     fn forum_plain_targets_keep_empty_comment_url_after_split() {
         use crate::ipc::queue::ForumTarget;
@@ -5706,6 +5917,7 @@ mod tests {
             trace: None,
             posted: None,
             skipped: true,
+            stopped: false,
         };
         let item = forum_result_to_item("u0", &result);
         assert_eq!(item.status, BatchItemStatus::Skip);
@@ -6026,6 +6238,7 @@ mod tests {
             trace: Some("at foo.rs:1\n\nframe0".into()),
             posted: None,
             skipped: false,
+            stopped: false,
         };
         let item = forum_result_to_item("u0", &result);
         assert_eq!(item.status, BatchItemStatus::Fail);
@@ -6047,6 +6260,7 @@ mod tests {
             trace: None,
             posted: None,
             skipped: false,
+            stopped: false,
         };
         let item = forum_result_to_item("u0", &result);
         assert_eq!(item.msg, "종목토론방 게시에 실패했습니다");

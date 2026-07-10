@@ -1,9 +1,7 @@
 mod browser_flow;
-mod cookie_bridge;
 mod devtools_connection;
 mod like_flow;
 mod packet_client;
-mod post_form;
 pub mod types;
 
 pub use types::{
@@ -11,7 +9,7 @@ pub use types::{
     NaverDiscussionRequest, NaverLoginProfile, NaverPostWithCommentRequest,
 };
 
-use devtools_connection::{normalize_debug_host, select_or_create_target, websocket_url_for_host};
+use devtools_connection::{select_or_create_target, websocket_url_for_host};
 use serde_json::{json, Value};
 use std::fmt::{Display, Formatter};
 use std::io::ErrorKind;
@@ -24,10 +22,6 @@ use tungstenite::{Message, WebSocket};
 
 const DISCUSSION_URL: &str = "https://stock.naver.com/discussion";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
-/// 게시(글쓰기/댓글) 경로의 페이지 로드(`wait_for_ready_state`) 대기 상한. WSL2 자원 경쟁 등으로
-/// 일시적으로 로드가 느려질 때 "대기초과"로 빠지는 빈도를 줄이려 `DEFAULT_TIMEOUT`(20초)보다
-/// 넉넉히 잡는다. 로그인 경로(auth)는 이 값을 쓰지 않으므로 영향이 없다(#대기초과 후속).
-pub(crate) const POST_READY_TIMEOUT: Duration = Duration::from_secs(45);
 /// DevTools WebSocket 핸드셰이크 전 TCP 연결 타임아웃. tungstenite `connect()`는 연결에
 /// 타임아웃이 없어, Chrome이 떴지만 DevTools가 응답하지 않으면 무한 대기한다(#210 로그인
 /// 멈춤의 한 원인). TCP 연결을 이 시간으로 묶는다(이후 입출력은 DEFAULT_TIMEOUT).
@@ -170,9 +164,9 @@ fn redact_cdp_params(method: &str, params: &Value) -> String {
 }
 
 // 네이버 로그인 확인부터 토론방 선택, 글쓰기/댓글 등록까지 전체 흐름을 실행하는 함수입니다.
-// 글/글+댓글 매크로가 공유하는 진입 셋업 결과(Chrome 연결·패킷 클라이언트·로그인·선택 종목).
+// 글/글+댓글 매크로가 공유하는 진입 셋업 결과(패킷 클라이언트·로그인·선택 종목). Chrome은 더
+// 이상 쓰지 않는다 — 저장 쿠키를 패킷 클라이언트에 직접 로드하므로(카페 경로와 동일).
 struct ForumDiscussionSession {
-    chrome: CdpClient,
     packet_client: packet_client::NaverPacketClient,
     login_profile: NaverLoginProfile,
     // npay 가입 판정 — 프로필 상태 500이 났을 때 "계정 보호조치(nid 인증 거부)"인지 가르는 데 쓴다.
@@ -184,27 +178,25 @@ struct ForumDiscussionSession {
     room_url: String,
 }
 
-// 글/글+댓글 매크로 공통 셋업: Chrome 연결 → 쿠키 주입 → 토론 페이지 → 패킷 클라이언트 →
-// 로그인 확인 → 토론방 진입까지 한 번에 수행한다. 두 경로가 동일하게 중복하던 블록을
-// 단일 함수로 합쳐 분기 누락·드리프트를 막는다(동작 변경 없음).
+// 글/글+댓글 매크로 공통 셋업: 저장 쿠키 로드 → 패킷 클라이언트 → 로그인 확인 → npay 가입 →
+// 토론방 선택까지 한 번에 수행한다. 두 경로가 동일하게 중복하던 블록을 단일 함수로 합쳐 분기
+// 누락·드리프트를 막는다.
+//
+// Chrome은 더 이상 쓰지 않는다(#344 후속). 예전엔 Chrome에 쿠키를 주입→getAllCookies로 되뽑아
+// 패킷 클라이언트를 만들었지만, 그건 저장 쿠키를 우회로 옮기는 것일 뿐 페이지 조작은 없었다.
+// 카페(`naver_cafe`) 경로처럼 저장 쿠키(`read_account_cookies`)를 곧바로 패킷 클라이언트에
+// 로드하면 Chrome이 전혀 필요 없다. 글쓰기/댓글/수정은 전부 순수 HTTP 패킷 API로 처리한다.
 fn open_discussion_session(
-    host: &str,
-    port: u16,
     account_id: Option<&str>,
     stock: Option<&DiscussionStock>,
 ) -> AutomationResult<ForumDiscussionSession> {
-    let host = normalize_debug_host(host);
-    let mut chrome = CdpClient::connect_to_existing_chrome(&host, port)?;
-    chrome.enable()?;
-    // 계정 쿠키를 Chrome에 주입한다. 바로 다음 build_naver_packet_client가 Chrome에서 쿠키를 뽑아
-    // HTTP 패킷 클라이언트를 만든다 — *여기까지만* Chrome이 필요하다. 글쓰기/댓글은 전부 HTTP 패킷
-    // API로 처리하므로, 종목토론방 페이지로의 이동/로드는 하지 않는다(사수 지시 2026-06-30): 페이지
-    // 렌더링이 게시에 불필요하고, 그 페이지 로드 대기가 가짜 "대기초과"의 원인이었다.
-    if let Some(account_id) = account_id {
-        chrome.inject_account_cookies(account_id)?;
-    }
-
-    let mut packet_client = chrome.build_naver_packet_client()?;
+    // 종목토론방 게시는 항상 계정 ID로 저장 쿠키를 찾는다 — 없으면 로드할 세션이 없어 명확히 실패.
+    let account_id = account_id.ok_or_else(|| {
+        AutomationError::new(
+            "종목토론방 게시에 계정 ID가 없습니다(저장된 로그인 쿠키를 찾을 수 없음).",
+        )
+    })?;
+    let mut packet_client = packet_client::NaverPacketClient::from_saved_cookies(account_id)?;
     let login_profile = packet_client.read_login_profile()?;
 
     // 세션 만료(getProfile가 비로그인으로 응답)면 여기서 차단 처리한다 — 예전엔 게시 직전 페이지
@@ -248,7 +240,6 @@ fn open_discussion_session(
     };
 
     Ok(ForumDiscussionSession {
-        chrome,
         packet_client,
         login_profile,
         npay_status,
@@ -292,8 +283,52 @@ fn clarify_profile_status_error(
 /// 건드리지 않는다). 여기서 재수출해 기존 호출부(`lib.rs`)의 import 경로를 유지한다.
 pub use like_flow::{run_naver_dislike, run_naver_like, LikeVerdict};
 
+/// 글 내용 변경(설계서 §5): `content_change`가 있으면 글 게시(submit_post) 후 `delay_sec`초 뒤
+/// 새 제목/본문으로 edit한다(같은 세션·크롬 kill 전). edit 실패는 로그만 남기고 게시 자체는
+/// 성공으로 둔다(edit 실패가 게시를 실패로 만들지 않게 — 사수 지시). `None`이면 아무것도 안 한다.
+fn maybe_edit_after_post(
+    packet_client: &mut packet_client::NaverPacketClient,
+    post_id: &str,
+    content_change: Option<&crate::ipc::queue::ContentChange>,
+) {
+    let Some(change) = content_change else {
+        return;
+    };
+    sleep(Duration::from_secs(u64::from(change.delay_sec)));
+    if let Err(error) = packet_client.edit_post(post_id, &change.title, &change.body) {
+        tracing::warn!(
+            post_id = %post_id,
+            "글 게시 후 내용 변경(edit) 실패 — 게시는 성공으로 둠: {}",
+            error.message()
+        );
+    }
+}
+
+/// 닉네임 랜덤 댓글(설계서 §2): `used`에 없는 닉네임으로 프로필을 바꾸고 성공한 닉네임을 `used`에
+/// 넣어 같은 계정의 다음 댓글과 겹치지 않게 한다. 변경 실패(네트워크/프로필 오류)는 로그만 남기고
+/// 기존 닉네임으로 진행한다(닉네임 변경 실패가 댓글을 막지 않게).
+fn maybe_randomize_nickname(
+    packet_client: &mut packet_client::NaverPacketClient,
+    used: &mut std::collections::HashSet<String>,
+) {
+    match packet_client.change_nickname_avoiding(used) {
+        Ok(nickname) => {
+            used.insert(nickname);
+        }
+        Err(error) => {
+            tracing::warn!(
+                "댓글 닉네임 랜덤 변경 실패 — 기존 닉네임으로 진행: {}",
+                error.message()
+            );
+        }
+    }
+}
+
 pub fn run_naver_discussion_macro(
     request: NaverDiscussionRequest,
+    // 닉네임 랜덤 댓글(설계서 §2)에서 계정 내 이미 쓴 닉네임을 누적하는 집합. 호출부(run_forum_publish)가
+    // 계정 단위로 소유해, 매크로가 stock마다 세션을 새로 열어도 같은 계정 안에서 닉네임이 겹치지 않게 한다.
+    used: &mut std::collections::HashSet<String>,
 ) -> AutomationResult<AutomationReport> {
     let title = request.title.trim();
     let body = request.body.trim();
@@ -306,22 +341,16 @@ pub fn run_naver_discussion_macro(
         return Err(AutomationError::new("내용이 비어 있습니다."));
     }
 
-    // 매크로 시작~세션 오픈(크롬 연결·쿠키 추출·로그인 확인)까지의 실제 소요시간을 로그로 남긴다.
+    // 매크로 시작~세션 오픈(저장 쿠키 로드·로그인 확인)까지의 실제 소요시간을 로그로 남긴다.
     let macro_started = Instant::now();
     tracing::info!(target_kind = ?request.target, "게시 매크로 시작 — 세션 오픈 진입");
     let ForumDiscussionSession {
-        mut chrome,
-        packet_client,
+        mut packet_client,
         login_profile,
         npay_status,
         selected,
         room_url,
-    } = open_discussion_session(
-        &request.host,
-        request.port,
-        request.account_id.as_deref(),
-        request.stock.as_ref(),
-    )?;
+    } = open_discussion_session(request.account_id.as_deref(), request.stock.as_ref())?;
     tracing::info!(
         elapsed_secs = macro_started.elapsed().as_secs(),
         "세션 오픈 완료 — 글/댓글 등록 단계 시작(페이지 이동 없이 패킷 API로 게시)"
@@ -342,13 +371,18 @@ pub fn run_naver_discussion_macro(
                 // 글쓰기 add 패킷 API로 게시하고, 응답 id로 작성 글 URL을 만든다(브라우저 이동 없음).
                 let post_id = packet_client.submit_post(&room_url, title, body)?;
                 posted_url = Some(packet_client.post_url_from_id(&room_url, &post_id)?);
+                maybe_edit_after_post(
+                    &mut packet_client,
+                    &post_id,
+                    request.content_change.as_ref(),
+                );
                 (false, true)
             } else {
-                // 수동 확인 모드(CLI)만 브라우저 폼이 필요하므로 이 경로에서만 페이지를 연다.
-                chrome.navigate(&room_url)?;
-                chrome.open_write_modal()?;
-                chrome.fill_post_form(title, body)?;
-                (chrome.highlight_manual_submit_target()?, false)
+                // 수동 확인 모드(브라우저 폼 채우기)는 종목토론방 Chrome 제거로 더 이상 지원하지
+                // 않는다(#344 후속). 실제 게시 경로(큐·즉시게시·CLI)는 전부 submit_after_fill=true다.
+                return Err(AutomationError::new(
+                    "수동 확인 모드(브라우저 폼 채우기)는 지원되지 않습니다. 자동 게시(submit_after_fill)를 사용하세요.",
+                ));
             }
         }
         AutomationTarget::Comment => {
@@ -373,12 +407,16 @@ pub fn run_naver_discussion_macro(
                 npay_status,
             )?;
             if request.submit_after_fill {
+                if request.comment_nickname_random {
+                    maybe_randomize_nickname(&mut packet_client, used);
+                }
                 packet_client.submit_comment(&comment_target_url, body)?;
                 (false, true)
             } else {
-                chrome.navigate(&comment_target_url)?;
-                chrome.fill_comment_form(body)?;
-                (chrome.highlight_manual_submit_target()?, false)
+                // 수동 확인 모드는 Chrome 제거로 미지원(위 글쓰기 분기와 동일).
+                return Err(AutomationError::new(
+                    "수동 확인 모드(브라우저 폼 채우기)는 지원되지 않습니다. 자동 게시(submit_after_fill)를 사용하세요.",
+                ));
             }
         }
     };
@@ -401,6 +439,8 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
     request: NaverPostWithCommentRequest,
     app: &tauri::AppHandle<R>,
     sleep_after: bool,
+    // 닉네임 랜덤 댓글(설계서 §2) 계정 내 누적 집합 — run_naver_discussion_macro와 동일 계약.
+    used: &mut std::collections::HashSet<String>,
 ) -> AutomationResult<Vec<AutomationReport>> {
     let title = request.title.trim();
     let body = request.body.trim();
@@ -419,20 +459,12 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
     }
 
     let ForumDiscussionSession {
-        // Chrome은 쿠키 추출·로그인 확인까지만 쓰였다. 이후 게시는 전부 패킷 API라 더는 쓰지
-        // 않지만, 세션이 끝날 때까지 살려둔다(Drop 시 소켓 정리).
-        chrome: _chrome,
-        packet_client,
+        mut packet_client,
         login_profile,
         npay_status,
         selected,
         room_url,
-    } = open_discussion_session(
-        &request.host,
-        request.port,
-        request.account_id.as_deref(),
-        request.stock.as_ref(),
-    )?;
+    } = open_discussion_session(request.account_id.as_deref(), request.stock.as_ref())?;
 
     // 글쓰기 전에 종목토론방 프로필(닉네임+소개 2222)을 보장한다(없으면 글쓰기 form 404). 멱등.
     clarify_profile_status_error(
@@ -443,6 +475,8 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
     // 글쓰기 add 패킷 API로 게시하고, 응답 id로 작성 글 URL을 만든다(페이지 이동 없음).
     let post_id = packet_client.submit_post(&room_url, title, body)?;
     let post_url = packet_client.post_url_from_id(&room_url, &post_id)?;
+    // 글 내용 변경(설계서 §5): 글→edit→댓글 순서를 유지하려 댓글 전에 여기서 edit한다.
+    maybe_edit_after_post(&mut packet_client, &post_id, request.content_change.as_ref());
     let post_report = AutomationReport {
         current_url: room_url.clone(),
         post_url: Some(post_url.clone()),
@@ -464,6 +498,9 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
         packet_client.ensure_profile_intro_setup(&post_url),
         npay_status,
     )?;
+    if request.comment_nickname_random {
+        maybe_randomize_nickname(&mut packet_client, used);
+    }
     packet_client.submit_comment(&post_url, comment)?;
     let comment_report = AutomationReport {
         current_url: post_url.clone(),
@@ -574,22 +611,6 @@ impl CdpClient {
         Ok(())
     }
 
-    // Chrome DevTools의 Runtime/Page 도메인을 활성화하는 함수입니다.
-    pub(crate) fn enable(&mut self) -> AutomationResult<()> {
-        self.call("Runtime.enable", json!({}))
-            .map_err(|error| AutomationError::new(format!("Runtime.enable 실패: {error}")))?;
-        self.call("Page.enable", json!({}))
-            .map_err(|error| AutomationError::new(format!("Page.enable 실패: {error}")))?;
-        // Network 도메인을 켜서 브라우저가 던지는 요청/응답/실패 이벤트를 받는다 — 페이지 로드
-        // 대기초과 시 "어떤 브라우저 요청이 무슨 status로 멈췄나"를 로그에 남기기 위함. 게시/댓글
-        // 경로 전용(로그인은 enable_page_only로 Network·Runtime 미활성 — 봇탐지 표면 유지). 실패는
-        // 비치명적으로 둔다 — 이벤트 진단이 안 될 뿐 게시 흐름 자체는 그대로 동작해야 한다.
-        if let Err(error) = self.call("Network.enable", json!({})) {
-            tracing::warn!("Network.enable 실패 — 네트워크 진단 이벤트 없이 계속: {error}");
-        }
-        Ok(())
-    }
-
     // 로그인 전용 CDP 셋업: Page 도메인만 켜고 **Runtime.enable 은 호출하지 않는다.**
     //
     // Runtime.enable 은 콘솔 인자 직렬화 경로를 활성화해, 페이지가 Error 객체의 `stack`
@@ -601,7 +622,6 @@ impl CdpClient {
     // 로그인 시퀀스는 Runtime.evaluate·Network.getCookies·Input.dispatchKeyEvent/MouseEvent·
     // Page.navigate·Page.addScriptToEvaluateOnNewDocument 만 쓰며, 이들은 Runtime.enable
     // 없이도 동작한다. 따라서 탐지 표면을 줄이려 로그인에선 Runtime 도메인을 켜지 않는다.
-    // (다운스트림 글쓰기/댓글의 `enable()`은 이벤트가 필요할 수 있어 그대로 둔다.)
     pub(crate) fn enable_page_only(&mut self) -> AutomationResult<()> {
         self.call("Page.enable", json!({}))
             .map_err(|error| AutomationError::new(format!("Page.enable 실패: {error}")))?;
@@ -620,39 +640,6 @@ impl CdpClient {
                 }
             }
         }
-        Ok(())
-    }
-
-    // 로그인 자동화가 저장한 계정 쿠키를 Chrome 세션에 주입하는 함수입니다.
-    // 이렇게 하면 사용자가 수동 로그인하지 않아도 Chrome이 로그인된 상태가 되고,
-    // 이후 기존 글쓰기/댓글 흐름이 그대로 동작합니다.
-    fn inject_account_cookies(&mut self, account_id: &str) -> AutomationResult<()> {
-        let saved = crate::auth::read_account_cookies(account_id)
-            .map_err(|error| {
-                AutomationError::new(format!("계정 쿠키 파일을 읽지 못했습니다: {error}"))
-            })?
-            .ok_or_else(|| {
-                AutomationError::new(format!(
-                    "계정 '{account_id}'의 유효한 로그인 쿠키가 없습니다. 먼저 로그인 자동화를 실행해 쿠키를 저장하세요."
-                ))
-            })?;
-
-        let params = cookie_bridge::cdp_params_from_saved_cookies(&saved);
-
-        if params.is_empty() {
-            return Err(AutomationError::new(format!(
-                "계정 '{account_id}'의 쿠키 파일에서 주입할 쿠키를 찾지 못했습니다."
-            )));
-        }
-
-        self.call("Network.enable", json!({}))
-            .map_err(|error| AutomationError::new(format!("Network.enable 실패: {error}")))?;
-
-        for param in params {
-            self.call("Network.setCookie", param)
-                .map_err(|error| AutomationError::new(format!("쿠키 주입 실패: {error}")))?;
-        }
-
         Ok(())
     }
 

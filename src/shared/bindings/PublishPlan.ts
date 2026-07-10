@@ -2,6 +2,7 @@
 import type { BandTarget } from "./BandTarget";
 import type { BlogTarget } from "./BlogTarget";
 import type { ClipTarget } from "./ClipTarget";
+import type { ContentChange } from "./ContentChange";
 import type { ForumTarget } from "./ForumTarget";
 import type { LoginTarget } from "./LoginTarget";
 import type { ModeValue } from "./ModeValue";
@@ -24,4 +25,19 @@ linkOverride: string, naver: Array<NaverTarget>, forum: Array<ForumTarget>, band
  * 워커(`execute_item`)는 이 필드가 채워진 아이템을 게시 대신 계정별 로그인으로 처리한다
  * (배치 1개 = 아이템 1개, 진행률 분모 = 계정 수). 일원화: 로그인도 now 큐로 흐른다(#210).
  */
-login?: Array<LoginTarget>, };
+login?: Array<LoginTarget>,
+/**
+ * "나눠서 게시"(#403): 종토 "특정 게시글" 댓글을 계정에 1:1 무작위 분배할지.
+ * false/미지정=정상(각 계정이 모든 댓글). true=링크마다 계정에 댓글 1개씩(겹침 없음).
+ */
+forumCommentDistribute?: boolean,
+/**
+ * 닉네임 랜덤 댓글(설계서 §2): 댓글 모드에서 한 계정이 여러 댓글을 달 때 각 댓글마다
+ * 닉네임을 랜덤으로 바꾼다(계정 내 중복 금지). 기본 false.
+ */
+commentNicknameRandom?: boolean,
+/**
+ * 글 내용 변경(설계서 §5): 채워지면 글 게시 후 delaySec초 뒤 새 제목/본문으로 edit한다.
+ * 글쓰기 모드에서만 의미. 미지정이면 변경하지 않는다.
+ */
+contentChange?: ContentChange, };

@@ -218,6 +218,12 @@ export function Queue({ go }: { go: GoFn }) {
     void ipc.queue.cancelNow(id).then(setNow);
     notifications.show({ message: "대기 작업을 취소했어요", color: "blue" });
   };
+  // 실행 중인 게시큐를 완전 종료(kill, 설계서 08). 실행 중 게시 루프가 안전 경계에서 스스로
+  // 멈추고 Chrome이 정상 정리되며(고아 없음), 큐에서 빠져 다음 대기 작업이 즉시 올라온다.
+  const kill = (id: string) => {
+    void ipc.queue.killNow(id).then(setNow);
+    notifications.show({ message: "실행 중인 작업을 중지했어요", color: "orange" });
+  };
   const promote = (id: string) => {
     void ipc.queue.promote(id).then((next) => {
       setNow(next);
@@ -457,6 +463,21 @@ export function Queue({ go }: { go: GoFn }) {
                         return `처리중 ${d}/${t}`;
                       })()}
                     </Badge>
+                    {/* 실행 중 작업 완전 종료(kill, 설계서 08). 행 클릭은 펼침이라
+                       stopPropagation으로 분리한다. 실행 루프가 안전 경계에서 스스로 멈추고
+                       Chrome이 정상 정리되며(고아 없음) 다음 대기 작업이 즉시 승계된다. */}
+                    <ActionIcon
+                      size="md"
+                      variant="subtle"
+                      color="red"
+                      title="중지 (실행 중인 작업 완전 종료)"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        kill(q.id);
+                      }}
+                    >
+                      <Icon.trash size={16} />
+                    </ActionIcon>
                     <Icon.chevronDown
                       size={17}
                       color="var(--mantine-color-blue-filled)"

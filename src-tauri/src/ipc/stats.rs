@@ -103,8 +103,12 @@ pub fn compute(
                     }
                 }
                 BatchItemStatus::Fail => resolved += 1,
-                // Skip(차단으로 건너뜀, #267-9)은 실제 시도가 아니라 성공률·완료수에서 제외한다.
-                BatchItemStatus::Running | BatchItemStatus::Waiting | BatchItemStatus::Skip => {}
+                // Skip(차단 건너뜀 #267-9)·Stopped(사용자 중지, 설계서 08)는 실제 시도가 아니라
+                // 성공률·완료수에서 제외한다.
+                BatchItemStatus::Running
+                | BatchItemStatus::Waiting
+                | BatchItemStatus::Skip
+                | BatchItemStatus::Stopped => {}
             }
         }
     }
@@ -178,6 +182,7 @@ mod tests {
             pw: "p".into(),
             status,
             status_msg: None,
+            status_trace: None,
             last: "—".into(),
             tags: vec![],
         }

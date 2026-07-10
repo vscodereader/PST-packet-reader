@@ -43,6 +43,18 @@ export function distributeStocksEvenly(
   return out;
 }
 
+/**
+ * "나눠서 게시"(댓글 분배, 설계서 §3) 활성 조건. 종토 "특정 게시글" 댓글을 계정들에 균등
+ * 분배하려면 **댓글 수가 계정 수 이상이고 계정이 1개 이상**이어야 한다. 댓글이 계정보다 적으면
+ * 균등 분배 시 빈 계정이 생기므로 비활성이다(기존 `==` 조건을 `>=`로 완화).
+ */
+export function canDistributeComments(
+  commentCount: number,
+  accountCount: number,
+): boolean {
+  return accountCount > 0 && commentCount >= accountCount;
+}
+
 /** A cafe publish target parsed from a board link — the cafe plus the board
  * (menu) to post into. `boardType` is resolved later (게시 시점, 쿠키 필요). */
 export interface CafeBoardTarget {

@@ -144,6 +144,7 @@ pub fn import_accounts(
             pw,
             status: AccountStatus::New,
             status_msg: None,
+            status_trace: None,
             last: "—".into(),
             tags,
         };
@@ -313,6 +314,7 @@ fn item_status_str(s: &BatchItemStatus) -> &'static str {
         Running => "처리중",
         Waiting => "대기",
         Skip => "건너뜀",
+        Stopped => "중지",
     }
 }
 
@@ -400,6 +402,7 @@ mod tests {
             pw: "pw123".into(),
             status: AccountStatus::Active,
             status_msg: None,
+            status_trace: None,
             last: "—".into(),
             tags: vec!["반도체".into(), "대형주".into()],
         }
@@ -772,6 +775,7 @@ mod tests {
             pw: "oldpw".into(),
             status: AccountStatus::Active,
             status_msg: None,
+            status_trace: None,
             last: "—".into(),
             tags: vec![],
         }];

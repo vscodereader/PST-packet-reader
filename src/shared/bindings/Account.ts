@@ -10,4 +10,10 @@ export type Account = { id: string, platform: PlatformId, loginId: string, pw: s
  * 마지막 상태 변경 사유(동결). 로그인 워커가 채운다 — 차단/타임아웃 원문이나 조치
  * 안내. UI가 배지 tooltip에 보여준다. 과거 JSON엔 없을 수 있어 기본값 None.
  */
-statusMsg?: string, last: string, tags: Array<string>, };
+statusMsg?: string,
+/**
+ * 마지막 실패의 개발자 trace(백트레이스). status_msg가 사용자용 한 줄이라면 이건 "자세히
+ * 보기"용 상세다(게시 결과의 trace와 동일 역할). 로그인 워커가 채운다. 과거 JSON엔 없을 수
+ * 있어 기본값 None.
+ */
+statusTrace?: string, last: string, tags: Array<string>, };
