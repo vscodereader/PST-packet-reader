@@ -85,6 +85,19 @@ export function commentTargetPayload(
   return { commentMode: mode, commentCount: Math.max(1, n) };
 }
 
+/** 종토 "특정 게시글" 댓글 나눠서 게시(#403)가 겹침 없이 1:1로 떨어지는 조건(순수 함수).
+ *  데스크톱(publish-modal `canCommentDistribute`)과 동일하게 **작성 댓글 수 == 계정 수**이고
+ *  둘 다 1 이상일 때만 참이다. 그때만 링크마다 댓글 풀이 계정에 정확히 1개씩 배정된다.
+ *  ⚠️ Admin 인벤토리(InvPostDto)에는 글 본문 excerpt만 있고 저장된 댓글 배열이 없어 이 화면에서는
+ *  실제 댓글 수를 알 수 없다. 그래서 UI 버튼은 이 헬퍼 대신 URL·계정 존재만으로 노출한다(아래
+ *  ForumCommentConfig 주석 참조). 이 헬퍼는 의도한 1:1 규칙의 명세/테스트용이다. */
+export function canForumCommentDistribute(
+  commentCount: number,
+  accountCount: number,
+): boolean {
+  return commentCount > 0 && accountCount > 0 && commentCount === accountCount;
+}
+
 type Target = "forum" | "cafe" | "blog" | "clip" | "band";
 
 /** 게시 대상(target)에 맞는 계정 loginId 목록을 하위 인벤토리 accountRows에서 거른다(순수 함수).
@@ -1094,6 +1107,49 @@ function ForumCommentConfig({
     })();
   };
 
+  // 나눠서 게시(#403): 데스크톱과 달리 여기선 전체 계정을 한 명령(단일 plan)으로 보내고
+  // forumCommentDistribute=true를 실어 하위/엔진이 링크마다 댓글을 계정에 1:1 분배하게 한다.
+  // ⚠️ 활성 조건은 URL·계정 존재(valid)만 본다 — Admin 인벤토리(InvPostDto)엔 글 본문 excerpt만
+  // 있고 저장된 댓글 배열이 없어 "댓글 수 == 계정 수"(canForumCommentDistribute)를 이 화면에서
+  // 판정할 수 없다. 겹침 없는 1:1은 실제 댓글 수가 계정 수와 같을 때만 보장되며(그 규칙은 헬퍼로
+  // 명세), 그렇지 않으면 엔진이 링크마다 댓글 풀을 셔플해 계정에 1개씩 배정한다(일부 미소진 가능).
+  const runDistribute = () => {
+    void (async () => {
+      try {
+        await api.publish.send({
+          deviceId: device.id,
+          postId: postId ?? "",
+          postTitle: postTitle ?? "",
+          targetLabel: "종목토론방",
+          split: false,
+          mode: "comment",
+          commentUrls: cleanUrls,
+          forumCommentDistribute: true,
+          assignments: buildAssignments(),
+        });
+        notifications.show({
+          title: `${device.name} · 댓글 나눠서 전송`,
+          message: `"${shortTitle(postTitle ?? "")}" · ${detail} · 계정에 1개씩 분배`,
+          color: "teal",
+        });
+      } catch (e) {
+        if (isOffline(e)) {
+          notifications.show({
+            title: `${device.name} · 나눠서 게시(미리보기)`,
+            message: `${detail} · 서버 오프라인(전송 안 됨)`,
+            color: "gray",
+          });
+        } else {
+          notifications.show({
+            title: "나눠서 게시 실패",
+            message: e instanceof Error ? e.message : String(e),
+            color: "red",
+          });
+        }
+      }
+    })();
+  };
+
   const confirmSchedule = () => {
     const at = toEpochMs(sched.date, sched.time);
     const when = scheduleMoment(sched.date, sched.time).when;
@@ -1207,7 +1263,7 @@ function ForumCommentConfig({
         })}
       </Group>
 
-      {/* 지금/예약 게시(댓글은 나눠서 없음) */}
+      {/* 지금/예약 게시 + 나눠서 게시(#403) */}
       <Stack gap={8} mt="md">
         <Group grow gap="xs">
           <Button
@@ -1231,6 +1287,20 @@ function ForumCommentConfig({
             예약 게시
           </Button>
         </Group>
+        {/* 나눠서 게시(#403): 넣은 링크마다 저장된 댓글을 계정에 1개씩 무작위 배정(겹침 없음).
+            ⚠️ 데스크톱은 "댓글 수 == 계정 수"일 때만 활성하지만, Admin 인벤토리엔 저장된 댓글
+            배열이 없어 여기선 그 비교가 불가 → URL·계정 존재(valid)만으로 노출한다. */}
+        <Button
+          size="sm"
+          fw={700}
+          variant="light"
+          color="teal"
+          disabled={!valid}
+          leftSection={<Icon.send size={15} />}
+          onClick={runDistribute}
+        >
+          나눠서 게시 (댓글을 계정들에 1개씩)
+        </Button>
         {armed && (
           <Paper withBorder radius="md" p="sm" bg="var(--mantine-color-gray-0)">
             <Text fz={12} fw={700} mb={6}>

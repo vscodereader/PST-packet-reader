@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  canForumCommentDistribute,
   commentTargetPayload,
   filterAccountsByTarget,
   maskId,
@@ -132,6 +133,22 @@ describe("publish-command 헬퍼", () => {
       const changed = [{ loginId: "x", platform: "blog", status: "active" }];
       expect(filterAccountsByTarget("forum", changed)).toEqual([]);
       expect(filterAccountsByTarget("blog", changed)).toEqual(["x"]);
+    });
+  });
+
+  describe("canForumCommentDistribute (#403: 댓글 나눠서 1:1 조건)", () => {
+    it("댓글 수 == 계정 수이고 둘 다 1 이상이면 참(겹침 없는 1:1)", () => {
+      expect(canForumCommentDistribute(3, 3)).toBe(true);
+      expect(canForumCommentDistribute(1, 1)).toBe(true);
+    });
+    it("댓글 수 != 계정 수면 거짓", () => {
+      expect(canForumCommentDistribute(2, 3)).toBe(false);
+      expect(canForumCommentDistribute(3, 2)).toBe(false);
+    });
+    it("0이면 거짓(댓글·계정 중 하나라도 비면 분배 불가)", () => {
+      expect(canForumCommentDistribute(0, 0)).toBe(false);
+      expect(canForumCommentDistribute(0, 3)).toBe(false);
+      expect(canForumCommentDistribute(3, 0)).toBe(false);
     });
   });
 });

@@ -48,6 +48,10 @@ pub struct PublishSpec {
     /// 댓글 모드의 특정 게시글 URL들(종토 댓글=특정게시글).
     #[serde(default)]
     pub comment_urls: Vec<String>,
+    /// 종토 "특정 게시글" 댓글을 계정들에 1개씩 나눠 답기(#403). true면 하위가 전체 계정×URL을 단일
+    /// 큐로 묶어 링크마다 댓글을 계정에 1:1 분배한다. 댓글(comment) 모드에서만 의미. 빈값=false.
+    #[serde(default)]
+    pub forum_comment_distribute: bool,
     /// 게시 대상 플랫폼("forum"=종토(기본)·"naver"=네이버 카페). 빈값=forum(하위호환).
     #[serde(default)]
     pub target: String,
@@ -251,6 +255,7 @@ pub async fn dispatch_publish(
             "clipLinks": clip_links_json,
             "bandTargets": band_targets_json,
             "commentUrls": spec.comment_urls,
+            "forumCommentDistribute": spec.forum_comment_distribute,
             "commentMode": spec.comment_mode,
             "commentCount": spec.comment_count,
             "assignments": assignments_json,
@@ -418,6 +423,7 @@ mod tests {
                 split: false,
                 mode: String::new(),
                 comment_urls: vec![],
+                forum_comment_distribute: false,
                 target: String::new(),
                 cafe_boards: vec![],
                 blog_links: vec![],

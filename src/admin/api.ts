@@ -395,6 +395,7 @@ export const api = {
         link?: string;
       }[]; // 카페 게시판/글 링크 파싱 결과(target=="naver")
       commentUrls?: string[]; // 댓글 모드(종토=특정게시글) URL들
+      forumCommentDistribute?: boolean; // 종토 특정글 댓글을 계정들에 1개씩 나눠 답기(#403)
       blogLinks?: {
         blogId: string;
         logNo?: string; // 특정 글(있으면). 없으면 최신 N개.
@@ -439,6 +440,7 @@ export const api = {
         link?: string;
       }[];
       commentUrls?: string[];
+      forumCommentDistribute?: boolean; // 종토 특정글 댓글을 계정들에 1개씩 나눠 답기(#403)
       blogLinks?: {
         blogId: string;
         logNo?: string;

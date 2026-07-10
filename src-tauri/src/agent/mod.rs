@@ -154,6 +154,10 @@ struct PublishCmd {
     /// 댓글 모드의 특정 게시글 URL들(종토 댓글=특정게시글, 사용자 확정 2026-07-06).
     #[serde(default)]
     comment_urls: Vec<String>,
+    /// 종토 "특정 게시글" 댓글을 계정들에 1개씩 나눠 답기(#403). true면 전체 계정×URL을 단일 큐로
+    /// 묶어 엔진이 링크마다 댓글을 계정에 1:1 분배한다. 댓글(comment) 모드에서만 의미. 빈값=false.
+    #[serde(default)]
+    forum_comment_distribute: bool,
     /// 게시 대상 플랫폼("forum"=종토(기본)·"naver"=네이버 카페). 빈값=forum(하위호환).
     /// forum이면 계정×종목(assignments.stocks), naver면 계정×게시판(cafe_boards)로 조립한다.
     #[serde(default)]
@@ -838,6 +842,7 @@ fn enqueue_publish<R: Runtime>(
             mode,
             &post.comments,
             &p.comment_urls,
+            p.forum_comment_distribute,
             now_ms(),
         )
     };
@@ -887,6 +892,7 @@ fn build_publish_items(
     mode: ModeValue,
     comments: &[String],
     comment_urls: &[String],
+    forum_comment_distribute: bool,
     now: u128,
 ) -> Vec<QueueNowItem> {
     // 댓글 모드는 종토 "특정 게시글(URL)"만 지원한다(사용자 확정 2026-07-06: 종토 댓글=특정게시글).
@@ -906,6 +912,59 @@ fn build_publish_items(
     };
 
     let mut items = Vec::new();
+
+    // 나눠서 게시(#403): 댓글 모드에서만, 전체 계정×URL을 **단일 QueueNowItem**에 담고
+    // forum_comment_distribute=true로 세팅한다. 엔진(plan_to_forum_requests)이 링크마다 댓글을
+    // 계정에 1:1 분배하려면 모든 계정이 같은 plan.forum에 있어야 하므로 계정별로 쪼개면 안 된다.
+    // 글/글+댓글 모드에선 distribute가 무의미 → 아래 계정별 경로로 폴백(false처럼 동작).
+    if is_comment && forum_comment_distribute && !urls.is_empty() {
+        let mut forum: Vec<ForumTarget> = Vec::new();
+        let mut locs: Vec<QueueLocation> = Vec::new();
+        for a in assignments {
+            for url in &urls {
+                forum.push(ForumTarget {
+                    account_id: a.login_id.clone(),
+                    name: "특정 게시글".to_string(),
+                    code: String::new(),
+                    comment_url: url.clone(),
+                });
+                locs.push(QueueLocation {
+                    p: PlatformId::Forum,
+                    name: "특정 게시글 댓글".to_string(),
+                    code: None,
+                });
+            }
+        }
+        if !forum.is_empty() {
+            items.push(QueueNowItem {
+                id: format!("agent-publish-{now}-0"),
+                title: plan_title.to_string(),
+                kind: mode.clone(),
+                state: QueueState::Waiting,
+                batch_id: None,
+                progress: None,
+                locs,
+                plan: Some(PublishPlan {
+                    post_id: post_id.to_string(),
+                    kind: mode.clone(),
+                    title: effective_title.to_string(),
+                    body_text: body.to_string(),
+                    comments: plan_comments.clone(),
+                    link_override: String::new(),
+                    naver: vec![],
+                    forum,
+                    band: vec![],
+                    blog: vec![],
+                    clip: vec![],
+                    login: None,
+                    forum_comment_distribute: true,
+                }),
+                items: vec![],
+            });
+        }
+        return items;
+    }
+
     for (idx, a) in assignments.iter().enumerate() {
         let mut forum: Vec<ForumTarget> = Vec::new();
         let mut locs: Vec<QueueLocation> = Vec::new();
@@ -2137,6 +2196,7 @@ mod tests {
             ModeValue::Post,
             &[],
             &[],
+            false,
             1234,
         );
 
@@ -2156,6 +2216,42 @@ mod tests {
         assert_eq!(f1[0].code, "035420");
         // 게시 전용(로그인 잡 아님).
         assert!(items[0].plan.as_ref().unwrap().login.is_none());
+    }
+
+    #[test]
+    fn build_publish_items_comment_distribute_makes_single_item() {
+        // 나눠서 게시(#403): 댓글 모드 + distribute=true면 계정별로 쪼개지 말고 **단일 큐**에
+        // 전체 계정×URL을 담고 forum_comment_distribute=true여야 한다(엔진이 링크마다 분배).
+        let assignments = vec![
+            PublishAssign { login_id: "acc_a".into(), stocks: vec![] },
+            PublishAssign { login_id: "acc_b".into(), stocks: vec![] },
+        ];
+        let items = build_publish_items(
+            &assignments,
+            "p1",
+            "제목",
+            "제목",
+            "본문",
+            ModeValue::Comment,
+            &["댓글1".into(), "댓글2".into()],
+            &["https://u/1".into()],
+            true,
+            1234,
+        );
+
+        // 계정이 2개여도 큐는 1개(단일 아이템).
+        assert_eq!(items.len(), 1);
+        let plan = items[0].plan.as_ref().unwrap();
+        // 엔진 분배 스위치 ON.
+        assert!(plan.forum_comment_distribute);
+        // forum = 전체 계정(2) × URL(1) = 2건, 두 계정이 같은 plan에 함께 있다.
+        assert_eq!(plan.forum.len(), 2);
+        let accts: std::collections::BTreeSet<_> =
+            plan.forum.iter().map(|f| f.account_id.as_str()).collect();
+        assert_eq!(accts.len(), 2);
+        assert!(accts.contains("acc_a") && accts.contains("acc_b"));
+        // 저장된 댓글 풀이 plan.comments로 실린다(엔진이 계정에 1개씩 분배).
+        assert_eq!(plan.comments, vec!["댓글1".to_string(), "댓글2".to_string()]);
     }
 
     #[test]
