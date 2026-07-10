@@ -80,7 +80,10 @@ mod tests {
         let h = clip_cbox_headers("https://clip.naver.com/contents?x");
         assert_eq!(value(&h, "Origin"), Some("https://clip.naver.com"));
         assert_eq!(value(&h, "sec-fetch-site"), Some("same-site"));
-        assert_eq!(value(&h, "Referer"), Some("https://clip.naver.com/contents?x"));
+        assert_eq!(
+            value(&h, "Referer"),
+            Some("https://clip.naver.com/contents?x")
+        );
     }
 
     #[test]

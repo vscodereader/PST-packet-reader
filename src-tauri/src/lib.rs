@@ -40,8 +40,7 @@ use discussion_batch::{
 };
 use naver_automation::{
     run_naver_discussion_macro, run_naver_dislike, run_naver_like, AutomationReport,
-    AutomationTarget, LikeVerdict,
-    NaverDiscussionRequest,
+    AutomationTarget, LikeVerdict, NaverDiscussionRequest,
 };
 
 #[tauri::command]
@@ -60,17 +59,22 @@ fn run_naver_discussion(
     target: Option<String>,
     submit_after_fill: Option<bool>,
 ) -> Result<AutomationReport, String> {
-    run_naver_discussion_macro(NaverDiscussionRequest {
-        title,
-        body,
-        host: host.unwrap_or_else(|| "127.0.0.1".to_owned()),
-        port: port.unwrap_or(9222),
-        target: parse_automation_target(target)?,
-        submit_after_fill: submit_after_fill.unwrap_or(false),
-        stock: None,
-        account_id: None,
-        comment_url: None,
-    })
+    run_naver_discussion_macro(
+        NaverDiscussionRequest {
+            title,
+            body,
+            host: host.unwrap_or_else(|| "127.0.0.1".to_owned()),
+            port: port.unwrap_or(9222),
+            target: parse_automation_target(target)?,
+            submit_after_fill: submit_after_fill.unwrap_or(false),
+            stock: None,
+            account_id: None,
+            comment_url: None,
+            comment_nickname_random: false,
+            content_change: None,
+        },
+        &mut std::collections::HashSet::new(),
+    )
     .map_err(|error| error.to_string())
 }
 
@@ -99,8 +103,10 @@ struct LikeOutcome {
 /// 좋아요 결과를 알림 로그(log_batches)에 남긴다 — 게시처럼 알림 패널에 뜨게 한다(사용자 지적
 /// 2026-07-01: 좋아요가 토스트만 뜨고 알림엔 안 남았다). (계정×링크)별 성공/실패를 한 배치로 묶는다.
 /// 좋아요 판정이 재로그인/비활성이면 **계정 상태를 바꾸고 쿠키를 지운다**(사용자 요청 2026-07-03:
-/// 세션 만료=재로그인·차단=비활성으로 상태 전환, 둘 다 쿠키만료값 삭제). 좋아요는 계정 id로 돌므로
-/// `apply_status_by_id`로 갱신하고, `store.mutate`가 디스크 저장 + 프론트 이벤트를 발생시킨다.
+/// 세션 만료=재로그인·차단=비활성으로 상태 전환, 둘 다 쿠키만료값 삭제). 좋아요는 프론트가
+/// **loginId**(쿠키 키)로 넘기므로 `apply_status_by_login_id`(login_id 매칭)로 갱신하고
+/// (account.id 매칭은 상태가 안 바뀌던 #383 회귀라 금지), `store.mutate`가 디스크 저장 + 프론트
+/// 이벤트를 발생시킨다.
 fn mark_account_status<R: Runtime>(
     app: &tauri::AppHandle<R>,
     login_id: &str,
@@ -113,7 +119,8 @@ fn mark_account_status<R: Runtime>(
     let id = login_id.to_owned();
     let msg_owned = msg.to_owned();
     store.mutate(move |accounts| {
-        ipc::accounts::apply_status_by_login_id(accounts, &id, status, Some(msg_owned))
+        // 좋아요 경로는 백트레이스가 없으므로 status_trace=None(#324 병합: 5번째 인자 추가됨).
+        ipc::accounts::apply_status_by_login_id(accounts, &id, status, Some(msg_owned), None)
     });
     // 만료/차단 계정의 "쿠키만료" 카운트다운 제거 + 죽은/차단 세션 쿠키 삭제(쿠키 파일 키=loginId).
     if let Err(error) = crate::auth::clear_account_cookies(login_id) {
@@ -193,7 +200,9 @@ async fn run_reaction_batch<R: Runtime>(
         .filter(|u| !u.is_empty())
         .collect();
     if post_urls.is_empty() {
-        return Err(format!("{label}를 누를 게시글 링크를 한 개 이상 입력하세요."));
+        return Err(format!(
+            "{label}를 누를 게시글 링크를 한 개 이상 입력하세요."
+        ));
     }
     if account_ids.is_empty() {
         return Err(format!("{label}를 누를 계정을 한 개 이상 선택하세요."));
@@ -435,16 +444,20 @@ async fn run_forum_publish_now<R: Runtime>(
     let app_for_job = app.clone();
     let results =
         tauri::async_runtime::spawn_blocking(move || -> Result<Vec<ForumPublishResult>, String> {
-            // 게시용 Chrome을 앱이 직접 디버그 포트로 띄운다(헤드리스). 사용자가 따로
-            // `--remote-debugging-port`로 Chrome을 실행할 필요가 없다. 게시가 끝나면
-            // 핸들이 Drop되며 Chrome을 종료한다. (로그인과 같은 런처 재사용)
-            let chrome = auth::launch_debug_chrome(true).map_err(|error| error.to_string())?;
-            let mut request = request;
-            request.host = FORUM_DEVTOOLS_HOST.to_owned();
-            request.port = chrome.port;
+            // 종목토론방 게시는 Chrome 없이 순수 HTTP 패킷 API로 처리한다(#344 후속). 저장 쿠키를
+            // 패킷 클라이언트에 직접 로드하므로 즉시게시도 Chrome을 띄우지 않는다(req.host/port는
+            // 이제 macro가 안 쓰므로 그대로 둔다).
             // 즉시 게시 경로는 종목별 진행 콜백이 필요 없어 no-op을 넘긴다(#219는 큐 워커 전용).
-            let results = run_forum_publish(request, app_for_job, |_| {}, |_, _| {}, |_, _, _| {});
-            drop(chrome);
+            // 즉시게시("지금 바로")는 큐 kill 대상이 아니라 취소 없음(|| false) + 더미 임계신호.
+            let results = run_forum_publish(
+                request,
+                app_for_job,
+                |_| {},
+                |_, _| {},
+                |_, _, _| {},
+                || false,
+                std::sync::Arc::new(crate::ipc::kill::CancelSignal::default()),
+            );
             Ok(results)
         })
         .await
@@ -706,6 +719,7 @@ async fn manual_add_account<R: Runtime>(
         pw: result.password,
         status: AccountStatus::Active,
         status_msg: None,
+        status_trace: None,
         last: "방금".to_owned(),
         tags: vec![],
     };
@@ -937,6 +951,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         queue::list_queue_now,
         queue::list_queue_scheduled,
         queue::cancel_queue_now,
+        queue::kill_queue_now,
         queue::clear_done_queue_now,
         queue::cancel_queue_scheduled,
         queue::add_queue_now,
@@ -1045,6 +1060,9 @@ pub fn manage_stores<R: Runtime>(app: &AppHandle<R>, dir: &Path) -> std::io::Res
     ));
     // 게시 큐 실행 워커 상태(promote 시 기동, 이슈 #144).
     app.manage(ipc::queue_runner::NowQueueRunner::default());
+    // 실행 중 게시큐 "완전 종료(kill)"용 취소 신호 레지스트리(설계서 08). 큐 id별 신호를
+    // in-memory로 보관 — 게시 루프가 종목 사이·대기 중에 확인하고 스스로 멈춘다.
+    app.manage(ipc::kill::CancelRegistry::default());
     Ok(())
 }
 
@@ -1254,6 +1272,7 @@ mod tests {
                 trace: None,
                 posted: None,
                 skipped: false,
+                stopped: false,
             },
             ForumPublishResult {
                 code: "000660".into(),
@@ -1263,6 +1282,7 @@ mod tests {
                 trace: Some("stack backtrace:\n  0: forum::login_check".into()),
                 posted: None,
                 skipped: false,
+                stopped: false,
             },
         ];
         let b = build_publish_batch(
@@ -1300,6 +1320,7 @@ mod tests {
             trace: None,
             posted: None,
             skipped: false,
+            stopped: false,
         }];
         let b = build_publish_batch(
             "제목",

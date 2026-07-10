@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  canDistributeComments,
   clampCommentCount,
   crawlToText,
   distributeStocksEvenly,
@@ -39,6 +40,28 @@ describe("distributeStocksEvenly", () => {
 
   it("returns [] for non-positive bucket counts", () => {
     expect(distributeStocksEvenly(["a"], 0)).toEqual([]);
+  });
+});
+
+describe("canDistributeComments (설계서 §3: 댓글 >= 계정)", () => {
+  it("is active when comments equal accounts", () => {
+    expect(canDistributeComments(3, 3)).toBe(true);
+  });
+
+  it("is active when there are more comments than accounts", () => {
+    expect(canDistributeComments(7, 3)).toBe(true);
+  });
+
+  it("is disabled when comments are fewer than accounts", () => {
+    expect(canDistributeComments(2, 3)).toBe(false);
+  });
+
+  it("is disabled with zero accounts even if comments exist", () => {
+    expect(canDistributeComments(5, 0)).toBe(false);
+  });
+
+  it("is disabled with no comments", () => {
+    expect(canDistributeComments(0, 2)).toBe(false);
   });
 });
 

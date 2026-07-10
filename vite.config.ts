@@ -32,6 +32,17 @@ export default defineConfig(async () => ({
     include: ["@mantine/core", "@mantine/hooks", "@mantine/notifications"],
   },
 
+  // 멀티페이지 빌드 입력: 메인 앱(index.html) + Admin 웹(admin.html). 기본 `vite build`는
+  // index.html만 내보내므로, 하위 COM 서버가 서빙할 admin.html도 dist/에 나오도록 명시한다.
+  build: {
+    rollupOptions: {
+      input: {
+        main: fileURLToPath(new URL("./index.html", import.meta.url)),
+        admin: fileURLToPath(new URL("./admin.html", import.meta.url)),
+      },
+    },
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

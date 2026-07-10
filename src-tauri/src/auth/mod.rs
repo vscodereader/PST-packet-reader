@@ -15,11 +15,12 @@ mod util;
 use tauri::{AppHandle, Runtime};
 
 pub use accounts::{
-    account_cookie_expiry, clear_account_cookies, read_account_cookies, read_account_cookies_unchecked,
-    save_accounts_file,
+    account_cookie_expiry, clear_account_cookies, read_account_cookies,
+    read_account_cookies_unchecked, save_accounts_file,
 };
 pub use adb::probe_adb_connection;
 // 게시(forum)에서도 로그인과 같은 Chrome 런처를 재사용해, 디버그 포트 Chrome을 앱이 직접 띄운다.
+pub(crate) use chrome::force_kill_tree;
 pub(crate) use chrome::launch as launch_debug_chrome;
 // 잔존(고아) Chrome 개수 조회 — UI가 "실행 중 크롬 N개"를 작업관리자 없이 보여주는 데 쓴다.
 pub(crate) use chrome::running_chrome_count;
@@ -111,8 +112,7 @@ pub(crate) async fn process_account<R: Runtime>(
         .try_state::<crate::store::JsonStore<crate::ipc::accounts::Account>>()
         .map(|store| {
             store.snapshot().iter().any(|a| {
-                a.login_id == account_id
-                    && a.status == crate::ipc::accounts::AccountStatus::OnHold
+                a.login_id == account_id && a.status == crate::ipc::accounts::AccountStatus::OnHold
             })
         })
         .unwrap_or(false);
@@ -151,7 +151,9 @@ pub(crate) async fn manual_add_account() -> Result<Option<ManualAddResult>, Orch
 
     tauri::async_runtime::spawn_blocking(move || login::manual_add(&paths))
         .await
-        .map_err(|error| OrchestratorError::CommandFailed(format!("수동추가 스레드 오류: {error}")))?
+        .map_err(|error| {
+            OrchestratorError::CommandFailed(format!("수동추가 스레드 오류: {error}"))
+        })?
 }
 
 // 로컬 쿠키가 유효해 보일 때 실제 로그인을 건너뛸지(단락) 판정한다. 단, 명시적 재로그인

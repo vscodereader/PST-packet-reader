@@ -329,7 +329,10 @@ mod tests {
         assert!(u.contains("seedMediaId=HEXABC"));
         assert!(u.contains("recType=CLIP_PC"));
         // recId JSON이 URL 인코딩돼 targetProfileId가 들어간다.
-        assert!(u.contains("targetProfileId") || u.contains("targetProfileId".replace(':', "%3A").as_str()));
+        assert!(
+            u.contains("targetProfileId")
+                || u.contains("targetProfileId".replace(':', "%3A").as_str())
+        );
         assert!(u.contains("PID123"));
     }
 
@@ -361,7 +364,8 @@ mod tests {
 
     #[test]
     fn create_failure_detail_surfaces_code_message() {
-        let body = serde_json::json!({"success": false, "code": "4090", "message": "도배 제한"}).to_string();
+        let body = serde_json::json!({"success": false, "code": "4090", "message": "도배 제한"})
+            .to_string();
         let d = create_failure_detail(&body);
         assert!(d.contains("code=4090") && d.contains("도배 제한"));
     }
@@ -424,10 +428,9 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/commentBox/cbox/web_naver_create_json.json"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"success": false, "code": "4000", "message": "막힘"})),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"success": false, "code": "4000", "message": "막힘"}),
+            ))
             .mount(&cbox)
             .await;
         let client = ClipCommentClient::with_base_url(cbox.uri());

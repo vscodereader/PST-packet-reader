@@ -372,7 +372,11 @@ pub async fn band_comment_on_post(
             } else {
                 tracing::warn!(
                     "{}",
-                    comment_failure_log(account_id, outcome.band_name.as_deref(), outcome.target_count)
+                    comment_failure_log(
+                        account_id,
+                        outcome.band_name.as_deref(),
+                        outcome.target_count
+                    )
                 );
             }
             Ok(outcome)

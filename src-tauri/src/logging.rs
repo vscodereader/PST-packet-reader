@@ -10,6 +10,7 @@
 //! (Cookie 헤더, storage-state)을 어떤 `tracing` 필드/메시지에도 넣지
 //! 않는다 — 기존 `naver_cafe` 컨벤션과 동일하다.
 
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -36,6 +37,61 @@ impl FormatTime for LocalTimer {
 /// 환경변수 `PSTMACRO_LOG`(미설정 시 `info`)로 필터를 구성한다.
 fn env_filter() -> EnvFilter {
     EnvFilter::try_from_env("PSTMACRO_LOG").unwrap_or_else(|_| EnvFilter::new("info"))
+}
+
+/// [원격제어 #324] 앱 tracing 로그를 메모리 링버퍼에 담아, 하위 에이전트가 서버(Admin 로그 창)로
+/// 흘려보낼 수 있게 한다. 파일·콘솔과 같은 이벤트가 여기에도 한 줄씩(같은 포맷) 쌓이고, 상한
+/// (`LOG_RING_CAP`) 초과 시 오래된 줄부터 버린다. 자격증명(쿠키 등)은 로그에 안 들어가는 기존
+/// 컨벤션이 그대로라 이 버퍼도 안전하다.
+static LOG_RING: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+const LOG_RING_CAP: usize = 3000;
+
+/// 링버퍼에 로그 줄을 쌓는 tracing writer. fmt 레이어가 포맷한 한 줄(들)을 그대로 받는다.
+struct RingWriter;
+
+impl io::Write for RingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Ok(text) = std::str::from_utf8(buf) {
+            for line in text.split('\n') {
+                let line = line.trim_end();
+                if !line.is_empty() {
+                    if let Ok(mut ring) = LOG_RING.lock() {
+                        ring.push_back(line.to_owned());
+                        while ring.len() > LOG_RING_CAP {
+                            ring.pop_front();
+                        }
+                    }
+                }
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> fmt::MakeWriter<'a> for RingWriter {
+    type Writer = RingWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        RingWriter
+    }
+}
+
+/// 하위 에이전트가 서버로 보낼, 아직 안 보낸 로그 줄을 최대 `max`개 FIFO로 꺼낸다(꺼낸 건 제거).
+/// best-effort — 전송 실패 시 그 줄은 유실될 수 있으나 로그 스트림엔 허용된다(#324).
+pub fn drain_agent_logs(max: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(mut ring) = LOG_RING.lock() {
+        while out.len() < max {
+            match ring.pop_front() {
+                Some(line) => out.push(line),
+                None => break,
+            }
+        }
+    }
+    out
 }
 
 /// 외부에서 로그 파일을 지우거나 비워도 다음 기록 시 같은 날짜 파일을 자동
@@ -145,11 +201,20 @@ pub fn init_file_logging(logs_dir: &Path) {
         .with_timer(LocalTimer)
         .with_writer(std::io::stderr);
 
+    // [원격제어 #324] 링버퍼 레이어 — 파일·콘솔과 같은 이벤트를 메모리에도 쌓아 에이전트가
+    // 서버(Admin 로그 창)로 흘려보낸다. 파일 레이어와 동일 포맷(target·로컬시각).
+    let ring_layer = fmt::layer()
+        .with_ansi(false)
+        .with_target(true)
+        .with_timer(LocalTimer)
+        .with_writer(RingWriter);
+
     // try_init: 이미 설치돼 있으면 Err를 반환하므로 무시(중복 초기화 안전).
     let _ = tracing_subscriber::registry()
         .with(env_filter())
         .with(file_layer)
         .with(console_layer)
+        .with(ring_layer)
         .try_init();
 }
 

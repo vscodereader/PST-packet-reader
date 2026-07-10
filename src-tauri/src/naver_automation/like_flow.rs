@@ -42,7 +42,11 @@ pub fn run_naver_dislike(account_id: &str, post_url: &str) -> LikeVerdict {
 /// 쿠키 로드·세션 확인(getProfile)·npay 재시도·차단/만료 원문 판정은 좋아요와 100% 동일하며,
 /// 마지막에 호출하는 reactions API의 reactionType만 다르다.
 fn run_naver_reaction(account_id: &str, post_url: &str, reaction_type: &str) -> LikeVerdict {
-    let label = if reaction_type == "bad" { "싫어요" } else { "좋아요" };
+    let label = if reaction_type == "bad" {
+        "싫어요"
+    } else {
+        "좋아요"
+    };
     let post_url = post_url.trim();
     if post_url.is_empty() {
         return LikeVerdict::Failed(format!("{label}를 누를 게시글 링크가 비어 있습니다."));
@@ -98,7 +102,10 @@ fn run_naver_reaction(account_id: &str, post_url: &str, reaction_type: &str) -> 
                 match client.react_post(post_url, reaction_type) {
                     Ok(()) => return LikeVerdict::Liked,
                     Err(error) if is_blocked_error(&error) => {
-                        return LikeVerdict::Blocked(format!("계정 차단(비활성) — {}", error.message()));
+                        return LikeVerdict::Blocked(format!(
+                            "계정 차단(비활성) — {}",
+                            error.message()
+                        ));
                     }
                     Err(_) => {}
                 }
@@ -118,9 +125,9 @@ fn verdict_from_probe(client: &packet_client::NaverPacketClient, context: &str) 
         RestrictionVerdict::Blocked(raw) => {
             LikeVerdict::Blocked(format!("계정 차단(비활성) [{context}] — 원문: {raw}"))
         }
-        RestrictionVerdict::Expired(raw) => {
-            LikeVerdict::Relogin(format!("세션 만료 — 재로그인 필요 [{context}] — 원문: {raw}"))
-        }
+        RestrictionVerdict::Expired(raw) => LikeVerdict::Relogin(format!(
+            "세션 만료 — 재로그인 필요 [{context}] — 원문: {raw}"
+        )),
         RestrictionVerdict::Healthy => LikeVerdict::Failed(format!(
             "좋아요 실패({context}) — 계정은 정상(비차단·로그인됨). 대상 글 삭제 등 계정 외 문제."
         )),
@@ -144,9 +151,7 @@ fn is_blocked_error(error: &AutomationError) -> bool {
 /// 실패 원문에 **세션 만료/인증쿠키 무효** 신호(`400Z01`/`Nid-No`/`nidlogin.login`)가 있는지.
 fn is_session_expired_error(error: &AutomationError) -> bool {
     let message = error.message();
-    message.contains("Nid-No")
-        || message.contains("400Z01")
-        || message.contains("nidlogin.login")
+    message.contains("Nid-No") || message.contains("400Z01") || message.contains("nidlogin.login")
 }
 
 #[cfg(test)]

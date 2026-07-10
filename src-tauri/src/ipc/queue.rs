@@ -111,8 +111,9 @@ pub struct BandTarget {
     /// band.us 가입·게시 링크(또는 band_no). `band_publish`가 여기서 band_no를 추출한다.
     pub link: String,
     /// 댓글 전용 모드(`kind == Comment`)에서 댓글을 달 기존 글 대상. post/both면 None.
-    /// 밴드는 url 댓글을 지원하지 않아 `mode`는 latest/popular만 의미가 있다(url이면
-    /// 호출부가 latest로 폄). `cafe_id`/`article_id`는 밴드에서 쓰지 않는다.
+    /// `mode`는 세 가지 모두 유효하다: `url`=특정 글 URL(`band_comment_on_post`, link가 곧 글 URL),
+    /// `latest`/`popular`=밴드 최신/인기 상위 N개(`band_comment`, `count` 사용).
+    /// `cafe_id`/`article_id`는 밴드에서 쓰지 않는다(url 대상은 `link`로 지정).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub comment_target: Option<CommentTargetSpec>,
@@ -187,6 +188,22 @@ pub struct LoginTarget {
     pub force: bool,
 }
 
+/// 글 내용 변경(설계서 §5). 글쓰기 게시일 때만 채워진다: 원본으로 글을 게시하고 `delay_sec`초
+/// 뒤 여기 담긴 새 제목/본문으로 edit(PUT edit)한다. `None`이면 변경하지 않는다(기본). 실제 게시
+/// 루프 배선은 별도로 하며, 여기서는 plan에 필드만 흐르게 둔다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
+#[serde(rename_all = "camelCase")]
+pub struct ContentChange {
+    /// 변경할 새 제목.
+    pub title: String,
+    /// 변경할 새 본문(평문).
+    pub body: String,
+    /// 게시 후 edit까지 대기할 시간(초).
+    #[ts(type = "number")]
+    pub delay_sec: u32,
+}
+
 /// 큐 아이템을 실제로 게시하는 데 필요한 동결된 실행 페이로드.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../src/shared/bindings/")]
@@ -222,6 +239,20 @@ pub struct PublishPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub login: Option<Vec<LoginTarget>>,
+    /// "나눠서 게시"(#403): 종토 "특정 게시글" 댓글을 계정에 **1:1 무작위**로 분배할지.
+    /// `false`(기본)=정상(각 계정이 모든 댓글을 단다). `true`=링크마다 재셔플해 계정마다 댓글
+    /// 1개씩(겹침 없음). 특정글(comment_url) 대상에만 적용 — 그 외엔 무시. 기본값 허용(호환).
+    #[serde(default)]
+    pub forum_comment_distribute: bool,
+    /// 닉네임 랜덤 댓글(설계서 §2): 댓글 모드에서 한 계정이 여러 댓글을 달 때 각 댓글마다
+    /// 닉네임을 랜덤으로 바꾼다(계정 내 중복 금지). 게시 루프 배선은 별도. 기본 false(호환).
+    #[serde(default)]
+    pub comment_nickname_random: bool,
+    /// 글 내용 변경(설계서 §5): 채워지면 글 게시 후 `delay_sec`초 뒤 새 제목/본문으로 edit한다.
+    /// 글쓰기 모드에서만 의미. 게시 루프 배선은 별도. 기본 None(호환).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub content_change: Option<ContentChange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -478,12 +509,32 @@ pub fn cancel_queue_now(
     next
 }
 
+/// 실행 중인 게시큐 1개를 **완전 종료(kill)**한다(설계서 08). `cancel_queue_now`는 큐에서
+/// 항목만 지워 그룹/배치 경계에서만 협조적으로 멈췄지만, 이 명령은 취소 신호도 함께 켜서
+/// **종목 사이·대기 중**에도 실행 중 게시 루프가 스스로 멈추게 한다. Chrome은 루프가 정상
+/// 경계로 빠져나오며 기존 `drop`(taskkill /T) 경로로 정리되어 고아가 남지 않는다. 항목을
+/// 큐에서도 제거하므로 워커는 다음 대기 큐를 즉시 승계한다.
+#[tauri::command]
+pub fn kill_queue_now<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    store: tauri::State<'_, JsonStore<QueueNowItem>>,
+    activity: tauri::State<'_, JsonStore<crate::ipc::activity::ActivityItem>>,
+    id: String,
+) -> Vec<QueueNowItem> {
+    // 로컬·원격 공유 경로(설계서 08 §5): 취소 신호 set + 큐 제거 + Stage2 강제 감시.
+    crate::ipc::kill::kill_one(&app, &id);
+    record(
+        activity.inner(),
+        ActivityType::Info,
+        "실행 작업 완전 종료(중지)됨",
+    );
+    store.snapshot()
+}
+
 /// 종료(`Done`) 아이템을 모두 큐에서 치운다(#1, "완료 항목 지우기"). 진행 중/대기 작업은
 /// 보존한다. 큐 창에 쌓인 완료 결과 카드를 한 번에 비울 때 쓴다.
 #[tauri::command]
-pub fn clear_done_queue_now(
-    store: tauri::State<'_, JsonStore<QueueNowItem>>,
-) -> Vec<QueueNowItem> {
+pub fn clear_done_queue_now(store: tauri::State<'_, JsonStore<QueueNowItem>>) -> Vec<QueueNowItem> {
     store.mutate(apply_clear_done_now)
 }
 
@@ -895,6 +946,9 @@ mod tests {
             }],
             clip: vec![],
             login: None,
+            forum_comment_distribute: false,
+            comment_nickname_random: false,
+            content_change: None,
         }
     }
 
@@ -955,7 +1009,11 @@ mod tests {
         ];
         let next = apply_reorder_now(items, &["w2".to_string(), "w1".to_string()]);
         let ids: Vec<&str> = next.iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(ids, vec!["w2", "w1", "d1"], "대기는 재정렬되고 Done은 바닥 고정");
+        assert_eq!(
+            ids,
+            vec!["w2", "w1", "d1"],
+            "대기는 재정렬되고 Done은 바닥 고정"
+        );
     }
 
     #[test]
@@ -1052,6 +1110,9 @@ mod tests {
             blog: vec![],
             clip: vec![],
             login: None,
+            forum_comment_distribute: false,
+            comment_nickname_random: false,
+            content_change: None,
         }
     }
 

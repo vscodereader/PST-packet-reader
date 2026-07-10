@@ -25,6 +25,9 @@ pub enum BatchItemStatus {
     /// 차단 계정으로 첫 글이 로그인/권한 오류로 실패하면, 같은 계정의 남은 글은 시도하지 않고
     /// 이 상태로 건너뛴다(#267-9). X(실패)와 구분해 "건너뜀"으로 표시한다.
     Skip,
+    /// 사용자 완전 종료(kill, 설계서 08)로 게시하지 않은 종목. 성공·실패·건너뜀과 구분해
+    /// 게시 결과에 "중지"로 집계·표시한다(로컬 🗑·Admin 원격 중지 공통 경로).
+    Stopped,
 }
 
 /// Single-variant enum → ts-rs emits the `"running"` string-literal type the

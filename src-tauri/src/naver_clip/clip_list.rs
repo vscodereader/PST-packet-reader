@@ -99,13 +99,15 @@ impl ClipListClient {
         let mut clips: Vec<ClipMedia> = Vec::new();
         let mut after: Option<String> = None;
         for page in 1..=MAX_PAGES {
-            let (mut fetched, page_info) =
-                match self.fetch_page(profile_id, media_type, after.as_deref(), cookie).await {
-                    Ok(v) => v,
-                    // 첫 페이지 실패는 대상이 0개가 되므로 오류로 알린다. 이후 페이지 실패는 부분 수집.
-                    Err(e) if page == 1 => return Err(e),
-                    Err(_) => break,
-                };
+            let (mut fetched, page_info) = match self
+                .fetch_page(profile_id, media_type, after.as_deref(), cookie)
+                .await
+            {
+                Ok(v) => v,
+                // 첫 페이지 실패는 대상이 0개가 되므로 오류로 알린다. 이후 페이지 실패는 부분 수집.
+                Err(e) if page == 1 => return Err(e),
+                Err(_) => break,
+            };
             let got = fetched.len();
             clips.append(&mut fetched);
             let has_next = page_info.as_ref().map(|p| p.has_next).unwrap_or(false);
@@ -266,7 +268,10 @@ fn parse_contents(body: &str) -> Option<(Vec<ClipMedia>, Option<PageInfo>)> {
         })
         .collect();
     let page_info = contents.get("pageInfo").map(|p| PageInfo {
-        has_next: p.get("hasNextPage").and_then(|v| v.as_bool()).unwrap_or(false),
+        has_next: p
+            .get("hasNextPage")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         end_cursor: p
             .get("endCursor")
             .and_then(|v| v.as_str())
@@ -366,9 +371,11 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/@dongzzi_chef"))
             .and(header_exists("User-Agent"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"<html>{"clipId":"dongzzi_chef","profileId":"PID_X"}</html>"#,
-            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(
+                    r#"<html>{"clipId":"dongzzi_chef","profileId":"PID_X"}</html>"#,
+                ),
+            )
             .mount(&server)
             .await;
         let client = ClipListClient::with_base_url(server.uri());

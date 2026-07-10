@@ -46,7 +46,9 @@ function statusColor(s: string) {
       ? "red"
       : s === "running"
         ? "blue"
-        : "gray";
+        : s === "stopped"
+          ? "orange"
+          : "gray";
 }
 
 export function SubLog({ item }: { item: BatchItem }) {
@@ -57,6 +59,8 @@ export function SubLog({ item }: { item: BatchItem }) {
   const waiting = item.status === "waiting";
   // 차단 계정으로 건너뛴 글(#267-9). X(실패)가 아니라 회색 "건너뜀"으로 구분 표시한다.
   const skip = item.status === "skip";
+  // 사용자 중지(kill)로 안 올린 글(설계서 08). 주황 X로 "중지" 표시(스피너로 뜨지 않게).
+  const stopped = item.status === "stopped";
   const color = statusColor(item.status);
   return (
     <Box
@@ -78,6 +82,8 @@ export function SubLog({ item }: { item: BatchItem }) {
             <Icon.clock size={13} />
           ) : skip ? (
             <Icon.arrowRight size={13} />
+          ) : stopped ? (
+            <Icon.x size={13} />
           ) : (
             <Loader size={13} color={color} />
           )}
@@ -252,6 +258,8 @@ function BatchRow({
   const kd = KIND[batch.kind] ?? { t: batch.kind, c: "gray" };
   const okN = batch.items.filter((i) => i.status === "success").length;
   const failN = batch.items.filter((i) => i.status === "fail").length;
+  // 사용자 중지(kill)로 안 올린 글(설계서 08).
+  const stoppedN = batch.items.filter((i) => i.status === "stopped").length;
   return (
     <Box style={{ borderBottom: "1px solid var(--mantine-color-gray-2)" }}>
       <Group
@@ -287,6 +295,12 @@ function BatchRow({
               <Text fz={11.5} component="span" c="red">
                 {" "}
                 · 실패 {failN}
+              </Text>
+            )}
+            {stoppedN > 0 && (
+              <Text fz={11.5} component="span" c="orange">
+                {" "}
+                · 중지 {stoppedN}
               </Text>
             )}
           </Text>

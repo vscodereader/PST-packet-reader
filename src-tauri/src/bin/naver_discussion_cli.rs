@@ -59,17 +59,22 @@ fn run() -> Result<(), String> {
     );
     println!();
 
-    let report = run_naver_discussion_macro(NaverDiscussionRequest {
-        title,
-        body,
-        host: args.host,
-        port: args.port,
-        target,
-        submit_after_fill: true,
-        stock: None,
-        account_id: None,
-        comment_url: None,
-    })
+    let report = run_naver_discussion_macro(
+        NaverDiscussionRequest {
+            title,
+            body,
+            host: args.host,
+            port: args.port,
+            target,
+            submit_after_fill: true,
+            stock: None,
+            account_id: None,
+            comment_url: None,
+            comment_nickname_random: false,
+            content_change: None,
+        },
+        &mut std::collections::HashSet::new(),
+    )
     .map_err(|error| error.to_string())?;
 
     println!("완료");

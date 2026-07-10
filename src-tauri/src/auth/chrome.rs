@@ -30,6 +30,37 @@ pub(crate) struct ChromeHandle {
     pub(crate) ua: Option<UaProfile>,
 }
 
+/// 지정 PID의 Chrome 프로세스 **트리**(렌더러/GPU/crashpad 자식 포함)를 강제 종료한다 —
+/// 실행 중 게시큐 kill이 협조적 정지 타임아웃 안에 안 끝날 때(hang)의 최후수단(설계서 08 Stage2).
+/// `ChromeHandle::drop`의 taskkill과 동일한 방식이며, 이미 죽은 PID면 무해한 no-op이다.
+/// best-effort: 실패해도 로그만 남긴다.
+pub(crate) fn force_kill_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        match cmd.output() {
+            Ok(_) => tracing::warn!(
+                pid,
+                "[CHROME] 강제 종료(kill 에스컬레이션) — taskkill /T /F 프로세스 트리"
+            ),
+            Err(error) => tracing::warn!(pid, %error, "[CHROME] 강제 taskkill 실행 실패"),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        // 개발/테스트(비-Windows): 프로세스 그룹까지는 못 잡지만 메인 PID는 kill한다.
+        let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
+        tracing::warn!(
+            pid,
+            "[CHROME] 강제 종료(kill 에스컬레이션, 비-Windows: 메인 PID kill -9)"
+        );
+    }
+}
+
 impl Drop for ChromeHandle {
     fn drop(&mut self) {
         // "완전 종료"의 판단 근거를 로그로 드러낸다(사수 질문): kill 신호 전송 결과 →
@@ -44,10 +75,7 @@ impl Drop for ChromeHandle {
         // → Windows에서는 `taskkill /PID <pid> /T /F`로 프로세스 트리(자식 헬퍼 포함)를
         //   통째로 강제 종료한다. 그 뒤 wait()로 메인 프로세스 핸들을 회수한다.
         let pid = self.child.id();
-        tracing::info!(
-            pid,
-            "[CHROME] 창 닫힘 — Chrome 종료 시작..."
-        );
+        tracing::info!(pid, "[CHROME] 창 닫힘 — Chrome 종료 시작...");
 
         #[cfg(windows)]
         {
@@ -267,7 +295,9 @@ fn launch_inner(headless: bool, ua: Option<UaProfile>) -> Result<ChromeHandle, O
     // 서비스워커·요청 헤더까지 같은 문자열). 페이지의 Client Hints(sec-ch-ua/userAgentData)는
     // login.rs 가 Emulation.setUserAgentOverride 로 같은 버전에 맞춘다 — 문자열만 바꾸면 Client
     // Hints·서비스워커 UA 와 어긋나 봇탐지(_setHasLiedBrowser/NCAPTCHA_UA_DETECTION)에 걸린다.
-    let ua_arg = ua.as_ref().map(|u| format!("--user-agent={}", u.user_agent));
+    let ua_arg = ua
+        .as_ref()
+        .map(|u| format!("--user-agent={}", u.user_agent));
     let mut args = vec![
         "--remote-debugging-port=0",
         profile_arg.as_str(),
@@ -338,7 +368,10 @@ fn launch_inner(headless: bool, ua: Option<UaProfile>) -> Result<ChromeHandle, O
     match wait_for_port(&user_data_dir) {
         Ok(port) => {
             handle.port = port;
-            tracing::info!("[CHROME] ✓ Chrome 실행 완료 — 디버그 포트 {port} (완전 로딩됨)");
+            tracing::info!(
+                "[CHROME] ✓ Chrome 실행 완료 — 디버그 포트 {port}, 프로필 {} (완전 로딩됨)",
+                user_data_dir.display()
+            );
             Ok(handle)
         }
         // handle이 Drop되며 프로세스/임시 디렉토리를 정리한다.
@@ -377,16 +410,34 @@ pub(crate) fn parse_devtools_active_port(content: &str) -> Option<u16> {
 
 // 임시 프로필 디렉토리 이름에 쓸 충돌 적은 접미사(PID + 나노초).
 fn unique_suffix() -> String {
+    // 프로세스 내 단조 증가 카운터로 **동시 호출 고유성**을 보장한다. 예전엔 `process::id()`(앱이
+    // 도는 내내 상수)+나노초만 썼는데, 종토 계정별 병렬 게시(#238)로 두 계정이 같은 나노초 창에
+    // 동시에 Chrome을 띄우면 suffix가 겹쳐 **같은 user-data-dir → 같은 DevToolsActivePort → 같은
+    // Chrome 세션**을 공유했다(쿠키가 뒤섞여 두 계정이 한 네이버 세션으로 동작 → 종토 프로필 생성이
+    // 충돌해 한쪽이 HTTP 500 "Failed to create profile user"). 원자 카운터를 더해 나노초가 겹쳐도
+    // user-data-dir가 절대 겹치지 않게 한다(계정별 Chrome/세션 완전 격리).
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or_default();
-    format!("{}-{}", std::process::id(), nanos)
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{}-{}", std::process::id(), nanos, seq)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unique_suffix_is_distinct_across_rapid_calls() {
+        // 같은 나노초 창에 여러 번 불려도(동시 Chrome 기동) 절대 겹치면 안 된다 — 겹치면 두
+        // 계정이 같은 user-data-dir/세션을 공유해 프로필 충돌(HTTP 500)이 난다(#238 회귀).
+        let n = 1000;
+        let set: std::collections::HashSet<String> = (0..n).map(|_| unique_suffix()).collect();
+        assert_eq!(set.len(), n, "unique_suffix가 빠른 연속 호출에서 중복됨");
+    }
 
     #[test]
     fn parses_port_from_first_line() {
