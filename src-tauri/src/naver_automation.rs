@@ -476,7 +476,11 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
     let post_id = packet_client.submit_post(&room_url, title, body)?;
     let post_url = packet_client.post_url_from_id(&room_url, &post_id)?;
     // 글 내용 변경(설계서 §5): 글→edit→댓글 순서를 유지하려 댓글 전에 여기서 edit한다.
-    maybe_edit_after_post(&mut packet_client, &post_id, request.content_change.as_ref());
+    maybe_edit_after_post(
+        &mut packet_client,
+        &post_id,
+        request.content_change.as_ref(),
+    );
     let post_report = AutomationReport {
         current_url: room_url.clone(),
         post_url: Some(post_url.clone()),
@@ -1059,8 +1063,9 @@ mod tests {
     fn clarify_profile_status_error_differs_by_npay_status() {
         use packet_client::NpayJoinStatus;
         // 서로 다른 원인이 똑같이 "프로필 상태 500"으로만 보이던 걸(사용자 지적) npay 판정별로 가른다.
-        let profile_500 =
-            || Err(AutomationError::new("프로필 상태 패킷 HTTP 실패: status=500, body={\"message\":\"Failed to fetch profile user status\"}"));
+        let profile_500 = || {
+            Err(AutomationError::new("프로필 상태 패킷 HTTP 실패: status=500, body={\"message\":\"Failed to fetch profile user status\"}"))
+        };
 
         // LoginRequired(nid 로그인 튕김) → 보호조치/재로그인 차단성 메시지(is_blocking_failure의 "보호조치").
         let e = clarify_profile_status_error(profile_500(), NpayJoinStatus::LoginRequired)
@@ -1088,7 +1093,11 @@ mod tests {
         // Completed/Unknown + 500 → 원본 유지(진짜 다른 프로필 문제).
         let e = clarify_profile_status_error(profile_500(), NpayJoinStatus::Completed)
             .expect_err("에러여야");
-        assert!(!e.message().contains("보호조치"), "원본 유지: {}", e.message());
+        assert!(
+            !e.message().contains("보호조치"),
+            "원본 유지: {}",
+            e.message()
+        );
 
         // 500이 아닌 실패는 npay 판정과 무관하게 원본 그대로.
         let e = clarify_profile_status_error(
@@ -1108,11 +1117,15 @@ mod tests {
         assert!(is_connection_lost_message(
             "IO error: ... 호스트 시스템의 소프트웨어에 의해 중단되었습니다. (os error 10053)"
         ));
-        assert!(is_connection_lost_message("connection reset (os error 10054)"));
+        assert!(is_connection_lost_message(
+            "connection reset (os error 10054)"
+        ));
         assert!(is_connection_lost_message(
             "응답이 없어 연결이 끊어졌습니다. (os error 10060)"
         ));
-        assert!(is_connection_lost_message("Chrome DevTools 연결이 닫혔습니다."));
+        assert!(is_connection_lost_message(
+            "Chrome DevTools 연결이 닫혔습니다."
+        ));
         // 재접속 비대상: 우리 읽기/쓰기 타임아웃(소켓은 살아있을 수 있음)·일반 CDP 오류.
         assert!(!is_connection_lost_message(
             "Chrome DevTools WebSocket 읽기 시간이 초과되었습니다."

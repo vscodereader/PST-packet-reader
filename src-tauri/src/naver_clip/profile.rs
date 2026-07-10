@@ -111,10 +111,9 @@ impl ClipProfileClient {
         })
         .to_string();
         let raw = self.post_graphql(&body, cookie).await?;
-        let json: serde_json::Value =
-            serde_json::from_str(json_slice(&raw)).map_err(|_| {
-                ClipError::new("클립 NaverProfile 응답을 해석하지 못했습니다(형식 변경)")
-            })?;
+        let json: serde_json::Value = serde_json::from_str(json_slice(&raw)).map_err(|_| {
+            ClipError::new("클립 NaverProfile 응답을 해석하지 못했습니다(형식 변경)")
+        })?;
         let np = json.get("data").and_then(|d| d.get("naverProfile"));
         let nickname = np
             .and_then(|n| n.get("nickname"))
@@ -344,12 +343,19 @@ mod tests {
     #[test]
     fn parse_sign_up_distinguishes_outcomes() {
         assert_eq!(
-            parse_sign_up(r#"{"data":{"signUp":{"__typename":"SignUpSucceed","user":{"profileId":"P"}}}}"#),
+            parse_sign_up(
+                r#"{"data":{"signUp":{"__typename":"SignUpSucceed","user":{"profileId":"P"}}}}"#
+            ),
             SignUpResult::Succeed
         );
         assert_eq!(
-            parse_sign_up(r#"{"data":{"signUp":{"__typename":"CommonError","code":409,"message":"중복"}}}"#),
-            SignUpResult::CommonError { code: "409".into(), message: "중복".into() }
+            parse_sign_up(
+                r#"{"data":{"signUp":{"__typename":"CommonError","code":409,"message":"중복"}}}"#
+            ),
+            SignUpResult::CommonError {
+                code: "409".into(),
+                message: "중복".into()
+            }
         );
         assert_eq!(parse_sign_up("garbage"), SignUpResult::Unknown);
     }
@@ -358,7 +364,10 @@ mod tests {
     fn generate_clip_id_is_10_alnum_starts_letter() {
         let id = generate_clip_id();
         assert_eq!(id.chars().count(), 10, "실측 성공값과 동일하게 10자");
-        assert!(id.chars().next().unwrap().is_ascii_alphabetic(), "첫 글자는 영문자");
+        assert!(
+            id.chars().next().unwrap().is_ascii_alphabetic(),
+            "첫 글자는 영문자"
+        );
         assert!(id.chars().all(|c| c.is_ascii_alphanumeric()));
     }
 
@@ -378,7 +387,11 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/v1.0/clip/profiles"))
             .and(header("x-creator-hub-sid", "clip"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"header":{"code":0,"message":""},"body":{"profileId":"P"}}"#))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(
+                    r#"{"header":{"code":0,"message":""},"body":{"profileId":"P"}}"#,
+                ),
+            )
             .mount(&creatorhub)
             .await;
         // clip_base는 안 쓰이지만 형식상 주입.
@@ -392,13 +405,18 @@ mod tests {
         let creatorhub = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v1.0/clip/profiles"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"header":{"code":-2102,"message":"없음"}}"#))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"header":{"code":-2102,"message":"없음"}}"#),
+            )
             .mount(&creatorhub)
             .await;
         Mock::given(method("POST"))
             .and(path("/api/graphql"))
             .and(body_string_contains("NaverProfile"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"data":{"naverProfile":{"nickname":"닉","profileImageUrl":"http://img"}}}"#))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"data":{"naverProfile":{"nickname":"닉","profileImageUrl":"http://img"}}}"#,
+            ))
             .mount(&clip)
             .await;
         Mock::given(method("POST"))

@@ -145,7 +145,12 @@ async fn log_phone_network_state() {
     ];
     tracing::info!("[ADB][NET] ─────────── 폰 네트워크 상태(원문) ───────────");
     for prop in PROPS {
-        match run_adb_timed(vec!["shell".to_string(), "getprop".to_string(), prop.to_string()]).await
+        match run_adb_timed(vec![
+            "shell".to_string(),
+            "getprop".to_string(),
+            prop.to_string(),
+        ])
+        .await
         {
             Ok(v) => tracing::info!("[ADB][NET]   {prop} = {}", v.trim()),
             Err(error) => tracing::warn!("[ADB][NET]   {prop} 조회 실패: {error}"),
@@ -325,7 +330,7 @@ mod tests {
         assert!(!is_valid_changed_ip("1.1.1.1", "1.1.1.1")); // 같음 → 아직
         assert!(!is_valid_changed_ip("1.1.1.1", "(확인 실패)")); // 비정상 응답 → 아직
         assert!(!is_valid_changed_ip("1.1.1.1", "")); // 빈 값 → 아직
-        // before가 비정상이었어도, 유효 IP를 새로 받으면 바뀐 것으로 본다.
+                                                      // before가 비정상이었어도, 유효 IP를 새로 받으면 바뀐 것으로 본다.
         assert!(is_valid_changed_ip("(확인 실패)", "3.3.3.3"));
     }
 

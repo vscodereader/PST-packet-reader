@@ -43,17 +43,21 @@ pub(crate) fn force_kill_tree(pid: u32) {
         cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
         cmd.creation_flags(CREATE_NO_WINDOW);
         match cmd.output() {
-            Ok(_) => tracing::warn!(pid, "[CHROME] 강제 종료(kill 에스컬레이션) — taskkill /T /F 프로세스 트리"),
+            Ok(_) => tracing::warn!(
+                pid,
+                "[CHROME] 강제 종료(kill 에스컬레이션) — taskkill /T /F 프로세스 트리"
+            ),
             Err(error) => tracing::warn!(pid, %error, "[CHROME] 강제 taskkill 실행 실패"),
         }
     }
     #[cfg(not(windows))]
     {
         // 개발/테스트(비-Windows): 프로세스 그룹까지는 못 잡지만 메인 PID는 kill한다.
-        let _ = Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .output();
-        tracing::warn!(pid, "[CHROME] 강제 종료(kill 에스컬레이션, 비-Windows: 메인 PID kill -9)");
+        let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
+        tracing::warn!(
+            pid,
+            "[CHROME] 강제 종료(kill 에스컬레이션, 비-Windows: 메인 PID kill -9)"
+        );
     }
 }
 
@@ -71,10 +75,7 @@ impl Drop for ChromeHandle {
         // → Windows에서는 `taskkill /PID <pid> /T /F`로 프로세스 트리(자식 헬퍼 포함)를
         //   통째로 강제 종료한다. 그 뒤 wait()로 메인 프로세스 핸들을 회수한다.
         let pid = self.child.id();
-        tracing::info!(
-            pid,
-            "[CHROME] 창 닫힘 — Chrome 종료 시작..."
-        );
+        tracing::info!(pid, "[CHROME] 창 닫힘 — Chrome 종료 시작...");
 
         #[cfg(windows)]
         {
@@ -294,7 +295,9 @@ fn launch_inner(headless: bool, ua: Option<UaProfile>) -> Result<ChromeHandle, O
     // 서비스워커·요청 헤더까지 같은 문자열). 페이지의 Client Hints(sec-ch-ua/userAgentData)는
     // login.rs 가 Emulation.setUserAgentOverride 로 같은 버전에 맞춘다 — 문자열만 바꾸면 Client
     // Hints·서비스워커 UA 와 어긋나 봇탐지(_setHasLiedBrowser/NCAPTCHA_UA_DETECTION)에 걸린다.
-    let ua_arg = ua.as_ref().map(|u| format!("--user-agent={}", u.user_agent));
+    let ua_arg = ua
+        .as_ref()
+        .map(|u| format!("--user-agent={}", u.user_agent));
     let mut args = vec![
         "--remote-debugging-port=0",
         profile_arg.as_str(),

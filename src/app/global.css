@@ -47,9 +47,10 @@
    안 보였다. idle만 흰색으로 바꿔 보이게 하고, 커서를 올리거나 잡고 움직이면(hover/drag)
    Mantine 기본(밝은 트랙 + 어두운 thumb=밝은 트랙 위에서 회색으로 보임)을 그대로 둔다. */
 .commlog-thumb {
-  background-color: rgba(255, 255, 255, 0.85) !important; /* idle: 흰색(검은 배경에 잘 보임) */
+  background-color: rgb(255 255 255 / 85%) !important; /* idle: 흰색(검은 배경에 잘 보임) */
 }
+
 .commlog-scrollbar:hover .commlog-thumb,
 .commlog-scrollbar:active .commlog-thumb {
-  background-color: rgba(0, 0, 0, 0.45) !important; /* hover/drag: 밝은 트랙 위에서 회색 드래그바 */
+  background-color: rgb(0 0 0 / 45%) !important; /* hover/drag: 밝은 트랙 위에서 회색 드래그바 */
 }

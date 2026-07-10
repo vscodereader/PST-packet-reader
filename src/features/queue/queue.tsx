@@ -222,7 +222,10 @@ export function Queue({ go }: { go: GoFn }) {
   // 멈추고 Chrome이 정상 정리되며(고아 없음), 큐에서 빠져 다음 대기 작업이 즉시 올라온다.
   const kill = (id: string) => {
     void ipc.queue.killNow(id).then(setNow);
-    notifications.show({ message: "실행 중인 작업을 중지했어요", color: "orange" });
+    notifications.show({
+      message: "실행 중인 작업을 중지했어요",
+      color: "orange",
+    });
   };
   const promote = (id: string) => {
     void ipc.queue.promote(id).then((next) => {

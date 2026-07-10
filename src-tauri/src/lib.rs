@@ -41,8 +41,7 @@ use discussion_batch::{
 };
 use naver_automation::{
     run_naver_discussion_macro, run_naver_dislike, run_naver_like, AutomationReport,
-    AutomationTarget, LikeVerdict,
-    NaverDiscussionRequest,
+    AutomationTarget, LikeVerdict, NaverDiscussionRequest,
 };
 
 #[tauri::command]
@@ -202,7 +201,9 @@ async fn run_reaction_batch<R: Runtime>(
         .filter(|u| !u.is_empty())
         .collect();
     if post_urls.is_empty() {
-        return Err(format!("{label}를 누를 게시글 링크를 한 개 이상 입력하세요."));
+        return Err(format!(
+            "{label}를 누를 게시글 링크를 한 개 이상 입력하세요."
+        ));
     }
     if account_ids.is_empty() {
         return Err(format!("{label}를 누를 계정을 한 개 이상 선택하세요."));

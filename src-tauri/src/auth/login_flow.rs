@@ -177,11 +177,7 @@ enum LoopDecision {
 /// - 캡차: headless면 headed로 승격, headed+보류재로그인(`manual_captcha`)이면 직접 입력
 ///   대기(WaitCaptcha), headed+첫 로그인이면 즉시 보류(FailCaptchaToHold).
 /// - 캡차 외 추가 인증(본인인증/기기인증)은 즉시 실패(#267-13).
-fn decide_loop_step(
-    signal: Signal,
-    wait_for_human: bool,
-    manual_captcha: bool,
-) -> LoopDecision {
+fn decide_loop_step(signal: Signal, wait_for_human: bool, manual_captcha: bool) -> LoopDecision {
     match signal {
         Signal::Success => LoopDecision::Success,
         // 보호조치는 착지 URL로 명확히 판별되므로 headed의 사람 대기 없이 즉시 확정한다(#228).
@@ -271,9 +267,7 @@ pub(crate) fn run(
     match run_inner(client, id, pw, wait_for_human, manual_captcha, &mut diag) {
         Ok(outcome) => {
             let trace = match &outcome {
-                LoginOutcome::Error(_) => {
-                    Some(diag.unwrap_or_else(crate::util::backtrace_string))
-                }
+                LoginOutcome::Error(_) => Some(diag.unwrap_or_else(crate::util::backtrace_string)),
                 _ => None,
             };
             (outcome, trace)
@@ -497,9 +491,7 @@ fn run_inner(
         };
         result_dom_streak = next_ready_streak(result_dom_streak, dom_ready);
         if !result_dom_gate_open(result_dom_streak) {
-            if captcha_deadline.is_none()
-                && phone_deadline.is_none()
-                && Instant::now() >= deadline
+            if captcha_deadline.is_none() && phone_deadline.is_none() && Instant::now() >= deadline
             {
                 let url = client.current_url().unwrap_or_default();
                 return Ok(LoginOutcome::Error(format!(
@@ -523,8 +515,7 @@ fn run_inner(
             // (상한 120초). 그 안에 로그인되면 위 logged_in 단락에서 성공 확정되고, 상한을 넘으면
             // 보류로 유지한다. 캡차 대기 중엔 정체 타이머를 끈다.
             LoopDecision::WaitCaptcha => {
-                captcha_deadline
-                    .get_or_insert_with(|| Instant::now() + MANUAL_CAPTCHA_TIMEOUT);
+                captcha_deadline.get_or_insert_with(|| Instant::now() + MANUAL_CAPTCHA_TIMEOUT);
                 pending_deadline = None;
             }
             // 첫 로그인(일반 계정) 캡차: grace 없이 즉시 실패시키고 계정을 보류(OnHold)로 둔다.
@@ -1133,7 +1124,8 @@ fn wait_wtmncapt_ready_for_block_wasm(client: &mut CdpClient) {
         return; // wasm 차단 OFF(PSTMACRO_BLOCK_WASM=0) — 기존 타이밍 무변경.
     }
     // typeof 가드로 ReferenceError 없이, 생성 완료(truthy)까지 확인한다.
-    const READY: &str = "(()=>{try{return typeof window.wtmncapt!=='undefined'&&!!window.wtmncapt;}\
+    const READY: &str =
+        "(()=>{try{return typeof window.wtmncapt!=='undefined'&&!!window.wtmncapt;}\
          catch(e){return false;}})()";
     let start = Instant::now();
     let deadline = start + WTMNCAPT_WAIT;
@@ -1332,9 +1324,10 @@ fn force_page_foreground(client: &mut CdpClient) {
     if let Err(error) = client.call("Page.bringToFront", json!({})) {
         tracing::debug!(error = %error, "[LOGIN] Page.bringToFront 실패(무시하고 진행)");
     }
-    if let Err(error) =
-        client.call("Emulation.setFocusEmulationEnabled", json!({ "enabled": true }))
-    {
+    if let Err(error) = client.call(
+        "Emulation.setFocusEmulationEnabled",
+        json!({ "enabled": true }),
+    ) {
         tracing::debug!(error = %error, "[LOGIN] setFocusEmulationEnabled 실패(무시하고 진행)");
     }
 }
@@ -1478,9 +1471,7 @@ fn type_into(
     // 구분할 수 있게 현재 상태를 한 번에 스냅샷해 진단 문자열로 돌려준다. 호출자는 이를
     // "자세히 보기" trace로 띄우고, 빈 자격증명으로는 진행하지 않는다.
     let active_id = client
-        .evaluate_string(
-            "(()=>{const ae=document.activeElement;return ae&&ae.id?ae.id:'';})()",
-        )
+        .evaluate_string("(()=>{const ae=document.activeElement;return ae&&ae.id?ae.id:'';})()")
         .unwrap_or_default();
     let field_visible = client
         .evaluate_bool(&format!(
@@ -1515,11 +1506,17 @@ fn type_into(
     //   · browser: 크롬 버전(성공 PC vs 실패 PC 비교용)
     // 판별표: keydown=0 → 렌더러 도달 실패(원격데스크톱/창 가림) · keyCode=229/isComposing=true → IME
     //   · input>0 인데 value=0 → 폼 JS 가 value 되돌림 · selftest=1 & keydown=0 → 렌더러 드롭 확정.
-    let key_stats = client.evaluate_string(READ_KEY_STATS_JS).unwrap_or_default();
+    let key_stats = client
+        .evaluate_string(READ_KEY_STATS_JS)
+        .unwrap_or_default();
     let browser = client
         .call("Browser.getVersion", json!({}))
         .ok()
-        .and_then(|v| v.get("product").and_then(Value::as_str).map(ToOwned::to_owned))
+        .and_then(|v| {
+            v.get("product")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
         .unwrap_or_default();
     tracing::warn!(
         selector,
@@ -1678,7 +1675,9 @@ pub(crate) fn manual_add_wait(
             Err(_) => {
                 conn_fail += 1;
                 if conn_fail >= MAX_CONN_FAIL {
-                    tracing::info!("[LOGIN] 🖐 수동추가 — Chrome 연결이 끊겨 취소(창이 닫혔거나 크래시)");
+                    tracing::info!(
+                        "[LOGIN] 🖐 수동추가 — Chrome 연결이 끊겨 취소(창이 닫혔거나 크래시)"
+                    );
                     return Ok(None);
                 }
             }
@@ -2050,7 +2049,7 @@ mod tests {
         // ID가 010+숫자8자리(총11자리)면 휴대전화 형식.
         assert!(id_is_phone_format("01011111111"));
         assert!(id_is_phone_format(" 01087654321 ")); // 공백 trim
-        // 아닌 형식은 모두 false.
+                                                      // 아닌 형식은 모두 false.
         assert!(!id_is_phone_format("0101111111")); // 10자리
         assert!(!id_is_phone_format("010111111111")); // 12자리
         assert!(!id_is_phone_format("01111111111")); // 010으로 시작 안 함

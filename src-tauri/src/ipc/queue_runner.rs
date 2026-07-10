@@ -18,8 +18,8 @@ use super::activity::{record, ActivityItem, ActivityType};
 use super::log_batches::{BatchItem, BatchItemStatus, LogBatch, PostedContent, MAX_LOG_BATCHES};
 use super::posts::{CommentTarget, ModeValue};
 use super::queue::{
-    apply_cancel_now, apply_yield_now, item_priority, CommentTargetSpec, LoginTarget,
-    PublishPlan, QueueNowItem, QueueState,
+    apply_cancel_now, apply_yield_now, item_priority, CommentTargetSpec, LoginTarget, PublishPlan,
+    QueueNowItem, QueueState,
 };
 use crate::auth::outcome::LoginResolution;
 use crate::auth::OrchestratorError;
@@ -577,7 +577,14 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                 }
                 AccountFamily::Band => all_band.extend(synth_band_failures(plan, acc, &skip)),
             }
-            done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band, &all_blog, &all_clip);
+            done = resolved_count(
+                &all_posts,
+                &all_comments,
+                &all_forum,
+                &all_band,
+                &all_blog,
+                &all_clip,
+            );
             set_progress_and_items(
                 app,
                 id,
@@ -626,7 +633,14 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                         })
                         .await;
                         all_posts.extend(reports);
-                        done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band, &all_blog, &all_clip);
+                        done = resolved_count(
+                            &all_posts,
+                            &all_comments,
+                            &all_forum,
+                            &all_band,
+                            &all_blog,
+                            &all_clip,
+                        );
                         set_progress_and_items(
                             app,
                             id,
@@ -708,7 +722,14 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                         .await;
                         all_comments.extend(reports);
                     }
-                    done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band, &all_blog, &all_clip);
+                    done = resolved_count(
+                        &all_posts,
+                        &all_comments,
+                        &all_forum,
+                        &all_band,
+                        &all_blog,
+                        &all_clip,
+                    );
                     set_progress_and_items(
                         app,
                         id,
@@ -744,7 +765,14 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                     let outcomes =
                         run_blog_targets(app, plan, id, base, done, total, Some(acc)).await;
                     all_blog.extend(outcomes);
-                    done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band, &all_blog, &all_clip);
+                    done = resolved_count(
+                        &all_posts,
+                        &all_comments,
+                        &all_forum,
+                        &all_band,
+                        &all_blog,
+                        &all_clip,
+                    );
                     set_progress_and_items(
                         app,
                         id,
@@ -778,7 +806,14 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                     let outcomes =
                         run_clip_targets(app, plan, id, base, done, total, Some(acc)).await;
                     all_clip.extend(outcomes);
-                    done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band, &all_blog, &all_clip);
+                    done = resolved_count(
+                        &all_posts,
+                        &all_comments,
+                        &all_forum,
+                        &all_band,
+                        &all_blog,
+                        &all_clip,
+                    );
                     set_progress_and_items(
                         app,
                         id,
@@ -815,7 +850,14 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
                     let outcomes =
                         run_band_targets(app, plan, id, base, done, total, Some(acc)).await;
                     all_band.extend(outcomes);
-                    done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band, &all_blog, &all_clip);
+                    done = resolved_count(
+                        &all_posts,
+                        &all_comments,
+                        &all_forum,
+                        &all_band,
+                        &all_blog,
+                        &all_clip,
+                    );
                     set_progress_and_items(
                         app,
                         id,
@@ -853,7 +895,14 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
         );
         let outcomes = run_forum_targets(app, plan, id, base, done, total, None).await;
         all_forum.extend(outcomes);
-        done = resolved_count(&all_posts, &all_comments, &all_forum, &all_band, &all_blog, &all_clip);
+        done = resolved_count(
+            &all_posts,
+            &all_comments,
+            &all_forum,
+            &all_band,
+            &all_blog,
+            &all_clip,
+        );
         set_progress_and_items(
             app,
             id,
@@ -903,7 +952,10 @@ async fn execute_item<R: Runtime>(app: &AppHandle<R>, item: &QueueNowItem) -> It
     // (사용자 취소) apply_yield_now가 no-op이라 되살아나지 않는다.
     let unattempted = forum_unattempted_accounts(plan, &all_forum);
     if !unattempted.is_empty() {
-        let who: Vec<String> = unattempted.iter().map(|a| crate::auth::mask_id(a)).collect();
+        let who: Vec<String> = unattempted
+            .iter()
+            .map(|a| crate::auth::mask_id(a))
+            .collect();
         tracing::info!(
             "[POST] 종목토론방 미시도 계정 {}건 — 큐에서 빼지 않고 차례 올 때까지 재대기: {}",
             unattempted.len(),
@@ -1158,7 +1210,16 @@ fn set_running_phase<R: Runtime>(
     clip: &[ClipOutcome],
     running: Vec<BatchItem>,
 ) {
-    let mut items = build_items(plan, posts, comments, fetch_failures, forum, band, blog, clip);
+    let mut items = build_items(
+        plan,
+        posts,
+        comments,
+        fetch_failures,
+        forum,
+        band,
+        blog,
+        clip,
+    );
     items.extend(running);
     set_queue_items(app, id, items);
 }
@@ -1908,7 +1969,6 @@ async fn do_login_and_capture_ip<R: Runtime>(
     Ok(crate::auth::fetch_external_ip().await)
 }
 
-
 /// 종목토론방 대상을 **계정별로 동시에** 게시한다(#237). 종토 게시는 Chrome 없이 순수 HTTP 패킷
 /// API로 처리하므로(#344 후속: 저장 쿠키를 패킷 클라이언트에 직접 로드), 계정마다 `spawn_blocking`
 /// 태스크만 띄우면 된다(packet_client는 blocking reqwest). 카페(9222)·밴드(HTTP)와도 자원이 겹치지
@@ -2564,7 +2624,13 @@ async fn run_login_targets<R: Runtime>(app: &AppHandle<R>, id: &str, targets: &[
         // 계정 세밀 상태/사유를 accounts 스토어에 반영한다(loginId가 같은 모든 행). 프론트
         // accounts 화면이 이 값을 폴링해 상태 배지/tooltip을 갱신한다.
         app.state::<JsonStore<Account>>().mutate(|list| {
-            apply_status_by_login_id(list, &t.account_id, status.clone(), Some(msg.clone()), trace.clone())
+            apply_status_by_login_id(
+                list,
+                &t.account_id,
+                status.clone(),
+                Some(msg.clone()),
+                trace.clone(),
+            )
         });
         // 활동 피드에도 상태별 타입으로 남긴다(기존 전용 로그인 큐와 동일 UX).
         record(
@@ -3016,7 +3082,8 @@ fn forum_failure_reason(message: &str) -> String {
     // 흘리면 "로그인·잠금 확인"이라는 틀린 안내가 떠(잠긴 게 아니라 망이 끊긴 것) — #330과 같은
     // 부류의 오안내. 네트워크 끊김으로 명확히 분류해 "잠시 후 재시도" 안내를 준다(재시도로 풀린다).
     if is_network_transport_failure(trimmed) {
-        return "잠시 인터넷 연결이 끊겨 게시에 실패했습니다. 잠시 후 다시 시도해 주세요".to_owned();
+        return "잠시 인터넷 연결이 끊겨 게시에 실패했습니다. 잠시 후 다시 시도해 주세요"
+            .to_owned();
     }
     // 개발 용어가 섞이지 않은 순수 안내문이면 사용자 친화로 보고 그대로 노출한다.
     if contains_tech_jargon(trimmed) {
@@ -3050,7 +3117,8 @@ fn naver_original_ban_reason(message: &str) -> Option<String> {
             let msg = pick(&v, "message")
                 .or_else(|| v.get("result").and_then(|r| pick(r, "detail")))
                 .or_else(|| pick(&v, "detail"));
-            let title = pick(&v, "title").or_else(|| v.get("result").and_then(|r| pick(r, "title")));
+            let title =
+                pick(&v, "title").or_else(|| v.get("result").and_then(|r| pick(r, "title")));
             let out = match (msg, title) {
                 (Some(m), Some(t)) => format!("{m} ({t})"),
                 (Some(m), None) => m,
@@ -3508,7 +3576,8 @@ async fn run_clip_targets<R: Runtime>(
     // 실행 시점에 (프로필 보장 → 핸들 해석 → 최신 N개 조회)로 작업을 펼친다. 어느 단계든 실패하면
     // 그 대상의 want개를 합성 실패로 남긴다(조용히 누락 금지). 프로필 보장은 계정당 1회만 한다.
     let mut work: Vec<ClipWorkItem> = Vec::new();
-    let mut profile_ready: std::collections::HashMap<String, Result<(), String>> = Default::default();
+    let mut profile_ready: std::collections::HashMap<String, Result<(), String>> =
+        Default::default();
     for t in &targets {
         let want = t.count.unwrap_or(1).max(1) as usize;
         let media_type = clip_media_type_of(t);
@@ -3549,18 +3618,16 @@ async fn run_clip_targets<R: Runtime>(
         }
 
         // (b) 핸들 → profileId.
-        let profile_id = match crate::naver_clip::resolve_clip_profile_id_for_account(
-            &t.account_id,
-            &t.handle,
-        )
-        .await
-        {
-            Ok(pid) => pid,
-            Err(e) => {
-                fail_all(&mut work, e);
-                continue;
-            }
-        };
+        let profile_id =
+            match crate::naver_clip::resolve_clip_profile_id_for_account(&t.account_id, &t.handle)
+                .await
+            {
+                Ok(pid) => pid,
+                Err(e) => {
+                    fail_all(&mut work, e);
+                    continue;
+                }
+            };
 
         // (c) 최신 N개 미디어 조회 → 미디어마다 댓글 작업 1건.
         match crate::naver_clip::fetch_latest_clips_for_account(
@@ -4101,10 +4168,7 @@ mod tests {
         let (status, _msg, trace) = resolve_login_status(&with_trace);
         assert_eq!(status, AccountStatus::Error);
         // 사용자 사유가 백트레이스 위에 먼저 붙는다(자세히 보기 전문 노출).
-        assert_eq!(
-            trace.as_deref(),
-            Some("연결 실패\n\nat x.rs:1:1\n\nframe0")
-        );
+        assert_eq!(trace.as_deref(), Some("연결 실패\n\nat x.rs:1:1\n\nframe0"));
     }
 
     #[test]
@@ -4672,7 +4736,10 @@ mod tests {
             forum_timed_out("b", "엘지", "2", "페이지 로드 대기 시간이 초과되었습니다."),
         ];
         let missing = forum_unattempted_accounts(&p, &all_forum);
-        assert_eq!(missing.into_iter().collect::<Vec<_>>(), vec!["c".to_owned()]);
+        assert_eq!(
+            missing.into_iter().collect::<Vec<_>>(),
+            vec!["c".to_owned()]
+        );
     }
 
     #[test]
@@ -4680,7 +4747,10 @@ mod tests {
         // 시도 후 실패(outcome 있음)는 미시도가 아니다 → 빈 집합 → execute_item이 Completed로 뺀다
         // (무한 재대기 방지). 차단·건너뜀도 outcome가 있어 마찬가지.
         let mut p = plan(ModeValue::Post, vec![]);
-        p.forum = vec![forum_target("a", "삼성", "1"), forum_target("b", "엘지", "2")];
+        p.forum = vec![
+            forum_target("a", "삼성", "1"),
+            forum_target("b", "엘지", "2"),
+        ];
         let all_forum = vec![
             forum_fail("a", "삼성", "1", "trace"),
             forum_blocked("b", "엘지", "2"),
@@ -4693,7 +4763,10 @@ mod tests {
         // 카페(a) + 종토(a,b) + 로그인이 섞인 plan에서 b의 종토만 남긴다 — 카페·login은 비워져
         // 재대기 시 카페 중복게시·재로그인이 없다(사수 지침: 카페·밴드 무손상).
         let mut p = plan(ModeValue::Post, vec![naver_target("a")]);
-        p.forum = vec![forum_target("a", "삼성", "1"), forum_target("b", "엘지", "2")];
+        p.forum = vec![
+            forum_target("a", "삼성", "1"),
+            forum_target("b", "엘지", "2"),
+        ];
         p.login = Some(vec![login_target("a", PlatformId::Naver)]);
         let keep: std::collections::BTreeSet<String> = ["b".to_owned()].into_iter().collect();
 
@@ -4702,7 +4775,10 @@ mod tests {
         assert!(sub.band.is_empty());
         assert!(sub.blog.is_empty());
         assert!(sub.clip.is_empty());
-        assert_eq!(sub.login, None, "login 비움 → 재로그인·IP회전 없음(저장 쿠키 게시)");
+        assert_eq!(
+            sub.login, None,
+            "login 비움 → 재로그인·IP회전 없음(저장 쿠키 게시)"
+        );
         assert_eq!(sub.forum.len(), 1);
         assert_eq!(sub.forum[0].account_id, "b");
         // 스칼라(제목/본문/댓글/링크)는 종토 게시에 그대로 쓰므로 보존.
@@ -4719,7 +4795,11 @@ mod tests {
         p.forum = vec![forum_target("a", "삼성", "1")];
         p.login = Some(vec![login_target("a", PlatformId::Naver)]);
         let keep: std::collections::BTreeSet<String> = ["a".to_owned()].into_iter().collect();
-        let item = now_item("re", QueueState::Waiting, Some(retain_forum_only(&p, &keep)));
+        let item = now_item(
+            "re",
+            QueueState::Waiting,
+            Some(retain_forum_only(&p, &keep)),
+        );
         assert_eq!(item_priority(&item), 1, "종토 우선순위 유지");
         assert!(is_forum_only_item(&item), "동시 종토 레인으로 처리");
     }
@@ -5081,7 +5161,16 @@ mod tests {
     #[test]
     fn build_items_maps_post_report_with_cafe_name_label() {
         let p = plan(ModeValue::Post, vec![naver_target("u0")]);
-        let items = build_items(&p, &[post_report("u0", 123, 456)], &[], &[], &[], &[], &[], &[]);
+        let items = build_items(
+            &p,
+            &[post_report("u0", 123, 456)],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].status, BatchItemStatus::Success);
         assert_eq!(items[0].target, "테스트카페");
@@ -5276,8 +5365,15 @@ mod tests {
         let reqs = plan_to_forum_requests(&p);
         assert_eq!(reqs.len(), 2);
         for r in &reqs {
-            assert!(r.comment_nickname_random, "닉네임 랜덤 옵션이 요청에 실려야 함");
-            assert_eq!(r.content_change.as_ref(), Some(&change), "글 내용 변경 옵션이 요청에 실려야 함");
+            assert!(
+                r.comment_nickname_random,
+                "닉네임 랜덤 옵션이 요청에 실려야 함"
+            );
+            assert_eq!(
+                r.content_change.as_ref(),
+                Some(&change),
+                "글 내용 변경 옵션이 요청에 실려야 함"
+            );
         }
     }
 
@@ -5314,7 +5410,9 @@ mod tests {
         }];
         let reqs = plan_to_forum_requests(&p);
         assert_eq!(reqs.len(), 3, "댓글 3개 → 요청 3개");
-        assert!(reqs.iter().all(|r| r.account_id == "u0" && r.comment_url.as_deref() == Some(url)));
+        assert!(reqs
+            .iter()
+            .all(|r| r.account_id == "u0" && r.comment_url.as_deref() == Some(url)));
         // 작성 순서 보존.
         let got: Vec<&str> = reqs.iter().map(|r| r.comment.as_str()).collect();
         assert_eq!(got, vec!["안녕하세요", "반갑습니다", "저두요"]);
@@ -5334,7 +5432,12 @@ mod tests {
             code: "005930".into(),
             comment_url: url.into(),
         };
-        p.forum = vec![mk("A", url_a), mk("B", url_a), mk("A", url_b), mk("B", url_b)];
+        p.forum = vec![
+            mk("A", url_a),
+            mk("B", url_a),
+            mk("A", url_b),
+            mk("B", url_b),
+        ];
         let reqs = plan_to_forum_requests(&p);
         assert_eq!(reqs.len(), 8, "(계정2×링크2)×댓글2 = 8");
         // 각 (계정, 링크) 쌍이 정확히 두 댓글(c1,c2)을 갖는다.
@@ -5369,8 +5472,12 @@ mod tests {
         };
         // 계정 3개(A,B,C) × 링크 2개.
         p.forum = vec![
-            mk("A", url_a), mk("B", url_a), mk("C", url_a),
-            mk("A", url_b), mk("B", url_b), mk("C", url_b),
+            mk("A", url_a),
+            mk("B", url_a),
+            mk("C", url_a),
+            mk("A", url_b),
+            mk("B", url_b),
+            mk("C", url_b),
         ];
         let reqs = plan_to_forum_requests(&p);
         assert_eq!(reqs.len(), 6, "링크2 × 계정3 = 6 (계정당 1개)");
@@ -5489,7 +5596,18 @@ mod tests {
             post_report("u0", 123, 999),
             post_fail("u1", "456", "NO_COOKIES", "쿠키 없음"),
         ];
-        let b = build_log_batch(&p, &reports, &[], &[], &[], &[], &[], &[], 1_700_000_000_000, 0);
+        let b = build_log_batch(
+            &p,
+            &reports,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            1_700_000_000_000,
+            0,
+        );
         assert_eq!(b.id, "lb-q-1700000000000-0");
         assert_eq!(b.title, "T");
         assert_eq!(b.body.as_deref(), Some("B")); // post 모드 → 본문 스냅샷
@@ -5999,7 +6117,10 @@ mod tests {
             forum_ok("acc_ok", "LG", "066570"),
         ];
         let ids = timed_out_post_login_ids(&forum);
-        assert!(ids.contains("acc_to1"), "대기시간 초과는 대기초과(재시도) 대상");
+        assert!(
+            ids.contains("acc_to1"),
+            "대기시간 초과는 대기초과(재시도) 대상"
+        );
         assert!(
             !ids.contains("acc_500"),
             "HTTP 500 서버 오류는 빠른 실패 — 대기초과(재시도) 아님(#342)"
@@ -6070,14 +6191,25 @@ mod tests {
         let forum = vec![
             forum_fail("acc_err", "삼성전자", "005930", "trace-x"), // message "엔진 오류" — 미분류
             forum_blocked("acc_block", "카카오", "035720"),         // 차단(403)
-            forum_timed_out("acc_to", "LG", "066570", "페이지 로드 대기 시간이 초과되었습니다."),
+            forum_timed_out(
+                "acc_to",
+                "LG",
+                "066570",
+                "페이지 로드 대기 시간이 초과되었습니다.",
+            ),
             forum_skipped("acc_skip", "네이버", "035420"),
             forum_ok("acc_ok", "SK하이닉스", "000660"),
         ];
         let ids = errored_post_login_ids(&forum);
         assert!(ids.contains("acc_err"), "미분류 실패는 에러 대상");
-        assert!(!ids.contains("acc_block"), "차단은 에러 아님(전용 상태가 우선)");
-        assert!(!ids.contains("acc_to"), "대기초과는 에러 아님(전용 상태가 우선)");
+        assert!(
+            !ids.contains("acc_block"),
+            "차단은 에러 아님(전용 상태가 우선)"
+        );
+        assert!(
+            !ids.contains("acc_to"),
+            "대기초과는 에러 아님(전용 상태가 우선)"
+        );
         assert!(!ids.contains("acc_skip"), "건너뜀(skip)은 에러 아님");
         assert!(!ids.contains("acc_ok"), "성공은 에러 아님");
     }
@@ -6103,9 +6235,7 @@ mod tests {
             .collect();
         let waiting: Vec<String> = successful_post_login_ids(&forum)
             .into_iter()
-            .filter(|id| {
-                !blocked.contains(id) && !timed_out.contains(id) && !errored.contains(id)
-            })
+            .filter(|id| !blocked.contains(id) && !timed_out.contains(id) && !errored.contains(id))
             .collect();
         assert!(errored.contains("acc_mix"), "성공+미분류실패 계정은 에러");
         assert!(
@@ -6156,7 +6286,9 @@ mod tests {
         );
         // 차단이 아니면 None(일반 403 매핑 경로 유지).
         assert_eq!(
-            naver_original_ban_reason("글쓰기 form 패킷 HTTP 실패: status=403, body={\"message\":\"x\"}"),
+            naver_original_ban_reason(
+                "글쓰기 form 패킷 HTTP 실패: status=403, body={\"message\":\"x\"}"
+            ),
             None
         );
     }
@@ -6220,7 +6352,9 @@ mod tests {
         }
         // 전송과 무관한 메시지는 네트워크로 오분류하면 안 된다(잠금·HTTP상태·게시 파싱).
         assert!(!is_network_transport_failure("아이디 잠금조치"));
-        assert!(!is_network_transport_failure("HTTP status 403 Forbidden for url (x)"));
+        assert!(!is_network_transport_failure(
+            "HTTP status 403 Forbidden for url (x)"
+        ));
         assert!(!is_network_transport_failure(
             "글쓰기 form 응답에서 txId를 찾지 못했습니다."
         ));
@@ -6421,7 +6555,9 @@ mod tests {
             name: name.into(),
             link: format!("https://blog.naver.com/{name}/200"),
             contents: String::new(),
-            result: Err(crate::naver_blog::BlogError::new("groupId를 찾지 못했습니다")),
+            result: Err(crate::naver_blog::BlogError::new(
+                "groupId를 찾지 못했습니다",
+            )),
         }
     }
 
