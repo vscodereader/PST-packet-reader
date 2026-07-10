@@ -1,6 +1,15 @@
 import "@testing-library/jest-dom";
 
 import { configure } from "@testing-library/react";
+import { vi } from "vitest";
+
+// Tauri event bus isn't available in jsdom. Components that call `listen(...)`
+// (e.g. app-shell's #400 내용변경 토스트 리스너) would otherwise fire a real IPC
+// call and reject. Stub it to resolve with a no-op unsubscribe.
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: () => Promise.resolve(() => {}),
+  emit: () => Promise.resolve(),
+}));
 
 // Heavy Mantine views (e.g. the Accounts table) can take well over a second to
 // mount + run their async IPC load on a cold/slow CI runner. Testing Library's

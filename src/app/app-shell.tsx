@@ -10,6 +10,8 @@ import {
   UnstyledButton,
 } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
+import { notifications } from "@mantine/notifications";
+import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useState } from "react";
 
 import { Accounts } from "@/features/accounts/accounts";
@@ -143,6 +145,38 @@ export function MacroApp() {
   useEffect(() => {
     refreshCounts(localStorage.getItem("mc-view") === "log");
   }, [refreshCounts]);
+
+  // 종토 내용변경(#400): 원글 게시 순간과 N초 뒤 내용 변경 완료 시 백엔드가 이벤트를 보내면
+  // 토스트로 알린다(알림 패널 카드는 logBatches 폴링으로 따로 뜬다). listen은 프로미스라
+  // 언마운트 시 해제한다 — 아직 해제 함수가 안 왔으면 도착 즉시 해제한다.
+  useEffect(() => {
+    type ContentEvt = { title?: string; stock?: string };
+    let active = true;
+    const unlisteners: Array<() => void> = [];
+    const track = (un: () => void) => (active ? unlisteners.push(un) : un());
+    const clip = (s: string | undefined) =>
+      !s ? "" : s.length > 18 ? `${s.slice(0, 18)}…` : s;
+    void listen<ContentEvt>("forum-content-original", (e) => {
+      notifications.show({
+        color: "blue",
+        title: "원글 게시됨",
+        message: `${e.payload.stock ?? "종목토론방"} · ${clip(e.payload.title)}`,
+        autoClose: 3000,
+      });
+    }).then(track);
+    void listen<ContentEvt>("forum-content-edited", (e) => {
+      notifications.show({
+        color: "teal",
+        title: "내용 변경됨",
+        message: `${e.payload.stock ?? "종목토론방"} · ${clip(e.payload.title)}`,
+        autoClose: 3500,
+      });
+    }).then(track);
+    return () => {
+      active = false;
+      unlisteners.forEach((un) => un());
+    };
+  }, []);
 
   const go: GoFn = (v, opts) => {
     setView(v);
