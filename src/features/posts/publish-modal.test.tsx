@@ -592,12 +592,12 @@ describe("PublishModal", () => {
     expect(plan.forumCommentDistribute).toBe(true);
   });
 
-  it("forum 특정글 '나눠서 게시'(#403): 댓글수≠계정수면 비활성 + 회색 카운트 안내", async () => {
+  it("forum 특정글 '나눠서 게시'(설계서 §3): 댓글수 > 계정수면 활성(>= 조건으로 완화)", async () => {
     const forumUrl =
       "https://stock.naver.com/domestic/stock/035720/discussion/421063210?chip=all";
     const commentDoc: LibraryPost = {
       id: "lfd2",
-      title: "종토 나눠서 불일치",
+      title: "종토 나눠서 댓글 더 많음",
       kind: "comment",
       updated: "방금 전",
       words: 20,
@@ -605,7 +605,7 @@ describe("PublishModal", () => {
       excerpt: "요약",
       commentTarget: "url",
       commentUrl: forumUrl,
-      comments: ["댓글1", "댓글2"], // 댓글 2개 vs 계정 1개 → 불일치
+      comments: ["댓글1", "댓글2"], // 댓글 2개 >= 기본 forum 계정 1개 → 활성(설계서 §3)
     };
     renderPublish({ doc: commentDoc });
     const splitBtn = await screen.findByRole(
@@ -613,9 +613,14 @@ describe("PublishModal", () => {
       { name: "나눠서 게시" },
       { timeout: 3000 },
     );
-    expect(splitBtn).toBeDisabled();
-    expect(screen.getByText(/댓글 : 2개/)).toBeInTheDocument();
-    expect(screen.getByText(/계정 : 1개/)).toBeInTheDocument();
+    expect(splitBtn).toBeEnabled();
+    await userEvent.click(splitBtn);
+    const call = ipcBackend.mock.calls.find((c) => c[0] === "add_queue_now");
+    expect(call).toBeDefined();
+    const plan = (
+      call?.[1] as { item: { plan: { forumCommentDistribute?: boolean } } }
+    ).item.plan;
+    expect(plan.forumCommentDistribute).toBe(true);
   });
 
   it("forum '특정 게시글' 댓글: 여러 글 URL을 넣으면 각 글마다 댓글 잡이 만들어진다(다중 url)", async () => {

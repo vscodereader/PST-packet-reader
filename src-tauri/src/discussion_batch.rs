@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -92,6 +92,14 @@ pub struct ForumPublishRequest {
     /// 이 URL의 글에 달린다(run_comment=true 전용). None이면 기존 per-종목 동작.
     #[serde(default)]
     pub comment_url: Option<String>,
+    /// 닉네임 랜덤 댓글(설계서 §2): 댓글 게시 직전에 프로필 닉네임을 계정 내 중복 없이 바꾼다.
+    /// 기본 false(무변경). used 집합은 `run_forum_publish`가 계정 단위로 소유한다.
+    #[serde(default)]
+    pub comment_nickname_random: bool,
+    /// 글 내용 변경(설계서 §5): 채워지면 글 게시 후 delay_sec초 뒤 새 제목/본문으로 edit한다.
+    /// 글쓰기 모드에서만 의미. 기본 None(무변경).
+    #[serde(default)]
+    pub content_change: Option<crate::ipc::queue::ContentChange>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,6 +265,12 @@ where
     // 것이므로 시도하지 않고 건너뛴다(#267-9). 한 번 켜지면 이후 모든 종목을 skip 처리한다.
     let mut blocked = false;
 
+    // 닉네임 랜덤 댓글(설계서 §2)의 계정 내 사용 닉네임 누적 집합. 루프 밖(계정 단위)에 두어
+    // 이 계정의 여러 댓글이 서로 다른 닉네임을 쓰게 한다(중복 금지). 계정끼리는 run_forum_publish가
+    // 따로 호출되므로 자동으로 독립적이다(계정 간 중복은 설계상 허용). 종토 병렬(#237/#238)은
+    // 계정별 전용 크롬·별도 호출이라 이 집합을 공유하지 않는다 — 병렬 무손상.
+    let mut used_nicknames: HashSet<String> = HashSet::new();
+
     for (index, stock) in request.stocks.iter().enumerate() {
         // 사용자 완전 종료(kill, 설계서 08): 새 종목을 시작하기 전에 확인해, 취소됐으면 남은
         // 종목을 게시하지 않고 멈춘다. 진행 중이던 종목 1개는 이미 게시+결과기록까지 끝난
@@ -315,6 +329,7 @@ where
         critical.enter_critical();
         let outcome = run_one_forum_stock_with_retry(
             &request, stock, title, body, comment, &app, &who, kind, index, &mut on_retry,
+            &mut used_nicknames,
         );
         critical.leave_critical();
         // 실패면 사용자용 메시지(message)와 캡처된 스택(trace)을 분리해 들고 간다(#199).
@@ -442,11 +457,13 @@ fn run_one_forum_stock_with_retry<R: Runtime>(
     // 이 종목의 스켈레톤 인덱스 + 재시도마다 UI를 "재시도중 N/M"으로 갱신할 콜백(2026-06-30).
     index: usize,
     on_retry: &mut impl FnMut(usize, usize, usize),
+    // 닉네임 랜덤 댓글(설계서 §2)의 계정 내 사용 닉네임 누적 집합(run_forum_publish 소유).
+    used: &mut HashSet<String>,
 ) -> Result<PostedContent, AutomationError> {
     let started = Instant::now();
     let mut attempt = 0usize;
     loop {
-        match run_one_forum_stock(request, stock, title, body, comment, app) {
+        match run_one_forum_stock(request, stock, title, body, comment, app, used) {
             Ok(posted) => return Ok(posted),
             Err(error) => {
                 let within_budget = started.elapsed() < FORUM_RETRY_TOTAL_BUDGET;
@@ -520,6 +537,8 @@ fn run_one_forum_stock<R: Runtime>(
     body: &str,
     comment: &str,
     app: &tauri::AppHandle<R>,
+    // 닉네임 랜덤 댓글(설계서 §2)의 계정 내 사용 닉네임 누적 집합(run_forum_publish 소유).
+    used: &mut HashSet<String>,
     // AutomationError를 그대로 돌려준다(메시지+캡처된 스택). 호출부가 message/backtrace로
     // 나눠 ForumPublishResult에 싣는다(#199).
 ) -> Result<PostedContent, AutomationError> {
@@ -545,10 +564,13 @@ fn run_one_forum_stock<R: Runtime>(
                 port: request.port,
                 stock: Some(stock.clone()),
                 account_id: Some(request.account_id.clone()),
+                comment_nickname_random: request.comment_nickname_random,
+                content_change: request.content_change.clone(),
             },
             // 글+댓글 한 종목 안의 1분 대기는 종목 간 대기와 별개이므로 여기서는 끕니다.
             app,
             false,
+            used,
         )
         .map(|reports| PostedContent {
             title: title.to_owned(),
@@ -563,18 +585,23 @@ fn run_one_forum_stock<R: Runtime>(
             AutomationTarget::Post
         };
         let macro_body = if request.run_comment { comment } else { body };
-        run_naver_discussion_macro(NaverDiscussionRequest {
-            title: title.to_owned(),
-            body: macro_body.to_owned(),
-            host: request.host.clone(),
-            port: request.port,
-            target,
-            submit_after_fill: true,
-            stock: Some(stock.clone()),
-            account_id: Some(request.account_id.clone()),
-            // "특정 게시글" 댓글이면 그 글 URL을 그대로 넘겨 랜덤 글 대신 이 글에 댓글을 단다.
-            comment_url: request.comment_url.clone(),
-        })
+        run_naver_discussion_macro(
+            NaverDiscussionRequest {
+                title: title.to_owned(),
+                body: macro_body.to_owned(),
+                host: request.host.clone(),
+                port: request.port,
+                target,
+                submit_after_fill: true,
+                stock: Some(stock.clone()),
+                account_id: Some(request.account_id.clone()),
+                // "특정 게시글" 댓글이면 그 글 URL을 그대로 넘겨 랜덤 글 대신 이 글에 댓글을 단다.
+                comment_url: request.comment_url.clone(),
+                comment_nickname_random: request.comment_nickname_random,
+                content_change: request.content_change.clone(),
+            },
+            used,
+        )
         .map(|report| {
             if request.run_comment {
                 // 댓글 전용: 게시한 글은 없고 댓글 내용을 보존한다. "특정 게시글" 댓글이면
@@ -709,6 +736,10 @@ pub fn run_discussion_batch<R: Runtime>(
         .as_deref()
         .map_or_else(|| "(계정 미지정)".to_owned(), crate::auth::mask_id);
 
+    // CSV 배치는 닉네임 랜덤 옵션이 없어(comment_nickname_random 기본 false) 실제로 닉네임을 바꾸지
+    // 않지만, 매크로 시그니처가 요구하는 계정 내 used 집합을 배치(=단일 계정) 단위로 하나 둔다.
+    let mut batch_used: HashSet<String> = HashSet::new();
+
     for index in 0..request.count {
         let stock = request.stocks[index % request.stocks.len()].clone();
 
@@ -728,9 +759,12 @@ pub fn run_discussion_batch<R: Runtime>(
                     port: request.port,
                     stock: Some(stock),
                     account_id: request.account_id.clone(),
+                    comment_nickname_random: false,
+                    content_change: None,
                 },
                 &app,
                 sleep_after,
+                &mut batch_used,
             ) {
                 Ok(pair_reports) => {
                     tracing::info!("[POST] {who}  \"{stock_name}\" 종목토론방 글+댓글 성공 ✅");
@@ -759,17 +793,22 @@ pub fn run_discussion_batch<R: Runtime>(
             let body = pick_text(&request.bodies, &request.body_mode, index, "내용")?;
 
             let stock_name = stock.name.clone();
-            let report = match run_naver_discussion_macro(NaverDiscussionRequest {
-                title,
-                body,
-                host: request.host.clone(),
-                port: request.port,
-                target: AutomationTarget::Post,
-                submit_after_fill: true,
-                stock: Some(stock.clone()),
-                account_id: request.account_id.clone(),
-                comment_url: None,
-            }) {
+            let report = match run_naver_discussion_macro(
+                NaverDiscussionRequest {
+                    title,
+                    body,
+                    host: request.host.clone(),
+                    port: request.port,
+                    target: AutomationTarget::Post,
+                    submit_after_fill: true,
+                    stock: Some(stock.clone()),
+                    account_id: request.account_id.clone(),
+                    comment_url: None,
+                    comment_nickname_random: false,
+                    content_change: None,
+                },
+                &mut batch_used,
+            ) {
                 Ok(report) => {
                     tracing::info!("[POST] {who}  \"{stock_name}\" 종목토론방 글 성공 ✅");
                     report
@@ -791,17 +830,22 @@ pub fn run_discussion_batch<R: Runtime>(
             let comment = pick_text(&request.comments, &request.comment_mode, index, "댓글내용")?;
 
             let stock_name = stock.name.clone();
-            let report = match run_naver_discussion_macro(NaverDiscussionRequest {
-                title: String::new(),
-                body: comment,
-                host: request.host.clone(),
-                port: request.port,
-                target: AutomationTarget::Comment,
-                submit_after_fill: true,
-                stock: Some(stock),
-                account_id: request.account_id.clone(),
-                comment_url: None,
-            }) {
+            let report = match run_naver_discussion_macro(
+                NaverDiscussionRequest {
+                    title: String::new(),
+                    body: comment,
+                    host: request.host.clone(),
+                    port: request.port,
+                    target: AutomationTarget::Comment,
+                    submit_after_fill: true,
+                    stock: Some(stock),
+                    account_id: request.account_id.clone(),
+                    comment_url: None,
+                    comment_nickname_random: false,
+                    content_change: None,
+                },
+                &mut batch_used,
+            ) {
                 Ok(report) => {
                     tracing::info!("[POST] {who}  \"{stock_name}\" 종목토론방 댓글 성공 ✅");
                     report

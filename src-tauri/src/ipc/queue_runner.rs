@@ -1290,6 +1290,8 @@ fn plan_to_forum_requests(plan: &PublishPlan) -> Vec<ForumPublishRequest> {
             stocks: vec![stock],
             link_override: plan.link_override.clone(),
             comment_url: Some(url.to_owned()),
+            comment_nickname_random: plan.comment_nickname_random,
+            content_change: plan.content_change.clone(),
         }
     };
 
@@ -1358,6 +1360,8 @@ fn plan_to_forum_requests(plan: &PublishPlan) -> Vec<ForumPublishRequest> {
             stocks,
             link_override: plan.link_override.clone(),
             comment_url: None,
+            comment_nickname_random: plan.comment_nickname_random,
+            content_change: plan.content_change.clone(),
         });
 
     url_reqs.into_iter().chain(regular).collect()
@@ -1584,6 +1588,8 @@ fn retain_plan_accounts(
             .collect(),
         login,
         forum_comment_distribute: plan.forum_comment_distribute,
+        comment_nickname_random: plan.comment_nickname_random,
+        content_change: plan.content_change.clone(),
     }
 }
 
@@ -1640,6 +1646,8 @@ fn retain_forum_only(
         clip: Vec::new(),
         login: None,
         forum_comment_distribute: plan.forum_comment_distribute,
+        comment_nickname_random: plan.comment_nickname_random,
+        content_change: plan.content_change.clone(),
     }
 }
 
@@ -4083,6 +4091,8 @@ mod tests {
             clip: vec![],
             login: None,
             forum_comment_distribute: false,
+            comment_nickname_random: false,
+            content_change: None,
         }
     }
 
@@ -5270,6 +5280,61 @@ mod tests {
         assert_eq!(r.stocks.len(), 1);
         assert_eq!(r.stocks[0].code, "035720"); // URL의 종목코드
         assert_eq!(r.comment, "좋은 글이네요");
+    }
+
+    // 설계서 §2·§5: plan의 닉네임 랜덤·글 내용 변경 옵션이 종토방 요청(특정글 댓글 req·일반 req
+    // 둘 다)에 그대로 실려야 게시 루프가 실제로 실행한다. 옵션이 흐르지 않으면 UI에서 켜도 무동작.
+    #[test]
+    fn forum_requests_carry_nickname_random_and_content_change() {
+        use crate::ipc::queue::{ContentChange, ForumTarget};
+        let change = ContentChange {
+            title: "새 제목".into(),
+            body: "새 본문".into(),
+            delay_sec: 30,
+        };
+        // 일반(빈 comment_url) 대상 + 특정글(comment_url) 대상을 한 plan에 섞어, 두 생성 경로를 모두 검증.
+        let url = "https://stock.naver.com/domestic/stock/005930/discussion/1";
+        let mut p = plan(ModeValue::Comment, vec![]);
+        p.comments = vec!["댓글".into()];
+        p.comment_nickname_random = true;
+        p.content_change = Some(change.clone());
+        p.forum = vec![
+            ForumTarget {
+                account_id: "u0".into(),
+                name: "삼성전자".into(),
+                code: "005930".into(),
+                comment_url: String::new(),
+            },
+            ForumTarget {
+                account_id: "u1".into(),
+                name: "글 #1".into(),
+                code: "005930".into(),
+                comment_url: url.into(),
+            },
+        ];
+        let reqs = plan_to_forum_requests(&p);
+        assert_eq!(reqs.len(), 2);
+        for r in &reqs {
+            assert!(r.comment_nickname_random, "닉네임 랜덤 옵션이 요청에 실려야 함");
+            assert_eq!(r.content_change.as_ref(), Some(&change), "글 내용 변경 옵션이 요청에 실려야 함");
+        }
+    }
+
+    // 옵션 기본값(false/None)이면 요청도 기본값이라 게시 루프가 기존과 100% 동일하게 동작한다.
+    #[test]
+    fn forum_requests_default_when_options_off() {
+        use crate::ipc::queue::ForumTarget;
+        let mut p = plan(ModeValue::Post, vec![]);
+        p.forum = vec![ForumTarget {
+            account_id: "u0".into(),
+            name: "삼성전자".into(),
+            code: "005930".into(),
+            comment_url: String::new(),
+        }];
+        let reqs = plan_to_forum_requests(&p);
+        assert_eq!(reqs.len(), 1);
+        assert!(!reqs[0].comment_nickname_random);
+        assert_eq!(reqs[0].content_change, None);
     }
 
     // #403 정상 게시: 특정글 1개·계정 1개라도 댓글을 여러 개 쓰면 **댓글 수만큼** 요청이 생겨

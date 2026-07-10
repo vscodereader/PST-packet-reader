@@ -61,17 +61,22 @@ fn run_naver_discussion(
     target: Option<String>,
     submit_after_fill: Option<bool>,
 ) -> Result<AutomationReport, String> {
-    run_naver_discussion_macro(NaverDiscussionRequest {
-        title,
-        body,
-        host: host.unwrap_or_else(|| "127.0.0.1".to_owned()),
-        port: port.unwrap_or(9222),
-        target: parse_automation_target(target)?,
-        submit_after_fill: submit_after_fill.unwrap_or(false),
-        stock: None,
-        account_id: None,
-        comment_url: None,
-    })
+    run_naver_discussion_macro(
+        NaverDiscussionRequest {
+            title,
+            body,
+            host: host.unwrap_or_else(|| "127.0.0.1".to_owned()),
+            port: port.unwrap_or(9222),
+            target: parse_automation_target(target)?,
+            submit_after_fill: submit_after_fill.unwrap_or(false),
+            stock: None,
+            account_id: None,
+            comment_url: None,
+            comment_nickname_random: false,
+            content_change: None,
+        },
+        &mut std::collections::HashSet::new(),
+    )
     .map_err(|error| error.to_string())
 }
 

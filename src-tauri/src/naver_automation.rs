@@ -292,8 +292,52 @@ fn clarify_profile_status_error(
 /// 건드리지 않는다). 여기서 재수출해 기존 호출부(`lib.rs`)의 import 경로를 유지한다.
 pub use like_flow::{run_naver_dislike, run_naver_like, LikeVerdict};
 
+/// 글 내용 변경(설계서 §5): `content_change`가 있으면 글 게시(submit_post) 후 `delay_sec`초 뒤
+/// 새 제목/본문으로 edit한다(같은 세션·크롬 kill 전). edit 실패는 로그만 남기고 게시 자체는
+/// 성공으로 둔다(edit 실패가 게시를 실패로 만들지 않게 — 사수 지시). `None`이면 아무것도 안 한다.
+fn maybe_edit_after_post(
+    packet_client: &mut packet_client::NaverPacketClient,
+    post_id: &str,
+    content_change: Option<&crate::ipc::queue::ContentChange>,
+) {
+    let Some(change) = content_change else {
+        return;
+    };
+    sleep(Duration::from_secs(u64::from(change.delay_sec)));
+    if let Err(error) = packet_client.edit_post(post_id, &change.title, &change.body) {
+        tracing::warn!(
+            post_id = %post_id,
+            "글 게시 후 내용 변경(edit) 실패 — 게시는 성공으로 둠: {}",
+            error.message()
+        );
+    }
+}
+
+/// 닉네임 랜덤 댓글(설계서 §2): `used`에 없는 닉네임으로 프로필을 바꾸고 성공한 닉네임을 `used`에
+/// 넣어 같은 계정의 다음 댓글과 겹치지 않게 한다. 변경 실패(네트워크/프로필 오류)는 로그만 남기고
+/// 기존 닉네임으로 진행한다(닉네임 변경 실패가 댓글을 막지 않게).
+fn maybe_randomize_nickname(
+    packet_client: &mut packet_client::NaverPacketClient,
+    used: &mut std::collections::HashSet<String>,
+) {
+    match packet_client.change_nickname_avoiding(used) {
+        Ok(nickname) => {
+            used.insert(nickname);
+        }
+        Err(error) => {
+            tracing::warn!(
+                "댓글 닉네임 랜덤 변경 실패 — 기존 닉네임으로 진행: {}",
+                error.message()
+            );
+        }
+    }
+}
+
 pub fn run_naver_discussion_macro(
     request: NaverDiscussionRequest,
+    // 닉네임 랜덤 댓글(설계서 §2)에서 계정 내 이미 쓴 닉네임을 누적하는 집합. 호출부(run_forum_publish)가
+    // 계정 단위로 소유해, 매크로가 stock마다 세션을 새로 열어도 같은 계정 안에서 닉네임이 겹치지 않게 한다.
+    used: &mut std::collections::HashSet<String>,
 ) -> AutomationResult<AutomationReport> {
     let title = request.title.trim();
     let body = request.body.trim();
@@ -311,7 +355,7 @@ pub fn run_naver_discussion_macro(
     tracing::info!(target_kind = ?request.target, "게시 매크로 시작 — 세션 오픈 진입");
     let ForumDiscussionSession {
         mut chrome,
-        packet_client,
+        mut packet_client,
         login_profile,
         npay_status,
         selected,
@@ -342,6 +386,11 @@ pub fn run_naver_discussion_macro(
                 // 글쓰기 add 패킷 API로 게시하고, 응답 id로 작성 글 URL을 만든다(브라우저 이동 없음).
                 let post_id = packet_client.submit_post(&room_url, title, body)?;
                 posted_url = Some(packet_client.post_url_from_id(&room_url, &post_id)?);
+                maybe_edit_after_post(
+                    &mut packet_client,
+                    &post_id,
+                    request.content_change.as_ref(),
+                );
                 (false, true)
             } else {
                 // 수동 확인 모드(CLI)만 브라우저 폼이 필요하므로 이 경로에서만 페이지를 연다.
@@ -373,6 +422,9 @@ pub fn run_naver_discussion_macro(
                 npay_status,
             )?;
             if request.submit_after_fill {
+                if request.comment_nickname_random {
+                    maybe_randomize_nickname(&mut packet_client, used);
+                }
                 packet_client.submit_comment(&comment_target_url, body)?;
                 (false, true)
             } else {
@@ -401,6 +453,8 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
     request: NaverPostWithCommentRequest,
     app: &tauri::AppHandle<R>,
     sleep_after: bool,
+    // 닉네임 랜덤 댓글(설계서 §2) 계정 내 누적 집합 — run_naver_discussion_macro와 동일 계약.
+    used: &mut std::collections::HashSet<String>,
 ) -> AutomationResult<Vec<AutomationReport>> {
     let title = request.title.trim();
     let body = request.body.trim();
@@ -422,7 +476,7 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
         // Chrome은 쿠키 추출·로그인 확인까지만 쓰였다. 이후 게시는 전부 패킷 API라 더는 쓰지
         // 않지만, 세션이 끝날 때까지 살려둔다(Drop 시 소켓 정리).
         chrome: _chrome,
-        packet_client,
+        mut packet_client,
         login_profile,
         npay_status,
         selected,
@@ -443,6 +497,8 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
     // 글쓰기 add 패킷 API로 게시하고, 응답 id로 작성 글 URL을 만든다(페이지 이동 없음).
     let post_id = packet_client.submit_post(&room_url, title, body)?;
     let post_url = packet_client.post_url_from_id(&room_url, &post_id)?;
+    // 글 내용 변경(설계서 §5): 글→edit→댓글 순서를 유지하려 댓글 전에 여기서 edit한다.
+    maybe_edit_after_post(&mut packet_client, &post_id, request.content_change.as_ref());
     let post_report = AutomationReport {
         current_url: room_url.clone(),
         post_url: Some(post_url.clone()),
@@ -464,6 +520,9 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
         packet_client.ensure_profile_intro_setup(&post_url),
         npay_status,
     )?;
+    if request.comment_nickname_random {
+        maybe_randomize_nickname(&mut packet_client, used);
+    }
     packet_client.submit_comment(&post_url, comment)?;
     let comment_report = AutomationReport {
         current_url: post_url.clone(),

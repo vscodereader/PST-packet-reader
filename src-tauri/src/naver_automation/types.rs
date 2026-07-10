@@ -20,6 +20,14 @@ pub struct NaverDiscussionRequest {
     // 선택 종목토론방의 랜덤 글에 댓글을 단다(하위호환).
     #[serde(default)]
     pub comment_url: Option<String>,
+    // 닉네임 랜덤 댓글(설계서 §2): 댓글(Comment) 대상일 때 submit_comment 직전에 프로필 닉네임을
+    // 랜덤으로 바꾼다(계정 내 중복 금지 — used 집합은 호출부가 계정 단위로 관리). 기본 false(무변경).
+    #[serde(default)]
+    pub comment_nickname_random: bool,
+    // 글 내용 변경(설계서 §5): 채워지면 글 게시(submit_post) 후 delay_sec초 뒤 새 제목/본문으로
+    // edit한다(글 대상 전용). None이면 변경하지 않는다(기본).
+    #[serde(default)]
+    pub content_change: Option<crate::ipc::queue::ContentChange>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +43,12 @@ pub struct NaverPostWithCommentRequest {
     // 로그인 자동화로 저장된 계정 ID. 지정되면 해당 계정의 쿠키를 Chrome에 주입합니다.
     #[serde(default)]
     pub account_id: Option<String>,
+    // 닉네임 랜덤 댓글(설계서 §2): 댓글 직전에 프로필 닉네임을 계정 내 중복 없이 바꾼다. 기본 false.
+    #[serde(default)]
+    pub comment_nickname_random: bool,
+    // 글 내용 변경(설계서 §5): 채워지면 글 게시 후 delay_sec초 뒤 edit한다(글→edit→댓글 순서). 기본 None.
+    #[serde(default)]
+    pub content_change: Option<crate::ipc::queue::ContentChange>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

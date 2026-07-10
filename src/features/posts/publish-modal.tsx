@@ -7,11 +7,13 @@ import {
   Group,
   Loader,
   Modal,
+  NumberInput,
   Radio,
   SegmentedControl,
   Select,
   Stack,
   Text,
+  Textarea,
   TextInput,
   ThemeIcon,
 } from "@mantine/core";
@@ -63,6 +65,7 @@ import {
 } from "./comment-jobs";
 import { PreviewModal } from "./preview-modal";
 import {
+  canDistributeComments,
   clampCommentCount,
   distributeStocksEvenly,
   htmlToText,
@@ -1006,6 +1009,16 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   // 범위 밖·누락은 1로 떨어진다.
   const commentCount = clampCommentCount(doc?.commentCount);
   const [linkOverride, setLinkOverride] = useState("");
+  // 닉네임 랜덤 댓글(설계서 §2): 댓글 모드에서 각 댓글마다 닉네임을 랜덤으로 바꿔 단다.
+  const [commentNicknameRandom, setCommentNicknameRandom] = useState(false);
+  // 내용 변경(설계서 §5): 글쓰기 게시 후 delaySec초 뒤 새 제목/본문으로 글을 교체(edit)한다.
+  // enabled=false면 plan에 싣지 않는다(변경 없음).
+  const [contentChange, setContentChange] = useState<{
+    enabled: boolean;
+    title: string;
+    body: string;
+    delaySec: number;
+  }>({ enabled: false, title: "", body: "", delaySec: 0 });
   const [showPreview, setShowPreview] = useState(false);
   const [flow, setFlow] = useState<null | "running" | PublishResult[]>(null);
   // 이번 모달 세션에서 이미 게시(큐 적재)한 계정의 loginId(#4/#5). 게시 직후 그 자리에서
@@ -1560,11 +1573,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     commentTargetMode === "url" &&
     forumUrlLoginIds.length > 0 &&
     comments.length > 0;
-  // 활성: 작성 댓글 수 == 선택 계정 수일 때만(그때만 1:1 겹침 없이 분배). 아니면 회색 안내만.
+  // 활성(설계서 §3): 댓글 수 >= 계정 수이고 계정이 1개 이상일 때(댓글이 계정보다 적으면 비활성,
+  // 균등 분배 시 빈 계정이 생기므로). 같거나 많으면 백엔드가 링크마다 계정에 댓글을 분배한다.
   const canCommentDistribute =
     canPublish &&
     showCommentDistribute &&
-    comments.length === forumUrlLoginIds.length;
+    canDistributeComments(comments.length, forumUrlLoginIds.length);
 
   // 선택 종목을 forum 계정별로 균등 분배해(#267-5), 각 계정이 자기 몫의 종목 잡만 갖도록 정상
   // jobs에서 forum 종목 잡을 필터링한다. forum 외(카페/밴드)·forum "특정글 댓글" 잡은 그대로 둔다.
@@ -1748,6 +1762,18 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
       login: [...loginByAccount.values()],
       // "나눠서 게시"(#403): 종토 특정글 댓글을 계정에 1:1 분배(백엔드가 링크마다 배정). 기본 false.
       forumCommentDistribute: opts?.forumCommentDistribute ?? false,
+      // 닉네임 랜덤 댓글(설계서 §2): 댓글 모드에서만 의미. 게시 루프 배선은 별도.
+      commentNicknameRandom,
+      // 내용 변경(설계서 §5): 글쓰기 모드에서 체크했을 때만 새 제목/본문/지연(초)을 동결한다.
+      ...(contentChange.enabled
+        ? {
+            contentChange: {
+              title: contentChange.title,
+              body: contentChange.body,
+              delaySec: contentChange.delaySec,
+            },
+          }
+        : {}),
     };
   };
 
@@ -2190,6 +2216,95 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
               </Box>
             )}
           </Box>
+        )}
+
+        {/* 닉네임 랜덤(설계서 §2): 댓글 모드에서만. 각 댓글마다 닉네임을 랜덤으로 바꿔 단다
+            (계정 내 중복 금지 — 실제 동작은 게시 루프가 처리, 여기선 plan에 값만 싣는다). */}
+        {mode === "comment" && (
+          <>
+            <Group gap={7} mt={22} mb={12}>
+              <Icon.refresh size={17} color="var(--mantine-color-gray-6)" />
+              <Text fz={13.5} fw={700}>
+                닉네임 랜덤
+              </Text>
+            </Group>
+            <Checkbox
+              label="랜덤"
+              checked={commentNicknameRandom}
+              onChange={(e) =>
+                setCommentNicknameRandom(e.currentTarget.checked)
+              }
+            />
+          </>
+        )}
+
+        {/* 내용 변경(설계서 §5): 글쓰기(글/글+댓글) 모드에서만. 체크하면 글 작성 UI(제목+내용)와
+            변경까지 지연(초)이 나타난다. 게시 후 그 초만큼 뒤 새 내용으로 글을 교체(edit)한다
+            (실제 동작은 게시 루프가 처리, 여기선 plan에 값만 싣는다). */}
+        {(mode === "post" || mode === "both") && (
+          <>
+            <Group gap={7} mt={22} mb={12}>
+              <Icon.pencil size={17} color="var(--mantine-color-gray-6)" />
+              <Text fz={13.5} fw={700}>
+                내용변경
+              </Text>
+            </Group>
+            <Checkbox
+              label="게시 후 내용 변경"
+              checked={contentChange.enabled}
+              onChange={(e) =>
+                setContentChange((c) => ({
+                  ...c,
+                  enabled: e.currentTarget.checked,
+                }))
+              }
+            />
+            {contentChange.enabled && (
+              <Stack gap={10} mt={12}>
+                <TextInput
+                  label="제목"
+                  placeholder="변경할 새 제목"
+                  value={contentChange.title}
+                  onChange={(e) =>
+                    setContentChange((c) => ({
+                      ...c,
+                      title: e.currentTarget.value,
+                    }))
+                  }
+                />
+                <Textarea
+                  label="내용"
+                  placeholder="변경할 새 내용"
+                  autosize
+                  minRows={4}
+                  value={contentChange.body}
+                  onChange={(e) =>
+                    setContentChange((c) => ({
+                      ...c,
+                      body: e.currentTarget.value,
+                    }))
+                  }
+                />
+                <Group gap={8} align="flex-end" wrap="nowrap">
+                  <NumberInput
+                    label="변경 지연"
+                    min={0}
+                    value={contentChange.delaySec}
+                    onChange={(v) =>
+                      setContentChange((c) => ({
+                        ...c,
+                        delaySec: typeof v === "number" ? v : 0,
+                      }))
+                    }
+                    style={{ width: 120 }}
+                  />
+                  <Text fz={13} fw={600} mb={8}>
+                    초
+                  </Text>
+                </Group>
+              </Stack>
+            )}
+          </>
         )}
 
         <Group gap={7} mt={22} mb={12}>

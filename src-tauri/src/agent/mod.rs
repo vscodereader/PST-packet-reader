@@ -1069,6 +1069,8 @@ fn build_publish_items(
                     clip: vec![],
                     login: None,
                     forum_comment_distribute: true,
+                    comment_nickname_random: false,
+                    content_change: None,
                 }),
                 items: vec![],
             });
@@ -1136,6 +1138,8 @@ fn build_publish_items(
                 clip: vec![],
                 login: None,
                 forum_comment_distribute: false,
+                comment_nickname_random: false,
+                content_change: None,
             }),
             items: vec![],
         });
@@ -1330,6 +1334,8 @@ fn build_cafe_publish_items(
                     force: true,
                 }]),
                 forum_comment_distribute: false,
+                comment_nickname_random: false,
+                content_change: None,
             }),
             items: vec![],
         });
@@ -1419,6 +1425,8 @@ fn build_blog_publish_items(
                 clip: vec![],
                 login: None,
                 forum_comment_distribute: false,
+                comment_nickname_random: false,
+                content_change: None,
             }),
             items: vec![],
         });
@@ -1503,6 +1511,8 @@ fn build_clip_publish_items(
                 clip,
                 login: None,
                 forum_comment_distribute: false,
+                comment_nickname_random: false,
+                content_change: None,
             }),
             items: vec![],
         });
@@ -1607,6 +1617,8 @@ fn build_band_publish_items(
                 clip: vec![],
                 login: None,
                 forum_comment_distribute: false,
+                comment_nickname_random: false,
+                content_change: None,
             }),
             items: vec![],
         });
@@ -1782,6 +1794,8 @@ fn enqueue_login<R: Runtime>(app: &AppHandle<R>, logins: &[(String, PlatformId)]
             clip: vec![],
             login: Some(login),
             forum_comment_distribute: false,
+            comment_nickname_random: false,
+            content_change: None,
         }),
         items: vec![],
     };

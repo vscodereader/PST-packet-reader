@@ -188,6 +188,22 @@ pub struct LoginTarget {
     pub force: bool,
 }
 
+/// 글 내용 변경(설계서 §5). 글쓰기 게시일 때만 채워진다: 원본으로 글을 게시하고 `delay_sec`초
+/// 뒤 여기 담긴 새 제목/본문으로 edit(PUT edit)한다. `None`이면 변경하지 않는다(기본). 실제 게시
+/// 루프 배선은 별도로 하며, 여기서는 plan에 필드만 흐르게 둔다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
+#[serde(rename_all = "camelCase")]
+pub struct ContentChange {
+    /// 변경할 새 제목.
+    pub title: String,
+    /// 변경할 새 본문(평문).
+    pub body: String,
+    /// 게시 후 edit까지 대기할 시간(초).
+    #[ts(type = "number")]
+    pub delay_sec: u32,
+}
+
 /// 큐 아이템을 실제로 게시하는 데 필요한 동결된 실행 페이로드.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../src/shared/bindings/")]
@@ -228,6 +244,15 @@ pub struct PublishPlan {
     /// 1개씩(겹침 없음). 특정글(comment_url) 대상에만 적용 — 그 외엔 무시. 기본값 허용(호환).
     #[serde(default)]
     pub forum_comment_distribute: bool,
+    /// 닉네임 랜덤 댓글(설계서 §2): 댓글 모드에서 한 계정이 여러 댓글을 달 때 각 댓글마다
+    /// 닉네임을 랜덤으로 바꾼다(계정 내 중복 금지). 게시 루프 배선은 별도. 기본 false(호환).
+    #[serde(default)]
+    pub comment_nickname_random: bool,
+    /// 글 내용 변경(설계서 §5): 채워지면 글 게시 후 `delay_sec`초 뒤 새 제목/본문으로 edit한다.
+    /// 글쓰기 모드에서만 의미. 게시 루프 배선은 별도. 기본 None(호환).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub content_change: Option<ContentChange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -920,6 +945,8 @@ mod tests {
             clip: vec![],
             login: None,
             forum_comment_distribute: false,
+            comment_nickname_random: false,
+            content_change: None,
         }
     }
 
@@ -1078,6 +1105,8 @@ mod tests {
             clip: vec![],
             login: None,
             forum_comment_distribute: false,
+            comment_nickname_random: false,
+            content_change: None,
         }
     }
 
