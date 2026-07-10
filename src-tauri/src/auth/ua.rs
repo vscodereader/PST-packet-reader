@@ -105,7 +105,11 @@ fn fetch_version_history() -> Option<Vec<String>> {
         .get("versions")?
         .as_array()?
         .iter()
-        .filter_map(|v| v.get("version").and_then(Value::as_str).map(ToOwned::to_owned))
+        .filter_map(|v| {
+            v.get("version")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
         .filter(|v| major_num(v).is_some() && v.split('.').count() >= 3)
         .collect();
     let picked = dedup_latest_per_major(&all, MAX_MAJORS);
@@ -135,7 +139,11 @@ fn dedup_latest_per_major(versions_newest_first: &[String], max_majors: usize) -
 /// - `installed_full = None`(설치 버전 못 읽음): 상위 버전 주장 위험을 피해 **풀 최저값**(가장 낮은
 ///   실존 버전) 하나로 고정.
 /// - 설치된 실제 버전 자체는 항상 안전한 후보(자기 버전 주장은 절대 안 어긋남).
-pub(crate) fn pick_capped(pool: &[String], installed_full: Option<&str>, entropy: u64) -> UaProfile {
+pub(crate) fn pick_capped(
+    pool: &[String],
+    installed_full: Option<&str>,
+    entropy: u64,
+) -> UaProfile {
     let lowest = |p: &[String]| -> String {
         p.iter()
             .filter_map(|v| major_num(v).map(|m| (m, v.clone())))
@@ -238,7 +246,11 @@ mod tests {
         // 설치 149 → 어떤 엔트로피로도 150 을 주장하지 않는다.
         for e in 0..30u64 {
             let p = pick_capped(&pool(), Some("149.0.7827.201"), e);
-            assert!(major_num(&p.full_version).unwrap() <= 149, "149 인데 {}", p.full_version);
+            assert!(
+                major_num(&p.full_version).unwrap() <= 149,
+                "149 인데 {}",
+                p.full_version
+            );
         }
     }
 
@@ -290,7 +302,10 @@ mod tests {
         .map(|s| (*s).to_owned())
         .collect();
         let out = dedup_latest_per_major(&input, 6);
-        assert_eq!(out, vec!["150.0.7871.47", "149.0.7827.201", "148.0.7710.99"]);
+        assert_eq!(
+            out,
+            vec!["150.0.7871.47", "149.0.7827.201", "148.0.7710.99"]
+        );
     }
 
     #[test]
@@ -299,7 +314,10 @@ mod tests {
             .iter()
             .map(|s| (*s).to_owned())
             .collect();
-        assert_eq!(dedup_latest_per_major(&input, 2), vec!["150.0.1.1", "149.0.1.1"]);
+        assert_eq!(
+            dedup_latest_per_major(&input, 2),
+            vec!["150.0.1.1", "149.0.1.1"]
+        );
     }
 
     #[test]

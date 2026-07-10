@@ -549,9 +549,7 @@ impl NaverPacketClient {
             Ok(result) => result,
             Err(error) => {
                 // 전송 실패는 비치명적: 쿠키를 건드리지 않고 그대로 넘겨 호출부가 좋아요를 재시도한다.
-                tracing::warn!(
-                    "네이버페이 가입(동의하기) 전송 실패 — 건너뜀(쿠키 보존): {error}"
-                );
+                tracing::warn!("네이버페이 가입(동의하기) 전송 실패 — 건너뜀(쿠키 보존): {error}");
                 return NpayJoinStatus::Unknown;
             }
         };
@@ -798,10 +796,7 @@ impl NaverPacketClient {
         headers.insert("downlink", HeaderValue::from_static("10"));
         headers.insert("ect", HeaderValue::from_static("4g"));
         headers.insert("priority", HeaderValue::from_static("u=0, i"));
-        headers.insert(
-            "upgrade-insecure-requests",
-            HeaderValue::from_static("1"),
-        );
+        headers.insert("upgrade-insecure-requests", HeaderValue::from_static("1"));
         Ok(headers)
     }
 
@@ -1051,7 +1046,9 @@ impl NaverPacketClient {
         );
         let headers = match self.stock_get_headers(STOCK_HOST, DEFAULT_REFERER) {
             Ok(headers) => headers,
-            Err(error) => return RestrictionVerdict::Unknown(format!("form 헤더 생성 실패: {error}")),
+            Err(error) => {
+                return RestrictionVerdict::Unknown(format!("form 헤더 생성 실패: {error}"))
+            }
         };
         let response = match self
             .client
@@ -1100,7 +1097,8 @@ impl NaverPacketClient {
     /// URL을 쿠키 달아 GET해서, 응답 본문이 실명확인 폼(실명확인·본인확인·certify·realNameCheck 마커)이면
     /// true. best-effort — 전송실패·불명확하면 false(오탐 방지). 게시 흐름은 안 바꾸고 확인만 한다.
     fn real_name_verification_required(&self) -> bool {
-        let mut headers = match self.base_headers(NID_HOST, NAVER_HOME_REFERER, "same-site", false) {
+        let mut headers = match self.base_headers(NID_HOST, NAVER_HOME_REFERER, "same-site", false)
+        {
             Ok(h) => h,
             Err(_) => return false,
         };
@@ -1258,14 +1256,12 @@ impl NaverPacketClient {
             .to_owned();
 
         // 닉네임만 교체하고 소개·이미지는 기존 form 값을 유지한다(프로필 PUT 경로와 동일 필드).
-        let form = self.get_stock_json(
-            "/api/community/profile/users/form",
-            referer,
-            "프로필 form",
-        )?;
-        let introduction = form.get("introduction").cloned().unwrap_or_else(|| {
-            Value::String(DEFAULT_PROFILE_INTRODUCTION.to_owned())
-        });
+        let form =
+            self.get_stock_json("/api/community/profile/users/form", referer, "프로필 form")?;
+        let introduction = form
+            .get("introduction")
+            .cloned()
+            .unwrap_or_else(|| Value::String(DEFAULT_PROFILE_INTRODUCTION.to_owned()));
         let image_url = form.get("imageUrl").cloned().unwrap_or(Value::Null);
 
         let payload = json!({
@@ -1359,7 +1355,10 @@ impl NaverPacketClient {
             )));
         }
 
-        tracing::info!(api = "POST cbox web_naver_create_json", "댓글 생성 API 성공");
+        tracing::info!(
+            api = "POST cbox web_naver_create_json",
+            "댓글 생성 API 성공"
+        );
         Ok(value
             .pointer("/result/comment/commentNo")
             .and_then(Value::as_i64)
@@ -3134,8 +3133,9 @@ mod tests {
 
     #[test]
     fn choose_unused_nickname_picks_first_not_in_used() {
-        let used: std::collections::HashSet<String> =
-            ["곰돌이".to_owned(), "너구리".to_owned()].into_iter().collect();
+        let used: std::collections::HashSet<String> = ["곰돌이".to_owned(), "너구리".to_owned()]
+            .into_iter()
+            .collect();
         let candidates = vec![
             "곰돌이".to_owned(),
             "너구리".to_owned(),
@@ -3151,7 +3151,9 @@ mod tests {
     #[test]
     fn choose_unused_nickname_falls_back_to_last_when_all_used() {
         let used: std::collections::HashSet<String> =
-            ["가".to_owned(), "나".to_owned(), "다".to_owned()].into_iter().collect();
+            ["가".to_owned(), "나".to_owned(), "다".to_owned()]
+                .into_iter()
+                .collect();
         let candidates = vec!["가".to_owned(), "나".to_owned(), "다".to_owned()];
 
         // 전부 겹치면 마지막 후보를 그대로 돌려준다.

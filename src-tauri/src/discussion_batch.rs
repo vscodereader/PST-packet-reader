@@ -328,7 +328,16 @@ where
         // 창을 막는다. 협조적 정지는 이 구간을 건드리지 않고(종목 사이에서만 멈춤) 여기 무관하다.
         critical.enter_critical();
         let outcome = run_one_forum_stock_with_retry(
-            &request, stock, title, body, comment, &app, &who, kind, index, &mut on_retry,
+            &request,
+            stock,
+            title,
+            body,
+            comment,
+            &app,
+            &who,
+            kind,
+            index,
+            &mut on_retry,
             &mut used_nicknames,
         );
         critical.leave_critical();
@@ -1259,10 +1268,10 @@ mod tests {
         assert!(is_timed_out_failure("request timed out"));
         // 2026-06-30(사용자 지시): HTTP 500/서버오류는 네이버 서버의 판정(통제 불가)이라 재시도해도
         // 또 실패 → 대기초과가 아니다(빨리 실패시킨다). 일시 네트워크 끊김(소켓)만 재시도한다.
-        assert!(!is_timed_out_failure("HTTP status 500 Internal Server Error"));
         assert!(!is_timed_out_failure(
-            "네이버 서버에 문제가 발생했습니다"
+            "HTTP status 500 Internal Server Error"
         ));
+        assert!(!is_timed_out_failure("네이버 서버에 문제가 발생했습니다"));
         // 차단/비번오류/일반실패는 대기초과가 아니다(다른 상태로 처리).
         assert!(!is_timed_out_failure("HTTP status 403 Forbidden"));
         assert!(!is_timed_out_failure("HTTP status 401 Unauthorized"));
@@ -1295,7 +1304,9 @@ mod tests {
         }
         // 차단/비번오류 등 비-네트워크는 영향 없음(regression 방지).
         assert!(!is_transient_network_failure("HTTP status 403 Forbidden"));
-        assert!(!is_transient_network_failure("동의하기 버튼이 아직 비활성화 상태입니다."));
+        assert!(!is_transient_network_failure(
+            "동의하기 버튼이 아직 비활성화 상태입니다."
+        ));
     }
 
     #[test]
@@ -1306,7 +1317,9 @@ mod tests {
              body={\"message\":\"Failed to fetch profile user status\"}";
         assert!(!is_timed_out_failure(profile_500));
         assert!(!is_retryable_forum_failure(profile_500));
-        assert!(!is_retryable_forum_failure("HTTP status 500 Internal Server Error"));
+        assert!(!is_retryable_forum_failure(
+            "HTTP status 500 Internal Server Error"
+        ));
     }
 
     #[test]
@@ -1318,11 +1331,19 @@ mod tests {
     #[test]
     fn retryable_forum_failure_only_for_timed_out_not_blocking_or_other() {
         // 대기초과(로딩 지연)·일시 네트워크 끊김만 재시도한다.
-        assert!(is_retryable_forum_failure("페이지 로드 대기 시간이 초과되었습니다."));
-        assert!(is_retryable_forum_failure("connection reset (os error 10054)"));
+        assert!(is_retryable_forum_failure(
+            "페이지 로드 대기 시간이 초과되었습니다."
+        ));
+        assert!(is_retryable_forum_failure(
+            "connection reset (os error 10054)"
+        ));
         // 500/서버오류는 네이버 판정(통제 불가) → 재시도 금지(빨리 실패, 2026-06-30 사용자 지시).
-        assert!(!is_retryable_forum_failure("네이버 서버에 문제가 발생했습니다"));
-        assert!(!is_retryable_forum_failure("HTTP status 500 Internal Server Error"));
+        assert!(!is_retryable_forum_failure(
+            "네이버 서버에 문제가 발생했습니다"
+        ));
+        assert!(!is_retryable_forum_failure(
+            "HTTP status 500 Internal Server Error"
+        ));
         // 차단(401/403/쿠키)은 재시도해도 또 실패 → 재시도 금지.
         assert!(!is_retryable_forum_failure("HTTP status 403 Forbidden"));
         assert!(!is_retryable_forum_failure("쿠키를 찾지 못했습니다"));
@@ -1332,7 +1353,9 @@ mod tests {
         ));
         // 요청 과다(429)는 2026-07-01(사용자 지시)부터 대기초과(일시)로 보아 재시도 대상이다 —
         // 계정이 죽은 게 아니라 레이트리밋이므로 재시도로 풀린다(차단은 아니라 blocking=false 유지).
-        assert!(is_retryable_forum_failure("HTTP status 429 Too Many Requests"));
+        assert!(is_retryable_forum_failure(
+            "HTTP status 429 Too Many Requests"
+        ));
         assert!(is_retryable_forum_failure(
             "글쓰기 form 패킷 HTTP 실패: HTTP status 429 Too Many Requests for url (https://x)"
         ));

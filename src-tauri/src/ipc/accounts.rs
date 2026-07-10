@@ -419,7 +419,8 @@ mod tests {
     #[test]
     fn apply_status_by_login_id_no_match_is_noop() {
         let start = vec![acct("r1", "a"), acct("r2", "b")];
-        let next = apply_status_by_login_id(start.clone(), "zzz", AccountStatus::Active, None, None);
+        let next =
+            apply_status_by_login_id(start.clone(), "zzz", AccountStatus::Active, None, None);
         assert_eq!(next, start);
     }
 }

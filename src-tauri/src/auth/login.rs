@@ -139,7 +139,8 @@ pub(crate) fn manual_add(
     // 쿠키 파일명은 login_id에, 계정 행은 평문 pw에 의존하므로 둘 다 캡처됐어야 한다.
     if !login_flow::captured_credentials_valid(&creds.id, &creds.pw) {
         return Err(OrchestratorError::CommandFailed(
-            "로그인은 됐지만 입력한 아이디/비밀번호를 읽지 못해 계정을 추가하지 못했습니다.".to_owned(),
+            "로그인은 됐지만 입력한 아이디/비밀번호를 읽지 못해 계정을 추가하지 못했습니다."
+                .to_owned(),
         ));
     }
 
@@ -149,7 +150,14 @@ pub(crate) fn manual_add(
         password: creds.pw.clone(),
         label: creds.id.clone(),
     };
-    finalize(paths, &account, LoginOutcome::Ok { cookies: creds.cookies }, None)?;
+    finalize(
+        paths,
+        &account,
+        LoginOutcome::Ok {
+            cookies: creds.cookies,
+        },
+        None,
+    )?;
 
     Ok(Some(ManualAddResult {
         login_id: creds.id,
@@ -243,8 +251,9 @@ fn write_cookie_file_resilient(
         std::fs::create_dir_all(dir).map_err(|e| disk_io_error("쿠키 디렉터리 생성", dir, &e))?;
     }
     // 일시적(재시도 가치 있는) 잠금: 권한 거부 또는 Windows 공유위반(os error 32).
-    let is_transient =
-        |e: &std::io::Error| e.kind() == ErrorKind::PermissionDenied || e.raw_os_error() == Some(32);
+    let is_transient = |e: &std::io::Error| {
+        e.kind() == ErrorKind::PermissionDenied || e.raw_os_error() == Some(32)
+    };
 
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
@@ -291,7 +300,10 @@ mod tests {
         // 임시파일은 남지 않는다(rename으로 교체).
         let mut tmp = path.as_os_str().to_owned();
         tmp.push(".tmp");
-        assert!(!std::path::PathBuf::from(tmp).exists(), "임시파일이 남으면 안 됨");
+        assert!(
+            !std::path::PathBuf::from(tmp).exists(),
+            "임시파일이 남으면 안 됨"
+        );
     }
 
     #[test]

@@ -523,16 +523,18 @@ pub fn kill_queue_now<R: tauri::Runtime>(
 ) -> Vec<QueueNowItem> {
     // 로컬·원격 공유 경로(설계서 08 §5): 취소 신호 set + 큐 제거 + Stage2 강제 감시.
     crate::ipc::kill::kill_one(&app, &id);
-    record(activity.inner(), ActivityType::Info, "실행 작업 완전 종료(중지)됨");
+    record(
+        activity.inner(),
+        ActivityType::Info,
+        "실행 작업 완전 종료(중지)됨",
+    );
     store.snapshot()
 }
 
 /// 종료(`Done`) 아이템을 모두 큐에서 치운다(#1, "완료 항목 지우기"). 진행 중/대기 작업은
 /// 보존한다. 큐 창에 쌓인 완료 결과 카드를 한 번에 비울 때 쓴다.
 #[tauri::command]
-pub fn clear_done_queue_now(
-    store: tauri::State<'_, JsonStore<QueueNowItem>>,
-) -> Vec<QueueNowItem> {
+pub fn clear_done_queue_now(store: tauri::State<'_, JsonStore<QueueNowItem>>) -> Vec<QueueNowItem> {
     store.mutate(apply_clear_done_now)
 }
 
@@ -1007,7 +1009,11 @@ mod tests {
         ];
         let next = apply_reorder_now(items, &["w2".to_string(), "w1".to_string()]);
         let ids: Vec<&str> = next.iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(ids, vec!["w2", "w1", "d1"], "대기는 재정렬되고 Done은 바닥 고정");
+        assert_eq!(
+            ids,
+            vec!["w2", "w1", "d1"],
+            "대기는 재정렬되고 Done은 바닥 고정"
+        );
     }
 
     #[test]

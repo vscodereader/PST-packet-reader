@@ -9,8 +9,7 @@ fn main() {
     // 실행되므로 `#[cfg(target_os="windows")]`는 리눅스(WSL) 크로스컴파일(cargo-xwin)에서 항상
     // false가 되어 placeholder가 안 만들어졌다 → fresh 타깃이 무조건 실패했다. 카고가 주는
     // `CARGO_CFG_TARGET_OS`(빌드 대상 OS)로 봐야 크로스컴파일에서도 동작한다.
-    let target_is_windows =
-        std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+    let target_is_windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
     let is_release = std::env::var("PROFILE").as_deref() == Ok("release");
     if target_is_windows && is_release {
         let pdb = std::path::Path::new("target/x86_64-pc-windows-msvc/release/pstmacro.pdb");

@@ -62,10 +62,7 @@ pub struct ViewBoostOutcome {
 /// 여러 링크를 순서대로 각각 `repeats`번 부스트한다. 링크 하나가 도중에 실패해도
 /// 다음 링크로 계속 진행한다(각 결과는 개별 [`ViewBoostOutcome`]에 담긴다).
 pub fn boost_views(links: &[String], repeats: u32) -> Vec<ViewBoostOutcome> {
-    links
-        .iter()
-        .map(|link| boost_one(link, repeats))
-        .collect()
+    links.iter().map(|link| boost_one(link, repeats)).collect()
 }
 
 /// 링크 하나를 `repeats`번 부스트한다. 한 회차라도 실패하면 그 링크는 거기서 멈추고
