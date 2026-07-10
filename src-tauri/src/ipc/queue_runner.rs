@@ -31,7 +31,9 @@ use crate::band_post::{
 use crate::discussion_batch::{run_forum_publish, ForumPublishRequest, ForumPublishResult};
 use crate::naver_automation::types::DiscussionStock;
 use crate::naver_cafe::article_list::models::SortBy;
-use crate::naver_cafe::distribute::{distribute_comments, mulberry32, seed_from_clock};
+use crate::naver_cafe::distribute::{
+    distribute_comments, mulberry32, partition_comments, seed_from_clock,
+};
 use crate::naver_cafe::orchestrator::{CommentJob, CommentJobReport, JobReport, PostJob};
 use crate::naver_cafe::{
     fetch_article_list_for_account, fetch_latest_articles_for_account_up_to,
@@ -1382,14 +1384,24 @@ fn plan_to_forum_requests(plan: &PublishPlan) -> Vec<ForumPublishRequest> {
 
     let mut url_reqs: Vec<ForumPublishRequest> = Vec::new();
     if plan.forum_comment_distribute && !plan.comments.is_empty() {
-        // 나눠서 게시: 링크마다 댓글 풀을 셔플해 계정에 1개씩 배정한다(#댓글==#계정이면 겹침 없이
-        // 전량 소진). 링크마다 rng가 진행돼 매칭이 재무작위화된다.
+        // 나눠서 게시(#400): 링크마다 댓글 풀을 셔플해 계정들에 **고르게 나눠 담는다**. 댓글이
+        // 계정보다 많으면 각 계정이 여러 개를 받아(예: 4댓글·2계정 → 계정당 2개) 전량 소진한다
+        // (계정당 1개만 주던 종전 동작이 프론트 `>=` 완화와 어긋나 나머지 댓글이 버려지던 버그 수정).
+        // 링크마다 rng가 진행돼 매칭이 재무작위화된다.
         let mut rng = mulberry32(seed_from_clock());
         for (url, accs) in &url_by_link {
-            let assigned = distribute_comments(accs.len(), &plan.comments, &mut rng);
+            let buckets = partition_comments(accs.len(), &plan.comments, &mut rng);
             for (i, (account_id, stock)) in accs.iter().enumerate() {
-                let comment = assigned.get(i).cloned().unwrap_or_default();
-                url_reqs.push(make_url_req(account_id, url, stock.clone(), comment));
+                let my_comments = buckets.get(i).cloned().unwrap_or_default();
+                if my_comments.is_empty() {
+                    // 안전장치: 계정 수 > 댓글 수(UI가 막지만) — 빈 댓글 1건으로 계정을 증발시키지 않는다.
+                    url_reqs.push(make_url_req(account_id, url, stock.clone(), String::new()));
+                } else {
+                    // 계정별 버킷의 댓글을 순서대로 여러 요청으로(요청 1건=댓글 1개 엔진 그대로).
+                    for c in my_comments {
+                        url_reqs.push(make_url_req(account_id, url, stock.clone(), c));
+                    }
+                }
             }
         }
     } else {
@@ -5495,6 +5507,34 @@ mod tests {
             assert_eq!(cs.len(), 3, "겹침 없음");
             assert!(cs.iter().all(|c| ["안녕", "반가워", "저두"].contains(c)));
         }
+    }
+
+    #[test]
+    fn forum_distribute_splits_more_comments_across_fewer_accounts() {
+        // #400: 댓글 4개 · 계정 2개 · 링크 1개 → 계정당 2개씩(총 4요청), 전량 소진·겹침 없음.
+        use crate::ipc::queue::ForumTarget;
+        use std::collections::BTreeSet;
+        let url = "https://stock.naver.com/domestic/stock/005930/discussion/1";
+        let mut p = plan(ModeValue::Comment, vec![]);
+        p.comments = vec!["c1".into(), "c2".into(), "c3".into(), "c4".into()]; // 4
+        p.forum_comment_distribute = true;
+        let mk = |acc: &str| ForumTarget {
+            account_id: acc.into(),
+            name: "글".into(),
+            code: "005930".into(),
+            comment_url: url.into(),
+        };
+        p.forum = vec![mk("A"), mk("B")]; // 계정 2개
+        let reqs = plan_to_forum_requests(&p);
+        assert_eq!(reqs.len(), 4, "4댓글이 2계정에 나뉘어 총 4요청");
+        // 계정마다 정확히 2개.
+        for acc in ["A", "B"] {
+            let n = reqs.iter().filter(|r| r.account_id == acc).count();
+            assert_eq!(n, 2, "{acc} 계정은 댓글 2개");
+        }
+        // 4개 댓글 전량 소진, 겹침 없음.
+        let cs: BTreeSet<&str> = reqs.iter().map(|r| r.comment.as_str()).collect();
+        assert_eq!(cs.len(), 4, "c1..c4 모두 정확히 한 번씩");
     }
 
     #[test]
