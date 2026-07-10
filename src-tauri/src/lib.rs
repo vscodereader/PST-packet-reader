@@ -444,13 +444,9 @@ async fn run_forum_publish_now<R: Runtime>(
     let app_for_job = app.clone();
     let results =
         tauri::async_runtime::spawn_blocking(move || -> Result<Vec<ForumPublishResult>, String> {
-            // 게시용 Chrome을 앱이 직접 디버그 포트로 띄운다(헤드리스). 사용자가 따로
-            // `--remote-debugging-port`로 Chrome을 실행할 필요가 없다. 게시가 끝나면
-            // 핸들이 Drop되며 Chrome을 종료한다. (로그인과 같은 런처 재사용)
-            let chrome = auth::launch_debug_chrome(true).map_err(|error| error.to_string())?;
-            let mut request = request;
-            request.host = FORUM_DEVTOOLS_HOST.to_owned();
-            request.port = chrome.port;
+            // 종목토론방 게시는 Chrome 없이 순수 HTTP 패킷 API로 처리한다(#344 후속). 저장 쿠키를
+            // 패킷 클라이언트에 직접 로드하므로 즉시게시도 Chrome을 띄우지 않는다(req.host/port는
+            // 이제 macro가 안 쓰므로 그대로 둔다).
             // 즉시 게시 경로는 종목별 진행 콜백이 필요 없어 no-op을 넘긴다(#219는 큐 워커 전용).
             // 즉시게시("지금 바로")는 큐 kill 대상이 아니라 취소 없음(|| false) + 더미 임계신호.
             let results = run_forum_publish(
@@ -462,7 +458,6 @@ async fn run_forum_publish_now<R: Runtime>(
                 || false,
                 std::sync::Arc::new(crate::ipc::kill::CancelSignal::default()),
             );
-            drop(chrome);
             Ok(results)
         })
         .await

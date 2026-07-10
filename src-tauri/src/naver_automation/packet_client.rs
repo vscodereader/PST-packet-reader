@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use url::form_urlencoded::Serializer;
 
 use super::types::{DiscussionSelection, NaverLoginProfile};
-use super::{AutomationError, AutomationResult, CdpClient};
+use super::{AutomationError, AutomationResult};
 
 const STOCK_ORIGIN: &str = "https://stock.naver.com";
 const M_STOCK_ORIGIN: &str = "https://m.stock.naver.com";
@@ -144,68 +144,25 @@ struct PostCandidate {
     post_id: String,
 }
 
-impl CdpClient {
-    // Chrome DevTools에서 로그인된 네이버 쿠키를 읽어 Rust HTTP 패킷 클라이언트를 만드는 함수입니다.
-    pub(super) fn build_naver_packet_client(&mut self) -> AutomationResult<NaverPacketClient> {
-        self.call("Network.enable", json!({}))?;
-
-        // getAllCookies는 URL/경로 필터 없이 브라우저의 **모든** 쿠키를 준다. getCookies({urls})로
-        // 특정 URL만 조회하면 nid 세션 쿠키(NID_JST 등 `.nid.naver.com` host-only)를 놓쳐 약관/가입
-        // 요청이 인증 실패할 수 있어, 밴드 로그인과 동일하게 전량 수거한다(아래에서 naver 도메인만 필터).
-        let result = self.call("Network.getAllCookies", json!({}))?;
-        let mut cookies: Vec<NaverCookie> = Vec::new();
-
-        for cookie in result
-            .get("cookies")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let Some(name) = cookie.get("name").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(value) = cookie.get("value").and_then(Value::as_str) else {
-                continue;
-            };
-            let domain = cookie
-                .get("domain")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-
-            if domain.contains("naver.com") || domain.contains("pstatic.net") {
-                cookies.push(NaverCookie {
-                    domain: domain.to_owned(),
-                    name: name.to_owned(),
-                    value: value.to_owned(),
-                });
-            }
-        }
-
-        let has = |name: &str| cookies.iter().any(|c| c.name == name);
-        if !has("NID_AUT") || !has("NID_SES") {
-            return Err(AutomationError::new(
-                "Chrome에서 네이버 로그인 쿠키를 찾지 못했습니다. 로그인 후 다시 실행하세요.",
-            ));
-        }
-
-        let user_agent = sanitize_user_agent(&self.evaluate_string("navigator.userAgent")?);
-        let client = Client::builder()
-            .timeout(Duration::from_secs(20))
-            .redirect(reqwest::redirect::Policy::limited(10))
-            .build()
-            .map_err(|error| {
-                AutomationError::new(format!("Rust HTTP 클라이언트 생성 실패: {error}"))
-            })?;
-
-        Ok(NaverPacketClient {
-            client,
-            cookies,
-            user_agent,
-        })
-    }
-}
-
 impl NaverPacketClient {
+    /// 저장된 로그인 쿠키 파일만으로 패킷 클라이언트를 만든다(계정 ID 기준) — **Chrome 없이 API
+    /// 전용**. 종목토론방 게시는 예전엔 Chrome에 쿠키를 주입→`getAllCookies`로 되뽑아 만들었지만,
+    /// 카페 경로처럼 저장 쿠키(`read_account_cookies`)를 곧바로 로드하면 Chrome이 전혀 필요 없다.
+    /// host-only 쿠키(NID_JST 등)도 저장 파일에 그대로 있어 전량 로드된다(도메인 필터·세션(NID_AUT/
+    /// NID_SES) 검증·데스크톱 UA는 [`from_storage_state`]에 위임 — 좋아요 경로와 100% 동일).
+    pub(super) fn from_saved_cookies(account_id: &str) -> AutomationResult<Self> {
+        let storage = crate::auth::read_account_cookies(account_id)
+            .map_err(|error| {
+                AutomationError::new(format!("계정 쿠키 파일을 읽지 못했습니다: {error}"))
+            })?
+            .ok_or_else(|| {
+                AutomationError::new(format!(
+                    "계정 '{account_id}'의 유효한 로그인 쿠키가 없습니다. 먼저 로그인 자동화를 실행해 쿠키를 저장하세요."
+                ))
+            })?;
+        Self::from_storage_state(&storage)
+    }
+
     /// 저장된 로그인 쿠키(storageState JSON)만으로 패킷 클라이언트를 만든다 — **Chrome 없이 API
     /// 전용**. 좋아요처럼 페이지 렌더링이 전혀 필요 없는 기능에서 쓴다(사수 지시: 페이지 이동
     /// 없이 API로만). 쿠키는 카페 경로와 동일하게 파일에서 읽으며(naver.com/pstatic.net 도메인만),
@@ -2513,15 +2470,6 @@ fn sec_ch_ua_from_user_agent(user_agent: &str) -> String {
     format!("\"Google Chrome\";v=\"{major}\", \"Chromium\";v=\"{major}\", \"Not)A;Brand\";v=\"24\"")
 }
 
-/// 게시용 Chrome은 headless(`--headless=new`)로 뜨므로 `navigator.userAgent`가
-/// `...HeadlessChrome/150...`이 된다. 이 UA를 그대로 요청 헤더에 실으면 네이버 봇탐지가
-/// "헤드리스 자동화"로 즉시 플래그한다(실측: 우리 요청 `HeadlessChrome/150` ↔ 브라우저
-/// `Chrome/149`). 실제 데스크톱 Chrome처럼 보이도록 `HeadlessChrome`을 `Chrome`으로 되돌린다
-/// (좋아요 경로 `from_storage_state`가 데스크톱 UA를 쓰는 것과 일관). 순수 함수.
-fn sanitize_user_agent(user_agent: &str) -> String {
-    user_agent.replace("HeadlessChrome", "Chrome")
-}
-
 /// 단일 Set-Cookie 헤더 한 줄을 (도메인·이름·값)으로 파싱한다(순수 함수). `name=value; domain=.naver.com;
 /// path=/; ...` 형태에서 이름/값과 domain 속성만 취한다. domain 속성이 없으면 응답 호스트(host-only)로
 /// 스코프한다(브라우저 규칙). 이름이 비면 `None`. 만료/삭제 속성은 다루지 않는다 — 가입 체인(수초)에선
@@ -2902,20 +2850,6 @@ mod tests {
         // Chrome 버전을 못 찾으면 기본값(빈 값·봇 탐지 유발 방지).
         let fallback = sec_ch_ua_from_user_agent("curl/8.0");
         assert!(fallback.contains("v=\"149\""), "{fallback}");
-    }
-
-    #[test]
-    fn sanitize_user_agent_strips_headless_marker() {
-        // headless Chrome이 노출하는 "HeadlessChrome"을 "Chrome"으로 되돌린다(봇 신호 제거).
-        let headless = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/150.0.0.0 Safari/537.36";
-        let cleaned = sanitize_user_agent(headless);
-        assert!(!cleaned.contains("Headless"), "{cleaned}");
-        assert!(cleaned.contains("Chrome/150.0.0.0"), "{cleaned}");
-        // sec-ch-ua 버전 파싱도 정화 후 UA에서 그대로 동작(UA↔hint 버전 일치 유지).
-        assert_eq!(chrome_major_from_user_agent(&cleaned), "150");
-        // 이미 정상인 UA는 그대로 둔다(불필요한 변형 없음).
-        let normal = "Mozilla/5.0 ... Chrome/149.0.0.0 Safari/537.36";
-        assert_eq!(sanitize_user_agent(normal), normal);
     }
 
     #[test]

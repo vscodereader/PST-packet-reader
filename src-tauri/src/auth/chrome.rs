@@ -30,14 +30,6 @@ pub(crate) struct ChromeHandle {
     pub(crate) ua: Option<UaProfile>,
 }
 
-impl ChromeHandle {
-    /// 우리가 spawn한 메인 Chrome 프로세스의 PID. 실행 중 게시큐 강제 종료(설계서 08 Stage2)에서
-    /// hang 시 이 PID로 프로세스 트리를 taskkill하기 위해 취소 신호에 등록한다.
-    pub(crate) fn pid(&self) -> u32 {
-        self.child.id()
-    }
-}
-
 /// 지정 PID의 Chrome 프로세스 **트리**(렌더러/GPU/crashpad 자식 포함)를 강제 종료한다 —
 /// 실행 중 게시큐 kill이 협조적 정지 타임아웃 안에 안 끝날 때(hang)의 최후수단(설계서 08 Stage2).
 /// `ChromeHandle::drop`의 taskkill과 동일한 방식이며, 이미 죽은 PID면 무해한 no-op이다.

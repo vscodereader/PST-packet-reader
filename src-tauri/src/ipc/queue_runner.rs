@@ -1909,13 +1909,13 @@ async fn do_login_and_capture_ip<R: Runtime>(
 }
 
 
-/// 종목토론방 대상을 **계정별로 동시에** 게시한다(#237). 계정마다 디버그 포트 Chrome을 직접
-/// 띄우는데(`launch_debug_chrome` = 빈 포트 자동배정 + 고유 프로필), 포트·프로필이 모두 달라
-/// 여러 개를 동시에 띄워도 충돌이 없다. 카페(9222)·밴드(HTTP)와도 자원이 겹치지 않아, 카페/밴드가
-/// 도는 중에도 종토방은 병렬로 흐른다. 동시 수는 사용자 설정 "최대 작동 가능 작업 수"(#284, 0=무제한)를 따른다. 계정·종목별
-/// 결과를 돌려준다(완료 로그용). Chrome 기동/태스크 실패 시 그 계정의 종목들을 실패 결과로
-/// 합성해 진행률·로그가 조용히 누락되지 않게 한다(거짓 100% 방지). 각 묶음 시작 전 협조적
-/// 취소(item_present)를 확인해, 취소된 아이템의 남은 계정은 게시하지 않는다.
+/// 종목토론방 대상을 **계정별로 동시에** 게시한다(#237). 종토 게시는 Chrome 없이 순수 HTTP 패킷
+/// API로 처리하므로(#344 후속: 저장 쿠키를 패킷 클라이언트에 직접 로드), 계정마다 `spawn_blocking`
+/// 태스크만 띄우면 된다(packet_client는 blocking reqwest). 카페(9222)·밴드(HTTP)와도 자원이 겹치지
+/// 않아, 카페/밴드가 도는 중에도 종토방은 병렬로 흐른다. 동시 수는 사용자 설정 "최대 작동 가능 작업
+/// 수"(#284, 0=무제한)를 따른다. 계정·종목별 결과를 돌려준다(완료 로그용). 태스크 패닉 시 그 계정의
+/// 종목들을 실패 결과로 합성해 진행률·로그가 조용히 누락되지 않게 한다(거짓 100% 방지). 각 묶음 시작
+/// 전 협조적 취소(item_present)를 확인해, 취소된 아이템의 남은 계정은 게시하지 않는다.
 async fn run_forum_targets<R: Runtime>(
     app: &AppHandle<R>,
     plan: &PublishPlan,
@@ -2064,108 +2064,69 @@ async fn run_forum_targets<R: Runtime>(
                     }
                     write_live_phase(&app_retry, &id_retry, &base_retry, &live, base_done, total);
                 };
-                match crate::auth::launch_debug_chrome(true) {
-                    Ok(chrome) => {
-                        // 강제 종료(설계서 08 Stage2)용: 이 계정의 Chrome 메인 PID를 취소 신호에
-                        // 등록 — 협조적 정지가 타임아웃 안에 안 끝나면(hang) kill 에스컬레이션이
-                        // 이 PID로 taskkill /T 해 프로세스 트리를 잡는다. 정상 완료 시엔 drop이
-                        // 먼저 정리하므로 이 PID는 이미 죽어 taskkill이 무해한 no-op이 된다.
-                        cancel_job.register_pid(chrome.pid());
-                        let mut req = req;
-                        // host는 plan_to_forum_requests에서 이미 127.0.0.1; 포트만 띄운 Chrome 값으로.
-                        req.port = chrome.port;
-                        // [가시성] 이 계정의 게시가 "지금 시작됐다"를 남긴다 — 종목 글 로그가 나오기
-                        // 전(전용 Chrome 띄우고 첫 글 여는 동안)에도 어느 계정이 도는지 보이게 한다.
-                        tracing::info!(
-                            "[POST] {} 종목토론방 게시 시작 — 전용 Chrome(포트 {}) · {}종목",
-                            crate::auth::mask_id(&req.account_id),
-                            chrome.port,
-                            req.stocks.len()
-                        );
-                        // account_id/port를 미리 복사한다 — req는 run_forum_publish로 move된다.
-                        let account_id_done = req.account_id.clone();
-                        let port_done = chrome.port;
-                        // 사용자 완전 종료 확인(설계서 08): 신호가 켜졌거나 큐에서 항목이
-                        // 사라졌으면(협조 취소) 남은 종목을 멈춘다. 진행 중 종목 1개는 게시+
-                        // 결과기록까지 끝낸 뒤라 안전하고, drop(chrome)로 정상 정리된다.
-                        // critical_job은 같은 신호의 클론 — run_forum_publish가 한 종목 게시
-                        // 동안 임계구역을 표시해 강제 kill(Stage2)이 그 창을 건드리지 않게 한다.
-                        let critical_job = Arc::clone(&cancel_job);
-                        let should_cancel =
-                            move || cancel_job.is_cancelled() || !item_present(&app_cancel, &id_cancel);
-                        let results = run_forum_publish(
-                            req,
-                            app_for_job,
-                            on_start,
-                            on_result,
-                            on_retry,
-                            should_cancel,
-                            critical_job,
-                        );
-                        // [가시성/증명] kill이 '게시 도중'이 아니라 '완전 완료 후'에만 일어난다는
-                        // 것을 로그만으로 증명할 수 있게, 종목별 실제 결과를 원문 그대로 남긴다.
-                        // 종목 N개가 모두 여기 찍힌 뒤에야 아래 "완벽 완료 확인"·Chrome 종료가
-                        // 나오므로, 중간에 kill됐다면 이 결과 줄이 불완전할 것이다.
-                        for r in &results {
-                            let url = r
-                                .posted
-                                .as_ref()
-                                .and_then(|p| p.url.as_deref())
-                                .unwrap_or("-");
-                            tracing::info!(
-                                "[POST]   └ [{}] {} — {} · url={} · {}",
-                                r.code,
-                                r.name,
-                                if r.ok {
-                                    "성공"
-                                } else if r.skipped {
-                                    "건너뜀"
-                                } else {
-                                    "실패"
-                                },
-                                url,
-                                r.message
-                            );
-                        }
-                        let ok = results.iter().filter(|r| r.ok).count();
-                        let total = results.len();
-                        tracing::info!(
-                            "[POST] {} 종목토론방 게시 완벽 완료 확인 — {}/{} 성공, 이제 전용 Chrome(포트 {}) 종료",
-                            crate::auth::mask_id(&account_id_done),
-                            ok,
-                            total,
-                            port_done
-                        );
-                        drop(chrome);
-                        results
-                    }
-                    // Chrome 기동 실패 → 이 계정 종목 전부 실패로 기록(누락 대신 명시). on_result로
-                    // 흘려 그 자리들을 즉시 실패로 바꾼다(다음 계정까지 대기 중으로 멈춰 보이지 않게).
-                    Err(error) => {
-                        // 인프라 실패(엔진 진입 전)는 backtrace가 없어 메시지를 trace로도 쓴다.
-                        let synth: Vec<ForumPublishResult> = req
-                            .stocks
-                            .iter()
-                            .map(|s| {
-                                let message = format!("Chrome 실행 실패: {error}");
-                                ForumPublishResult {
-                                    code: s.code.clone(),
-                                    name: s.name.clone(),
-                                    ok: false,
-                                    trace: Some(message.clone()),
-                                    message,
-                                    posted: None,
-                                    skipped: false,
-                                    stopped: false,
-                                }
-                            })
-                            .collect();
-                        for (i, result) in synth.iter().enumerate() {
-                            on_result(i, result);
-                        }
-                        synth
-                    }
+                // 종목토론방 게시는 Chrome 없이 순수 HTTP 패킷 API로 처리한다(#344 후속). 저장 쿠키를
+                // 패킷 클라이언트에 직접 로드하므로 계정별 전용 Chrome을 띄우지 않는다 — 병렬(#237/#238)은
+                // spawn_blocking으로 그대로 유지한다(packet_client는 blocking reqwest).
+                // req.host/port는 이제 아무도 안 쓰므로(macro가 Chrome을 안 씀) 그대로 둔다.
+                // [가시성] 이 계정의 게시가 "지금 시작됐다"를 남긴다 — 종목 글 로그가 나오기 전에도
+                // 어느 계정이 도는지 보이게 한다.
+                tracing::info!(
+                    "[POST] {} 종목토론방 게시 시작 — {}종목(Chrome 없이 패킷 API)",
+                    crate::auth::mask_id(&req.account_id),
+                    req.stocks.len()
+                );
+                // account_id를 미리 복사한다 — req는 run_forum_publish로 move된다.
+                let account_id_done = req.account_id.clone();
+                // 사용자 완전 종료 확인(설계서 08): 신호가 켜졌거나 큐에서 항목이 사라졌으면(협조
+                // 취소) 남은 종목을 멈춘다. Chrome PID kill(Stage2)은 크롬이 없어 무의미해졌고, 협조적
+                // 취소(item_present/CancelRegistry 신호)만으로 종목 사이에서 안전하게 멈춘다. 진행 중
+                // 종목 1개는 게시+결과기록까지 끝낸 뒤라 안전하다. critical_job은 같은 신호의 클론 —
+                // run_forum_publish가 한 종목 게시 동안 임계구역을 표시해 kill이 그 창을 안 건드리게 한다.
+                let critical_job = Arc::clone(&cancel_job);
+                let should_cancel =
+                    move || cancel_job.is_cancelled() || !item_present(&app_cancel, &id_cancel);
+                let results = run_forum_publish(
+                    req,
+                    app_for_job,
+                    on_start,
+                    on_result,
+                    on_retry,
+                    should_cancel,
+                    critical_job,
+                );
+                // [가시성/증명] kill이 '게시 도중'이 아니라 '완전 완료 후'에만 일어난다는 것을
+                // 로그만으로 증명할 수 있게, 종목별 실제 결과를 원문 그대로 남긴다. 종목 N개가 모두
+                // 여기 찍힌 뒤에야 아래 "완벽 완료 확인"이 나오므로, 중간에 kill됐다면 불완전할 것이다.
+                for r in &results {
+                    let url = r
+                        .posted
+                        .as_ref()
+                        .and_then(|p| p.url.as_deref())
+                        .unwrap_or("-");
+                    tracing::info!(
+                        "[POST]   └ [{}] {} — {} · url={} · {}",
+                        r.code,
+                        r.name,
+                        if r.ok {
+                            "성공"
+                        } else if r.skipped {
+                            "건너뜀"
+                        } else {
+                            "실패"
+                        },
+                        url,
+                        r.message
+                    );
                 }
+                let ok = results.iter().filter(|r| r.ok).count();
+                let total = results.len();
+                tracing::info!(
+                    "[POST] {} 종목토론방 게시 완벽 완료 확인 — {}/{} 성공",
+                    crate::auth::mask_id(&account_id_done),
+                    ok,
+                    total
+                );
+                results
             });
             handles.push((account_id, stocks_for_panic, handle));
         }
