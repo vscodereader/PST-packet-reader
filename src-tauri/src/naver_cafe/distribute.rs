@@ -75,6 +75,34 @@ pub fn distribute_comments(
     (0..count).map(|i| pool[i % pool.len()].clone()).collect()
 }
 
+/// 댓글 풀을 셔플해 `buckets`개 계정에 **고르게 나눠 담는다**(#400 나눠서게시). `distribute_comments`가
+/// 계정당 1개만 주는 것과 달리, 댓글이 계정보다 많으면 각 계정이 여러 개를 받는다(겹침 없이 전량 소진).
+/// 앞 버킷부터 1개씩 더 받아 개수 차이를 최대 1로 만든다(프론트 `distributeStocksEvenly`와 동일 규칙).
+///
+/// 예: 4댓글·2계정 → 각 2개; 5댓글·2계정 → [3, 2]. 댓글이 계정보다 적으면 뒤 버킷은 빈 배열
+/// (UI가 `댓글 수 ≥ 계정 수`를 강제하므로 통상 빈 버킷은 없다). `buckets == 0`이거나 풀이 비면 `[]`.
+pub fn partition_comments(
+    buckets: usize,
+    comments: &[String],
+    rng: &mut impl FnMut() -> f64,
+) -> Vec<Vec<String>> {
+    if buckets == 0 || comments.is_empty() {
+        return Vec::new();
+    }
+    let pool = shuffle(comments, rng);
+    let base = pool.len() / buckets;
+    let remainder = pool.len() % buckets;
+    let mut out: Vec<Vec<String>> = Vec::with_capacity(buckets);
+    let mut cursor = 0;
+    for b in 0..buckets {
+        // 앞에서 remainder개 버킷만 base+1개를 받아 동등하게(차이 ≤ 1) 나눈다.
+        let take = base + if b < remainder { 1 } else { 0 };
+        out.push(pool[cursor..cursor + take].to_vec());
+        cursor += take;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +204,47 @@ mod tests {
         let comments = pool(&["only"]);
         let got = distribute_comments(3, &comments, &mut mulberry32(1));
         assert_eq!(got, pool(&["only", "only", "only"]));
+    }
+
+    #[test]
+    fn partition_splits_comments_evenly_and_uses_all() {
+        // #400: 4댓글·2계정 → 계정당 2개, 전량 소진, 겹침 없음.
+        let comments = pool(&["a", "b", "c", "d"]);
+        let got = partition_comments(2, &comments, &mut mulberry32(7));
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].len(), 2);
+        assert_eq!(got[1].len(), 2);
+        let mut all: Vec<String> = got.into_iter().flatten().collect();
+        all.sort();
+        assert_eq!(all, pool(&["a", "b", "c", "d"]));
+    }
+
+    #[test]
+    fn partition_gives_remainder_to_front_buckets() {
+        // 5댓글·2계정 → [3, 2] (앞 버킷이 나머지를 받는다).
+        let comments = pool(&["a", "b", "c", "d", "e"]);
+        let got = partition_comments(2, &comments, &mut mulberry32(3));
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].len(), 3);
+        assert_eq!(got[1].len(), 2);
+        let total: usize = got.iter().map(|b| b.len()).sum();
+        assert_eq!(total, 5);
+    }
+
+    #[test]
+    fn partition_is_empty_without_buckets_or_comments() {
+        assert!(partition_comments(0, &pool(&["c1"]), &mut mulberry32(1)).is_empty());
+        assert!(partition_comments(2, &[], &mut mulberry32(1)).is_empty());
+    }
+
+    #[test]
+    fn partition_leaves_trailing_buckets_empty_when_fewer_comments() {
+        // 계정 > 댓글 (UI가 막지만 안전): 앞 버킷만 채우고 뒤는 빈 배열.
+        let comments = pool(&["a"]);
+        let got = partition_comments(3, &comments, &mut mulberry32(1));
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0], pool(&["a"]));
+        assert!(got[1].is_empty());
+        assert!(got[2].is_empty());
     }
 }

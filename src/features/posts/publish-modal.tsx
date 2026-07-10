@@ -2265,25 +2265,30 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
                   label="제목"
                   placeholder="변경할 새 제목"
                   value={contentChange.title}
-                  onChange={(e) =>
-                    setContentChange((c) => ({
-                      ...c,
-                      title: e.currentTarget.value,
-                    }))
-                  }
+                  onChange={(e) => {
+                    // #400 흰화면 버그: e.currentTarget을 업데이터 안에서 읽으면 안 된다.
+                    // setState 업데이터는 다음 렌더에 실행되는데, 그때 React가 합성이벤트의
+                    // currentTarget을 null로 비워 `.value` 접근이 터진다(에러바운더리 없어 앱
+                    // 전체 흰화면). 값을 핸들러에서 동기적으로 캡처해 넘긴다.
+                    const value = e.currentTarget.value;
+                    setContentChange((c) => ({ ...c, title: value }));
+                  }}
                 />
                 <Textarea
                   label="내용"
                   placeholder="변경할 새 내용"
-                  autosize
-                  minRows={4}
+                  // autosize 금지(#400): Mantine 9 autosize Textarea는 매 렌더마다
+                  // useLayoutEffect→getComputedStyle을 돌리고 마운트 시 document.fonts에
+                  // 리스너를 단다. 형제 입력(제목)에 타이핑할 때마다 이 경로가 실행되며,
+                  // 에러 바운더리가 없어 예외 한 번이면 앱 전체가 흰 화면이 됐다. 고정 rows로
+                  // 대체(writer-modal Textarea와 동일하게 autosize 미사용).
+                  rows={4}
                   value={contentChange.body}
-                  onChange={(e) =>
-                    setContentChange((c) => ({
-                      ...c,
-                      body: e.currentTarget.value,
-                    }))
-                  }
+                  onChange={(e) => {
+                    // #400: 제목과 동일 — currentTarget을 동기 캡처(업데이터 안에서 읽으면 null).
+                    const value = e.currentTarget.value;
+                    setContentChange((c) => ({ ...c, body: value }));
+                  }}
                 />
                 <Group gap={8} align="flex-end" wrap="nowrap">
                   <NumberInput
