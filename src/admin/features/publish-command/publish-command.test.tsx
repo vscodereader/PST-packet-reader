@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   commentTargetPayload,
+  filterAccountsByTarget,
   maskId,
   postDisplay,
   shortTitle,
@@ -97,6 +98,40 @@ describe("publish-command 헬퍼", () => {
       expect(commentTargetPayload("comment", "latest", 2.9).commentCount).toBe(
         2,
       );
+    });
+  });
+
+  describe("filterAccountsByTarget (게시 대상별 platform 필터)", () => {
+    const rows = [
+      { loginId: "f1", platform: "forum", status: "active" },
+      { loginId: "f2", platform: "forum", status: "waiting" },
+      { loginId: "c1", platform: "naver", status: "active" },
+      { loginId: "c2", platform: "naver", status: "new" },
+      { loginId: "b1", platform: "blog", status: "active" },
+      { loginId: "k1", platform: "clip", status: "active" },
+      { loginId: "d1", platform: "band", status: "active" },
+      { loginId: "old", status: "active" }, // platform 없음 → forum으로 본다
+    ];
+    it("종토는 platform=forum && active만 (카페·블로그 안 섞임)", () => {
+      // f1(active)·old(platform없음=forum,active). f2는 waiting이라 제외.
+      expect(filterAccountsByTarget("forum", rows)).toEqual(["f1", "old"]);
+    });
+    it("카페는 platform=naver 전부 (상태 무관 — 게시순간 로그인)", () => {
+      expect(filterAccountsByTarget("cafe", rows)).toEqual(["c1", "c2"]);
+    });
+    it("블로그/클립/밴드는 자기 platform && active만", () => {
+      expect(filterAccountsByTarget("blog", rows)).toEqual(["b1"]);
+      expect(filterAccountsByTarget("clip", rows)).toEqual(["k1"]);
+      expect(filterAccountsByTarget("band", rows)).toEqual(["d1"]);
+    });
+    it("rows 없거나 비면 null (호출부 더미 폴백)", () => {
+      expect(filterAccountsByTarget("forum", undefined)).toBeNull();
+      expect(filterAccountsByTarget("forum", [])).toBeNull();
+    });
+    it("종토로 로그인한 계정을 블로그로 바꾸면 종토에서 빠지고 블로그에 뜬다(#5)", () => {
+      const changed = [{ loginId: "x", platform: "blog", status: "active" }];
+      expect(filterAccountsByTarget("forum", changed)).toEqual([]);
+      expect(filterAccountsByTarget("blog", changed)).toEqual(["x"]);
     });
   });
 });

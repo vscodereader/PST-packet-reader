@@ -29,7 +29,7 @@ import { nowParts, scheduleMoment, toEpochMs } from "@/shared/schedule";
 import { DateTimePicker } from "@/shared/ui/date-time-picker";
 import { Icon } from "@/shared/ui/icons";
 
-import { api, isOffline } from "../../api";
+import { api, isOffline, type InvAccountDto } from "../../api";
 
 import type { ScheduledItem } from "./scheduled-posts";
 import {
@@ -86,6 +86,25 @@ export function commentTargetPayload(
 }
 
 type Target = "forum" | "cafe" | "blog" | "clip" | "band";
+
+/** 게시 대상(target)에 맞는 계정 loginId 목록을 하위 인벤토리 accountRows에서 거른다(순수 함수).
+ *  rows가 없거나 비면 null → 호출부가 오프라인 더미로 폴백한다. platform 매핑:
+ *  - cafe: platform=="naver" 전부(상태 무관 — 카페는 게시 순간 재로그인하므로 로그인 성공/실패를 안 본다).
+ *  - forum/blog/clip/band: platform==그 target && status=="active"만(로그인 성공 계정만).
+ *    forum 계정은 platform이 "forum"(빈값도 forum으로 본다 — 옛 하위 하위호환).
+ *  이렇게 해야 각 게시 대상 화면이 자기 platform 계정만 보여준다(카페·블로그가 종토 목록에 섞이지 않음). */
+export function filterAccountsByTarget(
+  target: Target,
+  rows: InvAccountDto[] | undefined,
+): string[] | null {
+  if (!rows || rows.length === 0) return null;
+  if (target === "cafe") {
+    return rows.filter((r) => r.platform === "naver").map((r) => r.loginId);
+  }
+  return rows
+    .filter((r) => (r.platform ?? "forum") === target && r.status === "active")
+    .map((r) => r.loginId);
+}
 const TARGETS: { key: Target; label: string; soon: boolean }[] = [
   { key: "forum", label: "종목토론방", soon: false },
   { key: "cafe", label: "네이버카페", soon: false },
@@ -308,29 +327,15 @@ export function PublishCommand({
     const p = postsFor(deviceId).find((x) => x.id === pid);
     return p ? postDisplay(p) : null;
   };
-  // 게시 대상별 계정 목록. 종토=로그인 성공(Active)만(기존). 카페=로그인 성공/실패 무관
-  // 카페(naver) 계정 전부(카페는 게시 순간 재로그인하므로 상태를 안 본다 — 요구서).
+  // 게시 대상별 계정 목록. 실데이터(accountRows) 있으면 filterAccountsByTarget로 platform별로
+  // 거르고, 없으면(오프라인/미보고) 더미로 폴백. 종토도 platform=="forum"만 보이게(카페/블로그가
+  // 종토 목록에 섞이던 문제 수정 — 각 target은 자기 platform 계정만).
   const accountsFor = (deviceId: string, target: Target | null): string[] => {
-    if (target === "cafe") {
-      const rows = invByDev[deviceId]?.accountRows;
-      if (rows && rows.length > 0) {
-        return rows.filter((r) => r.platform === "naver").map((r) => r.loginId);
-      }
-      return mockCafeAccounts(deviceId); // 오프라인/미보고 → 더미
-    }
-    if (target === "blog" || target === "clip" || target === "band") {
-      // 블로그·클립·밴드는 로그인 성공(active) 계정만 게시 가능(종토와 동일 Active 필터,
-      // 카페의 로그인 무관 전부와 다름). 블로그·클립=네이버 쿠키, 밴드=band.us 쿠키 — 모두
-      // 분배 시 로그인해 확보한다. 해당 플랫폼 계정 중 active만 쓴다.
-      const rows = invByDev[deviceId]?.accountRows;
-      if (rows && rows.length > 0) {
-        return rows
-          .filter((r) => r.platform === target && r.status === "active")
-          .map((r) => r.loginId);
-      }
-      return mockAccounts(deviceId); // 오프라인/미보고 → 더미
-    }
-    return invByDev[deviceId]?.accounts ?? mockAccounts(deviceId);
+    if (!target) return invByDev[deviceId]?.accounts ?? mockAccounts(deviceId);
+    const filtered = filterAccountsByTarget(target, invByDev[deviceId]?.accountRows);
+    if (filtered !== null) return filtered;
+    // 오프라인/미보고 → 더미 폴백(카페는 전용 더미).
+    return target === "cafe" ? mockCafeAccounts(deviceId) : mockAccounts(deviceId);
   };
 
   const toggleDev = (id: string) =>
