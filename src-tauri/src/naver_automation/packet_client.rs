@@ -925,6 +925,75 @@ impl NaverPacketClient {
         ))
     }
 
+    // 기존 글의 제목·본문을 수정한다(PUT /front-api/discussion/edit?id=). 글쓰기 add와 달리 txId·form
+    // 발급이 필요 없고 쿠키만 쓴다(패킷 실측 2026-07-09). 본문 contentJson(SE 문서)은 글쓰기와 완전히
+    // 동일하게 만들어야 하므로 build_post_payload의 document 빌더를 그대로 재사용한다.
+    pub(super) fn edit_post(
+        &mut self,
+        post_id: &str,
+        title: &str,
+        content_text: &str,
+    ) -> AutomationResult<()> {
+        // 글쓰기 add 본문을 만들어(target·txId는 edit body에 안 들어가므로 빈 값) 그 안의
+        // contentJson.document만 뽑아 쓴다. 본문 SE 문서 구성 로직을 중복 없이 재사용하기 위함.
+        let add_payload = build_post_payload(
+            title,
+            content_text,
+            &DiscussionTarget {
+                discussion_type: String::new(),
+                item_code: String::new(),
+            },
+            "",
+        );
+        let document = add_payload
+            .pointer("/contentJson/document")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let payload = json!({
+            "title": title,
+            "contentJson": { "document": document },
+            "documentId": "",
+            "isCleanbotDisabled": false,
+            "danglingImages": [],
+        });
+
+        let response_text = self
+            .client
+            .put(format!(
+                "{M_STOCK_ORIGIN}/front-api/discussion/edit?id={post_id}"
+            ))
+            .headers(self.json_headers(M_STOCK_HOST, DEFAULT_REFERER)?)
+            .json(&payload)
+            .send_traced(&self.client)
+            .map_err(|error| AutomationError::new(format!("글 수정 edit 패킷 전송 실패: {error}")))
+            .and_then(|response| response_text(response, "글 수정 edit"))?;
+        let value = parse_json(&response_text, "글 수정 edit")?;
+
+        if !value
+            .get("isSuccess")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            // 글쓰기 add와 동일 스타일 — 네이버 원본 실패 응답을 그대로 로그에 남긴다.
+            tracing::warn!(
+                api = "PUT /front-api/discussion/edit",
+                response = %log_snippet(&response_text),
+                "글 수정 edit API 실패(isSuccess=false)"
+            );
+            return Err(AutomationError::new(format!(
+                "글 수정 edit 패킷 API 실패: {}",
+                packet_error_message(&value, &response_text)
+            )));
+        }
+
+        tracing::info!(
+            api = "PUT /front-api/discussion/edit",
+            post_id,
+            "글 수정 edit API 성공(isSuccess=true)"
+        );
+        Ok(())
+    }
+
     // ---- 좋아요/싫어요(reactions) — 패킷 캡처(2026-07-01)로 재현 ----
 
     /// 게시글의 현재 반응 상태를 조회한다(`GET /posts/reactions?postIds=`). 내가 좋아요/싫어요를
@@ -1185,6 +1254,82 @@ impl NaverPacketClient {
             .ok_or_else(|| {
                 AutomationError::new("닉네임 추천 응답에서 recommendedNickname을 찾지 못했습니다.")
             })
+    }
+
+    // 추천 닉네임을 받아 `used`에 없는 새 닉네임으로 프로필 닉네임을 바꾼다(계정 안에서 댓글마다 다른
+    // 닉네임을 쓰기 위한 중복 회피). 추천이 겹치면 최대 NICKNAME_RETRY_MAX회 재추천하고, 다 겹치면
+    // 마지막 추천값을 그대로 쓴다(warn 로그). 성공 시 고른 닉네임을 돌려주므로 호출부가 used에 넣어
+    // 다음 호출이 또 다른 닉네임을 고르게 한다. 소개·이미지 등 나머지 필드는 기존 프로필 값을 유지한다.
+    pub(super) fn change_nickname_avoiding(
+        &mut self,
+        used: &std::collections::HashSet<String>,
+    ) -> AutomationResult<String> {
+        const NICKNAME_RETRY_MAX: usize = 10;
+        let referer = DEFAULT_REFERER;
+
+        // used에 없는 추천이 나오면 즉시 멈춘다(불필요한 추천 호출 방지). 다 겹치면 후보 전체를
+        // choose_unused_nickname에 넘겨 마지막 값을 고르게 한다.
+        let mut candidates: Vec<String> = Vec::new();
+        for _ in 0..NICKNAME_RETRY_MAX {
+            let candidate = self.recommend_profile_nickname(referer)?;
+            let is_unused = !used.contains(&candidate);
+            candidates.push(candidate);
+            if is_unused {
+                break;
+            }
+        }
+        let nickname = choose_unused_nickname(&candidates, used).ok_or_else(|| {
+            AutomationError::new("닉네임 추천을 한 번도 받지 못해 닉네임을 바꿀 수 없습니다.")
+        })?;
+        if used.contains(&nickname) {
+            tracing::warn!(
+                max = NICKNAME_RETRY_MAX,
+                nickname = %nickname,
+                "닉네임 중복 회피 실패 — 마지막 추천 닉네임을 그대로 사용"
+            );
+        }
+
+        // profileId는 프로필 상태 응답에서 얻는다(프로필 생성/PUT 경로가 profileId를 얻는 방식과 동일).
+        let status = self.read_profile_status_with_retry(STOCK_ROOT_REFERER)?;
+        let profile_id = status
+            .get("profileId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                AutomationError::new("프로필 상태에 profileId가 없어 닉네임을 바꿀 수 없습니다.")
+            })?
+            .to_owned();
+
+        // 닉네임만 교체하고 소개·이미지는 기존 form 값을 유지한다(프로필 PUT 경로와 동일 필드).
+        let form = self.get_stock_json(
+            "/api/community/profile/users/form",
+            referer,
+            "프로필 form",
+        )?;
+        let introduction = form.get("introduction").cloned().unwrap_or_else(|| {
+            Value::String(DEFAULT_PROFILE_INTRODUCTION.to_owned())
+        });
+        let image_url = form.get("imageUrl").cloned().unwrap_or(Value::Null);
+
+        let payload = json!({
+            "nickname": nickname,
+            "introduction": introduction,
+            "imageUrl": image_url,
+            "danglingImages": [],
+        });
+        self.client
+            .put(format!(
+                "{STOCK_ORIGIN}/api/community/profile/users/{profile_id}"
+            ))
+            .headers(self.stock_json_headers(STOCK_HOST, referer)?)
+            .json(&payload)
+            .send_traced(&self.client)
+            .map_err(|error| {
+                AutomationError::new(format!("닉네임 변경 PUT 패킷 전송 실패: {error}"))
+            })
+            .and_then(|response| response_text(response, "닉네임 변경 PUT"))?;
+
+        Ok(nickname)
     }
 
     // 프로필 소개 2222가 저장 가능한 값인지 검증 패킷으로 확인하는 함수입니다.
@@ -2087,6 +2232,19 @@ fn build_post_payload(title: &str, body: &str, target: &DiscussionTarget, tx_id:
         "txId": tx_id,
         "inflow": "NFS-P-P"
     })
+}
+
+// 추천 닉네임 후보 목록에서 used에 없는 첫 닉네임을 고르고, 다 겹치면 마지막 후보를 돌려주는
+// 순수 함수입니다(네트워크 없이 중복 회피 판정만 테스트할 수 있게 분리).
+fn choose_unused_nickname(
+    candidates: &[String],
+    used: &std::collections::HashSet<String>,
+) -> Option<String> {
+    candidates
+        .iter()
+        .find(|candidate| !used.contains(*candidate))
+        .cloned()
+        .or_else(|| candidates.last().cloned())
 }
 
 // Wireshark에서 확인한 댓글 create 요청의 form-urlencoded 본문을 만드는 함수입니다.
@@ -2997,6 +3155,82 @@ mod tests {
             payload["contentJson"]["document"]["components"][0]["value"][0]["nodes"][0]["value"],
             "본문 내용"
         );
+    }
+
+    #[test]
+    fn edit_body_reuses_add_document_builder_with_new_title_and_text() {
+        // edit_post의 body 구성과 동일하게: add 빌더로 document를 만들고 edit 형태로 감싼다.
+        let add_payload = build_post_payload(
+            "수정 제목",
+            "수정 본문",
+            &DiscussionTarget {
+                discussion_type: String::new(),
+                item_code: String::new(),
+            },
+            "",
+        );
+        let document = add_payload
+            .pointer("/contentJson/document")
+            .cloned()
+            .unwrap();
+        let edit_body = json!({
+            "title": "수정 제목",
+            "contentJson": { "document": document },
+            "documentId": "",
+            "isCleanbotDisabled": false,
+            "danglingImages": [],
+        });
+
+        // 제목이 새 값으로 들어가고
+        assert_eq!(edit_body["title"], "수정 제목");
+        // 본문 텍스트가 add 빌더가 만든 SE 문서 구조 그대로 새 값으로 들어간다.
+        assert_eq!(
+            edit_body["contentJson"]["document"]["components"][0]["value"][0]["nodes"][0]["value"],
+            "수정 본문"
+        );
+        assert_eq!(edit_body["contentJson"]["document"]["version"], "2.9.0");
+        // edit body 고정 필드(패킷 실측)
+        assert_eq!(edit_body["documentId"], "");
+        assert_eq!(edit_body["isCleanbotDisabled"], false);
+        assert_eq!(edit_body["danglingImages"], json!([]));
+        // add 전용 필드(txId·discussionType·itemCode)는 edit body에 없어야 한다.
+        assert!(edit_body.get("txId").is_none());
+        assert!(edit_body.get("discussionType").is_none());
+    }
+
+    #[test]
+    fn choose_unused_nickname_picks_first_not_in_used() {
+        let used: std::collections::HashSet<String> =
+            ["곰돌이".to_owned(), "너구리".to_owned()].into_iter().collect();
+        let candidates = vec![
+            "곰돌이".to_owned(),
+            "너구리".to_owned(),
+            "다람쥐".to_owned(),
+        ];
+
+        assert_eq!(
+            choose_unused_nickname(&candidates, &used).as_deref(),
+            Some("다람쥐")
+        );
+    }
+
+    #[test]
+    fn choose_unused_nickname_falls_back_to_last_when_all_used() {
+        let used: std::collections::HashSet<String> =
+            ["가".to_owned(), "나".to_owned(), "다".to_owned()].into_iter().collect();
+        let candidates = vec!["가".to_owned(), "나".to_owned(), "다".to_owned()];
+
+        // 전부 겹치면 마지막 후보를 그대로 돌려준다.
+        assert_eq!(
+            choose_unused_nickname(&candidates, &used).as_deref(),
+            Some("다")
+        );
+    }
+
+    #[test]
+    fn choose_unused_nickname_returns_none_for_empty_candidates() {
+        let used: std::collections::HashSet<String> = std::collections::HashSet::new();
+        assert_eq!(choose_unused_nickname(&[], &used), None);
     }
 
     #[test]
