@@ -68,6 +68,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/admin/accounts", get(list_accounts))
         .route("/admin/accounts/import", post(import_accounts))
         .route("/admin/accounts/distribute", post(distribute_accounts))
+        .route("/admin/accounts/update-meta", post(update_account_meta))
         // ── 통신로그(§10-5) + Admin 실시간 스트림(§3) ──
         .route("/admin/audit-log", get(audit_log))
         .route("/admin/stream", get(admin_stream))
@@ -905,6 +906,74 @@ async fn distribute_accounts(
         });
     }
     Ok(Json(DistributeResp { assignments, moved }))
+}
+
+/// 계정 상태/플랫폼 원격 편집(14-계정상태-관리 §4) — Admin이 하위 accountRows 폴링본 대비 바뀐 행만
+/// 모아 보낸다. 그 하위 SSE로 `update_account_meta`를 내려보내 loginId별 platform·status를 갱신한다.
+/// 게이트·[REJECT]·원문 무필터 로그는 게시/중지 명령과 동일. 하위가 갱신하면 다음 inventory 보고에
+/// 반영돼 Admin 폴링이 왕복을 닫는다(양방향).
+async fn update_account_meta(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<AccountMetaReq>,
+) -> AppResult<Json<serde_json::Value>> {
+    let op = st.auth_operator(&headers).await?;
+    if req.updates.is_empty() {
+        return Err(AppError::BadRequest("변경할 계정이 없습니다".into()));
+    }
+    let uid = Uuid::parse_str(&req.device_id)
+        .map_err(|_| AppError::BadRequest("기기 id 형식 오류".into()))?;
+    let device = st
+        .repo
+        .find_device(uid)
+        .await?
+        .ok_or_else(|| AppError::NotFound("없는 기기".into()))?;
+    let cid = req
+        .command_id
+        .clone()
+        .unwrap_or_else(|| format!("c-{}", Uuid::new_v4()));
+
+    if !AppState::is_commandable(device.state) {
+        let reason = match device.state {
+            DeviceState::Rotating => "대상 컴퓨터 IP 변경 중(ROTATING·거부코드 409)",
+            DeviceState::Reconnecting => "대상 컴퓨터 재연결 중(거부코드 409)",
+            _ => "대상 컴퓨터 꺼짐(offline·거부코드 409)",
+        };
+        st.audit(
+            "[REJECT]",
+            &format!("Admin → {}", device.name),
+            &req.device_id,
+            &format!(
+                "거부: update_account_meta(계정 상태/플랫폼 변경) commandId={cid} 사유={reason} operator={} 건수={}",
+                op.login_id,
+                req.updates.len()
+            ),
+            "fail",
+        )
+        .await;
+        return Err(AppError::Conflict(format!("{reason} — 재연결 후 다시 시도")));
+    }
+
+    let payload = serde_json::json!({
+        "type": "update_account_meta",
+        "commandId": cid,
+        "accountUpdates": req.updates,
+    });
+    st.hub.device_push(uid, payload.to_string());
+    // 원문 무필터 로그(Stage5): 어떤 계정을 어떤 platform·status로 바꾸라 했는지 payload 그대로.
+    st.audit(
+        "[CMD]",
+        &format!("Admin → {}", device.name),
+        &req.device_id,
+        &format!(
+            "update_account_meta(계정 상태/플랫폼 변경) {}건 commandId={cid} operator={} payload={payload}",
+            req.updates.len(),
+            op.login_id
+        ),
+        "cmd",
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "ok": true, "commandId": cid })))
 }
 
 // ───────────────────────── 통신로그 + Admin 스트림 ─────────────────────────

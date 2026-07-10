@@ -18,6 +18,7 @@ import { ChangePassword } from "./auth/change-password";
 import { Login } from "./auth/login";
 import { Signup } from "./auth/signup";
 import { AccountDistribute } from "./features/account-distribute/account-distribute";
+import { AccountState } from "./features/account-state/account-state";
 import { CommLog } from "./features/comm-log/comm-log";
 import { DeviceConnection } from "./features/device-connection/device-connection";
 import { Operators } from "./features/operators/operators";
@@ -40,6 +41,7 @@ interface NavEntry {
 const NAV: NavEntry[] = [
   { id: "devices", icon: "globe", label: "기기 연결" },
   { id: "distribute", icon: "users", label: "계정 분배" },
+  { id: "account-state", icon: "eye", label: "계정 상태" },
   { id: "publish-command", icon: "send", label: "게시 명령" },
   { id: "stop-command", icon: "trash", label: "중지 명령" },
   { id: "scheduled-posts", icon: "calendar", label: "예약된 글" },
@@ -143,6 +145,8 @@ function AppScreen({
       return <DeviceConnection />;
     case "distribute":
       return <AccountDistribute />;
+    case "account-state":
+      return <AccountState />;
     case "publish-command":
       return <PublishCommand onSchedule={onSchedule} />;
     case "stop-command":

@@ -45,6 +45,23 @@ struct Command {
     /// 완전 종료할지(설계서 08 §10).
     #[serde(default)]
     kill: Option<KillCmd>,
+    /// 계정 상태/플랫폼 원격 편집 명령(`update_account_meta`)일 때만 채워진다(14-계정상태-관리).
+    /// Admin이 하위 accountRows를 폴링해 바꾼 행만 모아 보낸다(loginId별 platform·status 선택 갱신).
+    #[serde(rename = "accountUpdates", default)]
+    account_updates: Vec<AccountMetaUpdate>,
+}
+
+/// 계정 1건의 원격 메타 편집(14-계정상태-관리 §4). loginId로 매칭해 platform(있으면)·status(있으면)만
+/// 바꾼다 — 둘 다 Option이라 생략한 필드는 건드리지 않는다. status는 사람이 되돌릴 수 있는 값
+/// (active/waiting/onHold)만 유효하고, 그 외(워커 판정값)는 무시한다.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct AccountMetaUpdate {
+    login_id: String,
+    #[serde(default)]
+    platform: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
 }
 
 /// 중지 명령 페이로드(설계서 08). queueId=그 큐 1개, all=디바이스 전 실행/대기 큐, loginId=그
@@ -135,6 +152,45 @@ fn status_to_str(s: &AccountStatus) -> &'static str {
         AccountStatus::Blocked => "blocked",
         AccountStatus::Error => "error",
     }
+}
+
+/// 원격 편집이 허용하는 상태 문자열 → AccountStatus. **사람이 되돌릴 수 있는** 값(active/waiting/
+/// onHold)만 받고, 그 외(badCredentials/blocked 등 워커 판정값)는 None을 돌려 무시한다
+/// (14-계정상태-관리 §5). 와이어 문자열은 status_to_str(AccountStatus serde camelCase)와 동일.
+fn status_from_str(s: &str) -> Option<AccountStatus> {
+    match s {
+        "active" => Some(AccountStatus::Active),
+        "waiting" => Some(AccountStatus::Waiting),
+        "onHold" => Some(AccountStatus::OnHold),
+        _ => None,
+    }
+}
+
+/// Admin이 보낸 계정 메타 편집을 계정 목록에 반영한다(순수, 14-계정상태-관리 §4). 각 update는
+/// loginId로 매칭해 platform(있으면 platform_from_str로 변환)·status(있으면 status_from_str로
+/// 변환, 유효값만)를 갱신한다. 생략한 필드는 그대로 두고, 매칭되는 loginId가 없으면 무시한다.
+/// status는 코어 `apply_status_by_login_id`를 재사용해 "사람이 되돌림"(status_msg/trace=None)으로 쓴다.
+fn apply_account_meta(mut accounts: Vec<Account>, updates: &[AccountMetaUpdate]) -> Vec<Account> {
+    for u in updates {
+        if let Some(p) = u.platform.as_deref() {
+            let pid = platform_from_str(p);
+            for a in accounts.iter_mut() {
+                if a.login_id == u.login_id {
+                    a.platform = pid.clone();
+                }
+            }
+        }
+        if let Some(st) = u.status.as_deref().and_then(status_from_str) {
+            accounts = crate::ipc::accounts::apply_status_by_login_id(
+                accounts,
+                &u.login_id,
+                st,
+                None,
+                None,
+            );
+        }
+    }
+    accounts
 }
 
 /// 게시 명령 페이로드 — 서버가 계정×종목을 확정해 내려보낸다(하위는 그대로 ForumTarget으로 조립).
@@ -607,8 +663,63 @@ fn dispatch<R: Runtime>(app: &AppHandle<R>, cmd: &Command) -> (&'static str, Str
             Some(k) => agent_kill(app, k),
             None => ("fail", "kill_publish에 kill 페이로드가 없습니다".into(), None),
         },
+        "update_account_meta" => update_account_meta(app, &cmd.account_updates),
         other => ("fail", format!("알 수 없는 명령: {other}"), None),
     }
+}
+
+/// 계정 상태/플랫폼 원격 편집(14-계정상태-관리 §4) — Admin이 보낸 update들을 계정 스토어에 반영한다.
+/// 코어 `apply_account_meta`(순수)로 갱신하고, **무엇을 어떻게 바꿨는지 원문**(loginId·before→after)을
+/// 통신로그에 남긴다(server log-forward로 Admin 통신로그에 그대로 뜬다 — 무필터 로그). 다음
+/// inventory_body 보고(≤4초)에 반영돼 Admin 폴링이 왕복을 닫는다.
+fn update_account_meta<R: Runtime>(
+    app: &AppHandle<R>,
+    updates: &[AccountMetaUpdate],
+) -> (&'static str, String, Option<Followup>) {
+    if updates.is_empty() {
+        return ("info", "변경할 계정이 없습니다".into(), None);
+    }
+    let store = app.state::<JsonStore<Account>>();
+    let before = store.snapshot();
+    // before→after 원문 로그(무필터). 매칭 loginId만 기록, 유효하지 않은 status/미매칭은 건너뜀 표시.
+    let mut lines: Vec<String> = Vec::new();
+    for u in updates {
+        let Some(cur) = before.iter().find(|a| a.login_id == u.login_id) else {
+            lines.push(format!("{}(미매칭·무시)", u.login_id));
+            continue;
+        };
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(p) = u.platform.as_deref() {
+            parts.push(format!(
+                "platform {}→{}",
+                platform_to_str(&cur.platform),
+                platform_to_str(&platform_from_str(p))
+            ));
+        }
+        if let Some(s) = u.status.as_deref() {
+            match status_from_str(s) {
+                Some(st) => parts.push(format!(
+                    "status {}→{}",
+                    status_to_str(&cur.status),
+                    status_to_str(&st)
+                )),
+                None => parts.push(format!("status {s}(비허용·무시)")),
+            }
+        }
+        lines.push(format!("{}: {}", u.login_id, parts.join(", ")));
+    }
+    store.mutate(|list| apply_account_meta(list, updates));
+    let n = updates.len();
+    tracing::info!(
+        count = n,
+        changes = %lines.join(" · "),
+        "[AGENT] 계정 상태/플랫폼 원격 편집(원문)"
+    );
+    (
+        "ok",
+        format!("계정 {n}건 상태/플랫폼 변경 · {}", lines.join(" · ")),
+        None,
+    )
 }
 
 /// 중지 명령(kill_publish) 처리(설계서 08 §10) — Admin이 보낸 대상(queueId 1개 / all 디바이스
@@ -2686,5 +2797,102 @@ mod tests {
             vec!["blocked", "error", "challenge", "gone"],
             "차단·에러·추가인증·account not found는 보존(삭제 금지)"
         );
+    }
+
+    // ───────── 계정 상태/플랫폼 원격 편집(14-계정상태-관리) ─────────
+    fn meta_acct(login: &str, platform: PlatformId, status: AccountStatus) -> Account {
+        Account {
+            id: login.into(),
+            platform,
+            login_id: login.into(),
+            pw: "pw".into(),
+            status,
+            status_msg: Some("이전 사유".into()),
+            status_trace: Some("이전 trace".into()),
+            last: "—".into(),
+            tags: vec![],
+        }
+    }
+
+    #[test]
+    fn apply_account_meta_platform_only_keeps_status() {
+        let accounts = vec![meta_acct("a", PlatformId::Forum, AccountStatus::Waiting)];
+        let updates = vec![AccountMetaUpdate {
+            login_id: "a".into(),
+            platform: Some("blog".into()),
+            status: None,
+        }];
+        let out = apply_account_meta(accounts, &updates);
+        assert_eq!(out[0].platform, PlatformId::Blog);
+        // status 미지정 → 그대로(사유/trace도 안 건드림).
+        assert_eq!(out[0].status, AccountStatus::Waiting);
+        assert_eq!(out[0].status_msg.as_deref(), Some("이전 사유"));
+    }
+
+    #[test]
+    fn apply_account_meta_status_only_resets_reason() {
+        let accounts = vec![meta_acct("a", PlatformId::Forum, AccountStatus::Waiting)];
+        let updates = vec![AccountMetaUpdate {
+            login_id: "a".into(),
+            platform: None,
+            status: Some("active".into()),
+        }];
+        let out = apply_account_meta(accounts, &updates);
+        assert_eq!(out[0].platform, PlatformId::Forum); // 플랫폼 그대로
+        assert_eq!(out[0].status, AccountStatus::Active);
+        // 사람이 되돌림 → 사유/trace None으로 초기화(apply_status_by_login_id 재사용).
+        assert_eq!(out[0].status_msg, None);
+        assert_eq!(out[0].status_trace, None);
+    }
+
+    #[test]
+    fn apply_account_meta_both_fields() {
+        let accounts = vec![meta_acct("a", PlatformId::Forum, AccountStatus::OnHold)];
+        let updates = vec![AccountMetaUpdate {
+            login_id: "a".into(),
+            platform: Some("naver".into()),
+            status: Some("onHold".into()),
+        }];
+        let out = apply_account_meta(accounts, &updates);
+        assert_eq!(out[0].platform, PlatformId::Naver);
+        assert_eq!(out[0].status, AccountStatus::OnHold);
+    }
+
+    #[test]
+    fn apply_account_meta_ignores_unmatched_login_id() {
+        let accounts = vec![meta_acct("a", PlatformId::Forum, AccountStatus::Active)];
+        let updates = vec![AccountMetaUpdate {
+            login_id: "does_not_exist".into(),
+            platform: Some("clip".into()),
+            status: Some("waiting".into()),
+        }];
+        let out = apply_account_meta(accounts, &updates);
+        // 미매칭 → 원본 불변.
+        assert_eq!(out[0].platform, PlatformId::Forum);
+        assert_eq!(out[0].status, AccountStatus::Active);
+    }
+
+    #[test]
+    fn apply_account_meta_ignores_disallowed_status() {
+        let accounts = vec![meta_acct("a", PlatformId::Forum, AccountStatus::Active)];
+        // blocked/badCredentials 등 워커 판정값은 사람이 못 되돌림 → status 변경 무시.
+        let updates = vec![AccountMetaUpdate {
+            login_id: "a".into(),
+            platform: Some("band".into()),
+            status: Some("blocked".into()),
+        }];
+        let out = apply_account_meta(accounts, &updates);
+        assert_eq!(out[0].platform, PlatformId::Band); // 플랫폼은 적용
+        assert_eq!(out[0].status, AccountStatus::Active); // status는 불변
+    }
+
+    #[test]
+    fn status_from_str_allows_only_human_reversible() {
+        assert_eq!(status_from_str("active"), Some(AccountStatus::Active));
+        assert_eq!(status_from_str("waiting"), Some(AccountStatus::Waiting));
+        assert_eq!(status_from_str("onHold"), Some(AccountStatus::OnHold));
+        assert_eq!(status_from_str("blocked"), None);
+        assert_eq!(status_from_str("badCredentials"), None);
+        assert_eq!(status_from_str("timedOut"), None);
     }
 }

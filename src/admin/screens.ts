@@ -6,6 +6,7 @@ export type Screen =
   | "force-pw"
   | "devices"
   | "distribute"
+  | "account-state"
   | "publish-command"
   | "stop-command"
   | "scheduled-posts"
@@ -29,6 +30,7 @@ export const PREVIEW_SCREENS: ScreenMeta[] = [
   { value: "force-pw", label: "강제 비밀번호 변경", group: "인증(로그인 전)" },
   { value: "devices", label: "기기 연결", group: "앱(로그인 후)" },
   { value: "distribute", label: "계정 분배", group: "앱(로그인 후)" },
+  { value: "account-state", label: "계정 상태", group: "앱(로그인 후)" },
   { value: "publish-command", label: "게시 명령", group: "앱(로그인 후)" },
   { value: "stop-command", label: "중지 명령", group: "앱(로그인 후)" },
   { value: "scheduled-posts", label: "예약된 글", group: "앱(로그인 후)" },

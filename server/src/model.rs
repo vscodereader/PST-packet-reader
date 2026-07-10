@@ -341,6 +341,25 @@ pub struct DeviceAssignment {
     pub device_name: String,
     pub count: usize,
 }
+// 계정 상태/플랫폼 원격 편집(14-계정상태-관리 §4). Admin이 하위 accountRows를 폴링해 바꾼 행만
+// 모아 보낸다. platform/status는 선택(생략하면 그 필드 유지). status는 하위가 active/waiting/onHold만 허용.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountMetaUpdate {
+    pub login_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountMetaReq {
+    pub device_id: String,
+    #[serde(default)]
+    pub command_id: Option<String>,
+    pub updates: Vec<AccountMetaUpdate>,
+}
 
 // 에이전트(하위)용
 #[derive(Deserialize)]

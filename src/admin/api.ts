@@ -494,6 +494,17 @@ export const api = {
         deviceIds,
       });
     },
+    // 계정 상태/플랫폼 원격 편집(14-계정상태-관리) — 하위 accountRows 폴링본 대비 바뀐 행만 보낸다.
+    // platform/status는 선택(생략하면 그 필드 유지). status는 하위가 active/waiting/onHold만 허용.
+    updateMeta(
+      deviceId: string,
+      updates: { loginId: string; platform?: string; status?: string }[],
+    ): Promise<{ ok: boolean; commandId: string }> {
+      return request("POST", "/admin/accounts/update-meta", {
+        deviceId,
+        updates,
+      });
+    },
   },
   audit: {
     list(): Promise<AuditDto[]> {
