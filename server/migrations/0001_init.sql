@@ -56,8 +56,10 @@ CREATE TABLE IF NOT EXISTS post_reports (
   at          BIGINT NOT NULL,                          -- 게시 완료 epoch ms
   received_at TIMESTAMPTZ NOT NULL,
   items       JSONB NOT NULL,
+  kind        TEXT NOT NULL DEFAULT '게시',             -- 결과 종류(15-기타명령 §6-3): 게시/좋아요/싫어요/조회수/IP
   PRIMARY KEY (device_id, batch_id)
 );
+ALTER TABLE post_reports ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT '게시';
 CREATE INDEX IF NOT EXISTS post_reports_received_idx ON post_reports (received_at);
 
 -- 로그인 결과 보고(§10-4-1). 컴퓨터(device_id)당 최신 1건(누적이 합계를 담아 이력은 불필요).

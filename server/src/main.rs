@@ -90,6 +90,7 @@ async fn main() {
         stop_reports: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         daily: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         scheduled: Arc::new(std::sync::Mutex::new(Vec::new())),
+        nickname_remaining: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
     // 예약 게시 스케줄러(07-게시명령 4단계) — 1초마다 도래한 예약을 하위로 발송한다.
     tokio::spawn(scheduled::scheduler_loop(state.clone()));

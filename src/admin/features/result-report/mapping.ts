@@ -27,6 +27,8 @@ export interface PostBatch {
   device: string;
   title: string;
   at: string;
+  // 결과 종류 태그(15-기타명령 §6-3) — 게시/좋아요/싫어요/조회수/IP. 없으면 게시로 본다.
+  kind: string;
   items: PostItem[];
 }
 
@@ -152,6 +154,8 @@ export function toPostBatch(r: PostReportDto): PostBatch {
     device: r.device,
     title: r.title,
     at: fmtAt(r.at),
+    // 종류 태그(§6-3): 옛 서버/게시는 kind가 없어 "게시"로 본다.
+    kind: r.kind && r.kind.trim() !== "" ? r.kind : "게시",
     items: r.items.map((it) => ({
       platform: it.platform as PlatformId,
       target: it.target,

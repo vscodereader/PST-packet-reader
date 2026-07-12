@@ -136,6 +136,8 @@ export interface InvPostDto {
   kind?: string;
   // 댓글 내용 미리보기 — 댓글은 제목이 없어(당연) 이 내용을 제목 대신 보여준다(글이 제목 보여주듯).
   excerpt?: string;
+  // 작성한 댓글 수(≥2 게이트용, 15-기타명령 §3) — 이 값이 2 이상일 때만 닉네임 랜덤 체크박스를 보인다.
+  commentCount?: number;
 }
 // 인벤토리 계정 1건(전체 — loginId·platform·status). 카페 게시명령이 로그인 무관 카페 계정을
 // 전부 쓰기 위함. 옛 하위는 안 보낼 수 있어 optional.
@@ -211,6 +213,8 @@ export interface PostReportDto {
   batchId: string;
   title: string;
   at: number; // 게시 완료 epoch ms
+  // 결과 종류 태그(15-기타명령 §6-3) — 게시/좋아요/싫어요/조회수/IP. 옛 서버/게시는 기본 "게시".
+  kind?: string;
   receivedAt: string;
   items: PostItemDto[];
 }
@@ -347,6 +351,73 @@ export const api = {
     queueState(id: string): Promise<DeviceQueueStateDto> {
       return request("GET", `/devices/${encodeURIComponent(id)}/queue-state`);
     },
+    // 닉네임 잔여 횟수 실시간 조회 요청(15-기타명령 §3·§6-2) — 하위가 계정별 remainingEditCount를
+    // 조회해 회신하도록 SSE 명령을 내려보낸다. 회신은 nicknameRemaining(GET) 폴링으로 읽는다.
+    queryNicknameRemaining(
+      id: string,
+      loginIds: string[],
+    ): Promise<{ ok: boolean; commandId: string }> {
+      return request(
+        "POST",
+        `/devices/${encodeURIComponent(id)}/nickname-remaining`,
+        { loginIds },
+      );
+    },
+    // 닉네임 잔여 횟수 회신 폴링(15-기타명령 §3) — loginId → 남은횟수 | null(조회 실패/미회신).
+    nicknameRemaining(id: string): Promise<Record<string, number | null>> {
+      return request(
+        "GET",
+        `/devices/${encodeURIComponent(id)}/nickname-remaining`,
+      );
+    },
+  },
+  // 기타 명령(15-기타명령 §2) — 고른 하위 1대에 좋아요/싫어요/조회수/IP변경을 내려보낸다. 전부
+  // 서버 generic issue_command(`/devices/:id/commands`)를 재사용한다(온라인 게이트 409 공통). 결과는
+  // post-report(종류 태그)로 결과 보고에, 원시 로그는 통신 로그에 뜬다. 페이로드: 좋아요/싫어요=
+  // links×loginIds, 조회수=links×repeats, IP변경=없음.
+  etc: {
+    like(
+      deviceId: string,
+      links: string[],
+      loginIds: string[],
+    ): Promise<{ ok: boolean; commandId: string }> {
+      return request(
+        "POST",
+        `/devices/${encodeURIComponent(deviceId)}/commands`,
+        { type: "like_posts", links, loginIds },
+      );
+    },
+    dislike(
+      deviceId: string,
+      links: string[],
+      loginIds: string[],
+    ): Promise<{ ok: boolean; commandId: string }> {
+      return request(
+        "POST",
+        `/devices/${encodeURIComponent(deviceId)}/commands`,
+        { type: "dislike_posts", links, loginIds },
+      );
+    },
+    boostView(
+      deviceId: string,
+      links: string[],
+      repeats: number,
+    ): Promise<{ ok: boolean; commandId: string }> {
+      return request(
+        "POST",
+        `/devices/${encodeURIComponent(deviceId)}/commands`,
+        { type: "boost_view", links, repeats },
+      );
+    },
+    rotateIp(
+      deviceId: string,
+    ): Promise<{ ok: boolean; commandId: string }> {
+      return request(
+        "POST",
+        `/devices/${encodeURIComponent(deviceId)}/commands`,
+        { type: "rotate_ip" },
+      );
+    },
   },
   stop: {
     // 중지 명령(설계서 08 §10) — 실행 중 게시큐 완전 종료. queueId=그 큐 1개, all=디바이스
@@ -415,6 +486,12 @@ export const api = {
       }[]; // 밴드 게시 대상(target=="band")
       commentMode?: string; // 카페·밴드 댓글 대상: "url"(특정글)|"latest"(최신)|"popular"(인기)
       commentCount?: number; // 카페·밴드 최신/인기 댓글 개수(상위 N)
+      commentNicknameRandom?: boolean; // 종토 댓글 닉네임 랜덤(15-기타명령 §3)
+      contentChange?: {
+        title: string;
+        body: string;
+        delaySec: number;
+      } | null; // 종토 글 게시 후 내용변경(15-기타명령 §4)
       assignments: {
         loginId: string;
         stocks: { code: string; name: string }[];
@@ -460,6 +537,12 @@ export const api = {
       }[]; // 밴드 게시 대상(target=="band")
       commentMode?: string; // 카페·밴드 댓글 대상: "url"|"latest"|"popular"
       commentCount?: number; // 카페·밴드 최신/인기 댓글 개수(상위 N)
+      commentNicknameRandom?: boolean; // 종토 댓글 닉네임 랜덤(15-기타명령 §3)
+      contentChange?: {
+        title: string;
+        body: string;
+        delaySec: number;
+      } | null; // 종토 글 게시 후 내용변경(15-기타명령 §4)
       assignments: {
         loginId: string;
         stocks: { code: string; name: string }[];

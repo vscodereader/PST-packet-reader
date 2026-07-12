@@ -236,6 +236,7 @@ mod tests {
             batch_id: batch.into(),
             title: title.into(),
             at: 1,
+            kind: "게시".into(),
             received_at: Utc.timestamp_opt(secs, 0).unwrap(),
             items: vec![PostItemDto {
                 platform: "forum".into(),

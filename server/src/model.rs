@@ -58,6 +58,10 @@ pub struct InvPost {
     /// 글/글+댓글은 제목을 쓰므로 이 값은 무시된다. 옛 하위가 안 보내면 빈 문자열.
     #[serde(default)]
     pub excerpt: String,
+    /// 작성한 댓글 수(≥2 게이트용, 15-기타명령 §3·§6-1). Admin이 종토 댓글 글을 고르면 이 값으로
+    /// 닉네임 랜덤 체크박스 노출을 판정한다(N≥2일 때만). 옛 하위가 안 보내면 0.
+    #[serde(default)]
+    pub comment_count: u32,
 }
 
 /// 인벤토리 계정 1건(전체 계정 — loginId·platform·status). 카페 게시명령은 로그인 성공/실패
@@ -434,8 +438,17 @@ pub struct PostReportReq {
     pub title: String,
     #[serde(default)]
     pub at: i64,
+    /// 결과 종류 태그(15-기타명령 §6-3) — 게시/좋아요/싫어요/조회수/IP. 게시 명령은 이 필드를
+    /// 안 실으므로 기본 "게시"로 본다(하위호환).
+    #[serde(default = "default_report_kind")]
+    pub kind: String,
     #[serde(default)]
     pub items: Vec<PostItemDto>,
+}
+
+/// 결과 보고 종류 기본값(옛 하위/게시 명령 = "게시").
+fn default_report_kind() -> String {
+    "게시".to_string()
 }
 
 /// 서버 보관용 게시 결과(보고 사본). device 컨텍스트(누가 올렸는지)를 더한다.
@@ -446,6 +459,8 @@ pub struct PostReport {
     pub batch_id: String,
     pub title: String,
     pub at: i64,
+    /// 결과 종류 태그(15-기타명령 §6-3) — 게시/좋아요/싫어요/조회수/IP.
+    pub kind: String,
     pub received_at: DateTime<Utc>,
     pub items: Vec<PostItemDto>,
 }
@@ -459,6 +474,8 @@ pub struct PostReportDto {
     pub batch_id: String,
     pub title: String,
     pub at: i64,
+    /// 결과 종류 태그(15-기타명령 §6-3) — 게시/좋아요/싫어요/조회수/IP.
+    pub kind: String,
     pub received_at: String,
     pub items: Vec<PostItemDto>,
 }

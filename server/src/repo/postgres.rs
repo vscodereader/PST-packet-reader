@@ -58,8 +58,11 @@ CREATE TABLE IF NOT EXISTS post_reports (
   at BIGINT NOT NULL,
   received_at TIMESTAMPTZ NOT NULL,
   items JSONB NOT NULL,
+  kind TEXT NOT NULL DEFAULT '게시',
   PRIMARY KEY (device_id, batch_id)
 );
+-- 15-기타명령 §6-3: 결과 종류 태그(게시/좋아요/싫어요/조회수/IP). 기존 테이블에도 멱등 추가.
+ALTER TABLE post_reports ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT '게시';
 CREATE TABLE IF NOT EXISTS login_reports (
   device_id UUID PRIMARY KEY,
   device_name TEXT NOT NULL,
@@ -431,14 +434,15 @@ impl Repository for PostgresRepo {
         let items = serde_json::to_value(&report.items)
             .map_err(|e| AppError::Internal(format!("게시 결과 직렬화 실패: {e}")))?;
         sqlx::query(
-            "INSERT INTO post_reports (device_id, batch_id, device_name, title, at, received_at, items)
-             VALUES ($1,$2,$3,$4,$5,$6,$7)
+            "INSERT INTO post_reports (device_id, batch_id, device_name, title, at, received_at, items, kind)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
              ON CONFLICT (device_id, batch_id) DO UPDATE SET
                device_name = EXCLUDED.device_name,
                title = EXCLUDED.title,
                at = EXCLUDED.at,
                received_at = EXCLUDED.received_at,
-               items = EXCLUDED.items",
+               items = EXCLUDED.items,
+               kind = EXCLUDED.kind",
         )
         .bind(report.device_id)
         .bind(&report.batch_id)
@@ -447,6 +451,7 @@ impl Repository for PostgresRepo {
         .bind(report.at)
         .bind(report.received_at)
         .bind(items)
+        .bind(&report.kind)
         .execute(&self.pool)
         .await
         .map_err(db_err)?;
@@ -467,6 +472,7 @@ impl Repository for PostgresRepo {
                     batch_id: r.get("batch_id"),
                     title: r.get("title"),
                     at: r.get("at"),
+                    kind: r.get("kind"),
                     received_at: r.get("received_at"),
                     items,
                 })
