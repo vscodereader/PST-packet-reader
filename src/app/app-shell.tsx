@@ -172,6 +172,17 @@ export function MacroApp() {
         autoClose: 3500,
       });
     }).then(track);
+    void listen<{ stock?: string; reason?: string }>(
+      "forum-content-edit-failed",
+      (e) => {
+        notifications.show({
+          color: "red",
+          title: "내용 변경 실패",
+          message: `${e.payload.stock ?? "종목토론방"} · ${clip(e.payload.reason)}`,
+          autoClose: 5000,
+        });
+      },
+    ).then(track);
     return () => {
       active = false;
       unlisteners.forEach((un) => un());

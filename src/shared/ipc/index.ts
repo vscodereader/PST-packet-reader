@@ -372,6 +372,10 @@ export const ipc = {
   forum: {
     /** 게시 엔진이 붙을 Chrome DevTools 엔드포인트. 백엔드가 단일 출처(프론트 상수 아님). */
     endpoint: () => call<{ host: string; port: number }>("forum_endpoint"),
+    /** 닉네임 랜덤(설계서 §2) UI용: 이 계정의 닉네임 변경 잔여 횟수(5회 상한 중 남은 횟수)를
+     * 조회한다. 조회 실패/필드 없음이면 null. loginId는 쿠키 파일 키. */
+    nicknameRemaining: (loginId: string) =>
+      call<number | null>("forum_nickname_remaining", { loginId }),
     publishNow: (request: ForumPublishRequest) =>
       call<ForumPublishResult[]>("run_forum_publish_now", { request }),
     /** 여러 게시글 링크 × 선택한 계정들의 모든 조합에 좋아요를 누른다(페이지 이동 없이 API 전용).

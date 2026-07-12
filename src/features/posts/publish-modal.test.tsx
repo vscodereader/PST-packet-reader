@@ -1006,6 +1006,32 @@ describe("PublishModal", () => {
     ).toBeInTheDocument();
   });
 
+  it("글+댓글(both) 모드에서 닉네임 랜덤 체크박스가 보인다(설계서 §2)", async () => {
+    // 댓글 전용뿐 아니라 글+댓글 모드에서도 닉네임 랜덤을 켤 수 있어야 한다(게이트 완화).
+    renderPublish({
+      doc: { ...postDoc, kind: "both", comments: ["댓글1"] },
+    });
+    expect(await screen.findByText("닉네임 랜덤")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("checkbox", { name: "랜덤" }),
+    ).toBeInTheDocument();
+  });
+
+  it("닉네임 랜덤을 체크하면 계정별 변경 잔여 횟수가 뜬다(forum_nickname_remaining 모킹)", async () => {
+    // 체크 전에는 조회하지 않고(불필요 API 방지), 체크하면 forum 계정별 잔여 횟수를 보여준다.
+    // 기본 forum 계정(invest_king7) 하나만 선택돼 있어 접두사 없이 "변경 기회 N회 남음"으로 뜬다.
+    renderPublish({
+      doc: { ...postDoc, kind: "both", comments: ["댓글1"] },
+    });
+    const checkbox = await screen.findByRole("checkbox", { name: "랜덤" });
+    expect(screen.queryByText(/변경 기회/)).not.toBeInTheDocument();
+    await userEvent.click(checkbox);
+    // 모킹된 forum_nickname_remaining=3 → "변경 기회 3회 남음".
+    expect(
+      await screen.findByText("변경 기회 3회 남음"),
+    ).toBeInTheDocument();
+  });
+
   it("enqueues a 'both' job with an empty comment pool", async () => {
     // both 문서이지만 댓글 풀이 비면 plan.comments는 빈 배열로 적재된다(워커가 글만 게시).
     // 결과 행은 "추가됨"으로 떠야 한다 — 빈 댓글 때문에 실패처럼 접히면 안 된다.

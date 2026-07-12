@@ -1285,6 +1285,18 @@ impl NaverPacketClient {
         Ok(nickname)
     }
 
+    /// 닉네임 변경 잔여 횟수(remainingEditCount)를 조회한다(설계서 §2, 닉네임 랜덤 UI용). 프로필
+    /// form 응답의 `remainingEditCount`(5회 상한 중 남은 횟수)를 그대로 돌려준다. 필드가 없으면
+    /// None. change_nickname_avoiding이 쓰는 것과 같은 form GET을 재사용한다.
+    pub(super) fn nickname_remaining_edit_count(&self) -> AutomationResult<Option<i64>> {
+        let form = self.get_stock_json(
+            "/api/community/profile/users/form",
+            DEFAULT_REFERER,
+            "프로필 form(닉네임 잔여 횟수)",
+        )?;
+        Ok(form.get("remainingEditCount").and_then(Value::as_i64))
+    }
+
     // 프로필 소개 2222가 저장 가능한 값인지 검증 패킷으로 확인하는 함수입니다.
     fn validate_profile_introduction(&self, referer: &str) -> AutomationResult<()> {
         let response_text = self

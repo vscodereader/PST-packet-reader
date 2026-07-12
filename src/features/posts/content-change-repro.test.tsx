@@ -33,8 +33,10 @@ describe("내용변경 제목 클릭 재현", () => {
         <PublishModal open doc={postDoc} onClose={vi.fn()} go={vi.fn()} />
       </MantineProvider>,
     );
-    // 게시 후 내용 변경 체크
-    await userEvent.click(screen.getByLabelText("게시 후 내용 변경"));
+    // 내용변경 체크박스는 forum(종목토론방) 컨텍스트에서만 뜬다. 계정 자동선택이 비동기라
+    // forum 카드("종목 선택" 버튼)가 뜰 때까지 기다린 뒤 체크한다.
+    await screen.findByRole("button", { name: /종목 선택/ });
+    await userEvent.click(await screen.findByLabelText("게시 후 내용 변경"));
     // 내용변경 제목 입력 클릭 + 타이핑
     const title = await screen.findByPlaceholderText("변경할 새 제목");
     await userEvent.click(title);

@@ -271,7 +271,8 @@ pub(crate) fn launch_for_login(headless: bool) -> Result<ChromeHandle, Orchestra
     tracing::info!(
         installed = %installed.as_deref().unwrap_or("(확인 실패)"),
         chosen = %ua.full_version,
-        "[CHROME] 로그인 UA 로테이션 — 설치 크롬 버전 이하에서 선택"
+        chosen_ua = %ua.user_agent,
+        "[CHROME] 로그인 UA 로테이션 — 설치 크롬 버전 이하에서 선택(UA 문자열 raw)"
     );
     launch_inner(headless, Some(ua))
 }
@@ -340,13 +341,23 @@ fn launch_inner(headless: bool, ua: Option<UaProfile>) -> Result<ChromeHandle, O
         let url_idx = args.len() - 1;
         args.insert(url_idx, WASM_HOST_BLOCK_ARG);
         tracing::info!(
-            "[CHROME] wtm.pstatic.net(봇탐지 WASM 엔진) DNS 차단 — 기본 ON(끄려면 \
-             PSTMACRO_BLOCK_WASM=0). ncaptcha SDK 단독 경로 강제(캡차 대응)."
+            env = %std::env::var("PSTMACRO_BLOCK_WASM").unwrap_or_else(|_| "(미설정=기본ON)".to_owned()),
+            arg = %WASM_HOST_BLOCK_ARG,
+            "[CHROME] wtm.pstatic.net DNS 차단 인자 실제 삽입 — ncaptcha SDK 단독 경로 강제(캡차 대응)"
+        );
+    } else if ua.is_some() {
+        tracing::info!(
+            env = %std::env::var("PSTMACRO_BLOCK_WASM").unwrap_or_else(|_| "(미설정)".to_owned()),
+            "[CHROME] wtm DNS 차단 OFF(PSTMACRO_BLOCK_WASM=falsy) — --host-resolver-rules 미삽입(대조군)"
         );
     }
     if headless {
         args.insert(0, "--headless=new");
     }
+
+    // 실제로 Chrome 에 넘어가는 커맨드라인 인자 원문(--host-resolver-rules·--user-agent·
+    // --user-data-dir 포함)을 그대로 남겨, 위 결정들이 실제 명령줄에 반영됐는지 로그만으로 검증한다.
+    tracing::info!("[CHROME] → {} {}", chrome, args.join(" "));
 
     let child = match Command::new(&chrome).args(&args).spawn() {
         Ok(child) => child,
@@ -387,6 +398,8 @@ fn wait_for_port(user_data_dir: &Path) -> Result<u16, OrchestratorError> {
     loop {
         if let Ok(content) = std::fs::read_to_string(&path) {
             if let Some(port) = parse_devtools_active_port(&content) {
+                tracing::info!("[CHROME] ← DevToolsActivePort(raw): {:?}", content);
+                tracing::info!("[CHROME]   판정: 첫 줄 파싱 → 디버그 포트 {port}");
                 return Ok(port);
             }
         }
