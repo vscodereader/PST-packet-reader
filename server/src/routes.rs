@@ -61,6 +61,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/admin/scheduled/:id", delete(delete_scheduled))
         .route("/devices/:id/inventory", get(device_inventory))
         .route("/devices/:id/queue-state", get(device_queue_state))
+        .route(
+            "/devices/:id/nickname-remaining",
+            post(issue_nickname_query).get(device_nickname_remaining),
+        )
         .route("/admin/kill", post(issue_kill))
         .route("/admin/stop-reports", get(list_stop_reports))
         .route("/admin/daily-results", get(list_daily_results))
@@ -79,6 +83,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/agent/state", post(agent_state))
         .route("/agent/log", post(agent_log))
         .route("/agent/inventory", post(agent_inventory))
+        .route("/agent/nickname-remaining", post(agent_nickname_remaining))
         .route("/agent/queue-state", post(agent_queue_state))
         .route("/agent/stop-report", post(agent_stop_report))
         .route("/agent/commands/:command_id/result", post(command_result))
@@ -331,11 +336,19 @@ async fn delete_device(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CommandReq {
     #[serde(rename = "type")]
     kind: String,
-    #[serde(rename = "commandId")]
     command_id: Option<String>,
+    // 기타 명령(15-기타명령 §2) 페이로드 — 좋아요/싫어요=links×loginIds, 조회수=links×repeats.
+    // 다른 명령은 비운다(그 명령들은 SSE에 etc를 안 싣는다).
+    #[serde(default)]
+    links: Vec<String>,
+    #[serde(default)]
+    login_ids: Vec<String>,
+    #[serde(default)]
+    repeats: u32,
 }
 
 fn cmd_label(kind: &str) -> &'static str {
@@ -344,7 +357,30 @@ fn cmd_label(kind: &str) -> &'static str {
         "distribute_accounts" => "계정 분배",
         "publish_posts" => "게시 명령",
         "delete_accounts" => "계정 삭제",
+        // 기타 명령(15-기타명령 §2).
+        "like_posts" => "좋아요",
+        "dislike_posts" => "싫어요",
+        "boost_view" => "조회수",
+        "rotate_ip" => "IP 변경",
         _ => "명령",
+    }
+}
+
+/// 기타 명령(15-기타명령 §2-3)이면 SSE 페이로드에 etc(links/loginIds/repeats)를 싣는다. 나머지
+/// 명령(게시·kill·계정 등 전용 경로가 따로 있는 것)은 type/commandId만 내려보낸다(기존 동작).
+fn command_payload(req: &CommandReq, cid: &str) -> serde_json::Value {
+    match req.kind.as_str() {
+        "like_posts" | "dislike_posts" => serde_json::json!({
+            "type": req.kind,
+            "commandId": cid,
+            "etc": { "links": req.links, "loginIds": req.login_ids },
+        }),
+        "boost_view" => serde_json::json!({
+            "type": req.kind,
+            "commandId": cid,
+            "etc": { "links": req.links, "repeats": req.repeats },
+        }),
+        _ => serde_json::json!({ "type": req.kind, "commandId": cid }),
     }
 }
 
@@ -380,7 +416,7 @@ async fn issue_command(
         return Err(AppError::Conflict(format!("{reason} — 재연결 후 다시 시도")));
     }
     // online → 명령 push(SSE) + [CMD] 로그.
-    let payload = serde_json::json!({ "type": req.kind, "commandId": cid });
+    let payload = command_payload(&req, &cid);
     st.hub.device_push(uid, payload.to_string());
     st.audit(
         "[CMD]",
@@ -1134,6 +1170,7 @@ async fn post_report(
         batch_id: req.id.clone(),
         title: req.title.clone(),
         at: req.at,
+        kind: req.kind.clone(),
         received_at: Utc::now(),
         items: req.items,
     };
@@ -1151,8 +1188,8 @@ async fn post_report(
         &format!("{} → Admin", device.name),
         &device.id.to_string(),
         &format!(
-            "게시 결과: '{}' — {ok}/{total}곳 성공 (batch={})",
-            req.title, req.id
+            "{} 결과: '{}' — {ok}/{total}곳 성공 (batch={})",
+            req.kind, req.title, req.id
         ),
         level,
     )
@@ -1176,6 +1213,7 @@ async fn list_post_reports(
                 batch_id: r.batch_id,
                 title: r.title,
                 at: r.at,
+                kind: r.kind,
                 received_at: r.received_at.to_rfc3339(),
                 items: r.items,
             })
@@ -1315,6 +1353,106 @@ async fn device_inventory(
     })))
 }
 
+// ───────────── 닉네임 잔여 횟수 실시간 조회(15-기타명령 §3·§6-2) ─────────────
+// Admin이 닉네임 랜덤 체크박스를 켜면 선택한 종토 계정들의 remainingEditCount를 실시간으로 왕복
+// 조회한다: Admin POST → 서버가 하위 SSE로 query_nickname_remaining 발송 → 하위가 계정별
+// forum_nickname_remaining 조회 후 /agent/nickname-remaining 회신 → 서버 메모리 보관 → Admin GET 폴링.
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NicknameQueryReq {
+    #[serde(default)]
+    command_id: Option<String>,
+    #[serde(default)]
+    login_ids: Vec<String>,
+}
+
+/// Admin → 서버: 닉네임 잔여 조회 요청. online이 아니면 거부(409). 하위 SSE로 조회 명령을 내려보낸다.
+async fn issue_nickname_query(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<NicknameQueryReq>,
+) -> AppResult<Json<serde_json::Value>> {
+    let op = st.auth_operator(&headers).await?;
+    let uid = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("기기 id 형식 오류".into()))?;
+    let device = st
+        .repo
+        .find_device(uid)
+        .await?
+        .ok_or_else(|| AppError::NotFound("없는 기기".into()))?;
+    let cid = req
+        .command_id
+        .clone()
+        .unwrap_or_else(|| format!("c-{}", Uuid::new_v4()));
+    if !AppState::is_commandable(device.state) {
+        return Err(AppError::Conflict(
+            "대상 컴퓨터가 online 이 아닙니다 — 재연결 후 다시 시도".into(),
+        ));
+    }
+    let payload = serde_json::json!({
+        "type": "query_nickname_remaining",
+        "commandId": cid,
+        "nicknameQuery": { "loginIds": req.login_ids },
+    });
+    st.hub.device_push(uid, payload.to_string());
+    st.audit(
+        "[CMD]",
+        &format!("Admin → {}", device.name),
+        &id,
+        &format!(
+            "query_nickname_remaining(닉네임 잔여 조회) commandId={cid} 계정 {}건 operator={}",
+            req.login_ids.len(),
+            op.login_id
+        ),
+        "cmd",
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "ok": true, "commandId": cid })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NicknameRemainingEntry {
+    login_id: String,
+    #[serde(default)]
+    remaining: Option<i64>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NicknameRemainingReport {
+    #[serde(default)]
+    results: Vec<NicknameRemainingEntry>,
+}
+
+/// 하위 → 서버: 닉네임 잔여 조회 회신. device당 loginId→(남은횟수|null) 맵에 병합 보관한다.
+/// 주기 보고가 아니라 온디맨드라 통신로그엔 남기지 않는다(폴링 응답과 동일).
+async fn agent_nickname_remaining(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<NicknameRemainingReport>,
+) -> AppResult<Json<serde_json::Value>> {
+    let device = st.auth_device(&headers).await?;
+    let entries: Vec<(String, Option<i64>)> = req
+        .results
+        .into_iter()
+        .map(|e| (e.login_id, e.remaining))
+        .collect();
+    st.set_nickname_remaining(device.id, entries);
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Admin 게시명령 화면 — 이 하위의 닉네임 잔여 횟수 맵(loginId→남은횟수|null). 아직 회신 전이면 빈 맵.
+async fn device_nickname_remaining(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> AppResult<Json<std::collections::HashMap<String, Option<i64>>>> {
+    st.auth_operator(&headers).await?;
+    let uid = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("기기 id 형식 오류".into()))?;
+    Ok(Json(st.get_nickname_remaining(uid)))
+}
+
 /// 하위 → 서버: 실행/대기 게시큐 스냅샷 보고(설계서 08 §10-2). 주기 보고라 통신로그엔 안 남기고
 /// 최신 1건만 보관한다(kill 명령만 원문 로그). Admin "중지 명령" 페이지가 폴링으로 읽는다.
 async fn agent_queue_state(
@@ -1449,3 +1587,81 @@ async fn list_login_reports(
 }
 
 use futures::StreamExt;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::PostReportReq;
+    use crate::state::AppState;
+    use crate::model::DeviceState;
+
+    fn req(kind: &str, links: Vec<&str>, login_ids: Vec<&str>, repeats: u32) -> CommandReq {
+        CommandReq {
+            kind: kind.into(),
+            command_id: None,
+            links: links.into_iter().map(String::from).collect(),
+            login_ids: login_ids.into_iter().map(String::from).collect(),
+            repeats,
+        }
+    }
+
+    #[test]
+    fn cmd_label_covers_etc_commands() {
+        assert_eq!(cmd_label("like_posts"), "좋아요");
+        assert_eq!(cmd_label("dislike_posts"), "싫어요");
+        assert_eq!(cmd_label("boost_view"), "조회수");
+        assert_eq!(cmd_label("rotate_ip"), "IP 변경");
+        // 기존 명령은 그대로.
+        assert_eq!(cmd_label("publish_posts"), "게시 명령");
+        assert_eq!(cmd_label("unknown_thing"), "명령");
+    }
+
+    #[test]
+    fn command_payload_carries_etc_for_like_and_boost() {
+        // 좋아요: links×loginIds를 etc에 싣는다(repeats는 안 실음).
+        let p = command_payload(&req("like_posts", vec!["l1", "l2"], vec!["a", "b"], 0), "c-1");
+        assert_eq!(p["type"], "like_posts");
+        assert_eq!(p["commandId"], "c-1");
+        assert_eq!(p["etc"]["links"][1], "l2");
+        assert_eq!(p["etc"]["loginIds"][0], "a");
+        assert!(p["etc"].get("repeats").is_none());
+
+        // 조회수: links×repeats(계정 없음).
+        let p = command_payload(&req("boost_view", vec!["l1"], vec![], 30), "c-2");
+        assert_eq!(p["etc"]["repeats"], 30);
+        assert!(p["etc"].get("loginIds").is_none());
+    }
+
+    #[test]
+    fn command_payload_rotate_ip_and_others_have_no_etc() {
+        let p = command_payload(&req("rotate_ip", vec![], vec![], 0), "c-3");
+        assert_eq!(p["type"], "rotate_ip");
+        assert!(p.get("etc").is_none());
+        // 기존 명령(전용 경로)도 etc 없이 type/commandId만.
+        let p = command_payload(&req("publish_posts", vec![], vec![], 0), "c-4");
+        assert!(p.get("etc").is_none());
+    }
+
+    #[test]
+    fn online_gate_rejects_non_online_states() {
+        // §4-2 온라인 게이트: issue_command가 재사용하는 판정. online만 명령 가능.
+        assert!(AppState::is_commandable(DeviceState::Online));
+        assert!(!AppState::is_commandable(DeviceState::Rotating));
+        assert!(!AppState::is_commandable(DeviceState::Reconnecting));
+        assert!(!AppState::is_commandable(DeviceState::Offline));
+    }
+
+    #[test]
+    fn post_report_kind_defaults_to_publish() {
+        // 게시 명령은 kind를 안 실으므로 기본 "게시".
+        let r: PostReportReq =
+            serde_json::from_str(r#"{"id":"b1","title":"10개 게시","at":1,"items":[]}"#).unwrap();
+        assert_eq!(r.kind, "게시");
+        // 기타 명령은 종류 태그를 실어 보낸다.
+        let r: PostReportReq = serde_json::from_str(
+            r#"{"id":"etc-1","title":"좋아요","at":1,"kind":"좋아요","items":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(r.kind, "좋아요");
+    }
+}

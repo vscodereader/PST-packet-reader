@@ -74,7 +74,25 @@ pub struct PublishSpec {
     /// 카페·밴드 최신/인기 댓글 개수(상위 N). 0이면 하위가 글의 commentCount로 폴백.
     #[serde(default)]
     pub comment_count: u32,
+    /// 닉네임 랜덤 댓글(종토 전용, 15-기타명령 §3). true면 하위 게시 큐가 각 댓글마다 닉네임을
+    /// 랜덤으로 회전한다(계정 내 중복 금지·5회 한도, 엔진 처리). 빈값=false(하위호환).
+    #[serde(default)]
+    pub comment_nickname_random: bool,
+    /// 게시 후 내용 변경(종토 글 전용, 15-기타명령 §4). 채워지면 하위가 글 게시 후 delaySec초 뒤
+    /// 새 제목/본문으로 edit한다(엔진 처리). None=변경 없음(하위호환).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_change: Option<ContentChange>,
     pub assignments: Vec<PublishAssignment>,
+}
+
+/// 게시 후 내용 변경 명세(15-기타명령 §4). Admin이 새 제목/본문/지연(초)을 실어 보내면 하위가
+/// 게시 후 지연 뒤 글을 edit한다. 하위 desktop `ContentChange`와 동형(camelCase title/body/delaySec).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentChange {
+    pub title: String,
+    pub body: String,
+    pub delay_sec: u32,
 }
 
 /// 카페 게시판/글 대상(Admin이 링크를 파싱해 보냄). menuId=게시판(글쓰기), articleId=특정 글(url 댓글).
@@ -258,6 +276,12 @@ pub async fn dispatch_publish(
             "forumCommentDistribute": spec.forum_comment_distribute,
             "commentMode": spec.comment_mode,
             "commentCount": spec.comment_count,
+            "commentNicknameRandom": spec.comment_nickname_random,
+            "contentChange": spec.content_change.as_ref().map(|c| serde_json::json!({
+                "title": c.title,
+                "body": c.body,
+                "delaySec": c.delay_sec,
+            })),
             "assignments": assignments_json,
         }
     });
@@ -431,6 +455,8 @@ mod tests {
                 band_targets: vec![],
                 comment_mode: String::new(),
                 comment_count: 0,
+                comment_nickname_random: false,
+                content_change: None,
                 assignments: vec![PublishAssignment {
                     login_id: "acc".into(),
                     stocks: vec![PublishStock { code: "005930".into(), name: "삼성전자".into() }],

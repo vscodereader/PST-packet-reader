@@ -86,6 +86,16 @@ describe("result-report 매핑", () => {
       expect(b.at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
     });
 
+    it("종류 태그(§6-3): 없으면 '게시', 있으면 그대로", () => {
+      // 게시 명령·옛 서버는 kind가 없다 → "게시"로 폴백.
+      expect(toPostBatch(base).kind).toBe("게시");
+      // 기타 명령은 종류 태그를 실어 보낸다.
+      expect(toPostBatch({ ...base, kind: "좋아요" }).kind).toBe("좋아요");
+      expect(toPostBatch({ ...base, kind: "IP" }).kind).toBe("IP");
+      // 빈 문자열도 게시로 본다.
+      expect(toPostBatch({ ...base, kind: "" }).kind).toBe("게시");
+    });
+
     it("성공 item은 success + posted(제목/본문/댓글/URL) 보존", () => {
       const b = toPostBatch({
         ...base,

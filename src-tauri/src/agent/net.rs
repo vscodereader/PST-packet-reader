@@ -172,6 +172,18 @@ pub async fn post_stop_report(
     post_authed(client, base, token, "/agent/stop-report", body).await
 }
 
+/// 닉네임 잔여 횟수 조회 회신(15-기타명령 §3·§6-2 실시간). 하위가 계정별 remainingEditCount를
+/// 올려 Admin이 닉네임 랜덤 체크박스 아래 "변경 가능횟수 N회"를 실시간으로 보게 한다.
+/// body = `{results:[{loginId, remaining: number|null}]}`.
+pub async fn post_nickname_remaining(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    body: &serde_json::Value,
+) -> Result<(), String> {
+    post_authed(client, base, token, "/agent/nickname-remaining", body).await
+}
+
 /// SSE 스트림 열기(`GET /agent/stream?token=`). 브라우저가 아니므로 토큰을 쿼리로 싣는다.
 /// 반환된 Response를 `chunk()`로 읽어 `data:` 줄을 파싱한다(호출부).
 pub async fn open_stream(

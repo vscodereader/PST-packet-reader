@@ -3,6 +3,7 @@ import {
   Badge,
   Box,
   Button,
+  Checkbox,
   Group,
   NumberInput,
   Paper,
@@ -11,6 +12,7 @@ import {
   SimpleGrid,
   Stack,
   Text,
+  Textarea,
   TextInput,
   ThemeIcon,
 } from "@mantine/core";
@@ -154,12 +156,20 @@ interface ForumCfg {
   market: Market;
   count: number | "";
   accounts: string[];
+  // 게시 후 내용변경(종토 글 전용, 15-기타명령 §4). enabled=false면 payload에 싣지 않는다.
+  contentChange: {
+    enabled: boolean;
+    title: string;
+    body: string;
+    delaySec: number;
+  };
 }
 const DEFAULT_CFG: ForumCfg = {
   category: "tradingValue",
   market: "all",
   count: "",
   accounts: [],
+  contentChange: { enabled: false, title: "", body: "", delaySec: 0 },
 };
 
 // ── 미리보기 더미(서버 프록시 배선 전) ──
@@ -258,7 +268,13 @@ export function PublishCommand({
     Record<
       string,
       {
-        posts: { id: string; title: string; kind?: string; excerpt?: string }[];
+        posts: {
+          id: string;
+          title: string;
+          kind?: string;
+          excerpt?: string;
+          commentCount?: number;
+        }[];
         accounts: string[];
         // 전체 계정(platform·status) — 카페는 로그인 무관 카페 계정을 전부 보여준다.
         accountRows: { loginId: string; platform?: string; status?: string }[];
@@ -328,8 +344,19 @@ export function PublishCommand({
   // 실데이터 우선, 없으면(오프라인/미보고) 더미. 글목록이 비어있어도 보고된 것이면 실데이터로 본다.
   const postsFor = (
     deviceId: string,
-  ): { id: string; title: string; kind?: string; excerpt?: string }[] =>
-    invByDev[deviceId]?.posts ?? mockPosts(deviceId);
+  ): {
+    id: string;
+    title: string;
+    kind?: string;
+    excerpt?: string;
+    commentCount?: number;
+  }[] => invByDev[deviceId]?.posts ?? mockPosts(deviceId);
+  // 선택한 글의 작성 댓글 수(≥2 게이트용, 15-기타명령 §3). 글 미선택/미보고면 0.
+  const commentCountFor = (deviceId: string): number => {
+    const pid = postByDev[deviceId];
+    if (!pid) return 0;
+    return postsFor(deviceId).find((x) => x.id === pid)?.commentCount ?? 0;
+  };
   // 선택한 글 종류의 글만(사용자 요청: 종류별로 안 섞이게).
   const postsForKind = (deviceId: string, kind: PostKind) =>
     postsFor(deviceId).filter((p) => postKindOf(p) === kind);
@@ -492,6 +519,7 @@ export function PublishCommand({
                 kind={kindByDev[d.id] ?? "post"}
                 postTitle={postLabelFor(d.id)}
                 postId={postByDev[d.id] ?? null}
+                postCommentCount={commentCountFor(d.id)}
                 accounts={accountsFor(d.id, targetByDev[d.id] ?? null)}
                 target={targetByDev[d.id] ?? null}
                 onSetTarget={(t) =>
@@ -515,6 +543,7 @@ function DeviceBlock({
   kind,
   postId,
   postTitle,
+  postCommentCount,
   accounts,
   target,
   onSetTarget,
@@ -526,6 +555,7 @@ function DeviceBlock({
   kind: PostKind;
   postId: string | null;
   postTitle: string | null;
+  postCommentCount: number;
   accounts: string[];
   target: Target | null;
   onSetTarget: (t: Target) => void;
@@ -599,6 +629,7 @@ function DeviceBlock({
           device={device}
           postId={postId}
           postTitle={postTitle}
+          postCommentCount={postCommentCount}
           accounts={accounts}
           onSchedule={onSchedule}
         />
@@ -650,7 +681,7 @@ function DeviceBlock({
 }
 
 // 종토 상세 구성(카테고리/시장/종목수/계정 + 4버튼). 외곽 Paper·기기헤더는 DeviceBlock이 제공.
-function ForumConfig({
+export function ForumConfig({
   device,
   mode,
   cfg,
@@ -751,6 +782,17 @@ function ForumConfig({
     }));
   };
 
+  // 게시 후 내용변경(15-기타명령 §4) — 체크됐을 때만 payload에 싣는다. 엔진이 게시 후 지연 뒤 edit.
+  const contentChangePayload = cfg.contentChange.enabled
+    ? {
+        contentChange: {
+          title: cfg.contentChange.title,
+          body: cfg.contentChange.body,
+          delaySec: cfg.contentChange.delaySec,
+        },
+      }
+    : {};
+
   const runNow = (split: boolean) => {
     void (async () => {
       try {
@@ -761,6 +803,7 @@ function ForumConfig({
           targetLabel: "종목토론방",
           split,
           mode, // 글=post / 글+댓글=both(글 게시 후 그 글에 저장된 댓글까지).
+          ...contentChangePayload,
           assignments: buildAssignments(split),
         });
         notifications.show({
@@ -802,6 +845,7 @@ function ForumConfig({
           targetLabel: "종목토론방",
           split,
           mode,
+          ...contentChangePayload,
           assignments: buildAssignments(split),
           at,
           detail,
@@ -914,6 +958,60 @@ function ForumConfig({
           )}
         </Group>
       </ScrollArea.Autosize>
+
+      {/* 게시 후 내용변경(15-기타명령 §4) — 종목토론방(글쓰기) 전용. 종목 수와 계정 사이 위치.
+          체크하면 새 제목/내용/지연(초)을 입력한다. 게시 성공 후 지연 뒤 그 글을 새 내용으로 edit한다
+          (엔진 spawn_forum_content_edit이 처리 — 여기선 payload에 값만 싣는다). 데스크톱 내용변경 블록 이식. */}
+      <Checkbox
+        mb={cfg.contentChange.enabled ? 8 : "sm"}
+        label="게시 후 내용변경"
+        checked={cfg.contentChange.enabled}
+        onChange={(e) => {
+          const enabled = e.currentTarget.checked;
+          onPatch({ contentChange: { ...cfg.contentChange, enabled } });
+        }}
+      />
+      {cfg.contentChange.enabled && (
+        <Stack gap={10} mb="sm">
+          <TextInput
+            size="xs"
+            label="제목"
+            placeholder="변경할 새 제목"
+            value={cfg.contentChange.title}
+            onChange={(e) => {
+              const title = e.currentTarget.value;
+              onPatch({ contentChange: { ...cfg.contentChange, title } });
+            }}
+          />
+          <Textarea
+            size="xs"
+            label="내용"
+            placeholder="변경할 새 내용"
+            rows={4}
+            value={cfg.contentChange.body}
+            onChange={(e) => {
+              const body = e.currentTarget.value;
+              onPatch({ contentChange: { ...cfg.contentChange, body } });
+            }}
+          />
+          <Group gap={8} align="flex-end" wrap="nowrap">
+            <NumberInput
+              size="xs"
+              label="변경 지연"
+              min={0}
+              w={120}
+              value={cfg.contentChange.delaySec}
+              onChange={(v) => {
+                const delaySec = typeof v === "number" ? v : 0;
+                onPatch({ contentChange: { ...cfg.contentChange, delaySec } });
+              }}
+            />
+            <Text fz={13} fw={600} mb={8}>
+              초
+            </Text>
+          </Group>
+        </Stack>
+      )}
 
       {/* 계정 선택 — 이 하위의 성공(Active) 계정만. 다중 선택이라 버튼 토글 목록으로 처리. */}
       <Text size="xs" c="dimmed" mb={4}>
@@ -1038,16 +1136,18 @@ function ForumConfig({
 // 종토 댓글 상세 구성(사용자 확정 2026-07-06: 종토 댓글=특정 게시글). 링크 여러 개 입력 + 링크추가
 // → 각 URL의 글에 저장된 댓글을 단다(엔진 기존 comment_url 경로 재사용). 계정 선택 후 지금/예약
 // 게시. 나눠서는 없다(URL 댓글은 계정마다 같은 URL에 단다). 데스크톱 writer-modal 링크 UX 이식.
-function ForumCommentConfig({
+export function ForumCommentConfig({
   device,
   postId,
   postTitle,
+  postCommentCount,
   accounts,
   onSchedule,
 }: {
   device: PubDevice;
   postId: string | null;
   postTitle: string | null;
+  postCommentCount: number;
   accounts: string[];
   onSchedule: (item: ScheduledItem) => void;
 }) {
@@ -1055,10 +1155,74 @@ function ForumCommentConfig({
   const [accts, setAccts] = useState<string[]>([]);
   const [armed, setArmed] = useState<boolean>(false);
   const [sched, setSched] = useState(() => nowParts());
+  // 닉네임 랜덤(15-기타명령 §3): 선택 글의 작성 댓글 수 ≥ 2일 때만 체크박스 노출(데스크톱 게이트 +
+  // Admin "댓글 수 ≥ 2"). 댓글 1개면 계정을 여러 개 골라도 숨긴다.
+  const showNicknameRandom = postCommentCount >= 2;
+  const [nicknameRandom, setNicknameRandom] = useState(false);
+  // 계정별 변경 가능 잔여 횟수(§6-2 실시간): 체크박스를 켤 때 하위에 원격 조회를 요청하고 그 회신을
+  // 폴링해 채운다. loginId → 남은횟수 | "loading"(확인 중) | "error"(확인 실패).
+  const [remaining, setRemaining] = useState<
+    Record<string, number | "loading" | "error">
+  >({});
 
   const cleanUrls = urls.map((u) => u.trim()).filter((u) => u.length > 0);
   const valid = postTitle != null && cleanUrls.length > 0 && accts.length > 0;
   const detail = `특정 게시글 ${cleanUrls.length}개 · 계정 ${accts.length}`;
+  // 닉네임 랜덤 flag는 게이트(≥2)가 열렸고 체크됐을 때만 payload에 싣는다. 숨겨지면 항상 false.
+  const commentNicknameRandom = showNicknameRandom && nicknameRandom;
+  const acctsKey = accts.join(",");
+
+  // 닉네임 랜덤을 켜면(§6-2 실시간) 선택 계정들의 잔여 횟수를 하위에 조회 요청하고, 회신을 폴링해
+  // 채운다. 먼저 각 계정을 "확인 중"으로 표시하고, POST(조회 명령)→GET(회신) 폴링으로 갱신한다.
+  // 언마운트·의존성 변경 시 늦은 응답이 상태를 덮지 않도록 cancelled로 가드한다.
+  useEffect(() => {
+    if (!commentNicknameRandom || accts.length === 0) return;
+    let cancelled = false;
+    const targets = accts;
+    // 각 계정을 "확인 중"으로 먼저 표시(데스크톱 publish-modal과 동일 — 계정별 setState).
+    targets.forEach((id) =>
+      setRemaining((m) => ({ ...m, [id]: "loading" })),
+    );
+    const applyMap = (map: Record<string, number | null>) => {
+      if (cancelled) return;
+      setRemaining((m) => {
+        const next = { ...m };
+        targets.forEach((id) => {
+          if (id in map) next[id] = map[id] ?? "error";
+        });
+        return next;
+      });
+    };
+    // 원격 조회 요청 → 이후 회신을 몇 초간 폴링. 오프라인/실패는 확인 실패로 표시.
+    void api.devices
+      .queryNicknameRemaining(device.id, targets)
+      .catch(() => {
+        if (!cancelled)
+          setRemaining((m) => {
+            const next = { ...m };
+            targets.forEach((id) => {
+              next[id] = "error";
+            });
+            return next;
+          });
+      });
+    const poll = () => {
+      api.devices
+        .nicknameRemaining(device.id)
+        .then(applyMap)
+        .catch(() => {
+          /* 미회신/오프라인 → 다음 폴링까지 "확인 중" 유지 */
+        });
+    };
+    poll();
+    const timer = window.setInterval(poll, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+    // acctsKey는 accts의 안정 문자열 키(배열 참조 대신 값으로 비교).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [commentNicknameRandom, acctsKey, device.id]);
 
   // 댓글은 계정마다 같은 URL들에 단다(나눠서 없음). assignment는 계정만(종목 없음).
   const buildAssignments = () =>
@@ -1082,6 +1246,7 @@ function ForumCommentConfig({
           split: false,
           mode: "comment",
           commentUrls: cleanUrls,
+          commentNicknameRandom,
           assignments: buildAssignments(),
         });
         notifications.show({
@@ -1125,6 +1290,7 @@ function ForumCommentConfig({
           mode: "comment",
           commentUrls: cleanUrls,
           forumCommentDistribute: true,
+          commentNicknameRandom,
           assignments: buildAssignments(),
         });
         notifications.show({
@@ -1164,6 +1330,7 @@ function ForumCommentConfig({
           split: false,
           mode: "comment",
           commentUrls: cleanUrls,
+          commentNicknameRandom,
           assignments: buildAssignments(),
           at,
           detail,
@@ -1262,6 +1429,38 @@ function ForumCommentConfig({
           );
         })}
       </Group>
+
+      {/* 닉네임 랜덤(15-기타명령 §3) — 계정 선택 밑·[지금 게시] 위. 선택 글의 작성 댓글 수 ≥ 2일
+          때만 노출(댓글 1개면 계정 여러 개여도 숨김). 체크하면 계정별 변경 가능횟수를 §6-2 실시간
+          원격 조회로 채워 보여준다. 켜지면 payload에 commentNicknameRandom=true가 실린다. */}
+      {showNicknameRandom && (
+        <>
+          <Checkbox
+            mt="sm"
+            label="닉네임 랜덤 (각 댓글마다 닉네임을 랜덤으로 바꿔 게시)"
+            checked={nicknameRandom}
+            onChange={(e) => setNicknameRandom(e.currentTarget.checked)}
+          />
+          {nicknameRandom && accts.length > 0 && (
+            <Stack gap={2} mt={8}>
+              {accts.map((id) => {
+                const r = remaining[id];
+                const label =
+                  r === undefined || r === "loading"
+                    ? "확인 중…"
+                    : r === "error"
+                      ? "확인 실패"
+                      : `변경 가능횟수 ${r}회`;
+                return (
+                  <Text key={id} fz={11.5} c="dimmed">
+                    {maskId(id)} : {label}
+                  </Text>
+                );
+              })}
+            </Stack>
+          )}
+        </>
+      )}
 
       {/* 지금/예약 게시 + 나눠서 게시(#403) */}
       <Stack gap={8} mt="md">

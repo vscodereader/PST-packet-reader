@@ -349,6 +349,7 @@ const POST_BATCHES: PostBatch[] = [
     device: "하위-001",
     title: "10개 종목토론방 게시",
     at: "2026-06-28 10:31",
+    kind: "게시",
     items: [
       ok("삼성전자 종목토론방", "chol_invest", {
         title: "삼성전자 오늘 흐름 정리",
@@ -434,6 +435,7 @@ const POST_BATCHES: PostBatch[] = [
     device: "하위-003",
     title: "3개 종목토론방 게시",
     at: "2026-06-28 10:42",
+    kind: "좋아요",
     items: [
       ok("LG화학 종목토론방", "good_pick", {
         title: "LG화학 소재 전망",
@@ -601,6 +603,22 @@ function PostSubLog({ item }: { item: PostItem }) {
   );
 }
 
+// 결과 종류 태그 색(15-기타명령 §6-3) — 데스크톱 좋아요=빨강/싫어요=남색/조회수=청록과 맞춘다.
+function kindColor(kind: string): string {
+  switch (kind) {
+    case "좋아요":
+      return "red";
+    case "싫어요":
+      return "indigo";
+    case "조회수":
+      return "teal";
+    case "IP":
+      return "grape";
+    default:
+      return "blue"; // 게시
+  }
+}
+
 function PostBatchCard({ b }: { b: PostBatch }) {
   // 성공/실패 배지를 누르면 그 상태만 필터(다시 누르면 전체). 컴퓨터(카드)마다 따로.
   const [filter, setFilter] = useState<"all" | "success" | "fail" | "stopped">(
@@ -621,9 +639,20 @@ function PostBatchCard({ b }: { b: PostBatch }) {
             <IconDeviceDesktop size={22} />
           </ThemeIcon>
           <Box>
-            <Text fw={800} size="lg" lh={1.2}>
-              {b.device}
-            </Text>
+            <Group gap={6} align="center">
+              <Text fw={800} size="lg" lh={1.2}>
+                {b.device}
+              </Text>
+              {/* 결과 종류 태그(15-기타명령 §6-3) — 게시가 아닌 기타 명령을 구분해 표시. */}
+              <Badge
+                size="sm"
+                radius="sm"
+                variant="light"
+                color={kindColor(b.kind)}
+              >
+                {b.kind}
+              </Badge>
+            </Group>
             <Text size="xs" c="dimmed">
               {b.title} · {b.at}
             </Text>

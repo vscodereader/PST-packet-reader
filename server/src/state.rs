@@ -37,6 +37,10 @@ pub struct AppState {
     /// 예약 게시 목록 — 서버가 보관하고 스케줄러가 시각되면 발송한다(07-게시명령 4단계). 인벤토리와
     /// 같은 이유로 메모리 보관(개발 기본 in-memory 저장소와 일관).
     pub scheduled: Arc<Mutex<Vec<crate::scheduled::ScheduledPost>>>,
+    /// 닉네임 잔여 횟수 실시간 조회 결과(15-기타명령 §3·§6-2). 하위가 계정별 remainingEditCount를
+    /// 회신하면 device당 loginId→(남은횟수|null) 맵에 병합 보관하고, Admin이 폴링해 읽는다. 인벤토리와
+    /// 같은 이유로 메모리(최신값)에 둔다. null=조회 실패(하위 쿠키 없음/에러).
+    pub nickname_remaining: Arc<Mutex<HashMap<Uuid, HashMap<String, Option<i64>>>>>,
 }
 
 fn bearer(headers: &HeaderMap) -> AppResult<String> {
@@ -161,6 +165,26 @@ impl AppState {
         self.queue_states.lock().unwrap().get(&id).cloned()
     }
 
+    /// 닉네임 잔여 횟수 회신을 device별 맵에 **병합**(loginId→남은횟수|null). 계정 하나씩 여러 번
+    /// 회신돼도 최신값으로 갱신되게 덮어쓴다(15-기타명령 §3·§6-2).
+    pub fn set_nickname_remaining(&self, id: Uuid, entries: Vec<(String, Option<i64>)>) {
+        let mut g = self.nickname_remaining.lock().unwrap();
+        let map = g.entry(id).or_default();
+        for (login_id, remaining) in entries {
+            map.insert(login_id, remaining);
+        }
+    }
+
+    /// 닉네임 잔여 횟수 맵 조회(없으면 빈 맵). Admin이 폴링해 체크박스 아래 "변경 가능횟수 N회"를 렌더.
+    pub fn get_nickname_remaining(&self, id: Uuid) -> HashMap<String, Option<i64>> {
+        self.nickname_remaining
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// 중지 요약을 디바이스별로 **누적**(개별 kill이 덮어써 사라지지 않게). 상한 200(오래된 것부터).
     pub fn set_stop_report(&self, id: Uuid, mut rpt: DeviceStopReport) {
         let mut g = self.stop_reports.lock().unwrap();
@@ -258,6 +282,7 @@ mod tests {
                     title: (*t).into(),
                     kind: "post".into(),
                     excerpt: String::new(),
+                    comment_count: 0,
                 })
                 .collect(),
             accounts: accounts.iter().map(|s| (*s).to_string()).collect(),

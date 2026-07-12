@@ -21,6 +21,7 @@ import { AccountDistribute } from "./features/account-distribute/account-distrib
 import { AccountState } from "./features/account-state/account-state";
 import { CommLog } from "./features/comm-log/comm-log";
 import { DeviceConnection } from "./features/device-connection/device-connection";
+import { EtcCommand } from "./features/etc-command/etc-command";
 import { Operators } from "./features/operators/operators";
 import { PublishCommand } from "./features/publish-command/publish-command";
 import {
@@ -45,6 +46,7 @@ const NAV: NavEntry[] = [
   { id: "publish-command", icon: "send", label: "게시 명령" },
   { id: "stop-command", icon: "trash", label: "중지 명령" },
   { id: "scheduled-posts", icon: "calendar", label: "예약된 글" },
+  { id: "etc-command", icon: "bolt", label: "기타 명령" },
   { id: "report", icon: "chart", label: "결과 보고" },
   { id: "operators", icon: "settings", label: "운영자 관리" },
   { id: "change-pw", icon: "eye", label: "비밀번호 변경" },
@@ -155,6 +157,8 @@ function AppScreen({
       return (
         <ScheduledPosts items={scheduled} onRemove={onRemoveScheduled} />
       );
+    case "etc-command":
+      return <EtcCommand />;
     case "report":
       return <ResultReport />;
     case "operators":

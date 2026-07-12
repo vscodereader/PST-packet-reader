@@ -24,7 +24,8 @@ use crate::ipc::log_batches::LogBatch;
 use crate::ipc::posts::{CommentTarget, ModeValue};
 use crate::ipc::queue::{
     apply_priority_order, as_fresh_now_item, BandTarget, BlogTarget, ClipTarget, CommentTargetSpec,
-    ForumTarget, LoginTarget, NaverTarget, PublishPlan, QueueLocation, QueueNowItem, QueueState,
+    ContentChange, ForumTarget, LoginTarget, NaverTarget, PublishPlan, QueueLocation, QueueNowItem,
+    QueueState,
 };
 use crate::ipc::queue_runner::{start_if_idle, NowQueueRunner};
 use crate::store::JsonStore;
@@ -49,6 +50,36 @@ struct Command {
     /// Admin이 하위 accountRows를 폴링해 바꾼 행만 모아 보낸다(loginId별 platform·status 선택 갱신).
     #[serde(rename = "accountUpdates", default)]
     account_updates: Vec<AccountMetaUpdate>,
+    /// 닉네임 잔여 횟수 실시간 조회 명령(`query_nickname_remaining`)일 때만 채워진다(15-기타명령 §3·
+    /// 결정 §6-2 실시간). 하위가 계정별 `forum_nickname_remaining`을 조회해 서버로 회신한다.
+    #[serde(rename = "nicknameQuery", default)]
+    nickname_query: Option<NicknameQueryCmd>,
+    /// 기타 명령(`like_posts`/`dislike_posts`/`boost_view`/`rotate_ip`)일 때만 채워진다(15-기타명령 §2).
+    #[serde(default)]
+    etc: Option<EtcCmd>,
+}
+
+/// 닉네임 잔여 횟수 조회 페이로드(15-기타명령 §3). Admin이 닉네임 랜덤 체크박스를 켤 때, 선택한
+/// 종토 계정들의 loginId를 실어 보낸다. 하위가 각 계정의 `forum_nickname_remaining`을 조회해 회신.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct NicknameQueryCmd {
+    #[serde(default)]
+    login_ids: Vec<String>,
+}
+
+/// 기타 명령 페이로드(15-기타명령 §2). 좋아요/싫어요=links×loginIds, 조회수=links×repeats,
+/// IP 변경=빈값. Admin이 고른 하위 1대에 SSE로 내려온다. 하위는 게시 큐를 타지 않고 데스크톱
+/// 즉시 실행 엔진(`run_reaction_batch`/`boost_views`/`toggle_airplane_mode`)을 그대로 호출한다.
+#[derive(Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct EtcCmd {
+    #[serde(default)]
+    links: Vec<String>,
+    #[serde(default)]
+    login_ids: Vec<String>,
+    #[serde(default)]
+    repeats: u32,
 }
 
 /// 계정 1건의 원격 메타 편집(14-계정상태-관리 §4). loginId로 매칭해 platform(있으면)·status(있으면)만
@@ -241,6 +272,14 @@ struct PublishCmd {
     /// 카페·밴드 최신/인기 댓글 개수(상위 N). 0이면 글에 저장된 commentCount로 폴백(하위호환).
     #[serde(default)]
     comment_count: u32,
+    /// 닉네임 랜덤 댓글(설계서 §2·15-기타명령). 종토 댓글 게시에서 각 댓글마다 닉네임을 랜덤으로
+    /// 바꾼다(계정 내 중복 금지·5회 한도, 엔진이 처리). Admin이 켜면 true. 빈값=false(하위호환).
+    #[serde(default)]
+    comment_nickname_random: bool,
+    /// 게시 후 내용 변경(설계서 §5·15-기타명령). 채워지면 종토 글 게시 후 `delaySec`초 뒤 새 제목/
+    /// 본문으로 edit한다(엔진 spawn_forum_content_edit이 처리). None=변경 없음(하위호환).
+    #[serde(default)]
+    content_change: Option<ContentChange>,
     assignments: Vec<PublishAssign>,
 }
 /// 카페 게시판/글 링크 파싱 결과(Admin이 parseCafeBoardLink/parseCafeArticleUrl로 파싱해 보냄).
@@ -378,11 +417,16 @@ async fn inventory_report_loop<R: Runtime>(app: AppHandle<R>) {
         let Some(cfg) = config::load() else {
             continue;
         };
-        let posts: Vec<(String, String, &'static str, String)> = app
+        let posts: Vec<(String, String, &'static str, String, u32)> = app
             .state::<JsonStore<crate::ipc::posts::LibraryPost>>()
             .snapshot()
             .into_iter()
-            .map(|p| (p.id, p.title, mode_to_str(&p.kind), p.excerpt))
+            .map(|p| {
+                // 작성한 댓글 수(≥2 게이트용, 15-기타명령 §3). Admin이 이 값으로 닉네임 랜덤
+                // 체크박스 노출을 판정한다(N≥2일 때만). 없으면 0.
+                let comment_count = p.comments.as_ref().map(|c| c.len()).unwrap_or(0) as u32;
+                (p.id, p.title, mode_to_str(&p.kind), p.excerpt, comment_count)
+            })
             .collect();
         let accounts = app.state::<JsonStore<Account>>().snapshot();
         let body = inventory_body(&posts, &accounts);
@@ -402,15 +446,16 @@ fn mode_to_str(m: &ModeValue) -> &'static str {
 }
 
 fn inventory_body(
-    posts: &[(String, String, &str, String)],
+    posts: &[(String, String, &str, String, u32)],
     accounts: &[Account],
 ) -> serde_json::Value {
     // 댓글은 제목이 없어(당연) title이 비거나 "제목 없음"이다 → excerpt(작성한 댓글 내용)를 함께
     // 실어 Admin이 제목 대신 내용을 보여주게 한다(글이 제목 보여주는 것과 똑같이).
+    // commentCount=작성한 댓글 수(≥2 게이트용, 15-기타명령 §3) — Admin이 닉네임 랜덤 노출을 판정.
     let posts: Vec<serde_json::Value> = posts
         .iter()
-        .map(|(id, title, kind, excerpt)| {
-            serde_json::json!({ "id": id, "title": title, "kind": kind, "excerpt": excerpt })
+        .map(|(id, title, kind, excerpt, comment_count)| {
+            serde_json::json!({ "id": id, "title": title, "kind": kind, "excerpt": excerpt, "commentCount": comment_count })
         })
         .collect();
     // 전체 계정(loginId·platform·status) — 카페 게시명령은 로그인 성공/실패 무관 카페 계정을 전부
@@ -608,7 +653,201 @@ async fn drain_events<R: Runtime>(
                 report_login_results(app2, client2, cfg2, cid2, f).await;
             });
         }
+        // 닉네임 잔여 조회(15-기타명령 §3·§6-2 실시간): 계정별 `forum_nickname_remaining`을
+        // 블로킹으로 조회해 서버로 회신한다(dispatch는 즉시 ack만, 실제 조회는 여기 백그라운드).
+        if cmd.kind == "query_nickname_remaining" {
+            if let Some(q) = cmd.nickname_query {
+                let (client2, cfg2) = (client.clone(), cfg.clone());
+                tauri::async_runtime::spawn(async move {
+                    report_nickname_remaining(client2, cfg2, q.login_ids).await;
+                });
+            }
+        }
+        // 기타 명령(15-기타명령 §2) 실제 실행 — 데스크톱 즉시 실행 엔진을 그대로 호출하고 결과를
+        // 서버로 회신(post-report에 종류 태그). 브라우저·ADB 블로킹이라 백그라운드로 돌린다.
+        if matches!(
+            cmd.kind.as_str(),
+            "like_posts" | "dislike_posts" | "boost_view" | "rotate_ip"
+        ) {
+            let (app2, client2, cfg2) = (app.clone(), client.clone(), cfg.clone());
+            let kind = cmd.kind.clone();
+            let etc = cmd.etc.clone().unwrap_or_default();
+            tauri::async_runtime::spawn(async move {
+                run_etc_command(app2, client2, cfg2, kind, etc).await;
+            });
+        }
     }
+}
+
+/// 닉네임 잔여 횟수 조회+회신(15-기타명령 §3·§6-2 실시간). 각 계정의 저장 쿠키로 프로필 form을
+/// GET해 `remainingEditCount`(5회 한도 중 남은 횟수)를 얻어 서버로 올린다. 데스크톱 IPC와 같은
+/// 엔진(`naver_automation::forum_nickname_remaining`)을 그대로 호출한다(엔진 무손상). 조회는
+/// 블로킹이라 `spawn_blocking`으로 감싸 executor를 막지 않는다. 실패한 계정은 remaining=null.
+async fn report_nickname_remaining(
+    client: reqwest::Client,
+    cfg: AgentConfig,
+    login_ids: Vec<String>,
+) {
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    for id in login_ids {
+        let id2 = id.clone();
+        let remaining: Option<i64> = tokio::task::spawn_blocking(move || {
+            crate::naver_automation::forum_nickname_remaining(&id2).ok().flatten()
+        })
+        .await
+        .ok()
+        .flatten();
+        results.push(serde_json::json!({ "loginId": id, "remaining": remaining }));
+    }
+    let body = serde_json::json!({ "results": results });
+    let _ = net::post_nickname_remaining(&client, &cfg.server_url, &cfg.device_token, &body).await;
+}
+
+// ───────────────────────── 기타 명령(15-기타명령 §2) ─────────────────────────
+
+/// 기타 명령의 dispatch 즉시 ack 레벨(실제 결과는 post-report로 뒤따른다).
+fn etc_ack_level(kind: &str) -> &'static str {
+    match kind {
+        "like_posts" | "dislike_posts" | "boost_view" | "rotate_ip" => "info",
+        _ => "fail",
+    }
+}
+
+/// 기타 명령의 결과 보고 종류 태그(§6-3) — 게시 결과 목록에서 게시와 구분해 표시한다.
+fn etc_report_kind(kind: &str) -> &'static str {
+    match kind {
+        "like_posts" => "좋아요",
+        "dislike_posts" => "싫어요",
+        "boost_view" => "조회수",
+        "rotate_ip" => "IP",
+        _ => "기타",
+    }
+}
+
+/// 기타 명령 dispatch 즉시 ack 메시지(통신 로그용) — 무엇을 몇 건 시작하는지 원문.
+fn etc_ack_message(kind: &str, etc: &EtcCmd) -> String {
+    match kind {
+        "like_posts" | "dislike_posts" => format!(
+            "{} 실행 시작 — 링크 {}개 × 계정 {}개",
+            etc_report_kind(kind),
+            etc.links.len(),
+            etc.login_ids.len()
+        ),
+        "boost_view" => format!(
+            "조회수 실행 시작 — 링크 {}개 × {}회",
+            etc.links.len(),
+            etc.repeats
+        ),
+        "rotate_ip" => "IP 변경 실행 시작 — 이 하위 PC IP 회전".to_string(),
+        other => format!("알 수 없는 기타 명령: {other}"),
+    }
+}
+
+/// 기타 명령 결과 1줄(post-report의 items 모양 = PostItemDto). platform/target/loginId/status/msg.
+fn etc_item(
+    platform: &str,
+    target: &str,
+    login_id: &str,
+    success: bool,
+    msg: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "platform": platform,
+        "target": target,
+        "loginId": login_id,
+        "status": if success { "success" } else { "fail" },
+        "msg": msg,
+    })
+}
+
+/// 기타 명령 결과 회신 본문(§6-3) — PostReportReq 모양 + 종류 태그(kind). 서버가 결과 보고에
+/// 종류로 구분해 싣고, 통신 로그엔 요약 1줄을 남긴다. items는 PostItemDto 모양.
+fn etc_report_body(kind: &str, title: &str, items: Vec<serde_json::Value>) -> serde_json::Value {
+    serde_json::json!({
+        "id": format!("etc-{}-{}", kind, now_ms()),
+        "title": title,
+        "at": now_ms() as i64,
+        "kind": etc_report_kind(kind),
+        "items": items,
+    })
+}
+
+/// 기타 명령 실행 + 결과 회신(15-기타명령 §2·§6-3). 게시 큐를 타지 않고 데스크톱 즉시 실행 엔진을
+/// 그대로 호출한다(엔진 무손상): 좋아요/싫어요=`run_reaction_batch`, 조회수=`view_boost::boost_views`,
+/// IP변경=`auth::toggle_airplane_mode`. 각 결과를 PostItemDto 모양으로 모아 종류 태그를 붙여
+/// post-report로 회신한다. IP변경에 폰/ADB가 없으면 앱이 죽지 않고 실패 1줄로 보고한다(§6-5).
+async fn run_etc_command<R: Runtime>(
+    app: AppHandle<R>,
+    client: reqwest::Client,
+    cfg: AgentConfig,
+    kind: String,
+    etc: EtcCmd,
+) {
+    let (title, items): (String, Vec<serde_json::Value>) = match kind.as_str() {
+        "like_posts" | "dislike_posts" => {
+            let (reaction, label) = if kind == "dislike_posts" {
+                ("bad", "싫어요")
+            } else {
+                ("good", "좋아요")
+            };
+            let links = etc.links.clone();
+            let login_ids = etc.login_ids.clone();
+            let title = format!("{label} — 링크 {}개 × 계정 {}개", links.len(), login_ids.len());
+            match crate::run_reaction_batch(app, links, login_ids, reaction, label).await {
+                Ok(outcomes) => {
+                    let items = outcomes
+                        .iter()
+                        .map(|o| {
+                            etc_item("forum", &o.post_url, &o.account_id, o.success, &o.message)
+                        })
+                        .collect();
+                    (title, items)
+                }
+                Err(e) => (title, vec![etc_item("forum", "-", "-", false, &e)]),
+            }
+        }
+        "boost_view" => {
+            let links = etc.links.clone();
+            let repeats = etc.repeats.max(1);
+            let title = format!("조회수 — 링크 {}개 × {}회", links.len(), repeats);
+            let outcomes = tokio::task::spawn_blocking(move || {
+                crate::view_boost::boost_views(&links, repeats)
+            })
+            .await
+            .unwrap_or_default();
+            let items = outcomes
+                .iter()
+                .map(|o| {
+                    etc_item(
+                        "forum",
+                        &o.link,
+                        "-",
+                        o.success,
+                        &format!("{}/{}회 · {}", o.completed, o.requested, o.message),
+                    )
+                })
+                .collect();
+            (title, items)
+        }
+        "rotate_ip" => {
+            let title = "IP 변경 — 이 하위 PC IP 회전".to_string();
+            // 폰/ADB 없으면 assert_adb_device/toggle이 Err → 실패 1줄로 보고(앱은 안 죽음, §6-5).
+            let item = match crate::auth::assert_adb_device().await {
+                Ok(()) => match crate::auth::toggle_airplane_mode().await {
+                    Ok(rot) => {
+                        let msg = format!("{} → {}", rot.before, rot.after);
+                        etc_item("", "IP", "-", rot.changed, &msg)
+                    }
+                    Err(e) => etc_item("", "IP", "-", false, &format!("IP 변경 실패: {e}")),
+                },
+                Err(e) => etc_item("", "IP", "-", false, &format!("IP 변경 실패: {e}")),
+            };
+            (title, vec![item])
+        }
+        _ => return,
+    };
+    let body = etc_report_body(&kind, &title, items);
+    let _ = net::post_report(&client, &cfg.server_url, &cfg.device_token, &body).await;
 }
 
 /// 명령 디스패치(동기). 반환: (level, 즉시 메시지, 로그인 결과 후속).
@@ -682,6 +921,24 @@ fn dispatch<R: Runtime>(
             ),
         },
         "update_account_meta" => update_account_meta(app, &cmd.account_updates),
+        // 기타 명령(15-기타명령 §2) — 좋아요/싫어요/조회수/IP변경. 게시 큐를 안 타는 즉시 실행이라
+        // dispatch는 ack만 남기고, 실제 엔진 호출+결과 회신(post-report에 종류 태그 첨부)은
+        // drain_events가 백그라운드로 돌린다(엔진이 브라우저·ADB를 블로킹으로 여닫아 executor를 막지
+        // 않도록). §6-3: 결과는 결과 보고(종류 태그)에, 원시 로그는 통신 로그에.
+        "like_posts" | "dislike_posts" | "boost_view" | "rotate_ip" => {
+            let etc = cmd.etc.clone().unwrap_or_default();
+            (etc_ack_level(&cmd.kind), etc_ack_message(&cmd.kind, &etc), None)
+        }
+        // 닉네임 잔여 조회는 실제 조회+회신을 drain_events가 백그라운드로 돌린다(네트워크 블로킹
+        // 회피). 여기선 즉시 ack만 남긴다(15-기타명령 §3·§6-2).
+        "query_nickname_remaining" => {
+            let n = cmd
+                .nickname_query
+                .as_ref()
+                .map(|q| q.login_ids.len())
+                .unwrap_or(0);
+            ("info", format!("닉네임 잔여 조회 {n}건 시작"), None)
+        }
         other => ("fail", format!("알 수 없는 명령: {other}"), None),
     }
 }
@@ -984,6 +1241,8 @@ fn enqueue_publish<R: Runtime>(
             &post.comments,
             &p.comment_urls,
             p.forum_comment_distribute,
+            p.comment_nickname_random,
+            p.content_change.as_ref(),
             now_ms(),
         )
     };
@@ -1034,6 +1293,8 @@ fn build_publish_items(
     comments: &[String],
     comment_urls: &[String],
     forum_comment_distribute: bool,
+    comment_nickname_random: bool,
+    content_change: Option<&ContentChange>,
     now: u128,
 ) -> Vec<QueueNowItem> {
     // 댓글 모드는 종토 "특정 게시글(URL)"만 지원한다(사용자 확정 2026-07-06: 종토 댓글=특정게시글).
@@ -1099,8 +1360,8 @@ fn build_publish_items(
                     clip: vec![],
                     login: None,
                     forum_comment_distribute: true,
-                    comment_nickname_random: false,
-                    content_change: None,
+                    comment_nickname_random,
+                    content_change: content_change.cloned(),
                 }),
                 items: vec![],
             });
@@ -1168,8 +1429,8 @@ fn build_publish_items(
                 clip: vec![],
                 login: None,
                 forum_comment_distribute: false,
-                comment_nickname_random: false,
-                content_change: None,
+                comment_nickname_random,
+                content_change: content_change.cloned(),
             }),
             items: vec![],
         });
@@ -2438,6 +2699,8 @@ mod tests {
             &[],
             &[],
             false,
+            false,
+            None,
             1234,
         );
 
@@ -2483,6 +2746,8 @@ mod tests {
             &["댓글1".into(), "댓글2".into()],
             &["https://u/1".into()],
             true,
+            false,
+            None,
             1234,
         );
 
@@ -2502,6 +2767,65 @@ mod tests {
             plan.comments,
             vec!["댓글1".to_string(), "댓글2".to_string()]
         );
+    }
+
+    #[test]
+    fn build_publish_items_honors_nickname_random_and_content_change() {
+        // 닉네임 랜덤·게시 후 내용변경은 payload에서 온 값을 그대로 plan에 실어야 한다(하드코딩 해제,
+        // 15-기타명령 §3·§4). 엔진(회전·edit)은 무손상 — 여기선 plan에 값이 흐르는지만 검증한다.
+        let assignments = vec![PublishAssign {
+            login_id: "acc_a".into(),
+            stocks: vec![PublishStockIn {
+                code: "005930".into(),
+                name: "삼성전자".into(),
+            }],
+        }];
+        let cc = ContentChange {
+            title: "새 제목".into(),
+            body: "새 본문".into(),
+            delay_sec: 30,
+        };
+        let items = build_publish_items(
+            &assignments,
+            "p1",
+            "제목",
+            "제목",
+            "본문",
+            ModeValue::Post,
+            &[],
+            &[],
+            false,
+            true,        // comment_nickname_random
+            Some(&cc),   // content_change
+            1234,
+        );
+        assert_eq!(items.len(), 1);
+        let plan = items[0].plan.as_ref().unwrap();
+        assert!(plan.comment_nickname_random, "닉네임 랜덤 flag가 실려야 한다");
+        assert_eq!(
+            plan.content_change.as_ref().map(|c| (c.title.as_str(), c.body.as_str(), c.delay_sec)),
+            Some(("새 제목", "새 본문", 30)),
+            "내용변경 값이 그대로 실려야 한다"
+        );
+    }
+
+    #[test]
+    fn build_publish_items_defaults_leave_features_off() {
+        // 기본(payload 미지정): 닉네임 랜덤 off·내용변경 None(하위호환).
+        let assignments = vec![PublishAssign {
+            login_id: "acc_a".into(),
+            stocks: vec![PublishStockIn {
+                code: "005930".into(),
+                name: "삼성전자".into(),
+            }],
+        }];
+        let items = build_publish_items(
+            &assignments, "p1", "제목", "제목", "본문", ModeValue::Post, &[], &[], false, false,
+            None, 1234,
+        );
+        let plan = items[0].plan.as_ref().unwrap();
+        assert!(!plan.comment_nickname_random);
+        assert!(plan.content_change.is_none());
     }
 
     #[test]
@@ -2960,12 +3284,14 @@ mod tests {
                 "급등주 분석".to_string(),
                 "post",
                 "외국인 순매수 유입".to_string(),
+                0u32,
             ),
             (
                 "p2".to_string(),
                 "제목 없음".to_string(),
                 "comment",
                 "오늘 흐름 좋네요 👍".to_string(),
+                3u32,
             ),
         ];
         let acct = |login: &str, status: AccountStatus| Account {
@@ -2991,6 +3317,9 @@ mod tests {
         assert_eq!(v["posts"][0]["id"], "p1");
         assert_eq!(v["posts"][1]["title"], "제목 없음");
         assert_eq!(v["posts"][1]["excerpt"], "오늘 흐름 좋네요 👍");
+        // commentCount(≥2 게이트용) — 작성한 댓글 수를 그대로 싣는다(글=0, 댓글글=3).
+        assert_eq!(v["posts"][0]["commentCount"], 0);
+        assert_eq!(v["posts"][1]["commentCount"], 3);
         // 계정은 성공(Active)만 — 차단/신규는 빠진다.
         let accts: Vec<&str> = v["accounts"]
             .as_array()
@@ -3123,5 +3452,86 @@ mod tests {
         assert_eq!(status_from_str("blocked"), None);
         assert_eq!(status_from_str("badCredentials"), None);
         assert_eq!(status_from_str("timedOut"), None);
+    }
+
+    // ───────── 기타 명령(15-기타명령 §2) ─────────
+
+    #[test]
+    fn command_parses_etc_payload() {
+        // Admin → SSE로 내려온 좋아요 명령이 links/loginIds로 역직렬화되는지.
+        let json = r#"{"type":"like_posts","commandId":"c-1",
+            "etc":{"links":["l1","l2"],"loginIds":["a","b","c"],"repeats":0}}"#;
+        let cmd: Command = serde_json::from_str(json).unwrap();
+        assert_eq!(cmd.kind, "like_posts");
+        let etc = cmd.etc.unwrap();
+        assert_eq!(etc.links, vec!["l1", "l2"]);
+        assert_eq!(etc.login_ids, vec!["a", "b", "c"]);
+        assert_eq!(etc.repeats, 0);
+    }
+
+    #[test]
+    fn command_parses_boost_view_repeats() {
+        let cmd: Command =
+            serde_json::from_str(r#"{"type":"boost_view","etc":{"links":["l1"],"repeats":30}}"#)
+                .unwrap();
+        let etc = cmd.etc.unwrap();
+        assert_eq!(etc.repeats, 30);
+        assert!(etc.login_ids.is_empty());
+    }
+
+    #[test]
+    fn command_rotate_ip_needs_no_etc() {
+        let cmd: Command = serde_json::from_str(r#"{"type":"rotate_ip"}"#).unwrap();
+        assert_eq!(cmd.kind, "rotate_ip");
+        assert!(cmd.etc.is_none());
+    }
+
+    #[test]
+    fn etc_report_kind_tags_each_action() {
+        // §6-3: 결과 보고 목록에서 게시와 구분할 종류 태그.
+        assert_eq!(etc_report_kind("like_posts"), "좋아요");
+        assert_eq!(etc_report_kind("dislike_posts"), "싫어요");
+        assert_eq!(etc_report_kind("boost_view"), "조회수");
+        assert_eq!(etc_report_kind("rotate_ip"), "IP");
+    }
+
+    #[test]
+    fn etc_ack_level_and_message() {
+        let etc = EtcCmd {
+            links: vec!["l1".into(), "l2".into()],
+            login_ids: vec!["a".into()],
+            repeats: 0,
+        };
+        assert_eq!(etc_ack_level("like_posts"), "info");
+        assert_eq!(etc_ack_level("rotate_ip"), "info");
+        assert!(etc_ack_message("like_posts", &etc).contains("링크 2개 × 계정 1개"));
+        let v = EtcCmd {
+            links: vec!["l1".into()],
+            login_ids: vec![],
+            repeats: 30,
+        };
+        assert!(etc_ack_message("boost_view", &v).contains("링크 1개 × 30회"));
+    }
+
+    #[test]
+    fn etc_report_body_carries_kind_tag_and_items() {
+        // 회신 본문(post-report)은 종류 태그(kind)와 PostItemDto 모양 items를 싣는다.
+        let items = vec![etc_item("forum", "l1", "a", true, "좋아요 완료")];
+        let body = etc_report_body("like_posts", "좋아요 — 링크 1개 × 계정 1개", items);
+        assert_eq!(body["kind"], "좋아요");
+        assert_eq!(body["title"], "좋아요 — 링크 1개 × 계정 1개");
+        assert_eq!(body["items"][0]["platform"], "forum");
+        assert_eq!(body["items"][0]["target"], "l1");
+        assert_eq!(body["items"][0]["loginId"], "a");
+        assert_eq!(body["items"][0]["status"], "success");
+        assert!(body["at"].is_i64());
+    }
+
+    #[test]
+    fn etc_item_maps_failure_to_fail_status() {
+        let it = etc_item("", "IP", "-", false, "IP 변경 실패: 폰 없음");
+        assert_eq!(it["status"], "fail");
+        assert_eq!(it["target"], "IP");
+        assert_eq!(it["msg"], "IP 변경 실패: 폰 없음");
     }
 }
