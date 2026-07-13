@@ -3,11 +3,13 @@
 //! 블로그 경로만 추가한다(ADD ONLY).
 
 pub mod comment_client;
+pub mod domain_client;
 pub mod error;
 pub(crate) mod headers;
 pub mod post_list;
 
 pub use comment_client::{BlogCommentClient, BlogCommentResult};
+pub use domain_client::BlogDomainClient;
 pub use error::BlogError;
 pub use post_list::{BlogPost, BlogPostList, BlogPostListClient};
 
@@ -50,6 +52,37 @@ pub async fn fetch_latest_blog_posts_for_account(
     let client = BlogPostListClient::new();
     client
         .fetch_latest_posts(blog_id, category_no, count, Some(&cookie_header))
+        .await
+}
+
+/// 저장된 네이버 쿠키로 블로그명(도메인) 사용 가능 여부를 조회한다(계정 단위 진입점).
+///
+/// `true`=사용 가능, `false`=이미 사용 중. 봇탐지 토큰이 필요 없는 단순 조회라 CDP 없이 HTTP로
+/// 처리한다(블로그 생성·글 발행은 별도 CDP 경로). 쿠키가 없으면 `BlogError`로 알린다.
+///
+/// # 쿠키 보안
+/// 계정 쿠키는 내부에서만 사용되며 반환 오류/로그에 절대 노출되지 않는다.
+pub async fn check_blog_name_for_account(
+    account_id: &str,
+    domain_id: &str,
+) -> Result<bool, BlogError> {
+    let cookie_header = resolve_cookie_header(account_id)?;
+    BlogDomainClient::new()
+        .check_availability(domain_id, Some(&cookie_header))
+        .await
+}
+
+/// 저장된 네이버 쿠키로 대체 블로그명 추천 목록을 조회한다(사용 중일 때 UI 제안용, best-effort).
+///
+/// # 쿠키 보안
+/// 계정 쿠키는 내부에서만 사용되며 반환 오류/로그에 절대 노출되지 않는다.
+pub async fn recommend_blog_names_for_account(
+    account_id: &str,
+    domain_id: &str,
+) -> Result<Vec<String>, BlogError> {
+    let cookie_header = resolve_cookie_header(account_id)?;
+    BlogDomainClient::new()
+        .recommend(domain_id, Some(&cookie_header))
         .await
 }
 
