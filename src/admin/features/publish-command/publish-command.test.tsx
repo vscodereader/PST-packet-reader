@@ -5,6 +5,7 @@ import {
   commentTargetPayload,
   filterAccountsByTarget,
   maskId,
+  parseBlogTags,
   postDisplay,
   shortTitle,
 } from "./publish-command";
@@ -149,6 +150,18 @@ describe("publish-command 헬퍼", () => {
       expect(canForumCommentDistribute(0, 0)).toBe(false);
       expect(canForumCommentDistribute(0, 3)).toBe(false);
       expect(canForumCommentDistribute(3, 0)).toBe(false);
+    });
+  });
+
+  describe("parseBlogTags (블로그 새 글 태그 입력 → 배열)", () => {
+    it("공백/쉼표로 나누고 # 을 떼며 빈 값을 버린다", () => {
+      expect(parseBlogTags("첫글 인생")).toEqual(["첫글", "인생"]);
+      expect(parseBlogTags("#첫글, #인생")).toEqual(["첫글", "인생"]);
+      expect(parseBlogTags("  첫글 ,  , 인생  ")).toEqual(["첫글", "인생"]);
+    });
+    it("빈 입력은 빈 배열", () => {
+      expect(parseBlogTags("")).toEqual([]);
+      expect(parseBlogTags("   ")).toEqual([]);
     });
   });
 });

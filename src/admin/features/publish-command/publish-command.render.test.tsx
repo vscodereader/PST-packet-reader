@@ -20,7 +20,9 @@ const queryNick = vi.hoisted(() =>
   vi.fn(() => Promise.resolve({ ok: true, commandId: "c2" })),
 );
 const nickRemaining = vi.hoisted(() => vi.fn(() => Promise.resolve({})));
-const stocksList = vi.hoisted(() => vi.fn(() => Promise.resolve({ stocks: [] })));
+const stocksList = vi.hoisted(() =>
+  vi.fn(() => Promise.resolve({ stocks: [] })),
+);
 
 vi.mock("../../api", () => ({
   isOffline: () => false,
@@ -38,7 +40,11 @@ vi.mock("@mantine/notifications", () => ({
   notifications: { show: vi.fn() },
 }));
 
-import { ForumCommentConfig, ForumConfig } from "./publish-command";
+import {
+  BlogWriteConfig,
+  ForumCommentConfig,
+  ForumConfig,
+} from "./publish-command";
 
 const device = { id: "d1", name: "하위-001", ip: "1.2.3.4" };
 
@@ -90,117 +96,194 @@ function ForumConfigHarness({
 }
 
 describe("게시명령 종토 옵션(닉네임 랜덤·게시 후 내용변경) 렌더", () => {
-beforeEach(() => {
-  send.mockClear();
-  create.mockClear();
-  queryNick.mockClear();
-  nickRemaining.mockClear();
-});
-
-describe("ForumCommentConfig 닉네임 랜덤(15-기타명령 §3)", () => {
-  it("작성 댓글 수 < 2면 체크박스를 숨긴다(계정 여러 개여도)", () => {
-    renderCmt(1);
-    expect(screen.queryByText(/닉네임 랜덤/)).toBeNull();
+  beforeEach(() => {
+    send.mockClear();
+    create.mockClear();
+    queryNick.mockClear();
+    nickRemaining.mockClear();
   });
 
-  it("작성 댓글 수 ≥ 2면 체크박스를 보인다", () => {
-    renderCmt(2);
-    expect(screen.getByText(/닉네임 랜덤/)).toBeInTheDocument();
+  describe("ForumCommentConfig 닉네임 랜덤(15-기타명령 §3)", () => {
+    it("작성 댓글 수 < 2면 체크박스를 숨긴다(계정 여러 개여도)", () => {
+      renderCmt(1);
+      expect(screen.queryByText(/닉네임 랜덤/)).toBeNull();
+    });
+
+    it("작성 댓글 수 ≥ 2면 체크박스를 보인다", () => {
+      renderCmt(2);
+      expect(screen.getByText(/닉네임 랜덤/)).toBeInTheDocument();
+    });
+
+    it("체크하면 계정별 변경 가능횟수를 원격 조회하고, 켠 채 게시하면 payload에 실린다", async () => {
+      const user = userEvent.setup();
+      renderCmt(2);
+      // URL 1개 + 계정 1개 선택 → 게시 활성.
+      const urlInput = screen.getByPlaceholderText("종목토론방 글 URL 1");
+      await user.type(urlInput, "https://post/1");
+      // 두 계정(acc_a·acc_b)은 마스킹이 같아("ac•••") 첫 버튼을 고른다.
+      const [firstAcct] = screen.getAllByRole("button", { name: /^ac•+$/ });
+      await user.click(firstAcct!);
+      // 닉네임 랜덤 체크 → 원격 조회 요청(§6-2 실시간).
+      await user.click(screen.getByRole("checkbox", { name: /닉네임 랜덤/ }));
+      await waitFor(() => expect(queryNick).toHaveBeenCalled());
+      // "지금 게시" → commentNicknameRandom=true가 payload에 실린다.
+      await user.click(screen.getByRole("button", { name: "지금 게시" }));
+      await waitFor(() => expect(send).toHaveBeenCalled());
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mode: "comment",
+          commentNicknameRandom: true,
+        }),
+      );
+    });
   });
 
-  it("체크하면 계정별 변경 가능횟수를 원격 조회하고, 켠 채 게시하면 payload에 실린다", async () => {
-    const user = userEvent.setup();
-    renderCmt(2);
-    // URL 1개 + 계정 1개 선택 → 게시 활성.
-    const urlInput = screen.getByPlaceholderText("종목토론방 글 URL 1");
-    await user.type(urlInput, "https://post/1");
-    // 두 계정(acc_a·acc_b)은 마스킹이 같아("ac•••") 첫 버튼을 고른다.
-    const [firstAcct] = screen.getAllByRole("button", { name: /^ac•+$/ });
-    await user.click(firstAcct!);
-    // 닉네임 랜덤 체크 → 원격 조회 요청(§6-2 실시간).
-    await user.click(screen.getByRole("checkbox", { name: /닉네임 랜덤/ }));
-    await waitFor(() => expect(queryNick).toHaveBeenCalled());
-    // "지금 게시" → commentNicknameRandom=true가 payload에 실린다.
-    await user.click(screen.getByRole("button", { name: "지금 게시" }));
-    await waitFor(() => expect(send).toHaveBeenCalled());
-    expect(send).toHaveBeenCalledWith(
-      expect.objectContaining({ mode: "comment", commentNicknameRandom: true }),
+  describe("ForumConfig 닉네임 랜덤(글+댓글, 15-기타명령 §3)", () => {
+    it("글+댓글(both)이고 작성 댓글 수 ≥ 2면 체크박스를 보인다", () => {
+      render(<ForumConfigHarness mode="both" postCommentCount={2} />);
+      expect(screen.getByText(/닉네임 랜덤/)).toBeInTheDocument();
+    });
+
+    it("글+댓글(both)이라도 작성 댓글 수 < 2면 숨긴다", () => {
+      render(<ForumConfigHarness mode="both" postCommentCount={1} />);
+      expect(screen.queryByText(/닉네임 랜덤/)).toBeNull();
+    });
+
+    it("순수 글(post) 모드는 작성 댓글 수 ≥ 2여도 숨긴다", () => {
+      render(<ForumConfigHarness mode="post" postCommentCount={5} />);
+      expect(screen.queryByText(/닉네임 랜덤/)).toBeNull();
+    });
+
+    it("켠 채 게시하면 commentNicknameRandom=true가 payload에 실린다", async () => {
+      const user = userEvent.setup();
+      render(<ForumConfigHarness mode="both" postCommentCount={2} />);
+      await user.click(screen.getByRole("checkbox", { name: /닉네임 랜덤/ }));
+      await waitFor(() => expect(queryNick).toHaveBeenCalled());
+      await user.click(screen.getByRole("button", { name: "지금 게시" }));
+      await waitFor(() => expect(send).toHaveBeenCalled());
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({ mode: "both", commentNicknameRandom: true }),
+      );
+    });
+  });
+
+  describe("ForumConfig 게시 후 내용변경(15-기타명령 §4)", () => {
+    it("체크박스가 종목 수와 계정 사이에 렌더된다(위치)", () => {
+      render(<ForumConfigHarness />);
+      const stockCount = screen.getByText("종목 수");
+      const contentChange = screen.getByText("게시 후 내용변경");
+      const accounts = screen.getByText(/^계정 \(/);
+      // DOM 순서: 종목 수 → 게시 후 내용변경 → 계정.
+      expect(
+        stockCount.compareDocumentPosition(contentChange) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(
+        contentChange.compareDocumentPosition(accounts) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    });
+
+    it("체크 후 제목/내용/지연을 입력하고 게시하면 contentChange가 payload에 실린다", async () => {
+      const user = userEvent.setup();
+      render(<ForumConfigHarness />);
+      // 기본은 접혀 있다(입력 없음).
+      expect(screen.queryByPlaceholderText("변경할 새 제목")).toBeNull();
+      await user.click(
+        screen.getByRole("checkbox", { name: "게시 후 내용변경" }),
+      );
+      await user.type(screen.getByPlaceholderText("변경할 새 제목"), "새 제목");
+      await user.type(screen.getByPlaceholderText("변경할 새 내용"), "새 본문");
+      await user.click(screen.getByRole("button", { name: "지금 게시" }));
+      await waitFor(() => expect(send).toHaveBeenCalled());
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mode: "post",
+          contentChange: { title: "새 제목", body: "새 본문", delaySec: 0 },
+        }),
+      );
+    });
+
+    it("체크 안 하면 contentChange를 payload에 싣지 않는다", async () => {
+      const user = userEvent.setup();
+      render(<ForumConfigHarness />);
+      await user.click(screen.getByRole("button", { name: "지금 게시" }));
+      await waitFor(() => expect(send).toHaveBeenCalled());
+      expect(send).toHaveBeenCalledWith(
+        expect.not.objectContaining({ contentChange: expect.anything() }),
+      );
+    });
+  });
+
+  function renderBlogWrite() {
+    return render(
+      <MantineProvider>
+        <BlogWriteConfig
+          device={device}
+          postId="p1"
+          postTitle="원격 발행 글"
+          accounts={["press02", "cho41004"]}
+          onSchedule={() => {}}
+        />
+      </MantineProvider>,
     );
-  });
-});
+  }
 
-describe("ForumConfig 닉네임 랜덤(글+댓글, 15-기타명령 §3)", () => {
-  it("글+댓글(both)이고 작성 댓글 수 ≥ 2면 체크박스를 보인다", () => {
-    render(<ForumConfigHarness mode="both" postCommentCount={2} />);
-    expect(screen.getByText(/닉네임 랜덤/)).toBeInTheDocument();
-  });
+  describe("BlogWriteConfig 새 글 발행(원격 배포) payload", () => {
+    beforeEach(() => {
+      send.mockClear();
+      create.mockClear();
+    });
 
-  it("글+댓글(both)이라도 작성 댓글 수 < 2면 숨긴다", () => {
-    render(<ForumConfigHarness mode="both" postCommentCount={1} />);
-    expect(screen.queryByText(/닉네임 랜덤/)).toBeNull();
-  });
+    it("제목·계정을 채워야 지금 발행이 활성화되고 target:blog_write payload를 보낸다", async () => {
+      const user = userEvent.setup();
+      renderBlogWrite();
+      const publishBtn = () =>
+        screen.getByRole("button", { name: "지금 발행" });
+      // 제목·계정 미선택이면 비활성.
+      expect(publishBtn()).toBeDisabled();
+      await user.type(screen.getByLabelText("블로그 새 글 제목"), "새 글 제목");
+      await user.type(screen.getByLabelText("블로그 새 글 본문"), "본문 내용");
+      await user.type(screen.getByLabelText("태그"), "#첫글 인생");
+      // 계정 press02 선택.
+      await user.click(screen.getByRole("button", { name: /^pr/ }));
+      expect(publishBtn()).toBeEnabled();
+      await user.click(publishBtn());
+      await waitFor(() => expect(send).toHaveBeenCalled());
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          target: "blog_write",
+          mode: "post",
+          blogWrite: expect.objectContaining({
+            title: "새 글 제목",
+            content: "본문 내용",
+            openType: 0,
+            commentYn: true,
+            searchYn: true,
+            sympathyYn: true,
+            noticePostYn: false,
+            tags: ["첫글", "인생"],
+          }),
+          assignments: [{ loginId: "press02", stocks: [] }],
+        }),
+      );
+    });
 
-  it("순수 글(post) 모드는 작성 댓글 수 ≥ 2여도 숨긴다", () => {
-    render(<ForumConfigHarness mode="post" postCommentCount={5} />);
-    expect(screen.queryByText(/닉네임 랜덤/)).toBeNull();
+    it("예약 발행은 같은 blog_write payload로 scheduled.create를 호출한다", async () => {
+      const user = userEvent.setup();
+      renderBlogWrite();
+      await user.type(screen.getByLabelText("블로그 새 글 제목"), "예약 글");
+      await user.click(screen.getByRole("button", { name: /^ch/ }));
+      await user.click(screen.getByRole("button", { name: "예약 발행" }));
+      await user.click(screen.getByRole("button", { name: "예약 확정" }));
+      await waitFor(() => expect(create).toHaveBeenCalled());
+      expect(create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          target: "blog_write",
+          blogWrite: expect.objectContaining({ title: "예약 글" }),
+          assignments: [{ loginId: "cho41004", stocks: [] }],
+        }),
+      );
+    });
   });
-
-  it("켠 채 게시하면 commentNicknameRandom=true가 payload에 실린다", async () => {
-    const user = userEvent.setup();
-    render(<ForumConfigHarness mode="both" postCommentCount={2} />);
-    await user.click(screen.getByRole("checkbox", { name: /닉네임 랜덤/ }));
-    await waitFor(() => expect(queryNick).toHaveBeenCalled());
-    await user.click(screen.getByRole("button", { name: "지금 게시" }));
-    await waitFor(() => expect(send).toHaveBeenCalled());
-    expect(send).toHaveBeenCalledWith(
-      expect.objectContaining({ mode: "both", commentNicknameRandom: true }),
-    );
-  });
-});
-
-describe("ForumConfig 게시 후 내용변경(15-기타명령 §4)", () => {
-  it("체크박스가 종목 수와 계정 사이에 렌더된다(위치)", () => {
-    render(<ForumConfigHarness />);
-    const stockCount = screen.getByText("종목 수");
-    const contentChange = screen.getByText("게시 후 내용변경");
-    const accounts = screen.getByText(/^계정 \(/);
-    // DOM 순서: 종목 수 → 게시 후 내용변경 → 계정.
-    expect(
-      stockCount.compareDocumentPosition(contentChange) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-    expect(
-      contentChange.compareDocumentPosition(accounts) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-  });
-
-  it("체크 후 제목/내용/지연을 입력하고 게시하면 contentChange가 payload에 실린다", async () => {
-    const user = userEvent.setup();
-    render(<ForumConfigHarness />);
-    // 기본은 접혀 있다(입력 없음).
-    expect(screen.queryByPlaceholderText("변경할 새 제목")).toBeNull();
-    await user.click(screen.getByRole("checkbox", { name: "게시 후 내용변경" }));
-    await user.type(screen.getByPlaceholderText("변경할 새 제목"), "새 제목");
-    await user.type(screen.getByPlaceholderText("변경할 새 내용"), "새 본문");
-    await user.click(screen.getByRole("button", { name: "지금 게시" }));
-    await waitFor(() => expect(send).toHaveBeenCalled());
-    expect(send).toHaveBeenCalledWith(
-      expect.objectContaining({
-        mode: "post",
-        contentChange: { title: "새 제목", body: "새 본문", delaySec: 0 },
-      }),
-    );
-  });
-
-  it("체크 안 하면 contentChange를 payload에 싣지 않는다", async () => {
-    const user = userEvent.setup();
-    render(<ForumConfigHarness />);
-    await user.click(screen.getByRole("button", { name: "지금 게시" }));
-    await waitFor(() => expect(send).toHaveBeenCalled());
-    expect(send).toHaveBeenCalledWith(
-      expect.not.objectContaining({ contentChange: expect.anything() }),
-    );
-  });
-});
 });

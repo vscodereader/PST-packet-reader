@@ -372,10 +372,15 @@ export function PublishCommand({
   // 종토 목록에 섞이던 문제 수정 — 각 target은 자기 platform 계정만).
   const accountsFor = (deviceId: string, target: Target | null): string[] => {
     if (!target) return invByDev[deviceId]?.accounts ?? mockAccounts(deviceId);
-    const filtered = filterAccountsByTarget(target, invByDev[deviceId]?.accountRows);
+    const filtered = filterAccountsByTarget(
+      target,
+      invByDev[deviceId]?.accountRows,
+    );
     if (filtered !== null) return filtered;
     // 오프라인/미보고 → 더미 폴백(카페는 전용 더미).
-    return target === "cafe" ? mockCafeAccounts(deviceId) : mockAccounts(deviceId);
+    return target === "cafe"
+      ? mockCafeAccounts(deviceId)
+      : mockAccounts(deviceId);
   };
 
   const toggleDev = (id: string) =>
@@ -1277,7 +1282,11 @@ export function ForumCommentConfig({
   // 닉네임 랜덤 flag는 게이트(≥2)가 열렸고 체크됐을 때만 payload에 싣는다. 숨겨지면 항상 false.
   const commentNicknameRandom = showNicknameRandom && nicknameRandom;
   // 계정별 변경 가능 잔여 횟수(§6-2 실시간) — 공유 훅이 원격 조회·폴링을 담당한다.
-  const remaining = useNicknameRemaining(device.id, accts, commentNicknameRandom);
+  const remaining = useNicknameRemaining(
+    device.id,
+    accts,
+    commentNicknameRandom,
+  );
 
   // 댓글은 계정마다 같은 URL들에 단다(나눠서 없음). assignment는 계정만(종목 없음).
   const buildAssignments = () =>
@@ -2037,6 +2046,8 @@ function BlogConfig({
   accounts: string[];
   onSchedule: (item: ScheduledItem) => void;
 }) {
+  // 게시 종류: "comment"=기존 블로그 댓글, "write"=새 글 발행(원격 배포, 텍스트만).
+  const [postMode, setPostMode] = useState<"comment" | "write">("comment");
   const [blogMode, setBlogMode] = useState<BlogMode>("specific");
   const [link, setLink] = useState("");
   const [count, setCount] = useState<number | "">(1);
@@ -2044,6 +2055,22 @@ function BlogConfig({
   const [accts, setAccts] = useState<string[]>([]);
   const [armed, setArmed] = useState<boolean>(false);
   const [sched, setSched] = useState(() => nowParts());
+
+  // 새 글 발행 모드는 완전히 별개 폼(제목/본문/발행설정) — 기존 댓글 UI는 그대로 둔다(무회귀).
+  if (postMode === "write") {
+    return (
+      <Box>
+        <BlogPostModeToggle mode={postMode} onChange={setPostMode} />
+        <BlogWriteConfig
+          device={device}
+          postId={postId}
+          postTitle={postTitle}
+          accounts={accounts}
+          onSchedule={onSchedule}
+        />
+      </Box>
+    );
+  }
 
   const isList = blogMode !== "specific"; // 최신글/인기글 = 최신 N개(동일 동작).
   const valid = postTitle != null && items.length > 0 && accts.length > 0;
@@ -2199,6 +2226,7 @@ function BlogConfig({
 
   return (
     <Box>
+      <BlogPostModeToggle mode={postMode} onChange={setPostMode} />
       {/* 댓글 대상 모드 — 특정 게시글 / 최신글 / 인기글(최신글·인기글은 동일 동작). */}
       <Text size="xs" c="dimmed" mb={4}>
         댓글 대상
@@ -2359,6 +2387,339 @@ function BlogConfig({
           <Paper withBorder radius="md" p="sm" bg="var(--mantine-color-gray-0)">
             <Text fz={12} fw={700} mb={6}>
               블로그 예약 — 게시 시각 선택
+            </Text>
+            <Group gap="sm" wrap="wrap">
+              <DateTimePicker
+                date={sched.date}
+                time={sched.time}
+                onChange={setSched}
+              />
+              <Button size="sm" color="grape" onClick={confirmSchedule}>
+                예약 확정
+              </Button>
+              <Button
+                size="sm"
+                variant="subtle"
+                color="gray"
+                onClick={() => setArmed(false)}
+              >
+                취소
+              </Button>
+            </Group>
+          </Paper>
+        )}
+      </Stack>
+    </Box>
+  );
+}
+
+// 블로그 게시 종류 토글(댓글 / 새 글 발행). 두 렌더 경로가 공유한다.
+function BlogPostModeToggle({
+  mode,
+  onChange,
+}: {
+  mode: "comment" | "write";
+  onChange: (m: "comment" | "write") => void;
+}) {
+  return (
+    <>
+      <Text size="xs" c="dimmed" mb={4}>
+        게시 종류
+      </Text>
+      <Group gap="xs" mb="sm">
+        <Button
+          size="xs"
+          variant={mode === "comment" ? "filled" : "default"}
+          color={mode === "comment" ? "blue" : "gray"}
+          onClick={() => onChange("comment")}
+        >
+          댓글
+        </Button>
+        <Button
+          size="xs"
+          variant={mode === "write" ? "filled" : "default"}
+          color={mode === "write" ? "blue" : "gray"}
+          onClick={() => onChange("write")}
+        >
+          새 글 발행
+        </Button>
+      </Group>
+    </>
+  );
+}
+
+// 공개 범위 선택지(OpenType 코드와 일치: 0=전체·1=이웃·2=서로이웃·3=비공개).
+const BLOG_OPEN_TYPES = [
+  { value: "0", label: "전체공개" },
+  { value: "1", label: "이웃공개" },
+  { value: "2", label: "서로이웃공개" },
+  { value: "3", label: "비공개" },
+] as const;
+
+// 태그 입력(공백/쉼표 구분) → 배열. # 은 떼고 빈 값은 버린다(엔진은 공백으로 이어 붙임).
+export function parseBlogTags(raw: string): string[] {
+  return raw
+    .split(/[\s,]+/)
+    .map((t) => t.replace(/^#+/, "").trim())
+    .filter((t) => t.length > 0);
+}
+
+// 네이버 블로그 **새 글 발행**(원격 배포, Option A 텍스트 전용). 대상 계정 각각 자기 블로그에 같은
+// 제목/본문/발행설정으로 새 글을 쓴다(계정=블로그 1:1). 데스크톱 blog.tsx 발행 폼을 미러한다.
+// 사진/파일/글꼴은 범위 밖(텍스트만). 즉시=target:"blog_write" 전송, 예약=서버 스케줄러 재사용.
+export function BlogWriteConfig({
+  device,
+  postId,
+  postTitle,
+  accounts,
+  onSchedule,
+}: {
+  device: PubDevice;
+  postId: string | null;
+  postTitle: string | null;
+  accounts: string[];
+  onSchedule: (item: ScheduledItem) => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [content, setContent] = useState("");
+  const [openType, setOpenType] = useState("0");
+  const [commentYn, setCommentYn] = useState(true);
+  const [searchYn, setSearchYn] = useState(true);
+  const [sympathyYn, setSympathyYn] = useState(true);
+  const [noticePostYn, setNoticePostYn] = useState(false);
+  const [tagsRaw, setTagsRaw] = useState("");
+  const [accts, setAccts] = useState<string[]>([]);
+  const [armed, setArmed] = useState<boolean>(false);
+  const [sched, setSched] = useState(() => nowParts());
+
+  const valid = title.trim().length > 0 && accts.length > 0;
+  const detail = `새 글 발행 · 계정 ${accts.length}`;
+
+  const blogWritePayload = () => ({
+    title: title.trim(),
+    content,
+    openType: Number(openType),
+    commentYn,
+    searchYn,
+    sympathyYn,
+    noticePostYn,
+    tags: parseBlogTags(tagsRaw),
+  });
+  const assignments = () => accts.map((loginId) => ({ loginId, stocks: [] }));
+
+  const runNow = () => {
+    void (async () => {
+      try {
+        await api.publish.send({
+          deviceId: device.id,
+          postId: postId ?? "",
+          postTitle: postTitle ?? "",
+          targetLabel: "네이버 블로그 새 글",
+          split: false,
+          mode: "post",
+          target: "blog_write",
+          blogWrite: blogWritePayload(),
+          assignments: assignments(),
+        });
+        notifications.show({
+          title: `${device.name} · 블로그 새 글 발행 명령 전송`,
+          message: `"${shortTitle(title)}" · ${detail}`,
+          color: "blue",
+        });
+      } catch (e) {
+        if (isOffline(e)) {
+          notifications.show({
+            title: `${device.name} · 블로그 새 글(미리보기)`,
+            message: `${detail} · 서버 오프라인(전송 안 됨)`,
+            color: "gray",
+          });
+        } else {
+          notifications.show({
+            title: "블로그 새 글 발행 명령 실패",
+            message: e instanceof Error ? e.message : String(e),
+            color: "red",
+          });
+        }
+      }
+    })();
+  };
+
+  const confirmSchedule = () => {
+    const at = toEpochMs(sched.date, sched.time);
+    const when = scheduleMoment(sched.date, sched.time).when;
+    setArmed(false);
+    void (async () => {
+      try {
+        await api.scheduled.create({
+          deviceId: device.id,
+          postId: postId ?? "",
+          postTitle: postTitle ?? "",
+          targetLabel: "네이버 블로그 새 글",
+          split: false,
+          mode: "post",
+          target: "blog_write",
+          blogWrite: blogWritePayload(),
+          assignments: assignments(),
+          at,
+          detail,
+        });
+        notifications.show({
+          title: `${device.name} 블로그 새 글 예약`,
+          message: `${when} · ${detail}`,
+          color: "grape",
+        });
+      } catch (e) {
+        if (isOffline(e)) {
+          onSchedule({
+            id: `sch-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+            deviceName: device.name,
+            postTitle: title || "-",
+            targetLabel: "네이버 블로그 새 글",
+            detail,
+            at,
+          });
+          notifications.show({
+            title: `${device.name} 블로그 새 글 예약(미리보기)`,
+            message: `${when} · ${detail} · 서버 오프라인(로컬에만 표시)`,
+            color: "gray",
+          });
+        } else {
+          notifications.show({
+            title: "블로그 새 글 예약 실패",
+            message: e instanceof Error ? e.message : String(e),
+            color: "red",
+          });
+        }
+      }
+    })();
+  };
+
+  return (
+    <Box>
+      <TextInput
+        size="xs"
+        label="제목"
+        placeholder="새 글 제목"
+        value={title}
+        onChange={(e) => setTitle(e.currentTarget.value)}
+        mb="sm"
+        aria-label="블로그 새 글 제목"
+      />
+      <Textarea
+        size="xs"
+        label="본문"
+        placeholder="본문(줄바꿈마다 한 문단). 사진·파일·글꼴은 이번 범위 아님(텍스트만)."
+        value={content}
+        onChange={(e) => setContent(e.currentTarget.value)}
+        rows={5}
+        mb="sm"
+        aria-label="블로그 새 글 본문"
+      />
+      <Select
+        size="xs"
+        label="공개 범위"
+        data={BLOG_OPEN_TYPES.map((o) => ({ value: o.value, label: o.label }))}
+        value={openType}
+        onChange={(v) => setOpenType(v ?? "0")}
+        allowDeselect={false}
+        mb="sm"
+        aria-label="공개 범위"
+      />
+      <Group gap="md" mb="sm">
+        <Checkbox
+          size="xs"
+          label="댓글 허용"
+          checked={commentYn}
+          onChange={(e) => setCommentYn(e.currentTarget.checked)}
+        />
+        <Checkbox
+          size="xs"
+          label="공감 허용"
+          checked={sympathyYn}
+          onChange={(e) => setSympathyYn(e.currentTarget.checked)}
+        />
+        <Checkbox
+          size="xs"
+          label="검색 허용"
+          checked={searchYn}
+          onChange={(e) => setSearchYn(e.currentTarget.checked)}
+        />
+        <Checkbox
+          size="xs"
+          label="공지 등록"
+          checked={noticePostYn}
+          onChange={(e) => setNoticePostYn(e.currentTarget.checked)}
+        />
+      </Group>
+      <TextInput
+        size="xs"
+        label="태그 (공백/쉼표로 구분, # 없이)"
+        placeholder="첫글 인생"
+        value={tagsRaw}
+        onChange={(e) => setTagsRaw(e.currentTarget.value)}
+        mb="sm"
+        aria-label="태그"
+      />
+
+      {/* 계정 선택 — 블로그는 유효 쿠키 필요(로그인 성공 계정만). 계정마다 자기 블로그에 발행. */}
+      <Text size="xs" c="dimmed" mb={4}>
+        계정 (이 하위의 블로그 로그인 성공 계정만 · {accts.length}명 선택)
+      </Text>
+      <Group gap={6}>
+        {accounts.length === 0 ? (
+          <Text size="xs" c="dimmed">
+            이 하위에 로그인 성공한 블로그 계정이 없습니다(계정 분배에서
+            플랫폼=네이버 블로그로 분배·로그인하세요).
+          </Text>
+        ) : (
+          accounts.map((a) => {
+            const on = accts.includes(a);
+            return (
+              <Button
+                key={a}
+                size="xs"
+                variant={on ? "filled" : "default"}
+                color={on ? "blue" : "gray"}
+                onClick={() =>
+                  setAccts((prev) =>
+                    on ? prev.filter((x) => x !== a) : [...prev, a],
+                  )
+                }
+              >
+                {maskId(a)}
+              </Button>
+            );
+          })
+        )}
+      </Group>
+
+      <Stack gap={8} mt="md">
+        <Group grow gap="xs">
+          <Button
+            size="sm"
+            fw={700}
+            disabled={!valid}
+            leftSection={<Icon.bolt size={15} />}
+            onClick={runNow}
+          >
+            지금 발행
+          </Button>
+          <Button
+            size="sm"
+            fw={700}
+            variant={armed ? "filled" : "light"}
+            color="grape"
+            disabled={!valid}
+            leftSection={<Icon.calendar size={15} />}
+            onClick={() => setArmed(true)}
+          >
+            예약 발행
+          </Button>
+        </Group>
+        {armed && (
+          <Paper withBorder radius="md" p="sm" bg="var(--mantine-color-gray-0)">
+            <Text fz={12} fw={700} mb={6}>
+              블로그 새 글 예약 — 발행 시각 선택
             </Text>
             <Group gap="sm" wrap="wrap">
               <DateTimePicker
