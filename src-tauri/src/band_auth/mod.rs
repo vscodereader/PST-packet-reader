@@ -19,7 +19,6 @@ use crate::auth::{
     OrchestratorError,
 };
 
-use cookies::{account_band_cookie_status, BandCookieStatus};
 use paths::{band_cookies_dir_for_app_data, ensure_band_cookies_dir};
 
 // 네이버 `accounts.json`에서 계정 목록을 읽는다. `auth::load_accounts_file`은 비공개이므로
@@ -63,10 +62,14 @@ pub(crate) async fn process_band_account<R: Runtime>(
         .find(|account| account.id == account_id)
         .ok_or_else(|| OrchestratorError::AccountNotFound(account_id.to_string()))?;
 
-    // 유효한 band 쿠키가 있으면 재로그인을 건너뛴다(이미 로그인 = active). 단 명시적
-    // 재로그인(force)이면 로컬 쿠키가 유효해 보여도 단락하지 않고 실제 로그인으로 새
+    // 유효하고 **신선한**(재사용 한계 시간 이내) band 쿠키가 있으면 재로그인을 건너뛴다
+    // (이미 로그인 = active). band_session은 세션 쿠키(expires:-1)라 로컬 만료검사로는
+    // 절대 만료로 안 잡히므로, 여기서 status(Valid)만 보면 4시간 지난 죽은 세션도 통과해
+    // 게시에서 'session expired'(result_code 300)로 실패한다 — savedAt 신선도까지 봐서
+    // 오래된 세션은 실제 재로그인으로 새 쿠키를 받게 강제한다(게시 경로와 동일 기준).
+    // 단 명시적 재로그인(force)이면 신선해 보여도 단락하지 않고 실제 로그인으로 새
     // 비밀번호를 검증한다 — 바뀐/죽은 자격증명을 잡는다(네이버 #132와 동일).
-    if !force && account_band_cookie_status(account_id)? == BandCookieStatus::Valid {
+    if !force && has_valid_saved_band_cookie(account_id) {
         return Ok(LoginResolution::active());
     }
 

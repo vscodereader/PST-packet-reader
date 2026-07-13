@@ -47,6 +47,9 @@ pub(crate) fn read_band_account_cookies(
 }
 
 /// 앱 데이터 루트 기준 계정의 band 쿠키 상태를 조회한다.
+/// (재로그인 게이트는 이제 신선도까지 보는 `account_band_cookie_reusable`을 쓴다. 이 status
+/// 조회는 진단/후속 배선용으로 남겨둔다 — 네이버 `read_account_cookies` 대응.)
+#[allow(dead_code)]
 pub(crate) fn account_band_cookie_status(
     account_id: &str,
 ) -> Result<BandCookieStatus, OrchestratorError> {
@@ -76,15 +79,20 @@ pub(crate) fn account_band_cookie_reusable(
     }
     let text = fs::read_to_string(path)?;
     let value: Value = serde_json::from_str(&text)?;
-    let now = now_secs();
-    if cookie_status_from_value(&value, now) != BandCookieStatus::Valid {
-        return Ok(false);
+    Ok(value_is_reusable(&value, now_secs(), max_age_secs))
+}
+
+/// 저장 쿠키 JSON이 재사용 가능한지(유효 세션 + `savedAt` 신선도) 판정하는 순수 함수.
+/// 유효하지 않거나, `savedAt`이 없거나(구형 파일), 신선도(max_age) 초과면 false.
+fn value_is_reusable(value: &Value, now: u64, max_age_secs: u64) -> bool {
+    if cookie_status_from_value(value, now) != BandCookieStatus::Valid {
+        return false;
     }
     // savedAt이 없으면(구형 파일) 신선도 미상 → 재사용하지 않고 재로그인하도록 false.
     let Some(saved_at) = value.get("savedAt").and_then(Value::as_u64) else {
-        return Ok(false);
+        return false;
     };
-    Ok(now.saturating_sub(saved_at) < max_age_secs)
+    now.saturating_sub(saved_at) < max_age_secs
 }
 
 /// 저장된 band 쿠키 파일이 유효한 세션을 담고 있는지 확인한다.
@@ -247,6 +255,58 @@ mod tests {
             cookie_status_from_value(&value, now),
             BandCookieStatus::Valid
         );
+    }
+
+    // 3시간 한계 기준 신선도 판정(process_band_account 재로그인 생략 게이트의 핵심).
+    const MAX_AGE_3H: u64 = 3 * 60 * 60;
+
+    fn session_cookie_value(saved_at: Option<u64>) -> Value {
+        let mut v = serde_json::json!({
+            // band_session은 세션 쿠키(expires:-1)라 로컬 만료검사로는 절대 만료 안 됨.
+            "cookies": [
+                {"name": "band_session", "domain": ".band.us", "expires": -1}
+            ]
+        });
+        if let Some(ts) = saved_at {
+            v["savedAt"] = serde_json::json!(ts);
+        }
+        v
+    }
+
+    #[test]
+    fn reusable_true_for_fresh_valid_session() {
+        let now = 1_700_000_000;
+        // 방금 저장(1분 전) → 재사용 가능.
+        let v = session_cookie_value(Some(now - 60));
+        assert!(value_is_reusable(&v, now, MAX_AGE_3H));
+    }
+
+    #[test]
+    fn reusable_false_for_stale_but_locally_valid_session() {
+        let now = 1_700_000_000;
+        // 4시간 전 저장 — 세션 쿠키라 status는 여전히 Valid지만 신선도 초과 → 재사용 불가
+        // (재로그인 강제). 이게 result_code 300 'session expired'를 막는 핵심 케이스.
+        let v = session_cookie_value(Some(now - 4 * 60 * 60));
+        assert_eq!(cookie_status_from_value(&v, now), BandCookieStatus::Valid);
+        assert!(!value_is_reusable(&v, now, MAX_AGE_3H));
+    }
+
+    #[test]
+    fn reusable_false_when_saved_at_missing() {
+        let now = 1_700_000_000;
+        // 구형 파일(savedAt 없음) → 신선도 미상 → 재사용하지 않음.
+        let v = session_cookie_value(None);
+        assert!(!value_is_reusable(&v, now, MAX_AGE_3H));
+    }
+
+    #[test]
+    fn reusable_false_when_no_band_session_cookie() {
+        let now = 1_700_000_000;
+        let v = serde_json::json!({
+            "savedAt": now - 60,
+            "cookies": [{"name": "OTHER", "domain": ".band.us", "expires": now + 3600}]
+        });
+        assert!(!value_is_reusable(&v, now, MAX_AGE_3H));
     }
 
     #[test]
