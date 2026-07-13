@@ -23,6 +23,12 @@ pub(crate) fn resolve_band_failure(
             AccountStatus::Blocked,
             "로그인 접근이 차단되었습니다(계정 상태 확인 필요).",
         ),
+        // 본인확인(휴대전화) 화면이 떴는데 계정 ID가 휴대전화 형식이 아니라 자동으로 풀 수 없는
+        // 보류 상태(네이버 PhoneVerify → OnHold 미러). 실패가 아니라 사용자 조치 대기다.
+        BandLoginOutcome::OnHold => LoginResolution::failure(
+            AccountStatus::OnHold,
+            "본인확인(휴대전화) 화면이 떠 로그인이 보류되었습니다. 이 계정만 골라 다시 로그인해 직접 처리하세요.",
+        ),
         // CDP 실패에서 온 trace는 "자세히 보기"에 띄우려고 보존한다(#210).
         BandLoginOutcome::Error(message) => {
             LoginResolution::failure_with_trace(AccountStatus::Error, message.clone(), trace)
@@ -71,6 +77,15 @@ mod tests {
             r.trace.as_deref(),
             Some("연결 실패\n\nat band.rs:1:1\n\nframe0")
         );
+    }
+
+    #[test]
+    fn on_hold_maps_to_on_hold_failure() {
+        // 본인확인(휴대전화) 비-형식 ID 보류는 OnHold 상태로 매핑되고 실패(비활성)로 본다.
+        let r = resolve_band_failure(&BandLoginOutcome::OnHold, None);
+        assert_eq!(r.status, AccountStatus::OnHold);
+        assert!(!r.succeeded);
+        assert!(!r.message.is_empty());
     }
 
     #[test]
