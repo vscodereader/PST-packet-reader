@@ -60,6 +60,33 @@ pub(crate) fn account_band_cookie_status(
     cookie_status_from_text(&text)
 }
 
+/// 저장된 band 쿠키가 **재사용 가능**한지(유효 세션 + 신선함) 확인한다. band 세션은 서명 후
+/// ~4시간이면 서버측에서 만료되지만("4 hours passed"), `band_session`은 세션 쿠키(expires:-1)라
+/// 로컬 만료검사(`cookie_is_unexpired`)로는 못 잡는다. 그래서 저장 시각(`savedAt`) 기준 신선도로
+/// 추가로 막아, 오래된 쿠키를 재사용해 게시가 'session expired'로 실패하는 것을 방지한다
+/// (게시 경로의 강제 재로그인 생략 판단용, 2026-07-13).
+pub(crate) fn account_band_cookie_reusable(
+    account_id: &str,
+    max_age_secs: u64,
+) -> Result<bool, OrchestratorError> {
+    let dir = band_cookies_dir(app_data_root()?);
+    let path = band_cookie_file_path(&dir, account_id);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let text = fs::read_to_string(path)?;
+    let value: Value = serde_json::from_str(&text)?;
+    let now = now_secs();
+    if cookie_status_from_value(&value, now) != BandCookieStatus::Valid {
+        return Ok(false);
+    }
+    // savedAt이 없으면(구형 파일) 신선도 미상 → 재사용하지 않고 재로그인하도록 false.
+    let Some(saved_at) = value.get("savedAt").and_then(Value::as_u64) else {
+        return Ok(false);
+    };
+    Ok(now.saturating_sub(saved_at) < max_age_secs)
+}
+
 /// 저장된 band 쿠키 파일이 유효한 세션을 담고 있는지 확인한다.
 pub(crate) fn has_valid_band_cookie_file(path: &Path) -> Result<bool, OrchestratorError> {
     if !path.exists() {
