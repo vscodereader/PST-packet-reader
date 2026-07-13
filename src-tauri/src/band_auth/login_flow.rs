@@ -277,6 +277,15 @@ pub(crate) fn is_oauth_consent_url(url: &str) -> bool {
     url.contains("allow_oauth") || url.contains("agree_term")
 }
 
+/// 현재 URL이 "로그인 완료" band 홈인지(순수 함수). band_session 쿠키만으론 성공을 못 가른다
+/// — auth.band.us 인터스티셜(2단계 인증/캡차/가입중)에서도 band_session 이 발급되기 때문이다.
+/// 실제 완료는 auth 도메인·네이버 도메인을 벗어나 band.us 홈(`www.band.us` 등)에 착지한 상태다
+/// (패킷 diff 2026-07-13: 성공 계정만 `www.band.us` JSESSIONID 발급). 인터스티셜(`auth.band.us`)과
+/// 네이버 로그인(`nid.naver.com`)은 제외한다.
+pub(crate) fn is_logged_in_band_url(url: &str) -> bool {
+    url.contains("band.us") && !url.contains("auth.band.us") && !url.contains("nid.naver.com")
+}
+
 /// 현재 URL이 미가입 계정 화면(`_ns=false`)인지(순수 함수). band 가 미가입 네이버 계정을
 /// `auth.band.us/login?...&_ns=false` 로 떨궈 "네이버로 가입하기"를 눌러야 한다.
 pub(crate) fn is_signup_needed_url(url: &str) -> bool {
@@ -494,9 +503,10 @@ fn read_signals(
 
     let captcha = visible_exists(client, "#captchaDiv, #captcha, img#captchaimg");
     let phone_verify = visible_exists(client, "#phone_value");
-    // 밴드 2단계 인증 게이트(validation_welcome)는 OTP 계열 종료 실패로 접는다 — 사람이 즉석에서
-    // 풀 수 없고, 이 화면의 반쪽 band_session 으로는 게시가 거부된다("session expired 4 hours").
-    let two_factor = url.contains("validation_welcome") || is_two_factor_text(&body_text);
+    // 밴드 2단계 인증은 화면 문구("2단계 인증")로만 잡는다 — 사람이 즉석에서 풀 수 없는 종료 실패.
+    // URL(validation_welcome)로는 잡지 않는다: 가입 흐름도 그 화면을 잠깐 지나가므로 성공 가능한
+    // 계정을 죽이면 안 된다(패킷 diff: 성공한 mango 도 validation_welcome 를 거쳐 band.us 로 진행).
+    let two_factor = is_two_factor_text(&body_text);
     let otp = two_factor || visible_exists(client, "#otp, input[name=otp], #cellphoneCertify");
 
     // 네이버 로그인 폼(#id/#pw)이 보이고 입력 가능한지.
@@ -533,9 +543,11 @@ fn read_signals(
     let locked = on_naver && is_locked_text(&body_text);
     let blocked = is_recaptcha_challenge_url(&url) || url.contains("account_status");
 
-    // 성공 확정: band_session 이 있고, 인증 게이트(2단계 인증/장기 미로그인)에 걸려 있지 않을 때만.
-    // 반쪽 세션(validation_welcome 등)을 성공으로 오판해 게시 실패("session expired")하던 것을 막는다.
-    let logged_in = has_session && !otp && !long_dormant;
+    // 성공 확정(패킷 diff 근거, 2026-07-13): band_session 만으론 부족하다 — auth.band.us 인터스티셜
+    // (2단계 인증/캡차/recaptcha/가입중)에서도 발급되며 그 반쪽 세션은 게시가 거부된다("session
+    // expired 4 hours"). 실제 로그인 완료 = auth 도메인을 벗어나 band.us 홈(www.band.us 등)에 착지
+    // (성공한 계정만 www.band.us JSESSIONID 발급). band_session 이 있고 band.us 홈일 때만 성공.
+    let logged_in = has_session && is_logged_in_band_url(&url);
 
     Ok(BandPageSignals {
         logged_in,
@@ -1329,6 +1341,24 @@ mod tests {
             "https://auth.band.us/b/inactive_user?redirect_url=https%3A%2F%2Fwww.band.us"
         ));
         assert!(!is_inactive_user_url("https://auth.band.us/b/validation_welcome"));
+    }
+
+    #[test]
+    fn logged_in_only_on_real_band_home() {
+        // 성공(패킷 diff): auth 도메인을 벗어난 band.us 홈만 로그인 완료로 본다.
+        assert!(is_logged_in_band_url("https://www.band.us/band-create"));
+        assert!(is_logged_in_band_url("https://band.us/band/103043410"));
+        assert!(is_logged_in_band_url("https://www.band.us/feed"));
+        // 인터스티셜(2단계 인증/캡차/가입중)과 네이버 로그인은 성공 아님 — band_session 있어도 반쪽.
+        assert!(!is_logged_in_band_url("https://auth.band.us/b/validation_welcome"));
+        assert!(!is_logged_in_band_url(
+            "https://auth.band.us/b/validation/recaptcha?next_url=https%3A%2F%2Fband.us"
+        ));
+        assert!(!is_logged_in_band_url("https://auth.band.us/continue_external_account_sign_up"));
+        assert!(!is_logged_in_band_url(
+            "https://nid.naver.com/oauth2.0/authorize?redirect_uri=https%3A%2F%2Fauth.band.us"
+        ));
+        assert!(!is_logged_in_band_url(""));
     }
 
     #[test]
