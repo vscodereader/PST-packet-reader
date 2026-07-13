@@ -694,6 +694,34 @@ async fn band_resolve_name(account_id: String, band_link: String) -> Result<Stri
         .map_err(|e| e.to_string())
 }
 
+/// 블로그명(도메인) 사용 가능 여부를 확인한다(저장 쿠키). `true`=사용 가능, `false`=이미 사용 중.
+#[tauri::command]
+async fn blog_check_name(account_id: String, domain_id: String) -> Result<bool, String> {
+    naver_blog::check_blog_name_for_account(&account_id, &domain_id)
+        .await
+        .map_err(|e| e.message().to_owned())
+}
+
+/// 새 블로그 글을 발행한다(저장 쿠키 → RabbitWrite HTTP). 기본 발행설정(전체공개·현재발행)으로
+/// 우선 실측한다 — 성공하면 게시글 링크(logNo), 봇탐지로 막히면 사유를 돌려준다.
+#[tauri::command]
+async fn blog_publish(
+    account_id: String,
+    blog_id: String,
+    title: String,
+    content: String,
+) -> Result<naver_blog::BlogWriteResult, String> {
+    naver_blog::publish_blog_post_for_account(
+        &account_id,
+        &blog_id,
+        &title,
+        &content,
+        &naver_blog::BlogPublishSettings::default(),
+    )
+    .await
+    .map_err(|e| e.message().to_owned())
+}
+
 /// 로그인·게시 없이 연결된 ADB 디바이스(폰)의 비행기모드만 껐다 켜 IP를 회전시킨다(#247).
 /// 로그인 경로(`auth/mod.rs`)와 동일하게 `assert_adb_device` → `toggle_airplane_mode` 순서로
 /// 기존 함수를 그대로 재사용한다 — 비행기모드 ON/OFF·IP 회전 결과 로그도 기존과 동일.
@@ -993,6 +1021,8 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         band_publish,
         band_comment,
         band_resolve_name,
+        blog_check_name,
+        blog_publish,
         rotate_ip,
         manual_add_account,
         get_account_cookies,

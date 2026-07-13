@@ -98,7 +98,8 @@ impl Default for BlogPublishSettings {
 }
 
 /// 발행 성공 결과. 게시글 번호(logNo)와 링크를 보존한다(결과 링크·완료 로그용).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BlogWriteResult {
     /// 게시글 번호. 예약 발행은 아직 없을 수 있어 `None`.
     pub log_no: Option<String>,
