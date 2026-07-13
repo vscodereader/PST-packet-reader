@@ -7,11 +7,15 @@ pub mod domain_client;
 pub mod error;
 pub(crate) mod headers;
 pub mod post_list;
+pub mod write_client;
 
 pub use comment_client::{BlogCommentClient, BlogCommentResult};
 pub use domain_client::BlogDomainClient;
 pub use error::BlogError;
 pub use post_list::{BlogPost, BlogPostList, BlogPostListClient};
+pub use write_client::{
+    BlogPublishSettings, BlogWriteClient, BlogWriteResult, OpenType, PublishTime,
+};
 
 /// 저장된 네이버 쿠키로 블로그 글에 댓글 1건을 등록한다(계정 단위 진입점, 큐 워커용).
 ///
@@ -69,6 +73,27 @@ pub async fn check_blog_name_for_account(
     let cookie_header = resolve_cookie_header(account_id)?;
     BlogDomainClient::new()
         .check_availability(domain_id, Some(&cookie_header))
+        .await
+}
+
+/// 저장된 네이버 쿠키로 블로그 새 글을 발행한다(계정 단위 진입점, HTTP RabbitWrite 경로).
+///
+/// `blog_id`(그 계정의 블로그명)에 제목/내용/발행설정으로 새 글을 올린다. 봇탐지 tokenId는
+/// 클라이언트가 생성해 실측하며(서버가 강하게 검증하면 CDP 경로로 대체), 성공하면 게시글
+/// 번호(logNo)와 링크를 돌려준다. 쿠키가 없으면 `BlogError`로 알린다.
+///
+/// # 쿠키 보안
+/// 계정 쿠키는 내부에서만 사용되며 반환 오류/로그에 절대 노출되지 않는다.
+pub async fn publish_blog_post_for_account(
+    account_id: &str,
+    blog_id: &str,
+    title: &str,
+    content: &str,
+    settings: &BlogPublishSettings,
+) -> Result<BlogWriteResult, BlogError> {
+    let cookie_header = resolve_cookie_header(account_id)?;
+    BlogWriteClient::new()
+        .publish(blog_id, title, content, settings, &cookie_header)
         .await
 }
 
