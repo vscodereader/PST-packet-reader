@@ -33,6 +33,20 @@ fn load_accounts() -> Result<Vec<Account>, OrchestratorError> {
     Ok(serde_json::from_str(&text)?)
 }
 
+/// 게시 시 강제 재로그인을 건너뛰고 저장 쿠키로 바로 게시해도 되는지 반환한다(형님 지시
+/// 2026-07-13). 매 게시 강제 재로그인이 밴드 봇탐지 reCAPTCHA 를 자체 유발하던 문제를 피한다.
+/// 유효 세션이면서 **신선한**(저장 후 재사용 한계 시간 이내) 쿠키일 때만 true — 밴드 세션은
+/// ~4시간이면 서버측 만료라, 오래된 쿠키를 재사용하면 'session expired'로 실패하기 때문이다.
+/// 파일 없음/만료/오래됨/오류는 모두 false → 아래 정상 로그인 경로로 진행한다.
+pub(crate) fn has_valid_saved_band_cookie(account_id: &str) -> bool {
+    cookies::account_band_cookie_reusable(account_id, BAND_COOKIE_REUSE_MAX_AGE_SECS)
+        .unwrap_or(false)
+}
+
+/// 저장된 band 쿠키를 재로그인 없이 재사용해도 되는 최대 나이(초). 밴드 PC웹 세션은 로그인 후
+/// ~4시간이면 만료되므로("4 hours passed") 그 안쪽으로 버퍼를 둔다(3시간).
+const BAND_COOKIE_REUSE_MAX_AGE_SECS: u64 = 3 * 60 * 60;
+
 /// 한 band 계정을 처리한다(네이버 `process_account` 미러).
 ///
 /// `_app`은 큐 워커가 넘기는 핸들로, CDP 로그인은 직접 호출하므로 본문에서는 쓰지 않는다.
