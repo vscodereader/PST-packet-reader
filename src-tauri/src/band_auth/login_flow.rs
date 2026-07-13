@@ -1,8 +1,14 @@
-//! band.us 이메일 로그인 CDP 시퀀스(네이버 `auth/login_flow.rs` 미러).
+//! band.us "네이버로 로그인"(OAuth2) CDP 시퀀스(네이버 `auth/login_flow.rs` 미러).
 //!
-//! 2단계: 이메일 입력 → 확인 → 비밀번호 입력 → 확인. 비밀번호는 band 페이지 JS가
-//! 클라이언트측에서 암호화하므로, `Runtime.evaluate`로 값만 꽂지 않고 실제 키 이벤트
-//! (`Input.dispatchKeyEvent`)로 한 글자씩 입력한다(키 후킹 암호화 대응).
+//! band 이메일 로그인 대신 **네이버 OAuth** 로 로그인한다(패킷 캡처로 검증). 진입 URL
+//! `redirect_external_account_login?type=naver` 로 이동하면 band가 **표준 네이버 로그인 폼**
+//! (`#id`/`#pw`, default_ecc.js — 일반 네이버 로그인과 동일)으로 리다이렉트한다. 그래서 네이버
+//! 로그인과 똑같이 실제 키 이벤트(`Input.dispatchKeyEvent`)로 아이디/비밀번호를 입력한다
+//! (페이지 JS가 keydown 을 후킹해 ECC 암호화하므로 값만 꽂으면 암호화가 깨진다). 네이버 인증
+//! 뒤에는 새 기기 확인/추가 페이지(네이버 로그인과 동일)와 OAuth 동의(`allow_oauth`) 페이지가
+//! 나올 수 있고, band가 세션을 세우면 `.band.us` 에 `band_session` 쿠키가 발급된다. band 측
+//! reCAPTCHA(`/b/validation/recaptcha`) 검증이 낄 수 있는데, 자동해결하지 않고 headed 면 사람이
+//! 풀도록 계속 기다린다.
 
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -11,8 +17,10 @@ use serde_json::{json, Value};
 
 use crate::naver_automation::{AutomationError, CdpClient};
 
-const EMAIL_LOGIN_URL: &str = "https://auth.band.us/email_login?keep_login=false";
-const PASSWORD_URL_FRAGMENT: &str = "email_login/password";
+// band "네이버로 로그인" 진입점. 이 URL로 이동하면 band가 네이버 OAuth authorize 로
+// 리다이렉트해 표준 네이버 로그인 폼(#id/#pw)을 띄운다.
+const OAUTH_ENTRY_URL: &str =
+    "https://auth.band.us/redirect_external_account_login?type=naver&keep_login=false&rcv=none";
 const HEADLESS_TIMEOUT: Duration = Duration::from_secs(40);
 const HEADED_TIMEOUT: Duration = Duration::from_secs(180);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -21,10 +29,9 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 // 일반 크롬과 동일하게 false 로 맞춘다.
 const STEALTH_INIT_JS: &str = "Object.defineProperty(navigator,'webdriver',{get:()=>false});";
 
-const EMAIL_SELECTOR: &str = "#input_email";
-const EMAIL_SUBMIT_SELECTOR: &str = "#email_login_form button[type=submit]";
-const PASSWORD_SELECTOR: &str = "#pw";
-const PASSWORD_SUBMIT_SELECTOR: &str = "#email_password_login_form button[type=submit]";
+// band-OAuth 페이지에 뜨는 표준 네이버 로그인 폼 셀렉터(일반 네이버 로그인과 동일).
+const NAVER_ID_SELECTOR: &str = "#id";
+const NAVER_PW_SELECTOR: &str = "#pw";
 
 /// 로그인 결과.
 pub(crate) enum BandLoginOutcome {
@@ -35,7 +42,11 @@ pub(crate) enum BandLoginOutcome {
 }
 
 /// 페이지 판정 신호(분류 입력). 분류 로직을 브라우저에서 분리해 단위 테스트한다.
-/// band 로그인은 캡차/otp/device 챌린지가 없으므로 logged_in/bad_credentials/blocked 만 둔다.
+/// 네이버 OAuth 로그인 폼을 거치지만, band 큐 관점의 결과는 logged_in/bad_credentials/blocked
+/// 세 가지로 충분하다. band 측 reCAPTCHA(`/b/validation/recaptcha`)와 계정 상태 페이지는
+/// `blocked`로 잡아, headed면 사람이 풀도록 계속 대기하고 headless면 실패로 확정한다.
+/// 네이버 캡차(보안문자)는 별도 신호 없이 pending 으로 두어 headed 사람 대기(180초) 안에
+/// 풀리면 성공 쿠키로 확정된다(자동해결 안 함).
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct BandPageSignals {
     pub logged_in: bool,
@@ -112,11 +123,29 @@ pub(crate) fn credentials_present(id: &str, pw: &str) -> bool {
     !id.trim().is_empty() && !pw.is_empty()
 }
 
+/// band-OAuth 진입 URL(순수 함수). `redirect_external_account_login?type=naver` 로 이동하면
+/// band가 네이버 OAuth authorize 로 리다이렉트해 표준 네이버 로그인 폼을 띄운다.
+pub(crate) fn oauth_entry_url() -> &'static str {
+    OAUTH_ENTRY_URL
+}
+
+/// 현재 URL이 네이버 OAuth 동의 페이지(`allow_oauth ... step=agree_term`)인지(순수 함수).
+/// 이 화면은 종료 신호가 아니라 "동의" 클릭이 필요한 액션 화면이라 루프에서 자동 클릭한다.
+pub(crate) fn is_oauth_consent_url(url: &str) -> bool {
+    url.contains("allow_oauth")
+}
+
+/// 현재 URL이 band 측 reCAPTCHA/검증 페이지인지(순수 함수). 자동해결하지 않고 `blocked`로 잡아
+/// headed면 사람 대기, headless면 실패로 확정한다.
+pub(crate) fn is_recaptcha_challenge_url(url: &str) -> bool {
+    url.contains("recaptcha") || url.contains("/validation/")
+}
+
 /// 수거한 쿠키에 band 세션 쿠키 `band_session`이 있는지 확인한다(순수 함수).
 ///
-/// band 로그인 성공 시 `auth.band.us/email_login/password` 응답이 `band_session`
-/// 쿠키(domain `.band.us`)를 발급한다. (`BUC`는 네이버 쿠키이며 band은 발급하지 않는다 —
-/// 패킷 캡처로 확인.)
+/// 네이버 OAuth 로그인이 끝나 band가 세션을 세우면(`external_account_login` 응답) `band_session`
+/// 쿠키(domain `.band.us`)가 발급된다 — 이게 로그인 성공의 최종 신호다. (`BUC`는 네이버 쿠키이며
+/// band은 발급하지 않는다 — 패킷 캡처로 확인.)
 pub(crate) fn has_band_session_cookies(cookies: &[Value]) -> bool {
     cookies
         .iter()
@@ -163,45 +192,45 @@ fn run_inner(
         ));
     }
 
-    // navigate 전에 스텔스 스크립트를 등록한다(best-effort).
+    // navigate 전에 스텔스 스크립트를 등록한다(best-effort, 네이버 로그인과 동일).
     let _ = client.call(
         "Page.addScriptToEvaluateOnNewDocument",
         json!({ "source": STEALTH_INIT_JS }),
     );
 
-    // --- 1단계: 이메일 페이지 ---
-    client.navigate(EMAIL_LOGIN_URL)?;
-    if !wait_for_visible(client, EMAIL_SELECTOR) {
+    // --- 1단계: band-OAuth 진입 → 표준 네이버 로그인 폼 ---
+    // redirect_external_account_login?type=naver 로 이동하면 band가 네이버 OAuth authorize 로
+    // 리다이렉트해 #id/#pw 로그인 폼(default_ecc.js — 일반 네이버 로그인과 동일)을 띄운다.
+    client.navigate(oauth_entry_url())?;
+    if !wait_for_visible(client, NAVER_ID_SELECTOR) {
         return Ok(BandLoginOutcome::Error(
-            "band 이메일 입력 폼(#input_email)을 찾지 못했습니다.".to_owned(),
+            "네이버 로그인 폼(#id)을 찾지 못했습니다(band 네이버 OAuth 리다이렉트 실패 가능)."
+                .to_owned(),
         ));
     }
-    if !type_into(client, EMAIL_SELECTOR, id)? {
+
+    // --- 2단계: 네이버 아이디/비밀번호 입력 → 로그인 ---
+    // 값만 꽂으면 keydown 후킹 ECC 암호화가 깨지므로 실제 키 이벤트로 한 글자씩 입력한다.
+    if !type_into(client, NAVER_ID_SELECTOR, id)? {
         return Ok(BandLoginOutcome::Error(
-            "이메일 자동 입력에 실패했습니다(이메일 칸이 비어 로그인을 중단). 잠시 후 다시 시도하세요."
+            "아이디 자동 입력에 실패했습니다(아이디 칸이 비어 로그인을 중단). 잠시 후 다시 시도하세요."
                 .to_owned(),
         ));
     }
     sleep(Duration::from_secs(1));
-    click_button(client, EMAIL_SUBMIT_SELECTOR)?;
-
-    // --- 2단계: 비밀번호 페이지 ---
-    if !wait_for_password_page(client) {
-        return Ok(BandLoginOutcome::Error(
-            "band 비밀번호 입력 폼(#pw)을 찾지 못했습니다. 이메일이 올바른지 확인하세요."
-                .to_owned(),
-        ));
-    }
-    if !type_into(client, PASSWORD_SELECTOR, pw)? {
+    if !type_into(client, NAVER_PW_SELECTOR, pw)? {
         return Ok(BandLoginOutcome::Error(
             "비밀번호 자동 입력에 실패했습니다(비밀번호 칸이 비어 로그인을 중단). 잠시 후 다시 시도하세요."
                 .to_owned(),
         ));
     }
     sleep(Duration::from_secs(2));
-    click_button(client, PASSWORD_SUBMIT_SELECTOR)?;
+    click_login_button(client)?;
 
-    // --- 결과 폴링 ---
+    // --- 3단계: 결과 폴링 ---
+    // 매 폴링마다 (a) 새 기기 확인/추가 페이지("등록 안함"·네이버 로그인과 동일)와 (b) OAuth 동의
+    // 페이지(allow_oauth)를 best-effort 로 처리하고, band_session 쿠키가 뜨는지 확인한다. band 측
+    // reCAPTCHA/계정상태 페이지는 blocked 로 잡혀, headed면 사람이 풀도록 계속 대기한다.
     let timeout = if wait_for_human {
         HEADED_TIMEOUT
     } else {
@@ -212,6 +241,15 @@ fn run_inner(
     let mut last_negative: Option<BandSignal> = None;
     let deadline = Instant::now() + timeout;
     loop {
+        // (a) 인증 성공 직후 뜨는 "새 기기 등록" 페이지면 "등록 안함"을 눌러 마무리한다
+        // (네이버 로그인과 동일한 CdpClient 헬퍼 재사용). 없으면 무시한다.
+        let _ = client.click_device_dontsave_if_present(Duration::from_millis(300));
+        // (b) OAuth 동의 페이지(allow_oauth ... step=agree_term)면 동의/허용 버튼을 눌러 진행한다.
+        let url = client.current_url().unwrap_or_default();
+        if is_oauth_consent_url(&url) {
+            let _ = click_oauth_consent(client);
+        }
+
         let signals = read_signals(client)?;
         match decide_loop_step(last_negative, classify(&signals), wait_for_human) {
             LoopDecision::Success => {
@@ -233,6 +271,46 @@ fn run_inner(
     }
 }
 
+// 네이버 로그인 버튼을 사람처럼 좌표 마우스 클릭한다(네이버 login_flow 미러). id 값에 점이 있어
+// CSS 이스케이프(#log\.login)가 필요하며, 좌표를 못 구하면 .click()으로, 그마저 없으면
+// button[type=submit]로 폴백한다.
+fn click_login_button(client: &mut CdpClient) -> Result<(), AutomationError> {
+    let center = client.evaluate(
+        "(()=>{const b=document.querySelector('#log\\\\.login')||\
+         document.querySelector('button[type=submit]');if(!b)return null;\
+         const r=b.getBoundingClientRect();if(r.width<=0||r.height<=0)return null;\
+         return [r.left+r.width/2, r.top+r.height/2];})()",
+    )?;
+    if let Some((x, y)) = parse_xy(&center) {
+        mouse_click(client, x, y)?;
+    } else {
+        client.evaluate(
+            "(()=>{const b=document.querySelector('#log\\\\.login')||\
+             document.querySelector('button[type=submit]');if(b){b.click();return true;}return false;})()",
+        )?;
+    }
+    Ok(())
+}
+
+// OAuth 동의 페이지(allow_oauth ... step=agree_term)에서 "동의/허용/계속" 버튼을 클릭한다
+// (best-effort). id 후보(#agree_btn/#agree/#btnAgree) 우선, 없으면 보이는 버튼/링크/submit 중
+// 텍스트에 동의·허용·계속이 든 첫 요소를 누른다. 자동 리다이렉트라 눌 게 없으면 no-op(false).
+fn click_oauth_consent(client: &mut CdpClient) -> Result<bool, AutomationError> {
+    const JS: &str = "(()=>{\
+        const vis=el=>{if(!el)return false;const r=el.getBoundingClientRect();\
+            return r.width>0&&r.height>0&&el.offsetParent!==null&&!el.disabled;};\
+        let el=document.querySelector('#agree_btn')||document.querySelector('#agree')\
+            ||document.querySelector('#btnAgree');\
+        if(!vis(el)){el=null;\
+            const cs=Array.prototype.slice.call(\
+                document.querySelectorAll('button, a, input[type=submit], input[type=button]'));\
+            for(const c of cs){\
+                const t=String(c.innerText||c.textContent||c.value||'').replace(/\\s+/g,' ').trim();\
+                if(vis(c)&&(t.includes('동의')||t.includes('허용')||t.includes('계속'))){el=c;break;}}}\
+        if(vis(el)){el.click();return true;}return false;})()";
+    Ok(client.evaluate_bool(JS).unwrap_or(false))
+}
+
 // 셀렉터 요소가 화면에 보이고 입력 가능(disabled 아님)할 때까지 기다린다.
 fn wait_for_visible(client: &mut CdpClient, selector: &str) -> bool {
     tracing::info!("[BAND] 입력 폼 로딩 대기 중... ({selector})");
@@ -249,31 +327,6 @@ fn wait_for_visible(client: &mut CdpClient, selector: &str) -> bool {
         }
         if Instant::now() >= deadline {
             tracing::info!("[BAND] ✗ 입력 폼 로딩 시간 초과(15초) ({selector})");
-            return false;
-        }
-        sleep(Duration::from_millis(250));
-    }
-}
-
-// 비밀번호 페이지가 로드될 때까지 기다린다: URL이 password 페이지로 바뀌고 #pw가 입력 가능.
-fn wait_for_password_page(client: &mut CdpClient) -> bool {
-    tracing::info!("[BAND] 비밀번호 페이지 대기 중...");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let url = client.current_url().unwrap_or_default();
-        if url.contains(PASSWORD_URL_FRAGMENT)
-            && client
-                .evaluate_bool(
-                    "(()=>{const el=document.querySelector('#pw');\
-                     return !!(el&&el.offsetParent!==null&&!el.disabled);})()",
-                )
-                .unwrap_or(false)
-        {
-            tracing::info!("[BAND] ✓ 비밀번호 페이지 로딩 확인");
-            return true;
-        }
-        if Instant::now() >= deadline {
-            tracing::info!("[BAND] ✗ 비밀번호 페이지 로딩 시간 초과(15초)");
             return false;
         }
         sleep(Duration::from_millis(250));
@@ -414,18 +467,6 @@ fn mouse_click_selector(client: &mut CdpClient, selector: &str) -> Result<bool, 
     Ok(false)
 }
 
-// 제출 버튼을 사람처럼 좌표 클릭한다. 좌표를 못 구하면 .click()으로 폴백.
-fn click_button(client: &mut CdpClient, selector: &str) -> Result<(), AutomationError> {
-    if !mouse_click_selector(client, selector)? {
-        let click = format!(
-            "(()=>{{const b=document.querySelector('{selector}');\
-             if(b){{b.click();return true;}}return false;}})()"
-        );
-        client.evaluate(&click)?;
-    }
-    Ok(())
-}
-
 // 선택자를 마우스로 클릭해 포커스한 뒤 한 글자씩 실제 키 이벤트로 입력한다(키 후킹 암호화
 // 대응). 입력 후 필드 값 길이를 확인해 비어 있으면 최대 3회 재시도한다.
 fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<bool, AutomationError> {
@@ -496,12 +537,30 @@ fn read_signals(client: &mut CdpClient) -> Result<BandPageSignals, AutomationErr
     let cookies = collect_band_cookies(client)?;
     let current_url = client.current_url().unwrap_or_default();
 
-    // 성공: band_session 쿠키 존재 + auth를 벗어나 www.band.us 로 이동.
-    let logged_in = has_band_session_cookies(&cookies) && current_url.contains("www.band.us");
-    // 차단: 계정 상태 페이지로 리다이렉트.
-    let blocked = current_url.contains("account_status");
-    // 비번 오류: 비밀번호 제출 후에도 비밀번호 페이지에 머무름.
-    let bad_credentials = current_url.contains(PASSWORD_URL_FRAGMENT) && !logged_in;
+    // 성공: band가 세션을 세워 band_session 쿠키가 발급됨(fresh Chrome 이라 stale 쿠키 없음).
+    let logged_in = has_band_session_cookies(&cookies);
+    // 차단: band 측 reCAPTCHA/검증 페이지 또는 계정 상태 페이지. 자동해결하지 않고 blocked 로 둔다
+    // (headed면 decide_loop_step 이 사람 대기, headless면 실패로 확정).
+    let blocked = is_recaptcha_challenge_url(&current_url) || current_url.contains("account_status");
+    // 네이버 캡차(보안문자)가 떠 있으면 비번오류로 오판하지 않는다 — headed 사람 대기 중에 풀도록
+    // pending 으로 둔다(자동해결 안 함).
+    let naver_captcha = client
+        .evaluate_bool(
+            "(()=>{const q=s=>{const e=document.querySelector(s);\
+             return !!(e&&e.offsetParent!==null);};\
+             return q('#captchaDiv')||q('#captcha')||q('img#captchaimg');})()",
+        )
+        .unwrap_or(false);
+    // 비번 오류: 네이버 로그인 폼에 오류 박스(#err_common)가 보이는 상태로 텍스트를 가짐(네이버
+    // login_flow 미러). 캡차가 떠 있거나 이미 로그인됐으면 오류로 보지 않는다.
+    let bad_credentials = !logged_in
+        && !naver_captcha
+        && client
+            .evaluate_bool(
+                "(()=>{const e=document.querySelector('#err_common');\
+                 return !!(e&&e.offsetParent!==null&&(e.textContent||'').trim().length>0);})()",
+            )
+            .unwrap_or(false);
 
     Ok(BandPageSignals {
         logged_in,
@@ -751,5 +810,39 @@ mod tests {
         assert!(!has_band_session_cookies(&[json!({ "name": "BUC" })]));
         assert!(!has_band_session_cookies(&[json!({ "name": "OTHER" })]));
         assert!(!has_band_session_cookies(&[]));
+    }
+
+    // --- OAuth 진입 URL / 페이지 판별(순수 함수) ---
+
+    #[test]
+    fn oauth_entry_url_targets_naver_external_login() {
+        let url = oauth_entry_url();
+        assert!(url.contains("auth.band.us/redirect_external_account_login"));
+        assert!(url.contains("type=naver"));
+    }
+
+    #[test]
+    fn detects_oauth_consent_page() {
+        assert!(is_oauth_consent_url(
+            "https://nid.naver.com/login/noauth/allow_oauth?oauth_token=x&step=agree_term"
+        ));
+        assert!(!is_oauth_consent_url(
+            "https://nid.naver.com/nidlogin.login?mode=form"
+        ));
+        assert!(!is_oauth_consent_url("https://www.band.us"));
+    }
+
+    #[test]
+    fn detects_recaptcha_challenge_page() {
+        assert!(is_recaptcha_challenge_url(
+            "https://auth.band.us/b/validation/recaptcha"
+        ));
+        assert!(is_recaptcha_challenge_url(
+            "https://auth.band.us/b/confirm_recaptcha"
+        ));
+        assert!(!is_recaptcha_challenge_url("https://www.band.us"));
+        assert!(!is_recaptcha_challenge_url(
+            "https://nid.naver.com/nidlogin.login"
+        ));
     }
 }
