@@ -364,6 +364,16 @@ pub struct AccountMetaReq {
     pub command_id: Option<String>,
     pub updates: Vec<AccountMetaUpdate>,
 }
+// 계정 삭제(14-계정상태-관리 휴지통). Admin이 고른 loginId들을 Admin(서버 staged)과 그 하위 PC
+// 양쪽에서 지운다. 하위엔 delete_accounts 명령이 내려가고, 서버 staged에서도 같은 loginId를 제거한다.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountDeleteReq {
+    pub device_id: String,
+    #[serde(default)]
+    pub command_id: Option<String>,
+    pub login_ids: Vec<String>,
+}
 
 // 에이전트(하위)용
 #[derive(Deserialize)]

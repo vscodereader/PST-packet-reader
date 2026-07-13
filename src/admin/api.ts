@@ -588,6 +588,17 @@ export const api = {
         updates,
       });
     },
+    // 계정 삭제(14-계정상태-관리 휴지통) — Admin(서버 staged)과 그 하위 PC 양쪽에서 지운다. 하위엔
+    // delete_accounts 명령이 내려가고, 서버 staged에서도 같은 loginId가 제거돼 다시 분배·표시되지 않는다.
+    delete(
+      deviceId: string,
+      loginIds: string[],
+    ): Promise<{ ok: boolean; commandId: string }> {
+      return request("POST", "/admin/accounts/delete", {
+        deviceId,
+        loginIds,
+      });
+    },
   },
   audit: {
     list(): Promise<AuditDto[]> {

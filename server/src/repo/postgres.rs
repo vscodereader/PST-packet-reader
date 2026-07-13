@@ -395,6 +395,20 @@ impl Repository for PostgresRepo {
             })
             .collect())
     }
+    async fn remove_staged_accounts_by_login_ids(
+        &self,
+        login_ids: &[String],
+    ) -> AppResult<usize> {
+        if login_ids.is_empty() {
+            return Ok(0);
+        }
+        let res = sqlx::query("DELETE FROM staged_accounts WHERE login_id = ANY($1)")
+            .bind(login_ids)
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(res.rows_affected() as usize)
+    }
 
     async fn add_audit(&self, e: AuditEntry) -> AppResult<()> {
         sqlx::query("INSERT INTO audit_log (id,ts,tag,dir,device,msg,level) VALUES ($1,$2,$3,$4,$5,$6,$7)")

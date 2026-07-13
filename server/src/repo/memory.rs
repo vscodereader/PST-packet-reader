@@ -163,6 +163,23 @@ impl Repository for MemoryRepo {
         let mut g = self.inner.lock().unwrap();
         Ok(ids.iter().filter_map(|id| g.accounts.remove(id)).collect())
     }
+    async fn remove_staged_accounts_by_login_ids(
+        &self,
+        login_ids: &[String],
+    ) -> AppResult<usize> {
+        let mut g = self.inner.lock().unwrap();
+        let set: std::collections::HashSet<&String> = login_ids.iter().collect();
+        let to_remove: Vec<Uuid> = g
+            .accounts
+            .iter()
+            .filter(|(_, a)| set.contains(&a.login_id))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &to_remove {
+            g.accounts.remove(id);
+        }
+        Ok(to_remove.len())
+    }
 
     async fn add_audit(&self, entry: AuditEntry) -> AppResult<()> {
         self.inner.lock().unwrap().audit.push(entry);

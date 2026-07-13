@@ -73,6 +73,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/admin/accounts/import", post(import_accounts))
         .route("/admin/accounts/distribute", post(distribute_accounts))
         .route("/admin/accounts/update-meta", post(update_account_meta))
+        .route("/admin/accounts/delete", post(delete_account))
         // ── 통신로그(§10-5) + Admin 실시간 스트림(§3) ──
         .route("/admin/audit-log", get(audit_log))
         .route("/admin/stream", get(admin_stream))
@@ -1012,6 +1013,87 @@ async fn update_account_meta(
     Ok(Json(serde_json::json!({ "ok": true, "commandId": cid })))
 }
 
+/// 계정 삭제(14-계정상태-관리 휴지통) — Admin과 하위 PC 양쪽에서 계정을 지운다. update_account_meta와
+/// 같은 게이트(auth·online 409·[REJECT])를 거친 뒤 (a) 하위 SSE로 delete_accounts 명령을 내려보내
+/// 그 하위 store에서 계정을 제거하고, (b) 서버 staged에서도 같은 loginId들을 제거해 다시 분배·표시되지
+/// 않게 한다. 원문 무필터 로그(Stage5). 하위가 지우면 다음 inventory 보고에 반영돼 Admin 폴링이 닫힌다.
+async fn delete_account(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<AccountDeleteReq>,
+) -> AppResult<Json<serde_json::Value>> {
+    let op = st.auth_operator(&headers).await?;
+    if req.login_ids.is_empty() {
+        return Err(AppError::BadRequest("삭제할 계정이 없습니다".into()));
+    }
+    let uid = Uuid::parse_str(&req.device_id)
+        .map_err(|_| AppError::BadRequest("기기 id 형식 오류".into()))?;
+    let device = st
+        .repo
+        .find_device(uid)
+        .await?
+        .ok_or_else(|| AppError::NotFound("없는 기기".into()))?;
+    let cid = req
+        .command_id
+        .clone()
+        .unwrap_or_else(|| format!("c-{}", Uuid::new_v4()));
+
+    if !AppState::is_commandable(device.state) {
+        let reason = match device.state {
+            DeviceState::Rotating => "대상 컴퓨터 IP 변경 중(ROTATING·거부코드 409)",
+            DeviceState::Reconnecting => "대상 컴퓨터 재연결 중(거부코드 409)",
+            _ => "대상 컴퓨터 꺼짐(offline·거부코드 409)",
+        };
+        st.audit(
+            "[REJECT]",
+            &format!("Admin → {}", device.name),
+            &req.device_id,
+            &format!(
+                "거부: delete_accounts(계정 삭제) commandId={cid} 사유={reason} operator={} 건수={}",
+                op.login_id,
+                req.login_ids.len()
+            ),
+            "fail",
+        )
+        .await;
+        return Err(AppError::Conflict(format!("{reason} — 재연결 후 다시 시도")));
+    }
+
+    // (a) 하위 SSE로 delete_accounts 명령 — 하위 delete_by_login_ids가 accounts[].loginId를 지운다.
+    //     하위 AccountIn은 pw가 필수라 빈 pw를 실어 보낸다(삭제는 loginId만 쓴다).
+    let accounts: Vec<serde_json::Value> = req
+        .login_ids
+        .iter()
+        .map(|lid| serde_json::json!({ "loginId": lid, "pw": "" }))
+        .collect();
+    let payload = serde_json::json!({
+        "type": "delete_accounts",
+        "commandId": cid,
+        "accounts": accounts,
+    });
+    st.hub.device_push(uid, payload.to_string());
+    // (b) 서버 staged에서도 제거 — 지운 계정이 다시 분배·표시되지 않게 한다.
+    let removed = st
+        .repo
+        .remove_staged_accounts_by_login_ids(&req.login_ids)
+        .await?;
+    // 원문 무필터 로그(Stage5): 어떤 loginId들을 Admin·하위에서 지웠는지 그대로.
+    st.audit(
+        "[CMD]",
+        &format!("Admin → {}", device.name),
+        &req.device_id,
+        &format!(
+            "delete_accounts(계정 삭제) {}건 commandId={cid} operator={} loginIds=[{}] (서버 staged 제거 {removed}건)",
+            req.login_ids.len(),
+            op.login_id,
+            req.login_ids.join(", ")
+        ),
+        "cmd",
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "ok": true, "commandId": cid })))
+}
+
 // ───────────────────────── 통신로그 + Admin 스트림 ─────────────────────────
 
 async fn audit_log(
@@ -1663,5 +1745,120 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.kind, "좋아요");
+    }
+
+    // ── /admin/accounts/delete 핸들러 테스트(계정 삭제) ──
+    use std::sync::Arc;
+
+    use axum::extract::State;
+    use axum::http::header::AUTHORIZATION;
+    use axum::Json;
+
+    use crate::config::Config;
+    use crate::hub::Hub;
+    use crate::repo::{MemoryRepo, Repository};
+    use crate::{crypto, jwt};
+
+    /// in-memory 저장소로 테스트용 AppState 구성(main.rs 구성 미러). 반환: (state, repo, jwt_secret).
+    fn test_state() -> (AppState, Arc<MemoryRepo>, Vec<u8>) {
+        let cfg = Config::from_env();
+        let jwt_secret = cfg.jwt_secret.clone();
+        let repo = Arc::new(MemoryRepo::new());
+        let dummy = crypto::hash_password("pstmacro-dummy-verify-target").unwrap();
+        let state = AppState {
+            repo: repo.clone(),
+            hub: Arc::new(Hub::new()),
+            cfg: Arc::new(cfg),
+            dummy_pw_hash: Arc::new(dummy),
+            inventory: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            queue_states: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            stop_reports: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            daily: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            scheduled: Arc::new(std::sync::Mutex::new(Vec::new())),
+            nickname_remaining: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        };
+        (state, repo, jwt_secret)
+    }
+
+    fn bearer_headers(token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        h
+    }
+
+    #[tokio::test]
+    async fn delete_account_issues_command_and_removes_staged() {
+        let (st, repo, secret) = test_state();
+        // 승인된 운영자 + 토큰(auth_operator 통과용).
+        let hash = crypto::hash_password("pw").unwrap();
+        repo.create_operator(Operator {
+            login_id: "op1".into(),
+            pw_hash: hash,
+            role: Role::Operator,
+            approved: true,
+            must_change_password: false,
+            token_version: 1,
+        })
+        .await
+        .unwrap();
+        let token = jwt::issue_operator(&secret, "op1", 1, 3600).unwrap();
+
+        // online 하위 1대.
+        let dev_id = Uuid::new_v4();
+        repo.create_device(Device {
+            id: dev_id,
+            name: "하위-001".into(),
+            ip: None,
+            state: DeviceState::Online,
+            last_seen: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+        // staged 계정 2건(삭제 대상 + 남을 계정).
+        repo.add_staged_accounts(vec![
+            StagedAccount {
+                id: Uuid::new_v4(),
+                login_id: "invest_king7".into(),
+                pw_cipher: "cipher-a".into(),
+                platform: "forum".into(),
+            },
+            StagedAccount {
+                id: Uuid::new_v4(),
+                login_id: "blog_press02".into(),
+                pw_cipher: "cipher-b".into(),
+                platform: "blog".into(),
+            },
+        ])
+        .await
+        .unwrap();
+
+        // 하위 SSE 구독(device_push는 구독자가 있어야 전송) — 명령 페이로드 확인용.
+        let mut rx = st.hub.device_subscribe(dev_id);
+
+        let res = delete_account(
+            State(st.clone()),
+            bearer_headers(&token),
+            Json(AccountDeleteReq {
+                device_id: dev_id.to_string(),
+                command_id: None,
+                login_ids: vec!["invest_king7".into()],
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.0["ok"], true);
+
+        // (a) delete_accounts 명령이 그 하위로 내려갔다(accounts[].loginId = 삭제 대상).
+        let msg = rx.try_recv().expect("delete_accounts 명령이 하위로 push돼야 함");
+        let payload: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        assert_eq!(payload["type"], "delete_accounts");
+        assert_eq!(payload["accounts"][0]["loginId"], "invest_king7");
+
+        // (b) 서버 staged에서 삭제 대상만 제거, 나머지는 유지.
+        let staged = repo.list_staged_accounts().await.unwrap();
+        let ids: Vec<String> = staged.into_iter().map(|a| a.login_id).collect();
+        assert!(!ids.contains(&"invest_king7".to_string()));
+        assert!(ids.contains(&"blog_press02".to_string()));
     }
 }

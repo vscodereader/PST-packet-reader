@@ -1,8 +1,10 @@
 import {
+  ActionIcon,
   Badge,
   Box,
   Button,
   Group,
+  Modal,
   Paper,
   ScrollArea,
   Select,
@@ -10,6 +12,7 @@ import {
   Text,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
+import { IconTrash } from "@tabler/icons-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { ACTIVE_PLATFORMS } from "@/shared/data/config";
@@ -124,6 +127,9 @@ export function AccountState() {
     Record<string, { platform?: string; status?: string }>
   >({});
   const [saving, setSaving] = useState(false);
+  // 삭제 확인 대상(휴지통 클릭한 loginId) — null이면 확인 창 닫힘. 삭제 중이면 버튼 잠금.
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   // online 하위 로드(서버 연결 시 실데이터, 오프라인이면 더미 유지).
   useEffect(() => {
@@ -226,6 +232,49 @@ export function AccountState() {
     }
   };
 
+  // 계정 삭제(휴지통) — Admin과 하위 PC 양쪽에서 지운다. 성공하면 표시 목록에서 그 행을 즉시 제거
+  // (낙관적 삭제)하고, ≤4초 뒤 하위 재보고로도 사라진다. 오프라인 미리보기는 로컬에서만 제거해 시연.
+  const confirmDelete = async () => {
+    if (deviceId === null || deleteTarget === null) return;
+    const loginId = deleteTarget;
+    setDeleting(true);
+    try {
+      const r = await api.accounts.delete(deviceId, [loginId]);
+      notifications.show({
+        message: `계정 ${maskId(loginId)}을(를) Admin·하위에서 삭제했어요 (commandId=${r.commandId})`,
+        color: "green",
+      });
+      removeRowLocally(loginId);
+    } catch (e) {
+      if (isOffline(e)) {
+        // 오프라인 미리보기: 로컬에서만 제거해 시연(서버 미연결).
+        removeRowLocally(loginId);
+        notifications.show({
+          message: `계정 ${maskId(loginId)} 삭제(미리보기 — 서버 미연결)`,
+          color: "gray",
+        });
+      } else {
+        notifications.show({
+          message: e instanceof Error ? e.message : "삭제 실패",
+          color: "red",
+        });
+      }
+    } finally {
+      setDeleting(false);
+      setDeleteTarget(null);
+    }
+  };
+
+  // 표시 목록에서 그 loginId를 제거 — 폴링본(original)과 미저장 편집(edits) 양쪽에서 뺀다.
+  const removeRowLocally = (loginId: string) => {
+    setOriginal((prev) => prev.filter((r) => r.loginId !== loginId));
+    setEdits((prev) => {
+      const next = { ...prev };
+      delete next[loginId];
+      return next;
+    });
+  };
+
   return (
     <Box
       p="lg"
@@ -305,6 +354,7 @@ export function AccountState() {
                   <Table.Th>계정</Table.Th>
                   <Table.Th w={200}>플랫폼</Table.Th>
                   <Table.Th w={200}>상태</Table.Th>
+                  <Table.Th w={60}>삭제</Table.Th>
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
@@ -342,11 +392,22 @@ export function AccountState() {
                         </Badge>
                       )}
                     </Table.Td>
+                    <Table.Td>
+                      <ActionIcon
+                        variant="subtle"
+                        color="red"
+                        title="계정 삭제"
+                        aria-label={`${maskId(r.loginId)} 삭제`}
+                        onClick={() => setDeleteTarget(r.loginId)}
+                      >
+                        <IconTrash size={18} />
+                      </ActionIcon>
+                    </Table.Td>
                   </Table.Tr>
                 ))}
                 {deviceId !== null && rows.length === 0 && (
                   <Table.Tr>
-                    <Table.Td colSpan={3}>
+                    <Table.Td colSpan={4}>
                       <Text c="dimmed" ta="center" py="md">
                         이 하위에 분배된 계정이 없습니다.
                       </Text>
@@ -355,7 +416,7 @@ export function AccountState() {
                 )}
                 {deviceId === null && (
                   <Table.Tr>
-                    <Table.Td colSpan={3}>
+                    <Table.Td colSpan={4}>
                       <Text c="dimmed" ta="center" py="md">
                         위에서 하위 COM을 선택하세요.
                       </Text>
@@ -372,6 +433,34 @@ export function AccountState() {
           하위에서 바꾸면 ≤4초 뒤 여기에도 반영(양방향).
         </Text>
       </Paper>
+
+      <Modal
+        opened={deleteTarget !== null}
+        onClose={() => setDeleteTarget(null)}
+        title="계정 삭제"
+        centered
+      >
+        <Text size="sm">
+          {deleteTarget !== null ? maskId(deleteTarget) : ""} 계정을 Admin과 하위
+          PC에서 삭제합니다. 되돌릴 수 없습니다.
+        </Text>
+        <Group justify="flex-end" mt="lg">
+          <Button
+            variant="default"
+            disabled={deleting}
+            onClick={() => setDeleteTarget(null)}
+          >
+            취소
+          </Button>
+          <Button
+            color="red"
+            loading={deleting}
+            onClick={() => void confirmDelete()}
+          >
+            삭제
+          </Button>
+        </Group>
+      </Modal>
     </Box>
   );
 }

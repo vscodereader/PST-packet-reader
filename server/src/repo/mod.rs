@@ -58,6 +58,8 @@ pub trait Repository: Send + Sync {
     async fn list_staged_accounts(&self) -> AppResult<Vec<StagedAccount>>;
     /// 분배(MOVE): 주어진 id들을 제거하고 그 계정들을 반환(§7). 없는 id는 무시.
     async fn take_staged_accounts(&self, ids: &[Uuid]) -> AppResult<Vec<StagedAccount>>;
+    /// 계정 삭제(휴지통): 주어진 login_id들을 스테이징에서 제거하고 제거된 개수를 반환. 없는 것은 무시.
+    async fn remove_staged_accounts_by_login_ids(&self, login_ids: &[String]) -> AppResult<usize>;
 
     // ── 감사로그(§10-5) ──
     async fn add_audit(&self, entry: AuditEntry) -> AppResult<()>;
