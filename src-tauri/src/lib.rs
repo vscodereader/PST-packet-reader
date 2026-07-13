@@ -702,24 +702,72 @@ async fn blog_check_name(account_id: String, domain_id: String) -> Result<bool, 
         .map_err(|e| e.message().to_owned())
 }
 
-/// 새 블로그 글을 발행한다(저장 쿠키 → RabbitWrite HTTP). 기본 발행설정(전체공개·현재발행)으로
-/// 우선 실측한다 — 성공하면 게시글 링크(logNo), 봇탐지로 막히면 사유를 돌려준다.
+/// 블로그 예약 발행 시각(연·월·일·시·분). 없으면 현재 발행.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlogReserveInput {
+    year: u32,
+    month: u32,
+    date: u32,
+    hour: u32,
+    minute: u32,
+}
+
+/// 새 블로그 글을 발행한다(저장 쿠키 → RabbitWrite HTTP, 크롬 안 뜸). 발행설정(공개범위·예약·
+/// 태그 등)은 프론트가 고른 값을 실으며 생략하면 기본값(전체공개·현재발행)이다. 성공 시 게시글
+/// 링크(logNo)를, 봇탐지로 막히면 사유를 돌려준다.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn blog_publish(
     account_id: String,
     blog_id: String,
     title: String,
     content: String,
+    open_type: Option<u8>,
+    comment_yn: Option<bool>,
+    search_yn: Option<bool>,
+    sympathy_yn: Option<bool>,
+    tags: Option<String>,
+    notice_post_yn: Option<bool>,
+    reserve: Option<BlogReserveInput>,
 ) -> Result<naver_blog::BlogWriteResult, String> {
-    naver_blog::publish_blog_post_for_account(
-        &account_id,
-        &blog_id,
-        &title,
-        &content,
-        &naver_blog::BlogPublishSettings::default(),
-    )
-    .await
-    .map_err(|e| e.message().to_owned())
+    use naver_blog::{BlogPublishSettings, OpenType, PublishTime};
+    let mut s = BlogPublishSettings::default();
+    if let Some(ot) = open_type {
+        s.open_type = match ot {
+            1 => OpenType::Neighbor,
+            2 => OpenType::MutualNeighbor,
+            3 => OpenType::Private,
+            _ => OpenType::Public,
+        };
+    }
+    if let Some(v) = comment_yn {
+        s.comment_yn = v;
+    }
+    if let Some(v) = search_yn {
+        s.search_yn = v;
+    }
+    if let Some(v) = sympathy_yn {
+        s.sympathy_yn = v;
+    }
+    if let Some(v) = tags {
+        s.tags = v;
+    }
+    if let Some(v) = notice_post_yn {
+        s.notice_post_yn = v;
+    }
+    if let Some(r) = reserve {
+        s.publish_time = PublishTime::Reserve {
+            year: r.year,
+            month: r.month,
+            date: r.date,
+            hour: r.hour,
+            minute: r.minute,
+        };
+    }
+    naver_blog::publish_blog_post_for_account(&account_id, &blog_id, &title, &content, &s)
+        .await
+        .map_err(|e| e.message().to_owned())
 }
 
 /// 로그인·게시 없이 연결된 ADB 디바이스(폰)의 비행기모드만 껐다 켜 IP를 회전시킨다(#247).
