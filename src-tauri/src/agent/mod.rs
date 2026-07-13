@@ -1907,7 +1907,17 @@ fn build_band_publish_items(
                 band,
                 blog: vec![],
                 clip: vec![],
-                login: None,
+                // 밴드도 카페처럼 게시 순간 로그인(옛 코드는 login:None 이라 저장 쿠키가 없으면
+                // NO_COOKIES로 죽었다). 이 계정의 밴드 로그인 스펙을 동봉하면 러너의
+                // prepare_group_login이 게시 직전 [유효·신선 쿠키면 재로그인 생략 / 아니면 회전→
+                // 로그인]으로 쿠키를 확보한다 — 최신 밴드 로직(쿠키재사용·reCAPTCHA 회피)과 일치.
+                login: Some(vec![LoginTarget {
+                    account_id: a.login_id.clone(),
+                    platform: PlatformId::Band,
+                    headless: false,
+                    use_adb: true,
+                    force: true,
+                }]),
                 forum_comment_distribute: false,
                 comment_nickname_random: false,
                 content_change: None,
