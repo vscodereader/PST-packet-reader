@@ -620,6 +620,7 @@ function DeviceBlock({
           onPatch={onPatch}
           postId={postId}
           postTitle={postTitle}
+          postCommentCount={postCommentCount}
           accounts={accounts}
           onSchedule={onSchedule}
         />
@@ -680,6 +681,66 @@ function DeviceBlock({
   );
 }
 
+// 닉네임 랜덤(15-기타명령 §3·§6-2) 계정별 변경 가능 잔여 횟수 실시간 조회 훅. 켜지면(enabled)
+// 각 계정을 "확인 중"으로 먼저 표시하고, 하위에 원격 조회를 요청(POST)한 뒤 회신을 1.5초 간격으로
+// 폴링(GET)해 채운다. loginId → 남은횟수 | "loading"(확인 중) | "error"(확인 실패). 언마운트·의존성
+// 변경 시 늦은 응답이 상태를 덮지 않도록 cancelled로 가드한다. ForumConfig·ForumCommentConfig가 공유.
+function useNicknameRemaining(
+  deviceId: string,
+  accounts: string[],
+  enabled: boolean,
+): Record<string, number | "loading" | "error"> {
+  const [remaining, setRemaining] = useState<
+    Record<string, number | "loading" | "error">
+  >({});
+  // acctsKey는 accounts의 안정 문자열 키(배열 참조 대신 값으로 비교).
+  const acctsKey = accounts.join(",");
+  useEffect(() => {
+    if (!enabled || accounts.length === 0) return;
+    let cancelled = false;
+    const targets = accounts;
+    // 각 계정을 "확인 중"으로 먼저 표시(데스크톱 publish-modal과 동일 — 계정별 setState).
+    targets.forEach((id) => setRemaining((m) => ({ ...m, [id]: "loading" })));
+    const applyMap = (map: Record<string, number | null>) => {
+      if (cancelled) return;
+      setRemaining((m) => {
+        const next = { ...m };
+        targets.forEach((id) => {
+          if (id in map) next[id] = map[id] ?? "error";
+        });
+        return next;
+      });
+    };
+    // 원격 조회 요청 → 이후 회신을 폴링. 오프라인/실패는 확인 실패로 표시.
+    void api.devices.queryNicknameRemaining(deviceId, targets).catch(() => {
+      if (!cancelled)
+        setRemaining((m) => {
+          const next = { ...m };
+          targets.forEach((id) => {
+            next[id] = "error";
+          });
+          return next;
+        });
+    });
+    const poll = () => {
+      api.devices
+        .nicknameRemaining(deviceId)
+        .then(applyMap)
+        .catch(() => {
+          /* 미회신/오프라인 → 다음 폴링까지 "확인 중" 유지 */
+        });
+    };
+    poll();
+    const timer = window.setInterval(poll, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, acctsKey, deviceId]);
+  return remaining;
+}
+
 // 종토 상세 구성(카테고리/시장/종목수/계정 + 4버튼). 외곽 Paper·기기헤더는 DeviceBlock이 제공.
 export function ForumConfig({
   device,
@@ -688,6 +749,7 @@ export function ForumConfig({
   onPatch,
   postId,
   postTitle,
+  postCommentCount,
   accounts,
   onSchedule,
 }: {
@@ -697,6 +759,7 @@ export function ForumConfig({
   onPatch: (patch: Partial<ForumCfg>) => void;
   postId: string | null;
   postTitle: string | null;
+  postCommentCount: number;
   accounts: string[];
   onSchedule: (item: ScheduledItem) => void;
 }) {
@@ -757,6 +820,20 @@ export function ForumConfig({
   const [armed, setArmed] = useState<boolean | null>(null);
   const [sched, setSched] = useState(() => nowParts());
 
+  // 닉네임 랜덤(15-기타명령 §3): 글+댓글(both)에서 그 글의 작성 댓글 수 ≥ 2일 때만 노출한다.
+  // 순수 "글"(post) 모드는 댓글이 없으므로 절대 보이지 않는다(데스크톱 publish-modal 게이트 미러:
+  // (mode==="comment" || mode==="both") — 종토 댓글은 ForumCommentConfig가, 여기선 both만 담당).
+  const showNicknameRandom = mode === "both" && postCommentCount >= 2;
+  const [nicknameRandom, setNicknameRandom] = useState(false);
+  // 게이트(both·≥2)가 열렸고 체크됐을 때만 payload에 싣는다. 숨겨지면 항상 false(post 모드 무해).
+  const commentNicknameRandom = showNicknameRandom && nicknameRandom;
+  // 켜면 선택 계정(cfg.accounts)의 잔여 변경 횟수를 §6-2 실시간 원격 조회로 채운다(공유 훅).
+  const remaining = useNicknameRemaining(
+    device.id,
+    cfg.accounts,
+    commentNicknameRandom,
+  );
+
   const detailFor = (split: boolean) => {
     const names = picked.map((s) => s.name);
     return split
@@ -804,6 +881,7 @@ export function ForumConfig({
           split,
           mode, // 글=post / 글+댓글=both(글 게시 후 그 글에 저장된 댓글까지).
           ...contentChangePayload,
+          commentNicknameRandom,
           assignments: buildAssignments(split),
         });
         notifications.show({
@@ -846,6 +924,7 @@ export function ForumConfig({
           split,
           mode,
           ...contentChangePayload,
+          commentNicknameRandom,
           assignments: buildAssignments(split),
           at,
           detail,
@@ -1048,6 +1127,38 @@ export function ForumConfig({
         </Text>
       )}
 
+      {/* 닉네임 랜덤(15-기타명령 §3) — 계정 선택 밑·[지금 게시] 위. 글+댓글(both)에서 그 글의 작성
+          댓글 수 ≥ 2일 때만 노출(순수 글 모드는 댓글이 없어 숨김). 체크하면 계정별 변경 가능횟수를
+          §6-2 실시간 원격 조회로 채워 보여준다. 켜지면 payload에 commentNicknameRandom=true가 실린다. */}
+      {showNicknameRandom && (
+        <>
+          <Checkbox
+            mt="sm"
+            label="닉네임 랜덤 (각 댓글마다 닉네임을 랜덤으로 바꿔 게시)"
+            checked={nicknameRandom}
+            onChange={(e) => setNicknameRandom(e.currentTarget.checked)}
+          />
+          {nicknameRandom && cfg.accounts.length > 0 && (
+            <Stack gap={2} mt={8}>
+              {cfg.accounts.map((id) => {
+                const r = remaining[id];
+                const label =
+                  r === undefined || r === "loading"
+                    ? "확인 중…"
+                    : r === "error"
+                      ? "확인 실패"
+                      : `변경 가능횟수 ${r}회`;
+                return (
+                  <Text key={id} fz={11.5} c="dimmed">
+                    {maskId(id)} : {label}
+                  </Text>
+                );
+              })}
+            </Stack>
+          )}
+        </>
+      )}
+
       {/* ④ 게시 실행 — 데스크톱 pstmacro와 동일한 4버튼(#267-5). 하위마다 독립 발행(안 섞임):
           즉시/예약 = 각 계정이 선택 종목 전체 게시, 나눠서 = 종목을 계정 수만큼 균등 분배. */}
       <Stack gap={8} mt="md">
@@ -1159,70 +1270,14 @@ export function ForumCommentConfig({
   // Admin "댓글 수 ≥ 2"). 댓글 1개면 계정을 여러 개 골라도 숨긴다.
   const showNicknameRandom = postCommentCount >= 2;
   const [nicknameRandom, setNicknameRandom] = useState(false);
-  // 계정별 변경 가능 잔여 횟수(§6-2 실시간): 체크박스를 켤 때 하위에 원격 조회를 요청하고 그 회신을
-  // 폴링해 채운다. loginId → 남은횟수 | "loading"(확인 중) | "error"(확인 실패).
-  const [remaining, setRemaining] = useState<
-    Record<string, number | "loading" | "error">
-  >({});
 
   const cleanUrls = urls.map((u) => u.trim()).filter((u) => u.length > 0);
   const valid = postTitle != null && cleanUrls.length > 0 && accts.length > 0;
   const detail = `특정 게시글 ${cleanUrls.length}개 · 계정 ${accts.length}`;
   // 닉네임 랜덤 flag는 게이트(≥2)가 열렸고 체크됐을 때만 payload에 싣는다. 숨겨지면 항상 false.
   const commentNicknameRandom = showNicknameRandom && nicknameRandom;
-  const acctsKey = accts.join(",");
-
-  // 닉네임 랜덤을 켜면(§6-2 실시간) 선택 계정들의 잔여 횟수를 하위에 조회 요청하고, 회신을 폴링해
-  // 채운다. 먼저 각 계정을 "확인 중"으로 표시하고, POST(조회 명령)→GET(회신) 폴링으로 갱신한다.
-  // 언마운트·의존성 변경 시 늦은 응답이 상태를 덮지 않도록 cancelled로 가드한다.
-  useEffect(() => {
-    if (!commentNicknameRandom || accts.length === 0) return;
-    let cancelled = false;
-    const targets = accts;
-    // 각 계정을 "확인 중"으로 먼저 표시(데스크톱 publish-modal과 동일 — 계정별 setState).
-    targets.forEach((id) =>
-      setRemaining((m) => ({ ...m, [id]: "loading" })),
-    );
-    const applyMap = (map: Record<string, number | null>) => {
-      if (cancelled) return;
-      setRemaining((m) => {
-        const next = { ...m };
-        targets.forEach((id) => {
-          if (id in map) next[id] = map[id] ?? "error";
-        });
-        return next;
-      });
-    };
-    // 원격 조회 요청 → 이후 회신을 몇 초간 폴링. 오프라인/실패는 확인 실패로 표시.
-    void api.devices
-      .queryNicknameRemaining(device.id, targets)
-      .catch(() => {
-        if (!cancelled)
-          setRemaining((m) => {
-            const next = { ...m };
-            targets.forEach((id) => {
-              next[id] = "error";
-            });
-            return next;
-          });
-      });
-    const poll = () => {
-      api.devices
-        .nicknameRemaining(device.id)
-        .then(applyMap)
-        .catch(() => {
-          /* 미회신/오프라인 → 다음 폴링까지 "확인 중" 유지 */
-        });
-    };
-    poll();
-    const timer = window.setInterval(poll, 1500);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-    // acctsKey는 accts의 안정 문자열 키(배열 참조 대신 값으로 비교).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [commentNicknameRandom, acctsKey, device.id]);
+  // 계정별 변경 가능 잔여 횟수(§6-2 실시간) — 공유 훅이 원격 조회·폴링을 담당한다.
+  const remaining = useNicknameRemaining(device.id, accts, commentNicknameRandom);
 
   // 댓글은 계정마다 같은 URL들에 단다(나눠서 없음). assignment는 계정만(종목 없음).
   const buildAssignments = () =>

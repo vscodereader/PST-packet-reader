@@ -58,7 +58,13 @@ function renderCmt(postCommentCount: number) {
 }
 
 // ForumConfig는 cfg를 부모가 들고 onPatch로 갱신한다(체크박스 → 입력 노출). 그 왕복을 재현하는 래퍼.
-function ForumConfigHarness() {
+function ForumConfigHarness({
+  mode = "post",
+  postCommentCount = 0,
+}: {
+  mode?: ComponentProps<typeof ForumConfig>["mode"];
+  postCommentCount?: number;
+}) {
   const [cfg, setCfg] = useState<ComponentProps<typeof ForumConfig>["cfg"]>({
     category: "tradingValue",
     market: "all",
@@ -70,11 +76,12 @@ function ForumConfigHarness() {
     <MantineProvider>
       <ForumConfig
         device={device}
-        mode="post"
+        mode={mode}
         cfg={cfg}
         onPatch={(patch) => setCfg((c) => ({ ...c, ...patch }))}
         postId="p1"
         postTitle="급등주 분석"
+        postCommentCount={postCommentCount}
         accounts={["acc_a"]}
         onSchedule={() => {}}
       />
@@ -118,6 +125,35 @@ describe("ForumCommentConfig 닉네임 랜덤(15-기타명령 §3)", () => {
     await waitFor(() => expect(send).toHaveBeenCalled());
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({ mode: "comment", commentNicknameRandom: true }),
+    );
+  });
+});
+
+describe("ForumConfig 닉네임 랜덤(글+댓글, 15-기타명령 §3)", () => {
+  it("글+댓글(both)이고 작성 댓글 수 ≥ 2면 체크박스를 보인다", () => {
+    render(<ForumConfigHarness mode="both" postCommentCount={2} />);
+    expect(screen.getByText(/닉네임 랜덤/)).toBeInTheDocument();
+  });
+
+  it("글+댓글(both)이라도 작성 댓글 수 < 2면 숨긴다", () => {
+    render(<ForumConfigHarness mode="both" postCommentCount={1} />);
+    expect(screen.queryByText(/닉네임 랜덤/)).toBeNull();
+  });
+
+  it("순수 글(post) 모드는 작성 댓글 수 ≥ 2여도 숨긴다", () => {
+    render(<ForumConfigHarness mode="post" postCommentCount={5} />);
+    expect(screen.queryByText(/닉네임 랜덤/)).toBeNull();
+  });
+
+  it("켠 채 게시하면 commentNicknameRandom=true가 payload에 실린다", async () => {
+    const user = userEvent.setup();
+    render(<ForumConfigHarness mode="both" postCommentCount={2} />);
+    await user.click(screen.getByRole("checkbox", { name: /닉네임 랜덤/ }));
+    await waitFor(() => expect(queryNick).toHaveBeenCalled());
+    await user.click(screen.getByRole("button", { name: "지금 게시" }));
+    await waitFor(() => expect(send).toHaveBeenCalled());
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: "both", commentNicknameRandom: true }),
     );
   });
 });
