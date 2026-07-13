@@ -418,6 +418,7 @@ mod tests {
                 blog_links: vec![],
                 clip_links: vec![],
                 band_targets: vec![],
+                blog_write: None,
                 comment_mode: String::new(),
                 comment_count: 0,
                 comment_nickname_random: false,

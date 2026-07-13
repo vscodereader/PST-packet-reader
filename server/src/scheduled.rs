@@ -67,6 +67,10 @@ pub struct PublishSpec {
     /// 밴드 게시 링크 파싱 결과(target=="band"일 때). 하위가 계정×밴드로 글/댓글을 올린다.
     #[serde(default)]
     pub band_targets: Vec<PublishBandTarget>,
+    /// 블로그 새 글 발행 설정(target=="blog_write"일 때). 대상 계정 각각 **자기 블로그**에 이
+    /// 제목/본문/발행설정으로 새 글을 쓴다(계정=블로그 1:1). 사진/파일/글꼴은 범위 밖(텍스트만).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blog_write: Option<PublishBlogWrite>,
     /// 카페·밴드 댓글 대상 모드("url"=특정 글·"latest"=최신·"popular"=인기). 빈값이면 하위가 글에
     /// 저장된 commentTarget으로 폴백(하위호환). 운영자가 게시 명령에서 직접 고른 값.
     #[serde(default)]
@@ -147,6 +151,32 @@ pub struct PublishBandTarget {
     pub band_no: String,
     #[serde(default)]
     pub link: String,
+}
+
+/// 블로그 새 글 발행 설정(Admin이 보냄, target=="blog_write"). 대상 계정 전체가 공유하는 글 내용·
+/// 발행설정 1벌 — 하위가 계정마다 **자기 블로그**에 이 값으로 새 글을 쓴다(계정=블로그 1:1).
+/// 서버는 그대로 하위로 흘려보낸다(scheduled_posts에 spec JSONB로 저장됨). 텍스트/공개범위/태그/
+/// 옵션만(사진/파일/글꼴 제외). blog_id는 하위가 계정 loginId로 채운다(그 계정 본인 블로그).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishBlogWrite {
+    pub title: String,
+    #[serde(default)]
+    pub content: String,
+    /// 공개 범위: 0=전체·1=이웃·2=서로이웃·3=비공개.
+    #[serde(default)]
+    pub open_type: u8,
+    #[serde(default)]
+    pub comment_yn: bool,
+    #[serde(default)]
+    pub search_yn: bool,
+    #[serde(default)]
+    pub sympathy_yn: bool,
+    #[serde(default)]
+    pub notice_post_yn: bool,
+    /// 태그(# 없는 순수 단어들).
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 impl PublishSpec {
@@ -258,6 +288,19 @@ pub async fn dispatch_publish(
             })
         })
         .collect();
+    // 블로그 새 글 발행 설정(target=="blog_write")은 하위 BlogWriteIn과 동형(camelCase)으로 흘려보낸다.
+    let blog_write_json = spec.blog_write.as_ref().map(|w| {
+        serde_json::json!({
+            "title": w.title,
+            "content": w.content,
+            "openType": w.open_type,
+            "commentYn": w.comment_yn,
+            "searchYn": w.search_yn,
+            "sympathyYn": w.sympathy_yn,
+            "noticePostYn": w.notice_post_yn,
+            "tags": w.tags,
+        })
+    });
     let payload = serde_json::json!({
         "type": "publish_posts",
         "commandId": cid,
@@ -272,6 +315,7 @@ pub async fn dispatch_publish(
             "blogLinks": blog_links_json,
             "clipLinks": clip_links_json,
             "bandTargets": band_targets_json,
+            "blogWrite": blog_write_json,
             "commentUrls": spec.comment_urls,
             "forumCommentDistribute": spec.forum_comment_distribute,
             "commentMode": spec.comment_mode,
@@ -455,6 +499,7 @@ mod tests {
                 blog_links: vec![],
                 clip_links: vec![],
                 band_targets: vec![],
+                blog_write: None,
                 comment_mode: String::new(),
                 comment_count: 0,
                 comment_nickname_random: false,
@@ -508,5 +553,48 @@ mod tests {
     fn origin_dir_distinguishes_schedule() {
         assert_eq!(origin_dir("operator=kim"), "Admin");
         assert_eq!(origin_dir("예약 스케줄러"), "예약 스케줄러");
+    }
+
+    #[test]
+    fn publish_spec_blog_write_roundtrip_camel_case() {
+        // Admin이 보낸 blog_write(camelCase)가 PublishSpec로 역직렬화되고 하위로 그대로 흐른다.
+        let json = serde_json::json!({
+            "postId": "p1",
+            "target": "blog_write",
+            "blogWrite": {
+                "title": "새 글 제목",
+                "content": "본문",
+                "openType": 2,
+                "commentYn": true,
+                "searchYn": false,
+                "sympathyYn": true,
+                "noticePostYn": true,
+                "tags": ["첫글", "인생"]
+            },
+            "assignments": []
+        });
+        let spec: PublishSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(spec.target, "blog_write");
+        let bw = spec.blog_write.as_ref().expect("blogWrite 있음");
+        assert_eq!(bw.title, "새 글 제목");
+        assert_eq!(bw.open_type, 2);
+        assert!(bw.comment_yn);
+        assert!(!bw.search_yn);
+        assert!(bw.notice_post_yn);
+        assert_eq!(bw.tags, vec!["첫글".to_string(), "인생".to_string()]);
+        // 직렬화도 camelCase 유지(scheduled_posts에 spec JSONB로 저장·복원).
+        let back = serde_json::to_value(&spec).unwrap();
+        assert_eq!(back["blogWrite"]["openType"], 2);
+        assert_eq!(back["blogWrite"]["noticePostYn"], true);
+    }
+
+    #[test]
+    fn publish_spec_without_blog_write_omits_field() {
+        // 기존 게시(blog_write 없음)는 None으로 역직렬화되고 직렬화에서 생략된다(하위호환).
+        let json = serde_json::json!({ "postId": "p1", "assignments": [] });
+        let spec: PublishSpec = serde_json::from_value(json).unwrap();
+        assert!(spec.blog_write.is_none());
+        let back = serde_json::to_value(&spec).unwrap();
+        assert!(back.get("blogWrite").is_none());
     }
 }
