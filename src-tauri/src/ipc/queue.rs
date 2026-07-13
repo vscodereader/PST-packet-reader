@@ -174,6 +174,46 @@ pub struct ClipTarget {
     pub media_type: Option<String>,
 }
 
+/// 네이버 블로그 **새 글 발행** 대상 1건(원격 배포, Option A 텍스트 전용). 블로그 댓글(`BlogTarget`)과
+/// 달리 새 글을 쓴다. 계정=자기 블로그 1:1이라 `blog_id`는 그 계정 본인 블로그(보통 loginId와 같다).
+/// 발행 엔진(`naver_blog::publish_blog_post_for_account`)을 그대로 재사용하며, 사진/파일/글꼴은
+/// 범위 밖(텍스트/공개범위/태그/옵션만). 예약은 서버 스케줄러가 발송 시각에 dispatch하므로 하위는
+/// 항상 즉시 발행(`PublishTime::Now`)한다. 기존 plan과 호환되도록 추가 필드는 기본값을 허용한다.
+// TODO(사진 업로드): 패킷 재캡처 후 mediaResources(image/video/file) 배선.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../src/shared/bindings/")]
+#[serde(rename_all = "camelCase")]
+pub struct BlogWriteTarget {
+    pub account_id: String,
+    /// 표시 이름(동결). 완료 로그/큐 표시에 blogId 등을 보여준다.
+    pub name: String,
+    /// 발행 대상 블로그 식별자(그 계정 본인 블로그). 보통 loginId와 같다.
+    pub blog_id: String,
+    /// 글 제목(동결).
+    pub title: String,
+    /// 글 본문 평문(동결). 줄바꿈마다 한 문단으로 발행 엔진이 처리한다.
+    pub content: String,
+    /// 공개 범위: 0=전체·1=이웃·2=서로이웃·3=비공개(`OpenType` 코드).
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub open_type: u8,
+    /// 댓글 허용 여부.
+    #[serde(default)]
+    pub comment_yn: bool,
+    /// 검색 허용 여부.
+    #[serde(default)]
+    pub search_yn: bool,
+    /// 공감 허용 여부.
+    #[serde(default)]
+    pub sympathy_yn: bool,
+    /// 공지사항 등록 여부.
+    #[serde(default)]
+    pub notice_post_yn: bool,
+    /// 태그(# 없는 순수 단어들). 엔진엔 공백으로 이어 넘긴다.
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
 /// 로그인 배치의 계정 1건. `account_id`는 로그인 쿠키 키(= loginId) 규약을 따른다.
 /// `platform`이 `Band`면 band.us 로그인(`process_band_account`), 그 외(naver/forum 등)는
 /// 네이버 로그인(`process_account`)으로 처리된다(프론트 `runLogin`의 naver/band 분기 미러).
@@ -233,6 +273,10 @@ pub struct PublishPlan {
     /// 네이버 클립 댓글 대상(#클립). 블로그와 같은 네이버 쿠키 재사용. 기본값(빈 Vec) 허용.
     #[serde(default)]
     pub clip: Vec<ClipTarget>,
+    /// 네이버 블로그 **새 글 발행** 대상(원격 배포). 블로그 댓글(`blog`)과 별개 — 새 글을 쓴다.
+    /// 카페와 같은 네이버 저장 쿠키를 재사용한다(별도 로그인 없음). 기본값(빈 Vec) 허용.
+    #[serde(default)]
+    pub blog_write: Vec<BlogWriteTarget>,
     /// 로그인 전용 아이템의 계정 목록. 게시 아이템에는 없다(직렬화 생략 → 기존 plan과 호환).
     /// 워커(`execute_item`)는 이 필드가 채워진 아이템을 게시 대신 계정별 로그인으로 처리한다
     /// (배치 1개 = 아이템 1개, 진행률 분모 = 계정 수). 일원화: 로그인도 now 큐로 흐른다(#210).
@@ -945,6 +989,7 @@ mod tests {
                 category_no: None,
             }],
             clip: vec![],
+            blog_write: vec![],
             login: None,
             forum_comment_distribute: false,
             comment_nickname_random: false,
@@ -1109,6 +1154,7 @@ mod tests {
             band: vec![],
             blog: vec![],
             clip: vec![],
+            blog_write: vec![],
             login: None,
             forum_comment_distribute: false,
             comment_nickname_random: false,

@@ -23,9 +23,9 @@ use crate::ipc::accounts::{Account, AccountStatus, PlatformId};
 use crate::ipc::log_batches::LogBatch;
 use crate::ipc::posts::{CommentTarget, ModeValue};
 use crate::ipc::queue::{
-    apply_priority_order, as_fresh_now_item, BandTarget, BlogTarget, ClipTarget, CommentTargetSpec,
-    ContentChange, ForumTarget, LoginTarget, NaverTarget, PublishPlan, QueueLocation, QueueNowItem,
-    QueueState,
+    apply_priority_order, as_fresh_now_item, BandTarget, BlogTarget, BlogWriteTarget, ClipTarget,
+    CommentTargetSpec, ContentChange, ForumTarget, LoginTarget, NaverTarget, PublishPlan,
+    QueueLocation, QueueNowItem, QueueState,
 };
 use crate::ipc::queue_runner::{start_if_idle, NowQueueRunner};
 use crate::store::JsonStore;
@@ -265,6 +265,10 @@ struct PublishCmd {
     /// 글/글+댓글=새 글, 댓글=아래 comment_mode/comment_count로 엔진이 최신/인기/특정글URL 해석.
     #[serde(default)]
     band_targets: Vec<BandTargetIn>,
+    /// 블로그 새 글 발행 설정(target=="blog_write"일 때). 대상 계정 각각 **자기 블로그**에 이
+    /// 제목/본문/발행설정으로 새 글을 쓴다(계정=블로그 1:1). 사진/파일/글꼴은 범위 밖(텍스트만).
+    #[serde(default)]
+    blog_write: Option<BlogWriteIn>,
     /// 카페·밴드 댓글 대상 모드(Admin 게시 명령에서 운영자가 고른 값). "url"(특정 글)·"latest"(최신)·
     /// "popular"(인기). 빈값이면 글(LibraryPost)에 저장된 commentTarget으로 폴백(하위호환).
     #[serde(default)]
@@ -335,6 +339,30 @@ struct BandTargetIn {
     band_no: String,
     #[serde(default)]
     link: String,
+}
+/// 블로그 새 글 발행 설정(Admin이 보냄, target=="blog_write"). 대상 계정 전체가 공유하는 글 내용·
+/// 발행설정 1벌 — 하위가 계정마다 **자기 블로그**에 이 값으로 새 글을 쓴다(계정=블로그 1:1).
+/// blog_id는 하위가 계정 loginId로 채운다(그 계정 본인 블로그). 사진/파일/글꼴은 범위 밖(텍스트만).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlogWriteIn {
+    title: String,
+    #[serde(default)]
+    content: String,
+    /// 공개 범위: 0=전체·1=이웃·2=서로이웃·3=비공개(OpenType 코드).
+    #[serde(default)]
+    open_type: u8,
+    #[serde(default)]
+    comment_yn: bool,
+    #[serde(default)]
+    search_yn: bool,
+    #[serde(default)]
+    sympathy_yn: bool,
+    #[serde(default)]
+    notice_post_yn: bool,
+    /// 태그(# 없는 순수 단어들).
+    #[serde(default)]
+    tags: Vec<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1231,6 +1259,13 @@ fn enqueue_publish<R: Runtime>(
             cc,
             now_ms(),
         )
+    } else if p.target == "blog_write" {
+        // 블로그 새 글 발행(원격 배포) — 계정×자기블로그로 plan.blog_write(BlogWriteTarget)를
+        // 조립한다(블로그 댓글 미러). 발행 설정은 Admin이 보낸 공유 1벌을 모든 계정이 쓴다.
+        match p.blog_write.as_ref() {
+            Some(bw) => build_blog_write_items(&p.assignments, bw, &p.post_id, &plan_title, now_ms()),
+            None => Vec::new(),
+        }
     } else {
         build_publish_items(
             &p.assignments,
@@ -1359,6 +1394,7 @@ fn build_publish_items(
                     band: vec![],
                     blog: vec![],
                     clip: vec![],
+                    blog_write: vec![],
                     login: None,
                     forum_comment_distribute: true,
                     comment_nickname_random,
@@ -1428,6 +1464,7 @@ fn build_publish_items(
                 band: vec![],
                 blog: vec![],
                 clip: vec![],
+                blog_write: vec![],
                 login: None,
                 forum_comment_distribute: false,
                 comment_nickname_random,
@@ -1613,6 +1650,7 @@ fn build_cafe_publish_items(
                 band: vec![],
                 blog: vec![],
                 clip: vec![],
+                blog_write: vec![],
                 // 카페는 분배 때 로그인하지 않으므로(사용자 지침 — 카페만 로그인 없이 분배) 게시
                 // 순간에 로그인해 쿠키를 확보해야 한다. 데스크톱 publish-modal(#225)처럼 이 계정의
                 // 로그인 스펙을 동봉하면 러너의 prepare_group_login이 게시 직전 [IP회전→로그인→
@@ -1715,6 +1753,7 @@ fn build_blog_publish_items(
                 band: vec![],
                 blog,
                 clip: vec![],
+                blog_write: vec![],
                 login: None,
                 forum_comment_distribute: false,
                 comment_nickname_random: false,
@@ -1801,6 +1840,7 @@ fn build_clip_publish_items(
                 band: vec![],
                 blog: vec![],
                 clip,
+                blog_write: vec![],
                 login: None,
                 forum_comment_distribute: false,
                 comment_nickname_random: false,
@@ -1907,6 +1947,7 @@ fn build_band_publish_items(
                 band,
                 blog: vec![],
                 clip: vec![],
+                blog_write: vec![],
                 // 밴드도 카페처럼 게시 순간 로그인(옛 코드는 login:None 이라 저장 쿠키가 없으면
                 // NO_COOKIES로 죽었다). 이 계정의 밴드 로그인 스펙을 동봉하면 러너의
                 // prepare_group_login이 게시 직전 [유효·신선 쿠키면 재로그인 생략 / 아니면 회전→
@@ -1918,6 +1959,80 @@ fn build_band_publish_items(
                     use_adb: true,
                     force: true,
                 }]),
+                forum_comment_distribute: false,
+                comment_nickname_random: false,
+                content_change: None,
+            }),
+            items: vec![],
+        });
+    }
+    items
+}
+
+/// 블로그 **새 글 발행** 큐 아이템을 만든다(순수 — 테스트 대상). 대상 계정마다 **자기 블로그**에
+/// 새 글 1개를 발행한다(계정=블로그 1:1). **계정 하나당 큐 1개**(카페·밴드·블로그댓글과 동일)이며,
+/// blog_id는 그 계정 loginId를 쓴다(그 계정 본인 블로그, 데스크톱과 달리 남의 블로그엔 못 씀).
+/// 발행 설정(공개범위·토글·태그)은 Admin이 보낸 공유 1벌(`bw`)을 모든 계정이 그대로 쓴다. 종목
+/// (assignment.stocks)은 블로그에서 쓰지 않는다. 발행 엔진은 러너가 호출하며 여기선 plan.blog_write
+/// (BlogWriteTarget)만 조립한다. 사진/파일/글꼴은 범위 밖(텍스트만).
+// TODO(사진 업로드): 패킷 재캡처 후 mediaResources 배선.
+fn build_blog_write_items(
+    assignments: &[PublishAssign],
+    bw: &BlogWriteIn,
+    post_id: &str,
+    plan_title: &str,
+    now: u128,
+) -> Vec<QueueNowItem> {
+    if bw.title.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut items = Vec::new();
+    for (idx, a) in assignments.iter().enumerate() {
+        // 계정=블로그 1:1 — blog_id는 그 계정 본인 loginId(남의 블로그엔 못 씀).
+        let blog_id = a.login_id.clone();
+        let target = BlogWriteTarget {
+            account_id: a.login_id.clone(),
+            name: blog_id.clone(),
+            blog_id,
+            title: bw.title.clone(),
+            content: bw.content.clone(),
+            open_type: bw.open_type,
+            comment_yn: bw.comment_yn,
+            search_yn: bw.search_yn,
+            sympathy_yn: bw.sympathy_yn,
+            notice_post_yn: bw.notice_post_yn,
+            tags: bw.tags.clone(),
+        };
+        let locs = vec![QueueLocation {
+            p: PlatformId::Blog,
+            name: format!("블로그 새 글 · {}", target.name),
+            code: None,
+        }];
+        items.push(QueueNowItem {
+            id: format!("agent-publish-{now}-{idx}"),
+            title: plan_title.to_string(),
+            // 새 글 발행이라 항상 글(Post) 모드. Admin이 보낸 mode와 무관하게 글쓰기다.
+            kind: ModeValue::Post,
+            state: QueueState::Waiting,
+            batch_id: None,
+            progress: None,
+            locs,
+            plan: Some(PublishPlan {
+                post_id: post_id.to_string(),
+                kind: ModeValue::Post,
+                // 블로그 새 글 본문/제목은 target에 동결돼 있어 plan 스칼라는 표시용으로만 둔다.
+                title: bw.title.clone(),
+                body_text: bw.content.clone(),
+                comments: vec![],
+                link_override: String::new(),
+                naver: vec![],
+                forum: vec![],
+                band: vec![],
+                blog: vec![],
+                clip: vec![],
+                blog_write: vec![target],
+                // 블로그 발행은 저장된 네이버 쿠키를 그대로 쓴다(별도 로그인 없음, 블로그 댓글과 동일).
+                login: None,
                 forum_comment_distribute: false,
                 comment_nickname_random: false,
                 content_change: None,
@@ -2101,6 +2216,7 @@ fn enqueue_login<R: Runtime>(
             band: vec![],
             blog: vec![],
             clip: vec![],
+            blog_write: vec![],
             login: Some(login),
             forum_comment_distribute: false,
             comment_nickname_random: false,
@@ -3104,6 +3220,76 @@ mod tests {
             9,
         );
         assert_eq!(items2[0].plan.as_ref().unwrap().blog[0].count, Some(1));
+    }
+
+    #[test]
+    fn build_blog_write_items_one_queue_per_account_own_blog() {
+        // 블로그 새 글 발행: 계정당 큐 1개, 각 계정이 **자기 블로그**(blog_id=loginId)에 새 글.
+        // 발행 설정(공개범위·토글·태그)은 공유 1벌을 모든 계정이 그대로 쓴다.
+        let assignments = vec![
+            PublishAssign {
+                login_id: "press02".into(),
+                stocks: vec![],
+            },
+            PublishAssign {
+                login_id: "cho41004".into(),
+                stocks: vec![],
+            },
+        ];
+        let bw = BlogWriteIn {
+            title: "새 글 제목".into(),
+            content: "첫째 줄\n둘째 줄".into(),
+            open_type: 2,
+            comment_yn: true,
+            search_yn: false,
+            sympathy_yn: true,
+            notice_post_yn: true,
+            tags: vec!["첫글".into(), "인생".into()],
+        };
+        let items = build_blog_write_items(&assignments, &bw, "p1", "새 글 제목", 1234);
+        // 계정당 큐 1개.
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id, "agent-publish-1234-0");
+        assert_eq!(items[1].id, "agent-publish-1234-1");
+        // 새 글 발행은 항상 글(Post) 모드.
+        assert_eq!(items[0].kind, ModeValue::Post);
+        // 큐0 = press02 자기 블로그 대상 1건.
+        let w0 = &items[0].plan.as_ref().unwrap().blog_write;
+        assert_eq!(w0.len(), 1);
+        assert_eq!(w0[0].account_id, "press02");
+        // 계정=블로그 1:1 — blog_id는 그 계정 loginId.
+        assert_eq!(w0[0].blog_id, "press02");
+        assert_eq!(w0[0].title, "새 글 제목");
+        assert_eq!(w0[0].content, "첫째 줄\n둘째 줄");
+        // 발행 설정이 그대로 실린다(공개범위 2=서로이웃, 토글, 태그).
+        assert_eq!(w0[0].open_type, 2);
+        assert!(w0[0].comment_yn);
+        assert!(!w0[0].search_yn);
+        assert!(w0[0].notice_post_yn);
+        assert_eq!(w0[0].tags, vec!["첫글".to_string(), "인생".to_string()]);
+        // 큐1 = cho41004 자기 블로그(blog_id=loginId), 계정끼리 안 섞임.
+        let w1 = &items[1].plan.as_ref().unwrap().blog_write;
+        assert_eq!(w1[0].account_id, "cho41004");
+        assert_eq!(w1[0].blog_id, "cho41004");
+        // 블로그 발행은 저장 쿠키 사용(로그인 잡 아님), 다른 플랫폼 대상은 비어야 한다.
+        let p0 = items[0].plan.as_ref().unwrap();
+        assert!(p0.login.is_none());
+        assert!(p0.blog.is_empty());
+        assert!(p0.naver.is_empty());
+        assert!(p0.band.is_empty());
+        assert!(p0.forum.is_empty());
+        // 제목이 비면 발행 대상이 없다(방어).
+        let empty = BlogWriteIn {
+            title: "   ".into(),
+            content: "본문".into(),
+            open_type: 0,
+            comment_yn: true,
+            search_yn: true,
+            sympathy_yn: true,
+            notice_post_yn: false,
+            tags: vec![],
+        };
+        assert!(build_blog_write_items(&assignments, &empty, "p1", "t", 9).is_empty());
     }
 
     #[test]
