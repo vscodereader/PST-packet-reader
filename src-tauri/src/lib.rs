@@ -355,6 +355,18 @@ fn forum_endpoint() -> ForumEndpoint {
     }
 }
 
+/// 닉네임 랜덤(설계서 §2) UI용: 이 계정의 닉네임 변경 잔여 횟수(remainingEditCount, 5회 상한 중
+/// 남은 횟수)를 조회한다. 저장 쿠키로 프로필 form을 GET하는 블로킹 작업이라 스레드 풀에서 돌린다.
+/// 조회 실패/필드 없음이면 None(프론트가 "확인 실패"로 표시). 닉네임 랜덤 체크 시에만 호출한다.
+#[tauri::command]
+async fn forum_nickname_remaining(login_id: String) -> Result<Option<i64>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        naver_automation::forum_nickname_remaining(&login_id).map_err(|error| error.message().to_owned())
+    })
+    .await
+    .map_err(|error| format!("닉네임 잔여 횟수 조회 스레드 오류: {error}"))?
+}
+
 // 게시 결과를 LogBatch로 묶는 단일 호출 빌더라, 인자가 8개여도 구조체로 묶을 실익이
 // 적다. clippy 한도(7)만 넘으므로 이 함수에 한해 허용한다.
 #[allow(clippy::too_many_arguments)]
@@ -996,6 +1008,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         open_incognito_chrome,
         run_naver_discussion_batch,
         forum_endpoint,
+        forum_nickname_remaining,
         run_forum_publish_now,
         record_band_batch,
         export_accounts_xlsx,

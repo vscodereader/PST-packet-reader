@@ -52,6 +52,7 @@ fn attempt(
     headless: bool,
     manual_captcha: bool,
 ) -> Result<(LoginOutcome, Option<String>), OrchestratorError> {
+    tracing::info!("========== [2] 로그인 페이지 로딩 시작 ==========");
     let handle = chrome::launch_for_login(headless)?;
     // CDP 연결/Page 활성화 실패는 AutomationError(백트레이스 보유)다. 인프라 Err로 뭉개
     // 백트레이스를 잃지 않도록, 메시지를 사용자 사유로·trace를 "자세히 보기"로 보존해
@@ -87,6 +88,10 @@ fn attempt(
     // headed(=!headless)면 사용자가 캡차/2차 인증을 직접 풀 동안 기다린다. manual_captcha는
     // 보류 계정 재로그인일 때만 true라, 캡차 직접 입력을 창을 열어둔 채 기다린다.
     let (outcome, trace) = login_flow::run(&mut client, id, pw, !headless, manual_captcha);
+    tracing::info!(
+        "========== [4] 제출·캡차/상태 확인 끝 (결과: {}) ==========",
+        login_flow::outcome_label(&outcome)
+    );
 
     drop(client);
     drop(handle); // ChromeHandle Drop이 프로세스/임시 프로필을 정리한다.
@@ -173,6 +178,7 @@ pub(crate) fn finalize(
 ) -> Result<LoginResolution, OrchestratorError> {
     match outcome {
         LoginOutcome::Ok { cookies } => {
+            tracing::info!("========== [5] finalize·쿠키 저장 시작 ==========");
             // 재로그인/로그인으로 새로 발급돼 저장되는 네이버 인증 쿠키 원문을 그대로 남긴다(사용자
             // 요청 2026-07-03: 만료 → 재로그인 시 새로 들어가는 NID_AUT/NID_SES 문자열을 만료 전
             // 값과 원문 대조). 로그만 추가할 뿐 로그인/게시 동작은 바뀌지 않는다.
@@ -187,6 +193,10 @@ pub(crate) fn finalize(
             });
             let contents = serde_json::to_string_pretty(&payload)?;
             write_cookie_file_resilient(&path, &contents)?;
+            tracing::info!(
+                "========== [5] finalize·쿠키 저장 끝 ({}) ==========",
+                path.display()
+            );
 
             if has_valid_cookie_file(&path)? {
                 Ok(LoginResolution::active())

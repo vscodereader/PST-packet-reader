@@ -82,7 +82,12 @@ pub struct ForumPublishRequest {
     pub run_comment: bool,
     pub title: String,
     pub body: String,
+    /// 대표 댓글(단일). 댓글 전용("특정 게시글") 경로와 완료 로그 표시에 쓴다.
     pub comment: String,
+    /// 글+댓글(both) 모드에서 내 글에 다는 댓글 풀 전체(설계서 §2 확장). 비어 있으면 `comment`
+    /// 하나만 단다(하위호환). 댓글 전용 경로는 이 필드를 쓰지 않는다(요청 1건=댓글 1개).
+    #[serde(default)]
+    pub comments: Vec<String>,
     pub stocks: Vec<DiscussionStock>,
     /// `#{링크}` 토큰 치환에 쓸 사용자 지정 링크값. 비우면 종목별 시세 링크를 쓴다.
     /// 과거 요청과 호환되도록 기본값(빈 문자열)을 허용한다.
@@ -564,11 +569,24 @@ fn run_one_forum_stock<R: Runtime>(
     let comment = crate::template_tokens::resolve_forum(comment, &stock.name, &stock.code, &link);
     let (title, body, comment) = (title.as_str(), body.as_str(), comment.as_str());
     let result = if request.run_post && request.run_comment {
+        // 글+댓글(both): 댓글 풀 전체를 이 종목값으로 토큰 치환해 내 글에 순서대로 단다(설계서 §2 확장).
+        // 풀이 비면 대표 댓글(comment) 하나로 하위호환. 각 댓글은 #{종목명} 등이 이 종목으로 치환된다.
+        let comment_pool: Vec<String> = if request.comments.is_empty() {
+            vec![comment.to_owned()]
+        } else {
+            request
+                .comments
+                .iter()
+                .map(|c| c.trim())
+                .filter(|c| !c.is_empty())
+                .map(|c| crate::template_tokens::resolve_forum(c, &stock.name, &stock.code, &link))
+                .collect()
+        };
         run_naver_post_with_comment_macro(
             NaverPostWithCommentRequest {
                 title: title.to_owned(),
                 body: body.to_owned(),
-                comment: comment.to_owned(),
+                comments: comment_pool,
                 host: request.host.clone(),
                 port: request.port,
                 stock: Some(stock.clone()),
@@ -794,7 +812,8 @@ pub fn run_discussion_batch<R: Runtime>(
                 NaverPostWithCommentRequest {
                     title,
                     body,
-                    comment,
+                    // CSV 배치는 회차마다 댓글 하나를 골라 단다(원소 1개짜리 풀).
+                    comments: vec![comment],
                     host: request.host.clone(),
                     port: request.port,
                     stock: Some(stock),

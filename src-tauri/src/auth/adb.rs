@@ -80,25 +80,27 @@ pub(crate) struct IpRotation {
 /// 여부를 눈으로 확인할 수 있다. (Samsung One UI는 `cmd connectivity airplane-mode`로 토글해도
 /// 상단 버튼에 불이 안 들어올 수 있으나, IP가 바뀌면 라디오는 실제로 순환한 것.)
 pub async fn toggle_airplane_mode() -> Result<IpRotation, OrchestratorError> {
+    tracing::info!("========== [1] ADB IP 회전 시작 ==========");
     let before = fetch_external_ip().await;
+    tracing::info!("[ADB] ← 회전 전 외부 IP(raw): {before}");
     tracing::info!("[ADB] ✈ 비행기모드 ON");
-    run_adb_timed(
-        airplane_mode_args(true)
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    )
-    .await?;
+    let on_args: Vec<String> = airplane_mode_args(true)
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    tracing::info!("[ADB] → adb {}", on_args.join(" "));
+    let on_out = run_adb_timed(on_args).await?;
+    tracing::info!("[ADB] ← (raw) {:?}", on_out.trim());
     // ON 동안 라디오가 실제로 끊긴 걸(폰 인터넷 차단) 확인할 때까지 기다린다(고정 대기 없음).
     wait_until_phone_offline().await;
     tracing::info!("[ADB] ✈ 비행기모드 OFF — 인터넷 복구 대기");
-    run_adb_timed(
-        airplane_mode_args(false)
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    )
-    .await?;
+    let off_args: Vec<String> = airplane_mode_args(false)
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    tracing::info!("[ADB] → adb {}", off_args.join(" "));
+    let off_out = run_adb_timed(off_args).await?;
+    tracing::info!("[ADB] ← (raw) {:?}", off_out.trim());
     // OFF 후: 인터넷 복구를 기다렸다가, 외부 IP가 실제로 바뀔 때까지 폴링해 바뀌면 즉시 반환한다.
     wait_for_internet_connection().await?;
     let after = wait_for_ip_change(&before).await;
@@ -119,6 +121,7 @@ pub async fn toggle_airplane_mode() -> Result<IpRotation, OrchestratorError> {
     tracing::info!("[ADB] ────────────────────────────────────");
     // 회전 직후 폰의 실제 네트워크 세대·통신사·DNS를 원문 그대로 남긴다(LTE→3G 변경 시 비교용).
     log_phone_network_state().await;
+    tracing::info!("========== [1] ADB IP 회전 끝 ({before} → {after}) ==========");
     Ok(IpRotation {
         before,
         after,
@@ -302,8 +305,20 @@ async fn wait_for_internet_connection() -> Result<(), OrchestratorError> {
 
 async fn has_internet_connection() -> Result<bool, OrchestratorError> {
     let probe = internet_probe_command();
+    tracing::info!("[ADB] → adb shell {probe}");
     let output = run_adb_timed(vec!["shell".to_string(), probe]).await?;
-    Ok(output.lines().any(|line| line.trim() == "ok"))
+    let online = output.lines().any(|line| line.trim() == "ok");
+    tracing::info!("[ADB] ← (raw) {:?}", output.trim());
+    tracing::info!(
+        "[ADB]   판정: \"ok\" {} → {}",
+        if online { "있음" } else { "없음" },
+        if online {
+            "인터넷 연결됨(온라인)"
+        } else {
+            "인터넷 끊김(오프라인/무응답)"
+        }
+    );
+    Ok(online)
 }
 
 fn internet_probe_command() -> String {

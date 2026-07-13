@@ -35,7 +35,9 @@ pub struct NaverDiscussionRequest {
 pub struct NaverPostWithCommentRequest {
     pub title: String,
     pub body: String,
-    pub comment: String,
+    // 방금 만든 내 글에 달 댓글 풀(설계서 §2 확장). 풀 전체를 작성 순서대로 단다 — 닉네임 랜덤이
+    // 켜져 있으면 댓글마다 닉네임을 회전한다. 단일 댓글 경로(CSV 배치 등)는 원소 1개짜리 풀을 넘긴다.
+    pub comments: Vec<String>,
     pub host: String,
     pub port: u16,
     #[serde(default)]

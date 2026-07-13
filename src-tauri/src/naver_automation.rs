@@ -298,7 +298,21 @@ pub fn spawn_forum_content_edit<R: Runtime>(
     change: &crate::ipc::queue::ContentChange,
 ) {
     let Some(post_id) = post_id_from_url(post_url) else {
-        tracing::warn!(url = %post_url, "내용 변경 예약 실패 — 글 URL에서 post_id를 찾지 못함");
+        let trace = crate::util::backtrace_string();
+        tracing::warn!(
+            url = %post_url,
+            trace = %trace,
+            "내용 변경 예약 실패 — 글 URL에서 post_id를 찾지 못함"
+        );
+        record_forum_edit_failure(
+            app,
+            account_id,
+            post_url,
+            stock_name,
+            stock_code,
+            "내용 변경 실패 — 글 URL에서 post_id 없음",
+            trace,
+        );
         return;
     };
     let app = app.clone();
@@ -312,19 +326,41 @@ pub fn spawn_forum_content_edit<R: Runtime>(
         let mut client = match packet_client::NaverPacketClient::from_saved_cookies(&account_id) {
             Ok(client) => client,
             Err(error) => {
+                let trace = crate::util::backtrace_string();
                 tracing::warn!(
                     account = %crate::auth::mask_id(&account_id),
+                    trace = %trace,
                     "내용 변경 edit 세션 오픈 실패 — 원글은 그대로 둠: {}",
                     error.message()
+                );
+                record_forum_edit_failure(
+                    &app,
+                    &account_id,
+                    &post_url,
+                    &stock_name,
+                    &stock_code,
+                    &format!("내용 변경 실패 — 세션 없음: {}", error.message()),
+                    trace,
                 );
                 return;
             }
         };
         if let Err(error) = client.edit_post(&post_id, &change.title, &change.body) {
+            let trace = crate::util::backtrace_string();
             tracing::warn!(
                 post_id = %post_id,
+                trace = %trace,
                 "내용 변경 edit 실패 — 원글은 그대로 둠: {}",
                 error.message()
+            );
+            record_forum_edit_failure(
+                &app,
+                &account_id,
+                &post_url,
+                &stock_name,
+                &stock_code,
+                &format!("내용 변경 실패 — {}", error.message()),
+                trace,
             );
             return;
         }
@@ -415,24 +451,178 @@ fn record_forum_edit_batch<R: Runtime>(
     });
 }
 
+/// 내용 변경 **실패**를 알림 패널에 뜨게 한다(#400 후속) — 일반 게시 실패처럼 실패 카드(LogBatch)를
+/// 하나 남기고(`BatchItemStatus::Failure` + `trace: Some(backtrace)`로 "자세히 보기" 노출), 실패
+/// 토스트 이벤트(`forum-content-edit-failed`)를 emit한다. `record_forum_edit_batch`와 같은 store
+/// 플러밍을 재사용한다. `reason`은 사용자용 메시지, `trace`는 개발자용 캡처 스택이다.
+fn record_forum_edit_failure<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    account_id: &str,
+    post_url: &str,
+    stock_name: &str,
+    stock_code: &str,
+    reason: &str,
+    trace: String,
+) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::ipc::accounts::PlatformId;
+    use crate::ipc::log_batches::{BatchItem, BatchItemStatus, LogBatch, MAX_LOG_BATCHES};
+    use crate::store::JsonStore;
+
+    static EDIT_FAIL_LB_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = EDIT_FAIL_LB_SEQ.fetch_add(1, Ordering::Relaxed);
+    let at = crate::util::now_ms();
+    let item = BatchItem {
+        platform: PlatformId::Forum,
+        target: format!("{stock_name} 내용 변경"),
+        code: Some(stock_code.to_owned()),
+        board: None,
+        login_id: account_id.to_owned(),
+        status: BatchItemStatus::Fail,
+        msg: reason.to_owned(),
+        trace: Some(trace),
+        posted: None,
+    };
+    let batch = LogBatch {
+        id: format!("lb-edit-fail-{at}-{seq}"),
+        title: format!("{stock_name} 내용 변경 실패"),
+        body: None,
+        comment: None,
+        kind: crate::ipc::posts::ModeValue::Post,
+        at,
+        state: None,
+        items: vec![item],
+    };
+    let logs = app.state::<JsonStore<LogBatch>>();
+    logs.mutate(move |mut v| {
+        v.insert(0, batch);
+        v.truncate(MAX_LOG_BATCHES);
+        v
+    });
+    // 토스트용 이벤트(프론트 app-shell 리스너가 받아 빨간 실패 토스트를 띄운다).
+    let _ = app.emit(
+        "forum-content-edit-failed",
+        serde_json::json!({
+            "loginId": account_id,
+            "stock": stock_name,
+            "reason": reason,
+            "url": post_url,
+        }),
+    );
+}
+
+/// 닉네임 변경 5회 상한(설계서 §2) 상태. 네이버는 계정당 기간별 닉네임 편집을 5회로 제한하고,
+/// 소진되면 닉네임 PUT이 429 `EDIT_COUNT_EXCEEDED`(errorCode 429B01)로 막힌다. 상한에 걸리면
+/// 이후 회전 시도를 멈춰(불필요한 429 반복 방지) 남은 댓글은 기존 닉네임으로 계속 단다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NicknameCap {
+    /// 아직 변경 여지가 있다 — 다음 댓글에서도 회전을 시도한다.
+    Available,
+    /// 5회 상한 도달(429 EDIT_COUNT_EXCEEDED) — 이후 회전을 중단한다.
+    Exhausted,
+}
+
+/// 닉네임 변경 실패 메시지가 "5회 상한 소진"(429 EDIT_COUNT_EXCEEDED)인지 판별한다(순수 함수).
+/// `change_nickname_avoiding`의 PUT이 429면 `response_text`가 status·body를 메시지에 실어 주므로,
+/// 네이버 원문 마커(`EDIT_COUNT_EXCEEDED`/`429B01`)로 상한 소진을 다른 일시 실패와 구분한다.
+fn is_nickname_cap_exhausted(message: &str) -> bool {
+    message.contains("EDIT_COUNT_EXCEEDED") || message.contains("429B01")
+}
+
 /// 닉네임 랜덤 댓글(설계서 §2): `used`에 없는 닉네임으로 프로필을 바꾸고 성공한 닉네임을 `used`에
 /// 넣어 같은 계정의 다음 댓글과 겹치지 않게 한다. 변경 실패(네트워크/프로필 오류)는 로그만 남기고
-/// 기존 닉네임으로 진행한다(닉네임 변경 실패가 댓글을 막지 않게).
+/// 기존 닉네임으로 진행한다(닉네임 변경 실패가 댓글을 막지 않게). 실패가 5회 상한(429
+/// EDIT_COUNT_EXCEEDED)이면 [`NicknameCap::Exhausted`]를 돌려 호출부가 이후 회전을 멈추게 한다.
 fn maybe_randomize_nickname(
     packet_client: &mut packet_client::NaverPacketClient,
     used: &mut std::collections::HashSet<String>,
-) {
+) -> NicknameCap {
     match packet_client.change_nickname_avoiding(used) {
         Ok(nickname) => {
             used.insert(nickname);
+            NicknameCap::Available
         }
         Err(error) => {
-            tracing::warn!(
-                "댓글 닉네임 랜덤 변경 실패 — 기존 닉네임으로 진행: {}",
-                error.message()
-            );
+            let message = error.message();
+            if is_nickname_cap_exhausted(message) {
+                tracing::warn!(
+                    "댓글 닉네임 랜덤 변경 상한(5회) 도달 — 이후 변경 중단, 기존 닉네임으로 진행: {message}"
+                );
+                NicknameCap::Exhausted
+            } else {
+                tracing::warn!("댓글 닉네임 랜덤 변경 실패 — 기존 닉네임으로 진행: {message}");
+                NicknameCap::Available
+            }
         }
     }
+}
+
+/// 방금 만든 내 글에 댓글 풀 전체를 다는 순수 루프(설계서 §2 확장). 네트워크를 [`CommentPoolOps`]
+/// 뒤로 감춰 테스트 가능하게 분리했다. `nickname_random`이면 댓글마다 닉네임을 회전하되, 회전이
+/// [`NicknameCap::Exhausted`](5회 상한 429)를 돌리면 그 계정은 이후 회전을 멈추고(불필요한 429
+/// 반복 방지) 남은 댓글을 기존 닉네임으로 계속 단다. 닉네임 회전은 댓글을 막지 않는다 — 댓글 게시
+/// 자체가 실패하면(기존 단일 댓글과 동일) 그 오류를 전파한다. 게시한 댓글 수를 돌려준다.
+fn run_comment_pool<T: CommentPoolOps>(
+    comments: &[&str],
+    nickname_random: bool,
+    ops: &mut T,
+) -> AutomationResult<usize> {
+    let mut cap = NicknameCap::Available;
+    let mut posted = 0usize;
+    for comment in comments {
+        if nickname_random && cap == NicknameCap::Available {
+            cap = ops.rotate_nickname();
+        }
+        ops.submit_comment(comment)?;
+        posted += 1;
+    }
+    Ok(posted)
+}
+
+/// [`run_comment_pool`]이 쓰는 댓글 게시 연산 seam. 실전 구현은 패킷 클라이언트로 닉네임을 바꾸고
+/// 방금 만든 글에 댓글을 달며, 테스트 구현은 호출을 기록해 루프 로직만 검증한다.
+trait CommentPoolOps {
+    /// 닉네임을 계정 내 중복 없이 랜덤 회전한다. 5회 상한(429)에 걸리면 [`NicknameCap::Exhausted`].
+    fn rotate_nickname(&mut self) -> NicknameCap;
+    /// 방금 만든 내 글에 댓글 1개를 단다. 실패는 그대로 전파(기존 단일 댓글과 동일).
+    fn submit_comment(&mut self, comment: &str) -> AutomationResult<()>;
+}
+
+/// [`CommentPoolOps`]의 실전 구현 — 패킷 클라이언트로 닉네임 회전·댓글 게시를 수행한다. 같은 계정의
+/// 댓글이 도배로 막히지 않도록 두 번째 댓글부터 [`COMMENT_LOOP_GAP`]만큼 텀을 둔다(댓글 전용 경로의
+/// 계정별 스로틀을 매크로 안에서 미러링). `post_url`은 방금 만든 내 글 — 풀 전체가 이 글에 달린다.
+struct PacketCommentOps<'a> {
+    client: &'a mut packet_client::NaverPacketClient,
+    used: &'a mut std::collections::HashSet<String>,
+    post_url: &'a str,
+    first: bool,
+}
+
+/// 매크로 안 댓글 사이 최소 텀(설계서 §2 확장). 댓글 전용 경로의 `COMMENT_MIN_GAP`(3초)를 미러링해
+/// 같은 계정이 한 글에 여러 댓글을 연달아 달 때 도배방지 차단을 피한다.
+const COMMENT_LOOP_GAP: Duration = Duration::from_secs(3);
+
+impl CommentPoolOps for PacketCommentOps<'_> {
+    fn rotate_nickname(&mut self) -> NicknameCap {
+        maybe_randomize_nickname(self.client, self.used)
+    }
+
+    fn submit_comment(&mut self, comment: &str) -> AutomationResult<()> {
+        if !self.first {
+            sleep(COMMENT_LOOP_GAP);
+        }
+        self.first = false;
+        self.client.submit_comment(self.post_url, comment)?;
+        Ok(())
+    }
+}
+
+/// 닉네임 랜덤(설계서 §2) UI용: 이 계정의 프로필 닉네임 변경 잔여 횟수(remainingEditCount)를 조회한다.
+/// 저장 쿠키로 프로필 form을 GET해 그 값을 돌려준다(5회 상한 중 남은 횟수). 필드가 없으면 None.
+pub fn forum_nickname_remaining(account_id: &str) -> AutomationResult<Option<i64>> {
+    let client = packet_client::NaverPacketClient::from_saved_cookies(account_id)?;
+    client.nickname_remaining_edit_count()
 }
 
 pub fn run_naver_discussion_macro(
@@ -552,7 +742,13 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
 ) -> AutomationResult<Vec<AutomationReport>> {
     let title = request.title.trim();
     let body = request.body.trim();
-    let comment = request.comment.trim();
+    // 댓글 풀(설계서 §2 확장): 빈 항목을 걸러 실제 달 댓글만 남긴다. 하나도 없으면 실패.
+    let comments: Vec<&str> = request
+        .comments
+        .iter()
+        .map(|comment| comment.trim())
+        .filter(|comment| !comment.is_empty())
+        .collect();
 
     if title.is_empty() {
         return Err(AutomationError::new("제목이 비어 있습니다."));
@@ -562,7 +758,7 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
         return Err(AutomationError::new("내용이 비어 있습니다."));
     }
 
-    if comment.is_empty() {
+    if comments.is_empty() {
         return Err(AutomationError::new("댓글 내용이 비어 있습니다."));
     }
 
@@ -601,24 +797,31 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
         let _ = app.emit("batch-wait-start", serde_json::json!({ "seconds": 60u64 }));
     }
 
-    // 방금 쓴 글에 댓글을 단다 — 페이지 이동 없이 글 URL을 referer로 패킷 API 호출.
+    // 방금 쓴 글에 댓글 풀 전체를 단다 — 페이지 이동 없이 글 URL을 referer로 패킷 API 호출.
+    // 닉네임 랜덤이면 댓글마다 닉네임을 회전하고, 5회 상한(429)에 걸리면 이후 회전을 멈춘다.
     clarify_profile_status_error(
         packet_client.ensure_profile_intro_setup(&post_url),
         npay_status,
     )?;
-    if request.comment_nickname_random {
-        maybe_randomize_nickname(&mut packet_client, used);
-    }
-    packet_client.submit_comment(&post_url, comment)?;
-    let comment_report = AutomationReport {
+    let mut ops = PacketCommentOps {
+        client: &mut packet_client,
+        used,
+        post_url: &post_url,
+        first: true,
+    };
+    let posted = run_comment_pool(&comments, request.comment_nickname_random, &mut ops)?;
+
+    // 게시한 댓글 수만큼 결과를 만든다(완료 로그·집계용 — 전부 같은 내 글에 달렸다).
+    let mut reports = vec![post_report];
+    reports.extend(std::iter::repeat_with(|| AutomationReport {
         current_url: post_url.clone(),
         post_url: None,
-        login_profile,
+        login_profile: login_profile.clone(),
         register_button_highlighted: false,
         submitted: true,
-        selected,
+        selected: selected.clone(),
         target: AutomationTarget::Comment,
-    };
+    }).take(posted));
 
     // 댓글 작성에 걸린 시간을 제외한 나머지 시간을 기다려 총 1분을 채웁니다.
     if sleep_after {
@@ -629,7 +832,7 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
         }
     }
 
-    Ok(vec![post_report, comment_report])
+    Ok(reports)
 }
 
 pub(crate) struct CdpClient {
@@ -1290,5 +1493,117 @@ mod tests {
             trace.contains("automation_error_keeps_message_and_records_caller_location"),
             "캡처한 스택에 호출 함수가 보여야 함(심볼 해석됨): {trace}"
         );
+    }
+
+    /// 댓글 풀 루프(설계서 §2 확장) 테스트용 mock — 닉네임 회전/댓글 게시 호출을 기록한다.
+    struct RecordingOps {
+        submitted: Vec<String>,
+        rotate_calls: usize,
+        /// 이 회차(0-based)부터 회전이 5회 상한(Exhausted)을 돌린다. None이면 항상 Available.
+        exhaust_at: Option<usize>,
+        /// 이 인덱스(0-based 댓글)의 게시를 실패시킨다. None이면 전부 성공.
+        fail_submit_at: Option<usize>,
+    }
+
+    impl RecordingOps {
+        fn new() -> Self {
+            Self {
+                submitted: Vec::new(),
+                rotate_calls: 0,
+                exhaust_at: None,
+                fail_submit_at: None,
+            }
+        }
+    }
+
+    impl CommentPoolOps for RecordingOps {
+        fn rotate_nickname(&mut self) -> NicknameCap {
+            let n = self.rotate_calls;
+            self.rotate_calls += 1;
+            match self.exhaust_at {
+                Some(k) if n >= k => NicknameCap::Exhausted,
+                _ => NicknameCap::Available,
+            }
+        }
+
+        fn submit_comment(&mut self, comment: &str) -> AutomationResult<()> {
+            let idx = self.submitted.len();
+            if self.fail_submit_at == Some(idx) {
+                return Err(AutomationError::new("댓글 생성 실패(mock)"));
+            }
+            self.submitted.push(comment.to_owned());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn run_comment_pool_posts_entire_pool_in_order() {
+        // (a) both 모드는 풀의 모든 댓글을 작성 순서대로 (내 글에) 단다. 닉네임 랜덤이 꺼졌으면
+        // 회전은 한 번도 시도하지 않는다.
+        let mut ops = RecordingOps::new();
+        let posted = run_comment_pool(&["가", "나", "다"], false, &mut ops).unwrap();
+        assert_eq!(posted, 3);
+        assert_eq!(ops.submitted, vec!["가", "나", "다"]);
+        assert_eq!(ops.rotate_calls, 0);
+    }
+
+    #[test]
+    fn run_comment_pool_rotates_nickname_before_each_comment_when_enabled() {
+        // (b) 닉네임 랜덤이 켜지면 댓글마다 회전을 시도한다(상한 전까지 매 댓글 1회).
+        let mut ops = RecordingOps::new();
+        let posted = run_comment_pool(&["가", "나", "다"], true, &mut ops).unwrap();
+        assert_eq!(posted, 3);
+        assert_eq!(ops.rotate_calls, 3);
+        assert_eq!(ops.submitted, vec!["가", "나", "다"]);
+    }
+
+    #[test]
+    fn run_comment_pool_rotation_failure_still_posts_comment() {
+        // (c) 회전 실패(상한 아님)는 Available로 돌아와 댓글을 막지 않는다 — maybe_randomize_nickname이
+        // 비상한 실패를 삼키고 Available을 돌리는 계약을 루프 관점에서 검증한다. 모든 댓글이 게시된다.
+        let mut ops = RecordingOps::new(); // rotate는 항상 Available(=회전 실패 삼킴과 동일 효과)
+        let posted = run_comment_pool(&["가", "나"], true, &mut ops).unwrap();
+        assert_eq!(posted, 2);
+        assert_eq!(ops.submitted, vec!["가", "나"]);
+    }
+
+    #[test]
+    fn run_comment_pool_stops_rotating_after_cap_but_keeps_posting() {
+        // 상한(429 EDIT_COUNT_EXCEEDED) 도달 후에는 회전을 멈추고(불필요한 429 방지) 남은 댓글은
+        // 기존 닉네임으로 계속 단다. 2번째 회전에서 Exhausted → 이후 회전 없음, 댓글 4개 전부 게시.
+        let mut ops = RecordingOps {
+            exhaust_at: Some(1),
+            ..RecordingOps::new()
+        };
+        let posted = run_comment_pool(&["가", "나", "다", "라"], true, &mut ops).unwrap();
+        assert_eq!(posted, 4);
+        assert_eq!(ops.submitted, vec!["가", "나", "다", "라"]);
+        assert_eq!(ops.rotate_calls, 2, "상한 도달 후에는 회전을 더 시도하지 않는다");
+    }
+
+    #[test]
+    fn run_comment_pool_propagates_submit_failure() {
+        // 댓글 게시 자체 실패는 기존 단일 댓글과 동일하게 그대로 전파한다(중간에서 멈춘다).
+        let mut ops = RecordingOps {
+            fail_submit_at: Some(1),
+            ..RecordingOps::new()
+        };
+        let result = run_comment_pool(&["가", "나", "다"], false, &mut ops);
+        assert!(result.is_err());
+        assert_eq!(ops.submitted, vec!["가"], "실패 직전까지만 게시된다");
+    }
+
+    #[test]
+    fn is_nickname_cap_exhausted_detects_edit_count_exceeded() {
+        // 429 EDIT_COUNT_EXCEEDED(errorCode 429B01)만 상한 소진으로 본다.
+        assert!(is_nickname_cap_exhausted(
+            "닉네임 변경 PUT 패킷 HTTP 실패: status=429, body={\"title\":\"EDIT_COUNT_EXCEEDED\",\"errorCode\":\"429B01\"}"
+        ));
+        assert!(is_nickname_cap_exhausted("...\"errorCode\":\"429B01\"..."));
+        // 일시 실패/다른 오류는 상한이 아니다(회전을 계속 시도할 수 있다).
+        assert!(!is_nickname_cap_exhausted(
+            "닉네임 변경 PUT 패킷 HTTP 실패: status=500, body={}"
+        ));
+        assert!(!is_nickname_cap_exhausted("닉네임 추천 패킷 전송 실패: timeout"));
     }
 }

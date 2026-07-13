@@ -18,7 +18,7 @@ import {
   ThemeIcon,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import type { BandTarget } from "@/shared/bindings/BandTarget";
 import type { BlogTarget } from "@/shared/bindings/BlogTarget";
@@ -1011,6 +1011,11 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
   const [linkOverride, setLinkOverride] = useState("");
   // 닉네임 랜덤 댓글(설계서 §2): 댓글 모드에서 각 댓글마다 닉네임을 랜덤으로 바꿔 단다.
   const [commentNicknameRandom, setCommentNicknameRandom] = useState(false);
+  // 닉네임 변경 잔여 횟수(설계서 §2, 5회 상한 중 남은 횟수). 체크박스가 켜졌을 때만 계정별로
+  // 조회한다(불필요한 API 호출 방지). loginId → 남은 횟수 | "loading"(확인 중) | "error"(확인 실패).
+  const [nicknameRemaining, setNicknameRemaining] = useState<
+    Record<string, number | "loading" | "error">
+  >({});
   // 내용 변경(설계서 §5): 글쓰기 게시 후 delaySec초 뒤 새 제목/본문으로 글을 교체(edit)한다.
   // enabled=false면 plan에 싣지 않는다(변경 없음).
   const [contentChange, setContentChange] = useState<{
@@ -1044,6 +1049,51 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
     });
     void ipc.stocks.list().then(setStocks);
   }, []);
+
+  // 닉네임 랜덤(설계서 §2)이 적용될 종목토론방 계정들의 loginId. 선택된 게시 가능한 forum 계정에서
+  // 뽑는다. 계정 순서·중복만 반영하는 안정 키라, 아래 조회 effect가 매 렌더마다 재실행되지 않는다.
+  const forumRemainingIds = useMemo(
+    () => [
+      ...new Set(
+        accounts
+          .filter(
+            (a) =>
+              a.platform === "forum" &&
+              selected.includes(a.id) &&
+              isPostable(a.status),
+          )
+          .map((a) => a.loginId),
+      ),
+    ],
+    [accounts, selected],
+  );
+  const forumRemainingKey = forumRemainingIds.join(",");
+
+  // 체크박스가 켜졌을 때만 계정별 닉네임 잔여 횟수를 조회한다(꺼져 있거나 forum 계정이 없으면 조회
+  // 안 함 — 사용자 지시: 불필요한 API 호출 금지). 각 계정을 "확인 중"으로 먼저 표시하고, 응답/에러로
+  // 갱신한다. 언마운트·의존성 변경 시 이전 요청 결과가 뒤늦게 상태를 덮지 않도록 cancelled로 가드한다.
+  useEffect(() => {
+    if (!commentNicknameRandom || forumRemainingIds.length === 0) return;
+    let cancelled = false;
+    forumRemainingIds.forEach((id) => {
+      setNicknameRemaining((m) => ({ ...m, [id]: "loading" }));
+      ipc.forum
+        .nicknameRemaining(id)
+        .then((n) => {
+          if (!cancelled)
+            setNicknameRemaining((m) => ({ ...m, [id]: n ?? "error" }));
+        })
+        .catch(() => {
+          if (!cancelled)
+            setNicknameRemaining((m) => ({ ...m, [id]: "error" }));
+        });
+    });
+    return () => {
+      cancelled = true;
+    };
+    // forumRemainingKey는 forumRemainingIds의 안정 문자열 키다(배열 참조 대신 값으로 비교).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [commentNicknameRandom, forumRemainingKey]);
 
   // 계정 목록을 다시 불러와(새로고침) 상태를 갱신한다(#4/#5). 게시(숫자)로 큐에 적재된 뒤,
   // 또는 '계속작성'으로 모달을 유지할 때 호출해, 백엔드가 갱신한 계정 상태(예: 게시 성공 →
@@ -2218,9 +2268,12 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
           </Box>
         )}
 
-        {/* 닉네임 랜덤(설계서 §2): 댓글 모드에서만. 각 댓글마다 닉네임을 랜덤으로 바꿔 단다
-            (계정 내 중복 금지 — 실제 동작은 게시 루프가 처리, 여기선 plan에 값만 싣는다). */}
-        {mode === "comment" && (
+        {/* 닉네임 랜덤(설계서 §2): 종목토론방(forum) 전용 — 카페·클립·밴드·블로그는 닉네임을 바꿔
+            게시할 수 없으므로 forum 계정이 선택됐을 때만 보인다. 댓글·글+댓글 모드에서. 각 댓글마다
+            닉네임을 랜덤으로 바꿔 단다(계정 내 중복 금지 — 실제 동작은 게시 루프가 처리, 여기선 plan에
+            값만 싣는다). 체크하면 계정별 변경 잔여 횟수(5회 상한 중 남은 횟수)를 조회해 옆에 보여준다. */}
+        {selPlatforms.includes("forum") &&
+          (mode === "comment" || mode === "both") && (
           <>
             <Group gap={7} mt={22} mb={12}>
               <Icon.refresh size={17} color="var(--mantine-color-gray-6)" />
@@ -2235,13 +2288,33 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
                 setCommentNicknameRandom(e.currentTarget.checked)
               }
             />
+            {commentNicknameRandom && forumRemainingIds.length > 0 && (
+              <Stack gap={2} mt={8}>
+                {forumRemainingIds.map((id) => {
+                  const r = nicknameRemaining[id];
+                  const label =
+                    r === undefined || r === "loading"
+                      ? "확인 중…"
+                      : r === "error"
+                        ? "확인 실패"
+                        : `변경 기회 ${r}회 남음`;
+                  return (
+                    <Text key={id} fz={11.5} c="dimmed">
+                      {forumRemainingIds.length > 1 ? `${id}: ${label}` : label}
+                    </Text>
+                  );
+                })}
+              </Stack>
+            )}
           </>
         )}
 
-        {/* 내용 변경(설계서 §5): 글쓰기(글/글+댓글) 모드에서만. 체크하면 글 작성 UI(제목+내용)와
-            변경까지 지연(초)이 나타난다. 게시 후 그 초만큼 뒤 새 내용으로 글을 교체(edit)한다
-            (실제 동작은 게시 루프가 처리, 여기선 plan에 값만 싣는다). */}
-        {(mode === "post" || mode === "both") && (
+        {/* 내용 변경(설계서 §5): 종목토론방(forum) 전용 — 카페·클립·밴드·블로그는 게시 후 내용
+            변경(edit)이 안 되므로 forum 계정이 선택됐을 때만 보인다. 글쓰기(글/글+댓글) 모드에서만.
+            체크하면 글 작성 UI(제목+내용)와 변경까지 지연(초)이 나타난다. 게시 후 그 초만큼 뒤 새
+            내용으로 글을 교체(edit)한다(실제 동작은 게시 루프가 처리, 여기선 plan에 값만 싣는다). */}
+        {selPlatforms.includes("forum") &&
+          (mode === "post" || mode === "both") && (
           <>
             <Group gap={7} mt={22} mb={12}>
               <Icon.pencil size={17} color="var(--mantine-color-gray-6)" />
@@ -2252,12 +2325,14 @@ function PublishModalInner({ open, doc, onClose, go }: PublishModalProps) {
             <Checkbox
               label="게시 후 내용 변경"
               checked={contentChange.enabled}
-              onChange={(e) =>
-                setContentChange((c) => ({
-                  ...c,
-                  enabled: e.currentTarget.checked,
-                }))
-              }
+              onChange={(e) => {
+                // #400 흰화면 버그(체크박스판): 종목이 선택돼 있으면 대기 중인 상태
+                // 갱신이 있어 React가 이 업데이터를 렌더 단계로 미룬다. 그때
+                // e.currentTarget은 null이라 `.checked` 접근이 터진다(에러바운더리
+                // 없어 앱 전체 흰 화면). 값을 핸들러에서 동기 캡처해 넘긴다.
+                const checked = e.currentTarget.checked;
+                setContentChange((c) => ({ ...c, enabled: checked }));
+              }}
             />
             {contentChange.enabled && (
               <Stack gap={10} mt={12}>
