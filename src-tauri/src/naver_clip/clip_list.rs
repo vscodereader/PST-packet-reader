@@ -284,17 +284,41 @@ fn parse_contents(body: &str) -> Option<(Vec<ClipMedia>, Option<PageInfo>)> {
 /// `@<handle>` 페이지 HTML에서 profileId를 뽑는다. `"clipId":"<handle>"` 출현 뒤 가장 가까운
 /// `"profileId":"<값>"`을 읽는다. 핸들 매칭으로 다른 사용자의 profileId 오인을 막는다(순수 함수).
 fn parse_profile_id(html: &str, handle: &str) -> Option<String> {
-    let needle = format!("\"clipId\":\"{handle}\"");
-    let from = html.find(&needle)?;
-    let after = &html[from..];
-    let key = "\"profileId\":\"";
-    let pos = after.find(key)? + key.len();
-    let value: String = after[pos..].chars().take_while(|&c| c != '"').collect();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
+    // 구 형식(≤2026-06): `"clipId":"<handle>"` 앵커 뒤 `"profileId":"<PID>"`.
+    let anchored = format!("\"clipId\":\"{handle}\"");
+    if let Some(from) = html.find(&anchored) {
+        return read_profile_token(&html[from..]);
     }
+    // 구 형식 페이지인데 앵커 핸들이 안 맞으면(다른 clipId만 존재) 다른 창작자 오인 방지로 None.
+    if html.contains("\"clipId\":\"") {
+        return None;
+    }
+    // 신 형식(2026-07~): `"clipId":"<handle>"`가 사라지고, profileId가 `clipprofile` 딥링크의
+    // (이중)URL인코딩 JSON(`data=...%2522profileId%2522%253A%2522<PID>%2522...`) 안에만 있다.
+    // `@handle` 페이지는 그 창작자 전용이라 유일 profileId가 곧 그 창작자다.
+    read_profile_token(html)
+}
+
+/// `profileId` 키(원문 / 단일 / 이중 URL인코딩) 뒤의 profileId 토큰(`[A-Za-z0-9_-]`)을 읽는다.
+/// 인코딩 구분자(`"`·`%`)에서 멈추므로 세 형식 모두 같은 값이 나온다(순수 함수).
+fn read_profile_token(s: &str) -> Option<String> {
+    for key in [
+        "\"profileId\":\"",
+        "%22profileId%22%3A%22",
+        "%2522profileId%2522%253A%2522",
+    ] {
+        if let Some(pos) = s.find(key) {
+            let start = pos + key.len();
+            let value: String = s[start..]
+                .chars()
+                .take_while(|&c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                .collect();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
 }
 
 /// 진단 문자열(응답 길이 + 공백 정리 스니펫 최대 160자). 본문엔 쿠키가 없다.
@@ -342,6 +366,32 @@ mod tests {
         );
         // 다른 핸들이면 못 찾는다.
         assert_eq!(parse_profile_id(html, "someone_else"), None);
+    }
+
+    #[test]
+    fn parse_profile_id_reads_new_encoded_format_2026_07() {
+        // 2026-07 네이버 클립 페이지 변경: `"clipId":"<handle>"` 앵커가 사라지고 profileId가
+        // `clipprofile` 딥링크의 이중 URL인코딩 JSON 안에만 남았다(실제 @clabreact 캡처).
+        let html = r#"<title>clabreact님의 네이버 클립 프로필</title><a href="naversearchapp://clipprofile%3Ftype%3Dhome%26version%3D72%26data%3D%257B%2522profileId%2522%253A%2522Fhtq9n-GBsm9xQl0lZ9U%2522%252C%2522entryTab%2522%253A%2522all%2522%257D">앱에서 보기</a>"#;
+        assert_eq!(
+            parse_profile_id(html, "clabreact"),
+            Some("Fhtq9n-GBsm9xQl0lZ9U".to_owned())
+        );
+        // 앵커가 없는 신 형식이라 어떤 핸들로 물어도 그 페이지의 유일 profileId를 돌려준다
+        // (호출부가 `@handle` 페이지를 핸들별로 받아오므로 오인 위험이 없다).
+        assert_eq!(
+            parse_profile_id(html, "anything"),
+            Some("Fhtq9n-GBsm9xQl0lZ9U".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_profile_id_reads_single_encoded_format() {
+        let html = r#"...%22profileId%22%3A%22AbC123_dEf456-Ghi%22..."#;
+        assert_eq!(
+            parse_profile_id(html, "whoever"),
+            Some("AbC123_dEf456-Ghi".to_owned())
+        );
     }
 
     #[test]
