@@ -7,8 +7,10 @@ use uuid::Uuid;
 
 use crate::error::AppResult;
 use crate::model::{
-    AuditEntry, Device, DeviceCode, DeviceState, LoginReport, Operator, PostReport, StagedAccount,
+    AuditEntry, DailyResultDto, Device, DeviceCode, DeviceState, DeviceStopReport, LoginReport,
+    Operator, PostReport, StagedAccount,
 };
+use crate::scheduled::ScheduledPost;
 
 pub mod memory;
 pub mod postgres;
@@ -74,4 +76,27 @@ pub trait Repository: Send + Sync {
     /// 로그인 결과 보고 저장. 컴퓨터(device_id)당 **최신 1건**으로 덮어쓴다(누적이 합계를 담음).
     async fn add_login_report(&self, report: LoginReport) -> AppResult<()>;
     async fn list_login_reports(&self) -> AppResult<Vec<LoginReport>>;
+
+    // ── 예약 게시 영속화(07-게시명령 4단계) ──
+    /// 예약 1건 저장(write-through). 같은 id면 갱신(멱등). 부팅 시 rehydrate로 복원.
+    async fn add_scheduled_post(&self, post: ScheduledPost) -> AppResult<()>;
+    /// 예약 전체 목록(발송 시각 `at` 오름차순). 부팅 rehydrate·복원용.
+    async fn list_scheduled_posts(&self) -> AppResult<Vec<ScheduledPost>>;
+    /// 예약 삭제(발송 완료·취소 시). 지운 게 있으면 true.
+    async fn delete_scheduled_post(&self, id: &str) -> AppResult<bool>;
+
+    // ── 중지 리포트 영속화(08 §10-3) ──
+    /// 하위(device_id)당 누적 중지 요약 1건 UPSERT(메모리 누적본을 통째로 write-through).
+    async fn upsert_stop_report(&self, device_id: Uuid, report: DeviceStopReport) -> AppResult<()>;
+    async fn list_stop_reports(&self) -> AppResult<Vec<(Uuid, DeviceStopReport)>>;
+
+    // ── 날짜별 결과 집계 영속화(날짜 분류) ──
+    /// (device_id, date) 하루치 집계 UPSERT(메모리 갱신본을 write-through).
+    async fn upsert_daily_result(
+        &self,
+        device_id: Uuid,
+        date: &str,
+        dto: DailyResultDto,
+    ) -> AppResult<()>;
+    async fn list_daily_results(&self) -> AppResult<Vec<(Uuid, DailyResultDto)>>;
 }

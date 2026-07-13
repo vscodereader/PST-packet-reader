@@ -9,9 +9,10 @@ use uuid::Uuid;
 use super::Repository;
 use crate::error::{AppError, AppResult};
 use crate::model::{
-    AuditEntry, Device, DeviceCode, DeviceState, LoginBatchDto, LoginCumulativeDto, LoginReport,
-    Operator, PostItemDto, PostReport, Role, StagedAccount,
+    AuditEntry, DailyResultDto, Device, DeviceCode, DeviceState, DeviceStopReport, LoginBatchDto,
+    LoginCumulativeDto, LoginReport, Operator, PostItemDto, PostReport, Role, StagedAccount,
 };
+use crate::scheduled::ScheduledPost;
 
 /// 스키마(멱등). `server/migrations/0001_init.sql`과 동일 내용.
 const SCHEMA: &str = r#"
@@ -75,6 +76,29 @@ CREATE TABLE IF NOT EXISTS login_reports (
 -- 기존 DB 업그레이드(멱등): 등록 건수 컬럼 추가(§10-1 등록 확인).
 ALTER TABLE login_reports ADD COLUMN IF NOT EXISTS registered INT NOT NULL DEFAULT 0;
 ALTER TABLE login_reports ADD COLUMN IF NOT EXISTS registered_visible INT NOT NULL DEFAULT 0;
+-- 예약 게시 영속화(07-게시명령 4단계). ScheduledPost 전체를 JSONB로 보관, at으로 발송 시각 정렬.
+CREATE TABLE IF NOT EXISTS scheduled_posts (
+  id         TEXT PRIMARY KEY,
+  device_id  UUID NOT NULL,
+  at         BIGINT NOT NULL,
+  payload    JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS scheduled_posts_at_idx ON scheduled_posts (at);
+-- 중지 리포트 영속화(08 §10-3). 하위(device_id)당 누적 요약 1건(DeviceStopReport 전체 JSONB).
+CREATE TABLE IF NOT EXISTS stop_reports (
+  device_id   UUID PRIMARY KEY,
+  payload     JSONB NOT NULL,
+  received_at TIMESTAMPTZ NOT NULL
+);
+-- 날짜별 결과 집계 영속화(날짜 분류). (device_id, date)당 하루치(DailyResultDto 전체 JSONB).
+CREATE TABLE IF NOT EXISTS daily_results (
+  device_id  UUID NOT NULL,
+  date       TEXT NOT NULL,
+  payload    JSONB NOT NULL,
+  PRIMARY KEY (device_id, date)
+);
+CREATE INDEX IF NOT EXISTS daily_results_date_idx ON daily_results (date);
 "#;
 
 pub struct PostgresRepo {
@@ -543,6 +567,123 @@ impl Repository for PostgresRepo {
                     registered: r.get::<i32, _>("registered") as usize,
                     registered_visible: r.get::<i32, _>("registered_visible") as usize,
                 })
+            })
+            .collect()
+    }
+
+    async fn add_scheduled_post(&self, post: ScheduledPost) -> AppResult<()> {
+        // ScheduledPost 전체를 JSONB로 보관. 같은 id면 UPSERT(멱등).
+        let payload = serde_json::to_value(&post)
+            .map_err(|e| AppError::Internal(format!("예약 직렬화 실패: {e}")))?;
+        sqlx::query(
+            "INSERT INTO scheduled_posts (id, device_id, at, payload, created_at)
+             VALUES ($1,$2,$3,$4,$5)
+             ON CONFLICT (id) DO UPDATE SET
+               device_id = EXCLUDED.device_id,
+               at = EXCLUDED.at,
+               payload = EXCLUDED.payload",
+        )
+        .bind(&post.id)
+        .bind(post.device_id)
+        .bind(post.at)
+        .bind(payload)
+        .bind(Utc::now())
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+    async fn list_scheduled_posts(&self) -> AppResult<Vec<ScheduledPost>> {
+        let rows = sqlx::query("SELECT payload FROM scheduled_posts ORDER BY at ASC")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_err)?;
+        rows.into_iter()
+            .map(|r| {
+                serde_json::from_value(r.get("payload"))
+                    .map_err(|e| AppError::Internal(format!("예약 역직렬화 실패: {e}")))
+            })
+            .collect()
+    }
+    async fn delete_scheduled_post(&self, id: &str) -> AppResult<bool> {
+        let r = sqlx::query("DELETE FROM scheduled_posts WHERE id=$1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    async fn upsert_stop_report(
+        &self,
+        device_id: Uuid,
+        report: DeviceStopReport,
+    ) -> AppResult<()> {
+        // 하위당 누적본을 통째로 JSONB로 UPSERT.
+        let payload = serde_json::to_value(&report)
+            .map_err(|e| AppError::Internal(format!("중지 리포트 직렬화 실패: {e}")))?;
+        sqlx::query(
+            "INSERT INTO stop_reports (device_id, payload, received_at)
+             VALUES ($1,$2,$3)
+             ON CONFLICT (device_id) DO UPDATE SET
+               payload = EXCLUDED.payload,
+               received_at = EXCLUDED.received_at",
+        )
+        .bind(device_id)
+        .bind(payload)
+        .bind(Utc::now())
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+    async fn list_stop_reports(&self) -> AppResult<Vec<(Uuid, DeviceStopReport)>> {
+        let rows = sqlx::query("SELECT device_id, payload FROM stop_reports")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_err)?;
+        rows.into_iter()
+            .map(|r| {
+                let report: DeviceStopReport = serde_json::from_value(r.get("payload"))
+                    .map_err(|e| AppError::Internal(format!("중지 리포트 역직렬화 실패: {e}")))?;
+                Ok((r.get("device_id"), report))
+            })
+            .collect()
+    }
+
+    async fn upsert_daily_result(
+        &self,
+        device_id: Uuid,
+        date: &str,
+        dto: DailyResultDto,
+    ) -> AppResult<()> {
+        // (device_id, date) 하루치 집계를 JSONB로 UPSERT.
+        let payload = serde_json::to_value(&dto)
+            .map_err(|e| AppError::Internal(format!("날짜 집계 직렬화 실패: {e}")))?;
+        sqlx::query(
+            "INSERT INTO daily_results (device_id, date, payload)
+             VALUES ($1,$2,$3)
+             ON CONFLICT (device_id, date) DO UPDATE SET
+               payload = EXCLUDED.payload",
+        )
+        .bind(device_id)
+        .bind(date)
+        .bind(payload)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+    async fn list_daily_results(&self) -> AppResult<Vec<(Uuid, DailyResultDto)>> {
+        let rows = sqlx::query("SELECT device_id, payload FROM daily_results")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_err)?;
+        rows.into_iter()
+            .map(|r| {
+                let dto: DailyResultDto = serde_json::from_value(r.get("payload"))
+                    .map_err(|e| AppError::Internal(format!("날짜 집계 역직렬화 실패: {e}")))?;
+                Ok((r.get("device_id"), dto))
             })
             .collect()
     }

@@ -73,3 +73,33 @@ CREATE TABLE IF NOT EXISTS login_reports (
   registered         INT NOT NULL DEFAULT 0,
   registered_visible INT NOT NULL DEFAULT 0
 );
+
+-- 예약 게시 영속화(07-게시명령 4단계). 서버가 보관하는 예약을 재시작 후에도 유지한다.
+-- ScheduledPost(글·대상·계정×종목 전체 명세 + 발송 시각) 전체를 payload JSONB로 통째 보관하고,
+-- at(발송 epoch ms)으로 스케줄러 정렬/조회. 발송 완료·취소 시 id로 삭제(멱등 UPSERT).
+CREATE TABLE IF NOT EXISTS scheduled_posts (
+  id         TEXT PRIMARY KEY,                          -- "sch-{uuid}"
+  device_id  UUID NOT NULL,
+  at         BIGINT NOT NULL,                           -- 발송 시각 epoch ms
+  payload    JSONB NOT NULL,                            -- ScheduledPost 전체
+  created_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS scheduled_posts_at_idx ON scheduled_posts (at);
+
+-- 중지 리포트 영속화(08 §10-3). 하위(device_id)당 누적 중지 요약 1건을 통째로 UPSERT.
+-- DeviceStopReport(stopped 배열 + received_at) 전체를 payload JSONB로 보관.
+CREATE TABLE IF NOT EXISTS stop_reports (
+  device_id   UUID PRIMARY KEY,
+  payload     JSONB NOT NULL,                           -- DeviceStopReport 전체(누적 stopped)
+  received_at TIMESTAMPTZ NOT NULL
+);
+
+-- 날짜별 결과 집계 영속화(날짜 분류). (device_id, date)당 하루치 집계 1건.
+-- DailyResultDto(그 날 KST의 로그인 4분류 + 중지) 전체를 payload JSONB로 보관.
+CREATE TABLE IF NOT EXISTS daily_results (
+  device_id  UUID NOT NULL,
+  date       TEXT NOT NULL,                             -- "YYYY-MM-DD" (KST)
+  payload    JSONB NOT NULL,                            -- DailyResultDto 전체
+  PRIMARY KEY (device_id, date)
+);
+CREATE INDEX IF NOT EXISTS daily_results_date_idx ON daily_results (date);

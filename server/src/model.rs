@@ -158,7 +158,8 @@ pub struct StopReportDto {
 
 /// 하루치 결과 집계(날짜별 분류) — 그 날(KST)의 로그인 4분류 + 중지를 합산 보관. 결과보고에서
 /// 하위별로 날짜를 골라 그 날의 성공/보류/대기초과/실패/중지만 보게 한다(절대 날짜 섞임 없음).
-#[derive(Debug, Clone, Default, Serialize)]
+/// Deserialize는 DB(JSONB) 영속화 복원용(재시작 rehydrate). 응답 형식(Serialize)은 불변.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DailyResultDto {
     pub date: String, // YYYY-MM-DD (KST)
