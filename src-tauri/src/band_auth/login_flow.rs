@@ -82,6 +82,27 @@ const SIGNUP_BUTTON_JS: &str = "(()=>{\
         const t=String(el.innerText||el.textContent||el.value||'').replace(/\\s+/g,' ');\
         return el.offsetParent!==null&&t.includes('네이버로 가입');});})()";
 
+// OAuth 동의 화면이 DOM 으로 떠 있는지(URL 판정 폴백·주력). 실제 동의 화면 URL 은
+// `nid.naver.com/oauth2.0/authorize`(band redirect_uri 동봉)라 `allow_oauth`(동의 제출 시 POST 되는
+// 순간 URL)만으로는 못 잡는다 — 패킷/로그로 확인(2026-07-13). 그래서 화면 고유 구조로 감지한다:
+// 본문에 "개인정보"+"제3자/제 3자"(밴드 OAuth [필수] 제3자 제공 동의) 가 있고, 화면에 보이는
+// "동의하기" 버튼이 있을 때. 전이 리다이렉트(authorize) 순간엔 이 DOM 이 없어 오탐이 없다.
+const CONSENT_DOM_JS: &str = "(()=>{\
+    const body=String(document.body?document.body.innerText:'').replace(/\\s+/g,'');\
+    if(body.indexOf('개인정보')<0||(body.indexOf('제3자')<0&&body.indexOf('제3자제공')<0))return false;\
+    const els=Array.prototype.slice.call(\
+        document.querySelectorAll('a, button, input[type=submit], input[type=button]'));\
+    return els.some(el=>{\
+        const t=String(el.innerText||el.textContent||el.value||'').replace(/\\s+/g,'');\
+        return el.offsetParent!==null&&(t==='동의하기'||t==='동의'||t==='허용하기'||t==='허용');});})()";
+
+// 밴드 2단계 인증/추가 검증 게이트 화면인지 본문 텍스트로 판정한다(순수 함수). band_session 쿠키가
+// 이 화면(`auth.band.us/b/validation_welcome`)에서 이미 발급되지만, 이는 인증 미완료 반쪽 세션이라
+// 게시가 거부된다("session expired"/"not authorized") — 성공으로 보면 안 된다(2026-07-13 로그 확인).
+pub(crate) fn is_two_factor_text(text: &str) -> bool {
+    text.contains("2단계 인증") || text.contains("2차 인증") || text.contains("2단계 인증이 필요")
+}
+
 /// 로그인 결과.
 pub(crate) enum BandLoginOutcome {
     Ok { cookies: Vec<Value> },
@@ -465,12 +486,18 @@ fn read_signals(
     submitted_for_form: bool,
 ) -> Result<BandPageSignals, AutomationError> {
     let cookies = collect_band_cookies(client)?;
-    let logged_in = has_band_session_cookies(&cookies);
+    // band_session 쿠키 존재는 "성공"의 필요조건일 뿐 충분조건이 아니다 — 2단계 인증 게이트
+    // (validation_welcome)에서도 이미 발급된다. 아래에서 인증 게이트가 아닐 때만 성공으로 확정한다.
+    let has_session = has_band_session_cookies(&cookies);
     let url = client.current_url().unwrap_or_default();
+    let body_text = client.evaluate_string(BODY_TEXT_JS).unwrap_or_default();
 
     let captcha = visible_exists(client, "#captchaDiv, #captcha, img#captchaimg");
     let phone_verify = visible_exists(client, "#phone_value");
-    let otp = visible_exists(client, "#otp, input[name=otp], #cellphoneCertify");
+    // 밴드 2단계 인증 게이트(validation_welcome)는 OTP 계열 종료 실패로 접는다 — 사람이 즉석에서
+    // 풀 수 없고, 이 화면의 반쪽 band_session 으로는 게시가 거부된다("session expired 4 hours").
+    let two_factor = url.contains("validation_welcome") || is_two_factor_text(&body_text);
+    let otp = two_factor || visible_exists(client, "#otp, input[name=otp], #cellphoneCertify");
 
     // 네이버 로그인 폼(#id/#pw)이 보이고 입력 가능한지.
     let form_visible = client
@@ -481,7 +508,7 @@ fn read_signals(
         .unwrap_or(false);
     // 비번 오류: #err_common 이 보이고 텍스트를 가짐. 캡차가 떠 있거나 이미 로그인됐으면 오류로
     // 보지 않는다(네이버 미러).
-    let bad_credentials = !logged_in
+    let bad_credentials = !has_session
         && !captcha
         && client
             .evaluate_bool(
@@ -491,19 +518,24 @@ fn read_signals(
             .unwrap_or(false);
     // 폼이 보이고, 아직 이번 폼에 제출하지 않았고, 캡차/오류 표시가 없을 때만 "입력해야 하는" 폼으로
     // 본다 — 오류가 뜬 폼(비번오류)이나 캡차가 뜬 폼에 재입력하지 않는다.
-    let naver_form = form_visible && !submitted_for_form && !captcha && !bad_credentials && !logged_in;
+    let naver_form = form_visible && !submitted_for_form && !captcha && !bad_credentials && !has_session;
 
-    let consent = is_oauth_consent_url(&url);
+    // 동의 화면 감지: URL(allow_oauth/agree_term) 또는 화면 DOM(동의하기 버튼 + 개인정보 제3자 제공).
+    // 실제 동의 화면 URL 은 oauth2.0/authorize 라 URL 만으론 못 잡아 DOM 감지가 주력이다(2026-07-13).
+    let consent = is_oauth_consent_url(&url) || client.evaluate_bool(CONSENT_DOM_JS).unwrap_or(false);
     let signup_needed =
         is_signup_needed_url(&url) || client.evaluate_bool(SIGNUP_BUTTON_JS).unwrap_or(false);
     let device = url.contains("deviceConfirm") || url.contains("deviceCheck");
 
-    let body_text = client.evaluate_string(BODY_TEXT_JS).unwrap_or_default();
     let on_naver = url.contains("nid.naver.com");
     let long_dormant = is_inactive_user_url(&url) || is_long_dormant_text(&body_text);
     let protected = url.contains("idSafetyRelease");
     let locked = on_naver && is_locked_text(&body_text);
     let blocked = is_recaptcha_challenge_url(&url) || url.contains("account_status");
+
+    // 성공 확정: band_session 이 있고, 인증 게이트(2단계 인증/장기 미로그인)에 걸려 있지 않을 때만.
+    // 반쪽 세션(validation_welcome 등)을 성공으로 오판해 게시 실패("session expired")하던 것을 막는다.
+    let logged_in = has_session && !otp && !long_dormant;
 
     Ok(BandPageSignals {
         logged_in,
@@ -765,9 +797,11 @@ fn click_oauth_consent(client: &mut CdpClient) -> Result<bool, AutomationError> 
         if(!vis(el)){el=null;\
             const cs=Array.prototype.slice.call(\
                 document.querySelectorAll('button, a, input[type=submit], input[type=button]'));\
-            for(const c of cs){\
-                const t=String(c.innerText||c.textContent||c.value||'').replace(/\\s+/g,' ').trim();\
-                if(vis(c)&&(t.includes('동의')||t.includes('허용')||t.includes('계속')||t.includes('확인'))){el=c;break;}}}\
+            const norm=c=>String(c.innerText||c.textContent||c.value||'').replace(/\\s+/g,'');\
+            for(const c of cs){const t=norm(c);\
+                if(vis(c)&&!t.includes('전체')&&(t==='동의하기'||t==='동의'||t==='허용하기'||t==='허용'||t==='확인'||t==='계속')){el=c;break;}}\
+            if(!vis(el)){for(const c of cs){const t=norm(c);\
+                if(vis(c)&&!t.includes('전체')&&(t.indexOf('동의')>=0||t.indexOf('허용')>=0||t.indexOf('계속')>=0||t.indexOf('확인')>=0)){el=c;break;}}}}\
         if(!vis(el))return null;\
         const r=el.getBoundingClientRect();return [r.left+r.width/2, r.top+r.height/2];})()";
     if let Some((x, y)) = parse_xy(&client.evaluate(CENTER_JS)?) {
@@ -784,9 +818,11 @@ fn click_oauth_consent(client: &mut CdpClient) -> Result<bool, AutomationError> 
              if(!vis(el)){el=null;\
                  const cs=Array.prototype.slice.call(\
                      document.querySelectorAll('button, a, input[type=submit], input[type=button]'));\
-                 for(const c of cs){\
-                     const t=String(c.innerText||c.textContent||c.value||'').replace(/\\s+/g,' ').trim();\
-                     if(vis(c)&&(t.includes('동의')||t.includes('허용')||t.includes('계속')||t.includes('확인'))){el=c;break;}}}\
+                 const norm=c=>String(c.innerText||c.textContent||c.value||'').replace(/\\s+/g,'');\
+                 for(const c of cs){const t=norm(c);\
+                     if(vis(c)&&!t.includes('전체')&&(t==='동의하기'||t==='동의'||t==='허용하기'||t==='허용'||t==='확인'||t==='계속')){el=c;break;}}\
+                 if(!vis(el)){for(const c of cs){const t=norm(c);\
+                     if(vis(c)&&!t.includes('전체')&&(t.indexOf('동의')>=0||t.indexOf('허용')>=0||t.indexOf('계속')>=0||t.indexOf('확인')>=0)){el=c;break;}}}}\
              if(vis(el)){el.click();return true;}return false;})()",
         )
         .unwrap_or(false))
@@ -1293,6 +1329,17 @@ mod tests {
             "https://auth.band.us/b/inactive_user?redirect_url=https%3A%2F%2Fwww.band.us"
         ));
         assert!(!is_inactive_user_url("https://auth.band.us/b/validation_welcome"));
+    }
+
+    #[test]
+    fn detects_two_factor_gate_text() {
+        // 밴드 2단계 인증 게이트 문구(로그 id=175 원문) — 성공 아님(반쪽 세션 게시 거부).
+        assert!(is_two_factor_text(
+            "BAND 로그인을 위한 2단계 인증이 필요합니다. 인증을 요청해주세요."
+        ));
+        assert!(is_two_factor_text("추가 2차 인증 절차입니다"));
+        assert!(!is_two_factor_text("정상적으로 로그인되었습니다"));
+        assert!(!is_two_factor_text(""));
     }
 
     #[test]
