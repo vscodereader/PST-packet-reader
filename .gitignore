@@ -70,3 +70,8 @@ docs/원격제어_설계_대화기록.md
 /fix_and_request/
 /docs/*.txt
 /docs/*.md
+
+# 로컬 보관 폴더 — 설계요구 문서·앱 실행로그(대용량)·로고 이미지 (GitHub 미추적, 로컬만)
+/Design_Doc/
+/error_log/
+/logo/
