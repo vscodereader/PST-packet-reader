@@ -40,6 +40,12 @@ const STEALTH_INIT_JS: &str = "(()=>{try{\
 const NAVER_ID_SELECTOR: &str = "#id";
 const NAVER_PW_SELECTOR: &str = "#pw";
 
+// 가입 마지막 단계에서 밴드가 요구하는 생년월일 기본값(형님 지시: 고정 기본값 자동입력). 계정 정보에
+// 생년월일이 없으므로 성인·연령제한 회피를 위해 이 값을 넣는다. YYYY/MM/DD 조각으로도 쓴다.
+const DEFAULT_SIGNUP_BIRTH_YEAR: &str = "1990";
+const DEFAULT_SIGNUP_BIRTH_MONTH: &str = "01";
+const DEFAULT_SIGNUP_BIRTH_DAY: &str = "01";
+
 // 폼 준비/결과 DOM 이 흔들리지 않고 자리잡았다고 볼 연속 확인 횟수(네이버 미러). 상위 문서가
 // complete 된 뒤에도 캡차/안티봇 iframe·스크립트가 뒤늦게 로드되며 DOM 이 잠깐 출렁이므로,
 // 그 과도기에 타이핑/클릭하지 않도록 연속 N회 안정될 때만 진행한다.
@@ -80,7 +86,7 @@ const SIGNUP_BUTTON_JS: &str = "(()=>{\
         document.querySelectorAll('a, button, input[type=submit], input[type=button]'));\
     return els.some(el=>{\
         const t=String(el.innerText||el.textContent||el.value||'').replace(/\\s+/g,' ');\
-        return el.offsetParent!==null&&t.includes('네이버로 가입');});})()";
+        return el.offsetParent!==null&&(t.includes('네이버로')&&t.includes('가입'));});})()";
 
 // OAuth 동의 화면이 DOM 으로 떠 있는지(URL 판정 폴백·주력). 실제 동의 화면 URL 은
 // `nid.naver.com/oauth2.0/authorize`(band redirect_uri 동봉)라 `allow_oauth`(동의 제출 시 POST 되는
@@ -125,8 +131,10 @@ pub(crate) struct BandPageSignals {
     pub naver_form: bool,
     /// OAuth 동의 페이지(`allow_oauth`/`agree_term`).
     pub consent: bool,
-    /// 미가입 계정 화면(`/login?...&_ns=false` 또는 "네이버로 가입하기" 버튼).
+    /// 미가입 계정 화면(`/login?...&_ns=false` 또는 "네이버로 밴드 가입" 버튼).
     pub signup_needed: bool,
+    /// 가입 마지막 단계(`external_account_sign_up`): 생년월일 입력 + 전체동의 화면.
+    pub signup_final: bool,
     /// 새 기기 등록/확인 페이지(`deviceConfirm`/`deviceCheck`) — 실패 아님, "등록 안함" 후 진행.
     pub device: bool,
     /// 네이버 캡차(보안문자) 표시.
@@ -155,6 +163,7 @@ pub(crate) enum BandSignal {
     NaverForm,
     Consent,
     SignupNeeded,
+    SignupFinal,
     Device,
     Captcha,
     PhoneVerify,
@@ -173,6 +182,7 @@ enum LoopAction {
     TypeLogin,
     ClickConsent,
     ClickSignup,
+    HandleSignupFinal,
     HandleDevice,
     HandlePhoneVerify,
     ConfirmedBad,
@@ -193,6 +203,8 @@ pub(crate) fn classify(s: &BandPageSignals) -> BandSignal {
         BandSignal::Consent
     } else if s.signup_needed {
         BandSignal::SignupNeeded
+    } else if s.signup_final {
+        BandSignal::SignupFinal
     } else if s.device {
         BandSignal::Device
     } else if s.captcha {
@@ -234,6 +246,7 @@ fn decide_loop_step(
         BandSignal::NaverForm => LoopAction::TypeLogin,
         BandSignal::Consent => LoopAction::ClickConsent,
         BandSignal::SignupNeeded => LoopAction::ClickSignup,
+        BandSignal::SignupFinal => LoopAction::HandleSignupFinal,
         BandSignal::Device => LoopAction::HandleDevice,
         BandSignal::PhoneVerify => LoopAction::HandlePhoneVerify,
         // 사람이 즉석에서 풀 수 없는 종료 상태 — headed 여도 즉시 실패(Blocked 매핑).
@@ -287,9 +300,21 @@ pub(crate) fn is_logged_in_band_url(url: &str) -> bool {
 }
 
 /// 현재 URL이 미가입 계정 화면(`_ns=false`)인지(순수 함수). band 가 미가입 네이버 계정을
-/// `auth.band.us/login?...&_ns=false` 로 떨궈 "네이버로 가입하기"를 눌러야 한다.
+/// `auth.band.us/login?...&_ns=false` 로 떨궈 "네이버로 밴드 가입"을 눌러야 한다.
 pub(crate) fn is_signup_needed_url(url: &str) -> bool {
     url.contains("_ns=false")
+}
+
+/// 현재 URL이 가입 마지막 단계(`external_account_sign_up`)인지(순수 함수). 미가입 계정이
+/// "네이버로 밴드 가입"을 눌러 네이버 재인증까지 마치면 이 화면에서 생년월일 + 약관동의를 받는다.
+pub(crate) fn is_signup_final_url(url: &str) -> bool {
+    url.contains("external_account_sign_up")
+}
+
+/// 본문 텍스트가 가입 마지막 단계 화면인지(순수 함수, URL 판정 폴백). "가입 마지막 단계"와
+/// "생년월일"이 함께 있으면 가입 완료 폼으로 본다(패킷 원문 문구, 2026-07-13).
+pub(crate) fn is_signup_final_text(text: &str) -> bool {
+    text.contains("가입 마지막 단계") && text.contains("생년월일")
 }
 
 /// 현재 URL이 band 측 reCAPTCHA/검증 페이지인지(순수 함수).
@@ -447,10 +472,17 @@ fn run_inner(
                 last_negative = None;
             }
             LoopAction::ClickSignup => {
-                // "네이버로 가입하기"를 눌러 redirect_external_account_sign_up 으로 이동시킨다. 그러면
+                // "네이버로 밴드 가입"을 눌러 external_account_sign_up 으로 이동시킨다. 그러면
                 // 네이버 로그인 폼이 다시 뜨므로 재입력을 허용하도록 제출 플래그를 되돌린다.
                 let _ = click_signup_button(client);
                 submitted_for_form = false;
+                last_negative = None;
+            }
+            LoopAction::HandleSignupFinal => {
+                // 가입 마지막 단계(생년월일 + 전체동의). 생년월일은 계정 정보에 없으므로 고정
+                // 기본값(DEFAULT_SIGNUP_BIRTHDATE)을 넣고 전체동의 후 완료 버튼을 누른다(형님 지시:
+                // 고정 기본값 자동입력). DOM 구조를 원문 로그로 남겨 셀렉터가 틀리면 드러나게 한다.
+                let _ = handle_signup_final(client);
                 last_negative = None;
             }
             LoopAction::HandleDevice => {
@@ -535,6 +567,8 @@ fn read_signals(
     let consent = is_oauth_consent_url(&url) || client.evaluate_bool(CONSENT_DOM_JS).unwrap_or(false);
     let signup_needed =
         is_signup_needed_url(&url) || client.evaluate_bool(SIGNUP_BUTTON_JS).unwrap_or(false);
+    // 가입 마지막 단계: URL(external_account_sign_up) 또는 본문("가입 마지막 단계"+"생년월일").
+    let signup_final = is_signup_final_url(&url) || is_signup_final_text(&body_text);
     let device = url.contains("deviceConfirm") || url.contains("deviceCheck");
 
     let on_naver = url.contains("nid.naver.com");
@@ -554,6 +588,7 @@ fn read_signals(
         naver_form,
         consent,
         signup_needed,
+        signup_final,
         device,
         captcha,
         phone_verify,
@@ -750,7 +785,7 @@ fn click_signup_button(client: &mut CdpClient) -> Result<bool, AutomationError> 
             document.querySelectorAll('a, button, input[type=submit], input[type=button]'));\
         for(const el of els){\
             const t=String(el.innerText||el.textContent||el.value||'').replace(/\\s+/g,' ');\
-            if(el.offsetParent!==null&&t.includes('네이버로 가입')){\
+            if(el.offsetParent!==null&&(t.includes('네이버로')&&t.includes('가입'))){\
                 const r=el.getBoundingClientRect();\
                 if(r.width>0&&r.height>0)return [r.left+r.width/2, r.top+r.height/2];}}\
         return null;})()";
@@ -765,10 +800,77 @@ fn click_signup_button(client: &mut CdpClient) -> Result<bool, AutomationError> 
                 document.querySelectorAll('a, button, input[type=submit], input[type=button]'));\
              for(const el of els){\
                 const t=String(el.innerText||el.textContent||el.value||'').replace(/\\s+/g,' ');\
-                if(el.offsetParent!==null&&t.includes('네이버로 가입')){el.click();return true;}}\
+                if(el.offsetParent!==null&&(t.includes('네이버로')&&t.includes('가입'))){el.click();return true;}}\
              return false;})()",
         )
         .unwrap_or(false))
+}
+
+// 가입 마지막 단계(external_account_sign_up)를 처리한다: (1) 생년월일을 고정 기본값으로 채우고
+// (text/number 입력·연월일 select 양쪽 best-effort) (2) 전체동의 체크 (3) 완료/가입 버튼을 좌표
+// 클릭한다. 정확한 셀렉터를 패킷에서 못 구했으므로 DOM 구조(입력·select·버튼)를 원문 진단으로 남겨
+// 안 맞으면 실제 셀렉터가 로그에 드러나게 한다(형님 "로그에 원문" 원칙).
+fn handle_signup_final(client: &mut CdpClient) -> Result<bool, AutomationError> {
+    let fill_js = format!(
+        "(()=>{{\
+        const Y='{y}',M='{m}',D='{d}',YMD='{y}{m}{d}';\
+        const setVal=(el,v)=>{{try{{\
+            const proto=el.tagName==='SELECT'?window.HTMLSelectElement.prototype:window.HTMLInputElement.prototype;\
+            const desc=Object.getOwnPropertyDescriptor(proto,'value');\
+            if(desc&&desc.set)desc.set.call(el,v);else el.value=v;\
+            el.dispatchEvent(new Event('input',{{bubbles:true}}));\
+            el.dispatchEvent(new Event('change',{{bubbles:true}}));}}catch(e){{}}}};\
+        const num=s=>parseInt(String(s).replace(/[^0-9]/g,''),10);\
+        const selects=Array.prototype.slice.call(document.querySelectorAll('select'));\
+        const pick=(sel,vals)=>{{for(const o of sel.options){{const ov=String(o.value),ot=String(o.textContent||'');\
+            if(vals.some(v=>ov===v||num(ov)===num(v)||ot.replace(/[^0-9]/g,'')===String(num(v))))\
+                {{setVal(sel,o.value);return true;}}}}return false;}};\
+        if(selects.length>=3){{pick(selects[0],[Y,'1990']);pick(selects[1],[M,'1']);pick(selects[2],[D,'1']);}}\
+        const inputs=Array.prototype.slice.call(document.querySelectorAll('input'))\
+            .filter(i=>['text','number','tel',''].indexOf(String(i.type||'').toLowerCase())>=0\
+                       &&i.offsetParent!==null&&i.type!=='checkbox'&&i.type!=='radio');\
+        if(inputs.length===1)setVal(inputs[0],YMD);\
+        else if(inputs.length>=3){{setVal(inputs[0],Y);setVal(inputs[1],M);setVal(inputs[2],D);}}\
+        else for(const i of inputs){{const h=(i.placeholder||'')+(i.name||'')+(i.id||'');\
+            if(/(birth|생년|년|month|month|day|일|월)/i.test(h))setVal(i,YMD);}}\
+        const cbs=Array.prototype.slice.call(document.querySelectorAll('input[type=checkbox]'));\
+        const all=Array.prototype.slice.call(document.querySelectorAll('label,button,a,span,div'))\
+            .find(e=>{{const t=String(e.textContent||'').replace(/\\s+/g,'');\
+                return t.indexOf('전체동의')>=0||t.indexOf('모두동의')>=0;}});\
+        if(all)all.click();\
+        for(const cb of cbs){{if(!cb.checked)cb.click();\
+            if(!cb.checked&&cb.closest('label'))cb.closest('label').click();}}\
+        const inputDiag=inputs.map(i=>(i.type||'text')+':'+(i.id||i.name||i.placeholder||'?')+'='+String(i.value).slice(0,10));\
+        const selDiag=selects.map(s=>(s.id||s.name||'?')+'='+s.value);\
+        const cbDiag=cbs.map(cb=>(cb.id||cb.name||'?')+':'+cb.checked);\
+        const btns=Array.prototype.slice.call(document.querySelectorAll('button,a,input[type=submit],input[type=button]'))\
+            .map(b=>String(b.innerText||b.textContent||b.value||'').replace(/\\s+/g,' ').trim())\
+            .filter(t=>t.length>0&&t.length<24);\
+        return JSON.stringify({{url:location.href,inputs:inputDiag,selects:selDiag,cbs:cbDiag,buttons:btns.slice(0,15)}});}})()",
+        y = DEFAULT_SIGNUP_BIRTH_YEAR, m = DEFAULT_SIGNUP_BIRTH_MONTH, d = DEFAULT_SIGNUP_BIRTH_DAY
+    );
+    let diag = client.evaluate_string(&fill_js).unwrap_or_default();
+    tracing::info!("[BAND] 가입 마지막 단계 처리(생년월일 {DEFAULT_SIGNUP_BIRTH_YEAR}-{DEFAULT_SIGNUP_BIRTH_MONTH}-{DEFAULT_SIGNUP_BIRTH_DAY} + 전체동의, 원문 구조) — {diag}");
+
+    // 완료/가입/확인/다음 버튼을 좌표 클릭(전체동의 라벨 제외, 정확매칭 우선).
+    const SUBMIT_JS: &str = "(()=>{\
+        const vis=el=>{if(!el)return false;const r=el.getBoundingClientRect();\
+            return r.width>0&&r.height>0&&el.offsetParent!==null&&!el.disabled;};\
+        const cs=Array.prototype.slice.call(\
+            document.querySelectorAll('button, a, input[type=submit], input[type=button]'));\
+        const norm=c=>String(c.innerText||c.textContent||c.value||'').replace(/\\s+/g,'');\
+        let el=null;\
+        for(const c of cs){const t=norm(c);\
+            if(vis(c)&&!t.includes('전체')&&(t==='완료'||t==='가입'||t==='가입하기'||t==='확인'||t==='다음'||t==='동의하고가입'||t==='시작하기')){el=c;break;}}\
+        if(!vis(el)){for(const c of cs){const t=norm(c);\
+            if(vis(c)&&!t.includes('전체')&&(t.indexOf('완료')>=0||t.indexOf('가입')>=0||t.indexOf('확인')>=0||t.indexOf('다음')>=0||t.indexOf('시작')>=0)){el=c;break;}}}\
+        if(!vis(el))return null;\
+        const r=el.getBoundingClientRect();return [r.left+r.width/2, r.top+r.height/2];})()";
+    if let Some((x, y)) = parse_xy(&client.evaluate(SUBMIT_JS)?) {
+        mouse_click(client, x, y)?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 // OAuth 동의 페이지에서 (1) 전체동의(agree-all) 체크박스를 먼저 체크하고 (2) 동의/확인 버튼을 좌표
@@ -1169,6 +1271,29 @@ mod tests {
             BandSignal::Blocked
         );
         assert_eq!(classify(&BandPageSignals::default()), BandSignal::Pending);
+    }
+
+    #[test]
+    fn detects_signup_final_step() {
+        assert!(is_signup_final_url("https://auth.band.us/external_account_sign_up"));
+        assert!(is_signup_final_url("https://auth.band.us/continue_external_account_sign_up"));
+        assert!(!is_signup_final_url("https://auth.band.us/login?_ns=false"));
+        assert!(is_signup_final_text(
+            "BAND 가입 마지막 단계입니다. 생년월일 전체동의 (선택 항목 포함) 이용약관 동의 (필수)"
+        ));
+        assert!(!is_signup_final_text("BAND 로그인 이메일로 로그인 휴대폰 번호로 로그인"));
+        // classify: 가입 마지막 단계는 고유 액션 신호로 잡힌다.
+        assert_eq!(
+            classify(&BandPageSignals {
+                signup_final: true,
+                ..Default::default()
+            }),
+            BandSignal::SignupFinal
+        );
+        assert_eq!(
+            decide_loop_step(None, BandSignal::SignupFinal, false),
+            LoopAction::HandleSignupFinal
+        );
     }
 
     #[test]
