@@ -92,6 +92,9 @@ async fn main() {
         scheduled: Arc::new(std::sync::Mutex::new(Vec::new())),
         nickname_remaining: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
+    // 부팅 rehydrate: 영속화된 예약·중지 리포트·날짜 집계를 repo→메모리로 복원(재시작 후에도 유지).
+    rehydrate(&state).await;
+
     // 예약 게시 스케줄러(07-게시명령 4단계) — 1초마다 도래한 예약을 하위로 발송한다.
     tokio::spawn(scheduled::scheduler_loop(state.clone()));
     let app = routes::build_router(state);
@@ -101,6 +104,47 @@ async fn main() {
         .unwrap_or_else(|e| panic!("바인드 실패 {bind}: {e}"));
     tracing::info!("pstmacro-server listening on {bind}");
     axum::serve(listener, app).await.expect("서버 종료");
+}
+
+/// 부팅 시 영속 저장소(repo)에서 예약·중지 리포트·날짜 집계를 읽어 in-memory 구조를 복원한다.
+/// write-through로 저장된 상태를 재시작 후에도 살려낸다(개발 in-memory 모드에선 빈 상태로 무해).
+async fn rehydrate(st: &AppState) {
+    match st.repo.list_scheduled_posts().await {
+        Ok(items) => {
+            let n = items.len();
+            *st.scheduled.lock().unwrap() = items;
+            if n > 0 {
+                tracing::info!("예약 게시 {n}건 복원(rehydrate)");
+            }
+        }
+        Err(e) => tracing::error!("예약 게시 복원 실패: {e}"),
+    }
+    match st.repo.list_stop_reports().await {
+        Ok(rows) => {
+            let n = rows.len();
+            let mut g = st.stop_reports.lock().unwrap();
+            for (id, report) in rows {
+                g.insert(id, report);
+            }
+            if n > 0 {
+                tracing::info!("중지 리포트 {n}건 복원(rehydrate)");
+            }
+        }
+        Err(e) => tracing::error!("중지 리포트 복원 실패: {e}"),
+    }
+    match st.repo.list_daily_results().await {
+        Ok(rows) => {
+            let n = rows.len();
+            let mut g = st.daily.lock().unwrap();
+            for (id, dto) in rows {
+                g.entry(id).or_default().insert(dto.date.clone(), dto);
+            }
+            if n > 0 {
+                tracing::info!("날짜별 집계 {n}건 복원(rehydrate)");
+            }
+        }
+        Err(e) => tracing::error!("날짜별 집계 복원 실패: {e}"),
+    }
 }
 
 /// SuperAdmin 부트스트랩(§5): 없으면 기본 `Superadmin`/`Superadmin` 시드 + 강제 비번변경 플래그.
