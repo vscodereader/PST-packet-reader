@@ -858,13 +858,14 @@ fn dispatch<R: Runtime>(
     match cmd.kind.as_str() {
         "distribute_accounts" => {
             let (added, visible) = add_accounts(app, &cmd.accounts);
-            // 카페(naver)는 분배 시 로그인하지 않고 등록만 한다(카페는 게시 순간 id/pw로 로그인).
-            // 그 외(종토·블로그·클립·밴드)만 분배 직후 자동 로그인 큐에 태운다. 로그인 엔진은 계정
-            // 플랫폼별로 다르다 — 밴드=band.us(Band), 그 외=네이버(Naver). login_platform_for로 정한다.
+            // 카페(naver)·밴드는 분배 시 로그인하지 않고 등록만 한다 — 둘 다 게시 순간 로그인
+            // (카페=게시 순간 id/pw, 밴드=게시 순간 band.us 로그인). 그 외(종토·블로그·클립)만
+            // 분배 직후 자동 로그인 큐에 태운다. 로그인 엔진은 계정 플랫폼별로 다르다 —
+            // 밴드=band.us(Band), 그 외=네이버(Naver). login_platform_from_str로 정한다.
             let logins: Vec<(String, PlatformId)> = cmd
                 .accounts
                 .iter()
-                .filter(|a| !is_cafe_platform(&a.platform))
+                .filter(|a| !is_cafe_platform(&a.platform) && a.platform != "band")
                 .map(|a| (a.login_id.clone(), login_platform_from_str(&a.platform)))
                 .collect();
             let cafe_only = cmd.accounts.len().saturating_sub(logins.len());
