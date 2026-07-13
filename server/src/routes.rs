@@ -632,7 +632,10 @@ async fn create_scheduled(
         "cmd",
     )
     .await;
+    // 메모리에 반영 후 repo에 write-through(재시작 후에도 예약 유지).
+    let stored = item.clone();
     st.scheduled.lock().unwrap().push(item);
+    st.repo.add_scheduled_post(stored).await?;
     Ok(Json(serde_json::json!({ "ok": true, "id": id })))
 }
 
@@ -688,6 +691,8 @@ async fn delete_scheduled(
                 "warn",
             )
             .await;
+            // repo에서도 제거(재시작 후 유령 예약 방지).
+            st.repo.delete_scheduled_post(&id).await?;
             Ok(Json(serde_json::json!({ "ok": true })))
         }
         None => Err(AppError::NotFound("없는 예약".into())),
@@ -1336,7 +1341,9 @@ async fn login_report(
     );
     let level = if b.failed.is_empty() { "ok" } else { "fail" };
     // 날짜별 분류(KST): 이 배치 4분류를 그 날 버킷에 합산한다(결과보고 날짜 선택용).
-    st.add_login_daily(device.id, &kst_date(), b);
+    let date = kst_date();
+    let daily = st.add_login_daily(device.id, &date, b);
+    st.repo.upsert_daily_result(device.id, &date, daily).await?; // write-through
     let report = LoginReport {
         device_id: device.id,
         device_name: device.name.clone(),
@@ -1577,8 +1584,11 @@ async fn agent_stop_report(
         .collect::<Vec<_>>()
         .join(", ");
     // 날짜별 분류(KST): 중지 요약을 그 날 버킷에도 합산한다(결과보고 날짜 선택용).
-    st.add_stop_daily(device.id, &kst_date(), &rpt.stopped);
-    st.set_stop_report(device.id, rpt);
+    let date = kst_date();
+    let daily = st.add_stop_daily(device.id, &date, &rpt.stopped);
+    st.repo.upsert_daily_result(device.id, &date, daily).await?; // write-through
+    let accumulated = st.set_stop_report(device.id, rpt);
+    st.repo.upsert_stop_report(device.id, accumulated).await?; // write-through
     st.audit(
         "[중지]",
         &format!("{} → 서버", device.name),

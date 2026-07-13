@@ -390,6 +390,8 @@ pub async fn scheduler_loop(st: AppState) {
         };
         for item in due {
             let cid = format!("c-{}", Uuid::new_v4());
+            // 도래분은 어느 결과든 목록에서 뺐으므로 repo에서도 정리(재시작 후 재발송 방지).
+            let _ = st.repo.delete_scheduled_post(&item.id).await;
             match st.repo.find_device(item.device_id).await {
                 Ok(Some(device)) if AppState::is_commandable(device.state) => {
                     dispatch_publish(&st, &device, &cid, &item.spec, "예약 스케줄러").await;

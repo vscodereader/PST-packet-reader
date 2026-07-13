@@ -186,7 +186,8 @@ impl AppState {
     }
 
     /// 중지 요약을 디바이스별로 **누적**(개별 kill이 덮어써 사라지지 않게). 상한 200(오래된 것부터).
-    pub fn set_stop_report(&self, id: Uuid, mut rpt: DeviceStopReport) {
+    /// 반환 = 누적 후의 디바이스 중지 요약 전체(호출부가 이걸 그대로 repo에 write-through).
+    pub fn set_stop_report(&self, id: Uuid, mut rpt: DeviceStopReport) -> DeviceStopReport {
         let mut g = self.stop_reports.lock().unwrap();
         let entry = g.entry(id).or_default();
         entry.stopped.append(&mut rpt.stopped);
@@ -195,6 +196,7 @@ impl AppState {
             entry.stopped.drain(0..len - 200);
         }
         entry.received_at = rpt.received_at;
+        entry.clone()
     }
 
     /// 모든 디바이스의 중지 요약 스냅샷((id, report) 목록).
@@ -208,30 +210,36 @@ impl AppState {
     }
 
     /// 로그인 결과 배치를 그 날(KST) 버킷에 합산(날짜 분류). 등록·누적은 무관, 4분류만 누적한다.
-    pub fn add_login_daily(&self, id: Uuid, date: &str, batch: &LoginBatchDto) {
+    /// 반환 = 합산 후 그 날 집계 전체(호출부가 repo에 write-through).
+    pub fn add_login_daily(&self, id: Uuid, date: &str, batch: &LoginBatchDto) -> DailyResultDto {
         let mut g = self.daily.lock().unwrap();
         let device_days = g.entry(id).or_default();
-        {
+        let updated = {
             let day = device_days.entry(date.to_string()).or_default();
             day.date = date.to_string();
             day.success += batch.success;
             day.onhold.extend(batch.onhold.iter().cloned());
             day.timedout.extend(batch.timedout.iter().cloned());
             day.failed.extend(batch.failed.iter().cloned());
-        }
+            day.clone()
+        };
         cap_days(device_days);
+        updated
     }
 
     /// 중지(kill) 요약을 그 날(KST) 버킷에 합산(날짜 분류).
-    pub fn add_stop_daily(&self, id: Uuid, date: &str, lines: &[StopLineDto]) {
+    /// 반환 = 합산 후 그 날 집계 전체(호출부가 repo에 write-through).
+    pub fn add_stop_daily(&self, id: Uuid, date: &str, lines: &[StopLineDto]) -> DailyResultDto {
         let mut g = self.daily.lock().unwrap();
         let device_days = g.entry(id).or_default();
-        {
+        let updated = {
             let day = device_days.entry(date.to_string()).or_default();
             day.date = date.to_string();
             day.stopped.extend(lines.iter().cloned());
-        }
+            day.clone()
+        };
         cap_days(device_days);
+        updated
     }
 
     /// 하위별 날짜별 결과 스냅샷((id, 최신날짜 우선 목록)).
