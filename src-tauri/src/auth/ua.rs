@@ -153,7 +153,15 @@ pub(crate) fn pick_capped(
     };
 
     let Some(cap_major) = installed_full.and_then(major_num) else {
-        return build_profile(&lowest(pool));
+        let chosen = build_profile(&lowest(pool));
+        tracing::info!(
+            candidates = %pool.join(", "),
+            installed = "(미확인)",
+            chosen = %chosen.full_version,
+            "[UA] 후보 {}개(설치 미확인 → 풀 최저값 고정, 상향 주장 회피)",
+            pool.len()
+        );
+        return chosen;
     };
 
     let mut candidates: Vec<String> = pool
@@ -172,7 +180,15 @@ pub(crate) fn pick_capped(
     }
 
     let idx = (entropy % candidates.len() as u64) as usize;
-    build_profile(&candidates[idx])
+    let chosen = build_profile(&candidates[idx]);
+    tracing::info!(
+        candidates = %candidates.join(", "),
+        installed = %installed_full.unwrap_or("(미확인)"),
+        chosen = %chosen.full_version,
+        "[UA] 후보 {}개(설치≤ 필터) 중 라운드로빈 선택",
+        candidates.len()
+    );
+    chosen
 }
 
 /// 매 로그인 호출 — 캐시된 풀에서, 설치 버전 상한 안에서 **라운드로빈**으로 하나 고른다.

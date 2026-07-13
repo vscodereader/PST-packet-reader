@@ -103,3 +103,72 @@ fn truncate(s: &str, max: usize) -> String {
         format!("{}…", &s[..max])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constructors_set_expected_kind() {
+        assert!(
+            matches!(BandPostError::invalid_link("L").kind, BandPostErrorKind::InvalidLink(ref s) if s == "L")
+        );
+        assert!(matches!(
+            BandPostError::no_session().kind,
+            BandPostErrorKind::NoSession
+        ));
+        assert!(
+            matches!(BandPostError::no_secret_key("d").kind, BandPostErrorKind::NoSecretKey(ref s) if s == "d")
+        );
+        assert!(
+            matches!(BandPostError::transport("t").kind, BandPostErrorKind::Transport(ref s) if s == "t")
+        );
+        assert!(
+            matches!(BandPostError::http(404, "b").kind, BandPostErrorKind::Http { status: 404, ref body } if body == "b")
+        );
+    }
+
+    #[test]
+    fn display_messages_include_context() {
+        assert!(BandPostError::invalid_link("https://x")
+            .to_string()
+            .contains("https://x"));
+        assert!(BandPostError::no_session()
+            .to_string()
+            .contains("밴드 로그인"));
+        assert!(BandPostError::no_secret_key("getKey 500")
+            .to_string()
+            .contains("getKey 500"));
+        assert!(BandPostError::transport("timeout")
+            .to_string()
+            .contains("timeout"));
+        let http = BandPostError::http(503, "boom").to_string();
+        assert!(http.contains("503") && http.contains("boom"));
+    }
+
+    #[test]
+    fn http_display_truncates_long_body() {
+        let shown = BandPostError::http(500, "x".repeat(500)).to_string();
+        // 본문은 300자에서 '…'로 잘린다: 원문 500개보다 짧고 301연속은 남지 않는다.
+        assert!(shown.contains('…'));
+        assert!(!shown.contains(&"x".repeat(301)));
+    }
+
+    #[test]
+    fn from_band_api_error_wraps_as_api_kind() {
+        let api = BandApiError {
+            result_code: Some(3),
+            message: "nope".into(),
+        };
+        let err: BandPostError = api.into();
+        assert!(matches!(err.kind, BandPostErrorKind::Api(_)));
+        assert!(err.to_string().contains("nope"));
+    }
+
+    #[test]
+    fn truncate_keeps_short_and_cuts_long() {
+        assert_eq!(truncate("abc", 10), "abc");
+        assert_eq!(truncate("abc", 3), "abc"); // 경계값(==max): 자르지 않음
+        assert_eq!(truncate("abcdef", 3), "abc…");
+    }
+}

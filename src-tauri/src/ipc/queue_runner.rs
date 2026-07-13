@@ -1350,6 +1350,8 @@ fn plan_to_forum_requests(plan: &PublishPlan) -> Vec<ForumPublishRequest> {
             title: plan.title.clone(),
             body: plan.body_text.clone(),
             comment,
+            // 댓글 전용("특정 게시글") 경로는 요청 1건=댓글 1개라 풀을 쓰지 않는다.
+            comments: Vec::new(),
             stocks: vec![stock],
             link_override: plan.link_override.clone(),
             comment_url: Some(url.to_owned()),
@@ -1430,6 +1432,9 @@ fn plan_to_forum_requests(plan: &PublishPlan) -> Vec<ForumPublishRequest> {
             title: plan.title.clone(),
             body: plan.body_text.clone(),
             comment: first_comment.clone(),
+            // 글+댓글(both) 모드: 댓글 풀 전체를 실어 내 글에 순서대로 단다(설계서 §2 확장). 댓글
+            // 전용(run_post=false)이면 매크로를 안 타므로 무해하다.
+            comments: plan.comments.clone(),
             stocks,
             link_override: plan.link_override.clone(),
             comment_url: None,

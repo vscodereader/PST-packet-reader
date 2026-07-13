@@ -194,3 +194,49 @@ fn percent_encode(value: &str) -> String {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_header_end_locates_blank_line() {
+        assert_eq!(find_header_end(b"HTTP/1.1 200 OK\r\n\r\nbody"), Some(15));
+        assert_eq!(find_header_end(b"no header terminator"), None);
+        assert_eq!(find_header_end(b""), None);
+    }
+
+    #[test]
+    fn parse_content_length_reads_value_case_insensitively() {
+        assert_eq!(
+            parse_content_length("Content-Length: 42\r\nHost: x"),
+            Some(42)
+        );
+        assert_eq!(parse_content_length("content-length:   7"), Some(7));
+        assert_eq!(parse_content_length("Host: x\r\nAccept: y"), None);
+        assert_eq!(parse_content_length("Content-Length: abc"), None);
+    }
+
+    #[test]
+    fn response_body_complete_requires_full_body() {
+        let full = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nabcd";
+        assert!(response_body_complete(full));
+
+        let partial = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nab";
+        assert!(!response_body_complete(partial));
+
+        // 헤더 종료(\r\n\r\n)가 없으면 미완료
+        assert!(!response_body_complete(b"HTTP/1.1 200 OK"));
+        // Content-Length 헤더가 없으면 미완료
+        assert!(!response_body_complete(
+            b"HTTP/1.1 200 OK\r\nHost: x\r\n\r\nbody"
+        ));
+    }
+
+    #[test]
+    fn percent_encode_preserves_unreserved_and_escapes_rest() {
+        assert_eq!(percent_encode("abcXYZ-._~09"), "abcXYZ-._~09");
+        assert_eq!(percent_encode("a b/c"), "a%20b%2Fc");
+        assert_eq!(percent_encode("?=&"), "%3F%3D%26");
+    }
+}

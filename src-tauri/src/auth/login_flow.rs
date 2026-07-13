@@ -330,6 +330,7 @@ fn run_inner(
             "로그인 폼(#id/#pw)을 찾지 못했습니다.".to_owned(),
         ));
     }
+    tracing::info!("========== [2] 로그인 페이지 로딩 끝 ==========");
 
     // [캡차 완화] CDP 자동화는 렌더러 DOM의 activeElement만 바꿀 뿐 브라우저(창) 포커스는
     // omnibox(주소창)에 남겨, document.hasFocus()=false 가 로그인 내내 유지된다. 그러면
@@ -352,6 +353,7 @@ fn run_inner(
     // 돌려준다. 빈/부분 자격증명으로 로그인 버튼을 누르면 결과가 #err_common/타임아웃으로
     // 분류돼 일시적 타이핑 실패가 영구 BadCredentials/Error로 둔갑하므로, 클릭하지 않고
     // 명확한 입력 실패로 중단한다.
+    tracing::info!("========== [3] 로그인 정보(ID/PW) 입력 시작 ==========");
     if let Some(d) = type_into(client, "#id", id)? {
         *diag = Some(format!("{d}\n\n{}", crate::util::backtrace_string()));
         return Ok(LoginOutcome::Error(
@@ -368,6 +370,8 @@ fn run_inner(
                 .to_owned(),
         ));
     }
+    tracing::info!("========== [3] 로그인 정보(ID/PW) 입력 끝 ==========");
+    tracing::info!("========== [4] 제출·캡차/상태 확인 시작 ==========");
 
     // '로그인 상태 유지'를 켠다 — 이걸 켜야 브라우저가 npay 약관동의(commonTermAgree)에 싣는 nid
     // 세션 쿠키(NID_JST·NID_SAUTO)가 발급된다(실측 성공 패킷은 이 쿠키를 실어 통과). best-effort.
@@ -590,6 +594,21 @@ fn run_inner(
             )));
         }
         sleep(POLL_INTERVAL);
+    }
+}
+
+/// 로그인 결과를 로그용 한 줄 라벨로 바꾼다(구간 종료 마커 `[4] … 끝 (결과: …)` 표시용, 순수 함수).
+pub(crate) fn outcome_label(outcome: &LoginOutcome) -> &'static str {
+    match outcome {
+        LoginOutcome::Ok { .. } => "성공",
+        LoginOutcome::ChallengeRequired { .. } => "챌린지(headed 승격 필요)",
+        LoginOutcome::BadCredentials => "비번오류",
+        LoginOutcome::Blocked => "차단",
+        LoginOutcome::Protected => "보호조치",
+        LoginOutcome::Locked => "잠금",
+        LoginOutcome::CaptchaUnsolved => "캡차 미해결(보류)",
+        LoginOutcome::PhoneVerify => "본인확인(보류)",
+        LoginOutcome::Error(_) => "오류",
     }
 }
 
@@ -1836,6 +1855,31 @@ mod tests {
             antibot_ready: antibot,
             default_prevented: None,
         }
+    }
+
+    #[test]
+    fn outcome_label_maps_each_variant_to_korean() {
+        // 구간 [4] 종료 마커의 괄호 안 라벨. 각 결과가 사람이 읽을 한 줄로 매핑되는지 고정한다.
+        assert_eq!(outcome_label(&LoginOutcome::Ok { cookies: vec![] }), "성공");
+        assert_eq!(
+            outcome_label(&LoginOutcome::ChallengeRequired {
+                kind: ChallengeKind::Captcha
+            }),
+            "챌린지(headed 승격 필요)"
+        );
+        assert_eq!(outcome_label(&LoginOutcome::BadCredentials), "비번오류");
+        assert_eq!(outcome_label(&LoginOutcome::Blocked), "차단");
+        assert_eq!(outcome_label(&LoginOutcome::Protected), "보호조치");
+        assert_eq!(outcome_label(&LoginOutcome::Locked), "잠금");
+        assert_eq!(
+            outcome_label(&LoginOutcome::CaptchaUnsolved),
+            "캡차 미해결(보류)"
+        );
+        assert_eq!(outcome_label(&LoginOutcome::PhoneVerify), "본인확인(보류)");
+        assert_eq!(
+            outcome_label(&LoginOutcome::Error("x".to_owned())),
+            "오류"
+        );
     }
 
     #[test]

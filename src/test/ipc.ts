@@ -1343,6 +1343,11 @@ export const invoke = vi.fn(
       case "forum_endpoint":
         return { host: "127.0.0.1", port: 9222 };
 
+      // --- 닉네임 변경 잔여 횟수 (설계서 §2) -------------------------------
+      // 실제 백엔드는 프로필 form을 GET해 remainingEditCount를 돌려준다. 테스트에서는 남은 3회로 모킹.
+      case "forum_nickname_remaining":
+        return 3;
+
       // --- forum 즉시 게시 (엔진 호출 모킹) ---------------------------------
       // 실제 백엔드는 패킷 게시를 수행한다. 테스트에서는 기존 목업과 동일하게
       // Math.random으로 성공/실패를 정하고, "게시하는 중" 상태가 보이도록 약간 지연한다.
