@@ -33,6 +33,16 @@ fn load_accounts() -> Result<Vec<Account>, OrchestratorError> {
     Ok(serde_json::from_str(&text)?)
 }
 
+/// 계정의 저장된 band 쿠키가 유효한 세션(band_session)을 담고 있는지 반환한다. 게시 경로가
+/// 매 게시 강제 재로그인(force)해 밴드 봇탐지 reCAPTCHA 를 자체 유발하던 문제를 피하려, 유효
+/// 쿠키가 있으면 재로그인을 건너뛰고 저장 쿠키로 바로 게시할지 판단하는 데 쓴다(형님 지시
+/// 2026-07-13). 파일 없음/만료/오류는 모두 false(유효하지 않음).
+pub(crate) fn has_valid_saved_band_cookie(account_id: &str) -> bool {
+    account_band_cookie_status(account_id)
+        .map(|status| status == BandCookieStatus::Valid)
+        .unwrap_or(false)
+}
+
 /// 한 band 계정을 처리한다(네이버 `process_account` 미러).
 ///
 /// `_app`은 큐 워커가 넘기는 핸들로, CDP 로그인은 직접 호출하므로 본문에서는 쓰지 않는다.

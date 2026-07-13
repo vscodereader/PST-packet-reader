@@ -1905,6 +1905,21 @@ async fn prepare_group_login<R: Runtime>(
         return Ok(());
     };
 
+    // 밴드: 유효한 저장 쿠키가 있으면 강제 재로그인을 건너뛰고 그 쿠키로 바로 게시한다(형님 지시
+    // 2026-07-13). 매 게시 강제 재로그인이 밴드 봇탐지 reCAPTCHA 를 자체 유발 → 로그인이 홈까지
+    // 못 가고 반쪽 band_session → 게시 'session expired' 로 실패하던 뿌리를 없앤다. 이 경우 IP
+    // 로테이션/검증은 생략된다(유효 쿠키 재사용 = 현재 IP 게시). 쿠키가 없거나 만료면 아래 정상
+    // 로그인 경로로 진행한다.
+    if matches!(login.platform, PlatformId::Band)
+        && crate::band_auth::has_valid_saved_band_cookie(&login.account_id)
+    {
+        tracing::info!(
+            account = %crate::auth::mask_id(&login.account_id),
+            "[BAND] 유효 쿠키 존재 — 강제 재로그인 생략, 저장 쿠키로 바로 게시(reCAPTCHA 회피)"
+        );
+        return Ok(());
+    }
+
     // 1. 회전+로그인(use_adb/force는 LoginTarget 값). 실패하면 그룹 전체를 그 사유로 실패.
     let login_ip = do_login_and_capture_ip(app, login).await?;
 
