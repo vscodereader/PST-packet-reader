@@ -730,20 +730,31 @@ fn click_signup_button(client: &mut CdpClient) -> Result<bool, AutomationError> 
 // OAuth 동의 페이지에서 (1) 전체동의(agree-all) 체크박스를 먼저 체크하고 (2) 동의/확인 버튼을 좌표
 // 마우스 클릭한다(best-effort). 자동 리다이렉트라 눌 게 없으면 no-op(false).
 fn click_oauth_consent(client: &mut CdpClient) -> Result<bool, AutomationError> {
-    // (1) 전체동의 체크박스: 라벨 텍스트(전체 동의/모두 동의)로 찾고, 없으면 첫 체크박스를 켠다.
+    // (1) 개인정보 제3자 제공 동의([필수]: 이용자식별자·네이버아이디·이름·이메일·프로필사진 —
+    //     service_scope profile/id·naverid·name·naveremail·profileimage) 전부 체크. 하나만 켜던
+    //     문제로 자동 선택이 안 됐다. 전체동의 요소 + 모든 체크박스 + 라벨(styled 체크박스 대비)을
+    //     눌러 전부 켠다. 동시에 화면 구조(체크박스 상태·버튼 후보·URL)를 진단으로 받아 로그에
+    //     원문을 남긴다 — 그래도 안 켜지면 이 로그가 실제 셀렉터를 드러낸다(형님 "로그에 원문" 원칙).
     const CHECK_ALL_JS: &str = "(()=>{\
         const cbs=Array.prototype.slice.call(document.querySelectorAll('input[type=checkbox]'));\
-        const label=cb=>{let l='';\
-            if(cb.id){const e=document.querySelector('label[for=\"'+cb.id+'\"]');if(e)l=e.textContent||'';}\
-            if(!l&&cb.closest('label'))l=cb.closest('label').textContent||'';\
-            if(!l&&cb.parentElement)l=cb.parentElement.textContent||'';\
-            return String(l).replace(/\\s+/g,' ');};\
-        let t=null;\
-        for(const cb of cbs){const l=label(cb);\
-            if(l.includes('전체 동의')||l.includes('전체동의')||l.includes('모두 동의')||l.includes('모두동의')){t=cb;break;}}\
-        if(!t&&cbs.length)t=cbs[0];\
-        if(t){if(!t.checked)t.click();return true;}return false;})()";
-    let _ = client.evaluate_bool(CHECK_ALL_JS);
+        const all=Array.prototype.slice.call(document.querySelectorAll('label,button,a,span,div'))\
+            .find(e=>{const t=String(e.textContent||'').replace(/\\s+/g,'');\
+                return t.indexOf('전체동의')>=0||t.indexOf('모두동의')>=0;});\
+        if(all)all.click();\
+        const before=cbs.map(cb=>cb.checked);\
+        for(const cb of cbs){\
+            if(!cb.checked)cb.click();\
+            if(!cb.checked&&cb.id){const l=document.querySelector('label[for=\"'+cb.id+'\"]');if(l)l.click();}\
+            if(!cb.checked&&cb.closest('label'))cb.closest('label').click();}\
+        const states=cbs.map(cb=>(cb.id||cb.name||'?')+':'+cb.checked);\
+        const btns=Array.prototype.slice.call(\
+            document.querySelectorAll('button,a,input[type=submit],input[type=button]'))\
+            .map(b=>String(b.innerText||b.textContent||b.value||'').replace(/\\s+/g,' ').trim())\
+            .filter(t=>t.length>0&&t.length<24);\
+        return JSON.stringify({url:location.href,cbCount:cbs.length,before:before,\
+            after:states,allBtn:!!all,buttons:btns.slice(0,15)});})()";
+    let diag = client.evaluate_string(CHECK_ALL_JS).unwrap_or_default();
+    tracing::info!("[BAND] OAuth 동의 화면 처리(원문 구조) — {diag}");
 
     // (2) 동의/확인/허용/계속 버튼을 좌표 클릭(id 후보 우선, 없으면 텍스트로).
     const CENTER_JS: &str = "(()=>{\
