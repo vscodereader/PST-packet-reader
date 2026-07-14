@@ -33,6 +33,9 @@ const REASON_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const AFTER_REASON_SETTLE: Duration = Duration::from_millis(900);
 /// 제출 클릭 후 페이지 SDK 가 토큰을 만들어 `/api/report`를 쏘고 응답이 올 때까지의 상한.
 const SUBMIT_RESULT_TIMEOUT: Duration = Duration::from_secs(30);
+/// 신고 결과 alert("접수되었습니다") 가 응답 처리 직후 열릴 때까지 폴링하며 자동 수락하는 상한·간격.
+const RESULT_DIALOG_TIMEOUT: Duration = Duration::from_secs(3);
+const RESULT_DIALOG_POLL: Duration = Duration::from_millis(300);
 /// 신고 제출 요청 — 이 URL 부분일치로 CDP Network 감시자를 무장한다.
 const REPORT_API_NEEDLE: &str = "/api/report";
 
@@ -112,27 +115,57 @@ impl ReportBrowser {
         // 사유 UI(SPA + /api/reason)가 렌더될 때까지 폴링한다. 렌더된 사유 컨테이너 원문을 남긴다.
         self.wait_reasons_rendered()?;
 
-        // 제출 클릭 전에 /api/report 감시자를 무장한다(SDK 가 쏘는 요청을 놓치지 않게).
-        self.client.arm_network_capture(REPORT_API_NEEDLE);
-
-        // 1) 사유 선택 — 무엇을 찾고 무엇을 클릭했는지 원문 로그. index 는 /api/reason 순서 폴백용
-        // (사유 라디오가 REPORT_REASONS 와 같은 순서로 렌더된다는 실측 근거).
+        // 1) 사유 선택 — **실제로 라디오가 눌릴 때까지** 재시도한다. 2번째+ 글은 같은 탭을 재사용하며
+        // navigate 직후 readyState 가 즉시 complete 로 잡혀(이전 문서 잔여) `wait_reasons_rendered`의
+        // 느슨한 프로브가 "렌더됨"을 오판할 수 있다(2026-07-14 로그: polls=1 candidate_count=2 인데
+        // 정작 select 는 candidates:[] 로 라디오 미발견 → 미선택 제출 → "신고 사유를 선택해주세요" alert).
+        // 그래서 select 결과의 clicked:true 를 진짜 신호로 삼아, 라디오가 실제로 뜰 때까지 다시 시도한다.
+        // index 는 /api/reason 순서 폴백용(사유 라디오가 REPORT_REASONS 와 같은 순서로 렌더된다는 실측).
         let reason_index = super::report_client::REPORT_REASONS
             .iter()
             .position(|r| r.code == reason_code);
         let select_js = build_select_reason_js(reason_code, reason_label, reason_index);
-        match self.client.evaluate_string(&select_js) {
-            Ok(log) => tracing::info!(target: "report", reason = %reason_code, result = %log, "[REPORT-SUBMIT] 사유 선택 시도 — DOM 원문"),
-            Err(error) => {
-                tracing::warn!(target: "report", %error, "[REPORT-SUBMIT] 사유 선택 evaluate 실패");
-                return Err(ReportError::Submit(format!("사유 선택 실패: {error}")));
+        let select_deadline = Instant::now() + REASON_RENDER_TIMEOUT;
+        let mut selected = false;
+        loop {
+            match self.client.evaluate_string(&select_js) {
+                Ok(log) => {
+                    tracing::info!(target: "report", reason = %reason_code, result = %log, "[REPORT-SUBMIT] 사유 선택 시도 — DOM 원문");
+                    if reason_was_selected(&log) {
+                        selected = true;
+                        break;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(target: "report", %error, "[REPORT-SUBMIT] 사유 선택 evaluate 실패");
+                    return Err(ReportError::Submit(format!("사유 선택 실패: {error}")));
+                }
             }
+            if Instant::now() >= select_deadline {
+                break;
+            }
+            sleep(REASON_POLL_INTERVAL);
         }
+        // 라디오를 끝내 못 눌렀으면 **제출하지 않는다** — 미선택 제출은 네이버가 "신고 사유를
+        // 선택해주세요" alert 를 띄우고 /api/report 를 안 쏴 30초를 헛되이 기다리게 한다. 열렸을 그
+        // alert 를 수락해 정리하고, 사람이 읽는 실패로 즉시 끝낸다.
+        if !selected {
+            self.client.accept_pending_js_dialog();
+            return Err(ReportError::Submit(
+                "신고 사유 라디오가 렌더되지 않아 선택하지 못했습니다(사유 미선택 제출 방지 — token.rs)"
+                    .to_owned(),
+            ));
+        }
+
+        // 제출 클릭 전에 /api/report 감시자를 무장한다(SDK 가 쏘는 요청을 놓치지 않게).
+        self.client.arm_network_capture(REPORT_API_NEEDLE);
 
         // React state 반영 대기 후 제출 버튼을 누른다(선택 즉시 disabled 일 수 있어 나눠서).
         sleep(AFTER_REASON_SETTLE);
         match self.client.evaluate_string(SUBMIT_CLICK_JS) {
-            Ok(log) => tracing::info!(target: "report", result = %log, "[REPORT-SUBMIT] 제출 버튼 클릭 시도 — DOM 원문"),
+            Ok(log) => {
+                tracing::info!(target: "report", result = %log, "[REPORT-SUBMIT] 제출 버튼 클릭 시도 — DOM 원문")
+            }
             Err(error) => {
                 tracing::warn!(target: "report", %error, "[REPORT-SUBMIT] 제출 클릭 evaluate 실패");
                 return Err(ReportError::Submit(format!("제출 버튼 클릭 실패: {error}")));
@@ -140,7 +173,33 @@ impl ReportBrowser {
         }
 
         // 페이지가 쏜 /api/report 요청/응답을 CDP Network 이벤트로 기다린다.
-        self.await_report_result()
+        let result = self.await_report_result();
+
+        // 성공 시 네이버가 띄우는 alert("신고가 성공적으로 접수되었습니다.")를 자동 수락한다. 이 모달이
+        // 열린 채 남으면 단건 신고 후 크롬이 사람이 엔터를 칠 때까지 안 닫힌다(2026-07-14 로그 근거).
+        // 여러 건일 땐 다음 navigate 가 대신 닫아줘 안 보였던 문제. 다건에서도 다음 글로 넘어가기 전에
+        // 미리 정리해 둔다. alert 는 /api/report 응답을 페이지 JS 가 처리한 **직후** 열려 이 시점보다
+        // 살짝 늦을 수 있으므로, 열릴 때까지 짧게 폴링하며 수락한다(열린 게 없으면 no-op).
+        self.dismiss_result_dialog();
+
+        result
+    }
+
+    /// 신고 결과 alert 가 열릴 때까지 짧게 폴링하며 자동 수락한다(Bug: 단건 신고 후 크롬 미종료).
+    /// `Page.handleJavaScriptDialog` 는 모달이 열려 있어도 블로킹되지 않으므로 폴링이 안전하다. 한 번
+    /// 수락하면 즉시 끝내고, 상한까지 안 열리면 조용히 넘어간다(성공 문구 없이 종료되는 흐름도 있다).
+    fn dismiss_result_dialog(&mut self) {
+        let deadline = Instant::now() + RESULT_DIALOG_TIMEOUT;
+        loop {
+            if self.client.accept_pending_js_dialog() {
+                tracing::info!(target: "report", "[REPORT-SUBMIT] 결과 alert 자동 수락 — 크롬 종료/다음 글 진행 차단 해제");
+                return;
+            }
+            if Instant::now() >= deadline {
+                return;
+            }
+            sleep(RESULT_DIALOG_POLL);
+        }
     }
 
     /// 사유 UI 가 DOM 에 렌더될 때까지 폴링한다(SPA + `/api/reason` 응답 후 렌더). 후보 사유 요소가
@@ -307,6 +366,17 @@ fn build_select_reason_js(code: &str, label: &str, index: Option<usize>) -> Stri
     )
 }
 
+/// `build_select_reason_js` 결과(JSON 원문)에서 **실제로 사유 라디오가 눌렸는지**를 판정한다.
+/// `clicked:true` 여야만 사유가 선택된 것 — `wait_reasons_rendered`의 느슨한 프로브가 잔여 DOM에
+/// 속아 "렌더됨"을 오판해도(2번째+ 글에서 관측), 이 판정으로 미선택 제출을 막는다. 파싱 실패/필드
+/// 부재는 미선택(false)으로 본다.
+fn reason_was_selected(select_json: &str) -> bool {
+    serde_json::from_str::<Value>(select_json)
+        .ok()
+        .and_then(|value| value.get("clicked").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
 /// 제출/확인 버튼을 찾아 클릭하는 JS. 동적 SPA 라 정확한 셀렉터를 하드코딩할 수 없어, 한국어 텍스트
 /// (신고/신고하기/확인/제출/완료)나 `type=submit` 을 일반적으로 훑어 1차 액션 버튼을 누르고, 취소/닫기
 /// 류는 배제한다. 찾은/클릭한 것을 JSON 으로 돌려준다(원문 로깅용).
@@ -384,3 +454,30 @@ const REASON_PROBE_JS: &str = r#"
   } catch (e) { return '0|' + String(e); }
 })()
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // build_select_reason_js 결과에서 "실제 선택됨"만 통과시켜야 한다(2번째+ 글의 미선택 제출 차단).
+    #[test]
+    fn reason_was_selected_true_only_when_radio_actually_clicked() {
+        // 1번째 글 성공 케이스(로그 원문): 라벨텍스트로 라디오를 눌렀다.
+        let ok = r#"{"code":"AA29","label":"스팸홍보/도배입니다","index":1,"strategy":"label-text","clicked":true,"target":{"tag":"INPUT"},"candidates":[{"tag":"LABEL"}]}"#;
+        assert!(reason_was_selected(ok));
+    }
+
+    #[test]
+    fn reason_was_selected_false_when_no_radio_found() {
+        // 2번째 글 실패 케이스(로그 원문): 프로브가 오판해 select 가 라디오를 못 찾음.
+        let miss = r#"{"code":"AA29","label":"스팸홍보/도배입니다","index":1,"strategy":null,"clicked":false,"target":null,"candidates":[]}"#;
+        assert!(!reason_was_selected(miss));
+    }
+
+    #[test]
+    fn reason_was_selected_false_on_unparseable_or_missing_field() {
+        assert!(!reason_was_selected("not json"));
+        assert!(!reason_was_selected("{}"));
+        assert!(!reason_was_selected(r#"{"clicked":"yes"}"#)); // 문자열은 bool 아님 → false
+    }
+}

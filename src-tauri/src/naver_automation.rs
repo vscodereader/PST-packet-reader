@@ -999,6 +999,17 @@ impl CdpClient {
         Ok(())
     }
 
+    /// 열려 있는 네이티브 JS 다이얼로그(alert/confirm)를 **수락(OK)** 한다. 신고 성공 시 네이버가
+    /// `alert("신고가 성공적으로 접수되었습니다.")`를 띄우는데, 이 모달이 열려 있으면 페이지·창 종료가
+    /// 막혀 단건 신고 후 크롬이 사람이 엔터를 칠 때까지 안 닫힌다(2026-07-14 CDP 로그 근거:
+    /// `Page.javascriptDialogOpening type=alert`). 이 호출로 자동 수락해 크롬이 바로 닫히게 한다.
+    /// 열린 다이얼로그가 없으면 CDP가 에러를 주지만 그건 "닫을 게 없었다"는 정상이라 조용히 false로
+    /// 흘린다(Page 도메인은 `enable_page_only`로 이미 켜져 있어야 이벤트/수락이 동작한다).
+    pub(crate) fn accept_pending_js_dialog(&mut self) -> bool {
+        self.call("Page.handleJavaScriptDialog", json!({ "accept": true }))
+            .is_ok()
+    }
+
     /// 신고 토큰 브라우저용: Network 도메인을 켜고 이 계정의 네이버 세션 쿠키를 CDP로 주입한다.
     /// srp2 신고 페이지는 비로그인이면 `nid.naver.com/nidlogin.login`으로 리다이렉트돼 ncaptcha SDK가
     /// 토큰을 만들지 못한다(2026-07-14 CDP 로그 근거). navigate 전에 저장 세션 쿠키(NID_AUT/NID_SES 등)를
