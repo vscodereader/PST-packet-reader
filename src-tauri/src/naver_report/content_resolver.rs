@@ -145,9 +145,14 @@ pub fn resolve_encrypted_user_id(
     http: &ReportHttp,
     link: &DiscussionLink,
 ) -> Result<String, ReportError> {
+    // 실측(신고 패킷 + 400 응답 원문 확정): by-item 은 bool 파라미터 isHolderOnly/excludesItemNews/
+    // isItemNewsOnly 를 **필수**로 요구한다(누락 시 400 `{"fieldErrors":{...:["Required"]}}`). 브라우저와
+    // 동일하게 셋 다 false 로 붙인다. isCleanbotPassedOnly=false 는 서버가 그대로 받아들인다(에러 없음).
     let by_item_url = format!(
         "https://stock.naver.com/api/community/discussion/posts/by-item\
-?discussionType=domesticStock&itemCode={}&isCleanbotPassedOnly=false&pageSize=30",
+?discussionType=domesticStock&itemCode={}\
+&isHolderOnly=false&excludesItemNews=false&isItemNewsOnly=false\
+&isCleanbotPassedOnly=false&pageSize=30",
         link.item_code
     );
     let by_item = http
