@@ -49,13 +49,16 @@ import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 
 import { ipc } from "@/shared/ipc";
-import type { StickerPack } from "@/shared/ipc";
+import type { OglinkMeta, StickerPack } from "@/shared/ipc";
 
 import {
   createCodeBlock,
   createFileBlock,
+  createFileUploadBlock,
   createImageBlock,
+  createImageUploadBlock,
   createOglinkBlock,
+  createOglinkUrlBlock,
   createScheduleBlock,
   createStickerBlock,
   createTextBlock,
@@ -64,6 +67,7 @@ import {
   setAlign,
   setCode,
   setText,
+  stripDataUrlPrefix,
   toggleMark,
   type Align,
   type Block,
@@ -92,6 +96,9 @@ interface BlockEditorProps {
   accountId: string | null;
   blocks: Block[];
   onChange: (blocks: Block[]) => void;
+  /** 원격(Admin) 모드 — 브라우저라 Tauri IPC·계정 세션이 없다. 미디어를 원본(사진=base64/링크=URL/
+   *  스티커=정적)만 담아 raw 블록으로 만들고, 하위 에이전트가 발행 시 대상 계정 세션으로 해결한다. */
+  remote?: boolean;
 }
 
 type ModalKind = null | "link" | "sticker" | "schedule";
@@ -114,7 +121,12 @@ function normalize(list: Block[]): Block[] {
   return next;
 }
 
-export function BlockEditor({ accountId, blocks, onChange }: BlockEditorProps) {
+export function BlockEditor({
+  accountId,
+  blocks,
+  onChange,
+  remote = false,
+}: BlockEditorProps) {
   const [modal, setModal] = useState<ModalKind>(null);
   const [busy, setBusy] = useState(false);
   // 커서가 있는 문단(text) id. 삽입은 이 문단 바로 아래에, 서식은 이 문단에 적용한다.
@@ -165,6 +177,16 @@ export function BlockEditor({ accountId, blocks, onChange }: BlockEditorProps) {
   }
 
   async function onInsertPhoto() {
+    // 원격(Admin): 계정 세션이 없으니 업로드하지 않고 브라우저에서 base64로 읽어 raw 블록만 만든다.
+    // 실제 업로드는 하위가 발행 시 대상 계정으로 한다(agent resolve_blocks_for_account).
+    if (remote) {
+      const picked = await pickFileBrowser("image/*");
+      if (picked)
+        insertAtCursor(
+          createImageUploadBlock(picked.dataBase64, picked.fileName),
+        );
+      return;
+    }
     const id = requireAccount();
     if (!id) return;
     const path = await pickFile("이미지");
@@ -184,6 +206,14 @@ export function BlockEditor({ accountId, blocks, onChange }: BlockEditorProps) {
   }
 
   async function onInsertFile() {
+    if (remote) {
+      const picked = await pickFileBrowser("*/*");
+      if (picked)
+        insertAtCursor(
+          createFileUploadBlock(picked.dataBase64, picked.fileName),
+        );
+      return;
+    }
     const id = requireAccount();
     if (!id) return;
     const path = await pickFile("파일");
@@ -319,9 +349,13 @@ export function BlockEditor({ accountId, blocks, onChange }: BlockEditorProps) {
       <LinkModal
         opened={modal === "link"}
         accountId={accountId}
+        remote={remote}
         onClose={() => setModal(null)}
         onInsert={(link, meta) => {
-          insertAtCursor(createOglinkBlock(link, meta));
+          // 원격(meta=null)이면 URL만 담은 raw 블록 — 하위가 발행 시 계정 세션으로 조회한다.
+          insertAtCursor(
+            meta ? createOglinkBlock(link, meta) : createOglinkUrlBlock(link),
+          );
           setModal(null);
         }}
       />
@@ -336,6 +370,7 @@ export function BlockEditor({ accountId, blocks, onChange }: BlockEditorProps) {
       <StickerModal
         opened={modal === "sticker"}
         accountId={accountId}
+        remote={remote}
         onClose={() => setModal(null)}
         onInsert={(packCode, seq) => {
           insertAtCursor(createStickerBlock(packCode, seq));
@@ -344,6 +379,43 @@ export function BlockEditor({ accountId, blocks, onChange }: BlockEditorProps) {
       />
     </Stack>
   );
+}
+
+/** 원격(Admin) 정적 스티커 팩 — 브라우저엔 계정 세션이 없어 목록 API를 못 부른다. 무료 기본 팩만
+ *  둔다(하위가 packCode+seq 그대로 발행). seq는 보수적으로 1..count. */
+const STATIC_STICKER_PACKS: { packCode: string; count: number }[] = [
+  { packCode: "cafe_001", count: 10 },
+  { packCode: "cafe_002", count: 10 },
+  { packCode: "cafe_005", count: 10 },
+  { packCode: "motion2d_01", count: 10 },
+];
+
+/** 브라우저 파일 선택(Admin) — `<input type=file>` + FileReader로 (파일명, 순수 base64)를 얻는다.
+ *  Tauri 다이얼로그/로컬 경로가 없는 브라우저용. 취소/실패 시 null. */
+async function pickFileBrowser(
+  accept: string,
+): Promise<{ fileName: string; dataBase64: string } | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = accept;
+    input.onchange = () => {
+      const file = input.files?.[0];
+      if (!file) {
+        resolve(null);
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () =>
+        resolve({
+          fileName: file.name,
+          dataBase64: stripDataUrlPrefix(String(reader.result ?? "")),
+        });
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(file);
+    };
+    input.click();
+  });
 }
 
 /** Tauri 파일 선택 다이얼로그로 로컬 경로 1개를 고른다(취소 시 null). */
@@ -435,6 +507,12 @@ function blockLabel(block: Block): string {
       return "스티커";
     case "placesMap":
       return "장소";
+    case "imageUpload":
+      return "사진 (업로드 대기)";
+    case "fileUpload":
+      return "파일 (업로드 대기)";
+    case "oglinkUrl":
+      return "링크 (조회 대기)";
   }
 }
 
@@ -517,6 +595,26 @@ function BlockBody({
       return (
         <Text size="sm">{block.places.map((p) => p.name).join(", ")}</Text>
       );
+    case "imageUpload":
+    case "fileUpload":
+      // 원격(Admin): 아직 업로드 전 — 하위 발행 시 계정 세션으로 업로드된다.
+      return (
+        <Text size="sm">
+          {block.fileName}{" "}
+          <Text span c="dimmed" fz="xs">
+            (발행 시 대상 계정으로 업로드)
+          </Text>
+        </Text>
+      );
+    case "oglinkUrl":
+      return (
+        <Text size="sm">
+          {block.link}{" "}
+          <Text span c="dimmed" fz="xs">
+            (발행 시 링크 정보 조회)
+          </Text>
+        </Text>
+      );
   }
 }
 
@@ -564,22 +662,28 @@ function FormatToolbar({
 function LinkModal({
   opened,
   accountId,
+  remote,
   onClose,
   onInsert,
 }: {
   opened: boolean;
   accountId: string | null;
+  remote?: boolean;
   onClose: () => void;
-  onInsert: (
-    link: string,
-    meta: Awaited<ReturnType<typeof ipc.blog.oglink>>,
-  ) => void;
+  onInsert: (link: string, meta: OglinkMeta | null) => void;
 }) {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
 
   async function submit() {
-    if (!accountId || !url.trim()) return;
+    if (!url.trim()) return;
+    // 원격(Admin): 조회하지 않고 URL만 넘긴다(하위가 발행 시 계정 세션으로 oglink 조회).
+    if (remote) {
+      onInsert(url.trim(), null);
+      setUrl("");
+      return;
+    }
+    if (!accountId) return;
     setLoading(true);
     try {
       const meta = await ipc.blog.oglink(accountId, url.trim());
@@ -667,11 +771,13 @@ function ScheduleModal({
 function StickerModal({
   opened,
   accountId,
+  remote,
   onClose,
   onInsert,
 }: {
   opened: boolean;
   accountId: string | null;
+  remote?: boolean;
   onClose: () => void;
   onInsert: (packCode: string, seq: number) => void;
 }) {
@@ -681,6 +787,17 @@ function StickerModal({
   const [loading, setLoading] = useState(false);
 
   async function loadPacks() {
+    // 원격(Admin): 계정 세션이 없어 목록 API를 못 부르니 정적 무료 팩을 쓴다.
+    if (remote) {
+      setPacks(
+        STATIC_STICKER_PACKS.map((p) => ({
+          packCode: p.packCode,
+          stickerCount: p.count,
+          isFree: true,
+        })),
+      );
+      return;
+    }
     if (!accountId) return;
     setLoading(true);
     try {
@@ -696,8 +813,14 @@ function StickerModal({
   }
 
   async function selectPack(code: string) {
-    if (!accountId) return;
     setPack(code);
+    // 원격: seq는 정적 팩의 1..count(계정 세션 없이 self-contained하게 발행).
+    if (remote) {
+      const found = STATIC_STICKER_PACKS.find((p) => p.packCode === code);
+      setSeqs(Array.from({ length: found?.count ?? 0 }, (_, i) => i + 1));
+      return;
+    }
+    if (!accountId) return;
     setLoading(true);
     try {
       setSeqs(await ipc.blog.stickerSeqs(accountId, code));

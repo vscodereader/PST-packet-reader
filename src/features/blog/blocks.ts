@@ -92,6 +92,35 @@ export interface StickerBlock {
   align: Align;
 }
 
+// ── 원격(Admin) 원본 미디어 블록 ──
+// Admin은 브라우저라 계정 세션·Tauri IPC가 없어 사진/파일 업로드·링크 조회를 직접 못 한다. 그래서
+// 원본만 담아 보내고(사진/파일=base64, 링크=URL) 하위 에이전트가 계정 세션으로 해결한다
+// (agent/mod.rs resolve_blocks_for_account). 데스크톱은 이 타입을 쓰지 않는다(이미 해결된 블록 전송).
+
+/** 원격 사진(업로드 대기) — 하위가 계정 세션으로 업로드해 image 블록으로 바꾼다. */
+export interface ImageUploadBlock {
+  id: string;
+  type: "imageUpload";
+  /** base64(순수, data URL 접두사 없이). */
+  dataBase64: string;
+  fileName: string;
+}
+
+/** 원격 파일(업로드 대기). */
+export interface FileUploadBlock {
+  id: string;
+  type: "fileUpload";
+  dataBase64: string;
+  fileName: string;
+}
+
+/** 원격 링크(oglink 조회 대기) — 하위가 계정 세션으로 조회해 oglink 블록으로 바꾼다. */
+export interface OglinkUrlBlock {
+  id: string;
+  type: "oglinkUrl";
+  link: string;
+}
+
 /** 장소(placesMap)의 place 원소. */
 export interface PlaceItem {
   placeId: string;
@@ -121,7 +150,11 @@ export type Block =
   | ImageBlock
   | OglinkBlock
   | StickerBlock
-  | PlacesMapBlock;
+  | PlacesMapBlock
+  // 원격(Admin) 원본 미디어 — 하위 에이전트가 발행 전 실제 image/file/oglink 블록으로 해결한다.
+  | ImageUploadBlock
+  | FileUploadBlock
+  | OglinkUrlBlock;
 
 /** 텍스트 블록의 서식 토글 키. */
 export type TextMark = "bold" | "italic" | "underline" | "strikeThrough";
@@ -224,6 +257,37 @@ export function createStickerBlock(
   seq: number,
 ): StickerBlock {
   return { id: newBlockId(), type: "sticker", packCode, seq, align: "left" };
+}
+
+/** 원격 사진(업로드 대기) 블록. base64는 data URL 접두사(`data:...;base64,`)를 제거한 순수 값이어야
+ *  한다 — 하위 에이전트가 그대로 디코드해 업로드한다. */
+export function createImageUploadBlock(
+  dataBase64: string,
+  fileName: string,
+): ImageUploadBlock {
+  return { id: newBlockId(), type: "imageUpload", dataBase64, fileName };
+}
+
+/** 원격 파일(업로드 대기) 블록. */
+export function createFileUploadBlock(
+  dataBase64: string,
+  fileName: string,
+): FileUploadBlock {
+  return { id: newBlockId(), type: "fileUpload", dataBase64, fileName };
+}
+
+/** 원격 링크(oglink 조회 대기) 블록 — 사용자가 입력한 URL만 담는다. */
+export function createOglinkUrlBlock(link: string): OglinkUrlBlock {
+  return { id: newBlockId(), type: "oglinkUrl", link };
+}
+
+/** data URL(`data:image/png;base64,XXXX`) 또는 순수 base64에서 **순수 base64**만 뽑는다(순수 함수).
+ *  브라우저 FileReader.readAsDataURL 결과에서 접두사를 떼어 하위가 바로 디코드하게 한다. */
+export function stripDataUrlPrefix(dataUrl: string): string {
+  const comma = dataUrl.indexOf(",");
+  return dataUrl.startsWith("data:") && comma >= 0
+    ? dataUrl.slice(comma + 1)
+    : dataUrl;
 }
 
 /** staticmap 썸네일 + 선택 장소 → 장소 블록. */

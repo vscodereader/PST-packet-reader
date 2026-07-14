@@ -2,9 +2,10 @@
 // 편집기 툴바(BlockEditor 재사용)로 제목·본문 블록·발행설정을 작성해 그 하위로 `publish_blog_write`를
 // 내려보낸다. 하위는 각 대상 계정의 쿠키로 자기 블로그에 같은 글을 RabbitWrite 발행하고 결과를 회신한다.
 //
-// ⚠️ 사진/파일/링크/스티커/장소 블록은 계정 쿠키로 백엔드 보조 API를 호출해 채워지는데, 그 쿠키는
-// 하위 PC에만 있고 Admin(브라우저)엔 없다. 그래서 Admin 원격 작성의 실효 경로는 텍스트/서식/소스코드/
-// 일정 블록이다(미디어 삽입은 TODO(실기기 튜닝) — 하위측 프리페치 필요). 텍스트 위주 새 글은 정상 동작.
+// 사진/파일/링크/스티커는 계정 세션이 필요한데 Admin(브라우저)엔 없다. 그래서 원격 모드(BlockEditor
+// remote)에서 원본만 담아 보내고(사진/파일=base64, 링크=URL, 스티커=정적 팩) 하위 에이전트가 발행 시
+// 대상 계정 세션으로 업로드/조회해 해결한다(agent resolve_blocks_for_account). 텍스트/서식/소스코드/일정은
+// 그대로 동작.
 
 import {
   Box,
@@ -169,6 +170,7 @@ export function BlogWriteConfig({
           accountId={composeAccount}
           blocks={blocks}
           onChange={setBlocks}
+          remote
         />
       </Box>
 
