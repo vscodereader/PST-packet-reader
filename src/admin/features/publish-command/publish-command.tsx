@@ -60,6 +60,15 @@ const KIND_OPTS: { value: PostKind; label: string }[] = [
   { value: "comment", label: "댓글" },
   { value: "both", label: "글+댓글" },
 ];
+
+// 하위별 "무엇을 게시할까" 선택. 종토/카페/밴드 글 종류(글/댓글/글+댓글)에 더해 "블로그 새글"을 둔다.
+// "블로그 새글"을 고르면 그 하위의 대상이 자동으로 블로그로 바뀌어 제목/본문 작성기(BlogWriteConfig)가
+// 바로 뜬다(플랫폼 탭을 따로 안 눌러도 됨).
+type DeviceAction = PostKind | "blogWrite";
+const KIND_ACTION_OPTS: { value: DeviceAction; label: string }[] = [
+  ...KIND_OPTS,
+  { value: "blogWrite", label: "블로그 새글" },
+];
 /** 글의 종류(없으면 post로 본다 — 옛 하위 하위호환). */
 function postKindOf(p: { kind?: string }): PostKind {
   return p.kind === "comment" || p.kind === "both" ? p.kind : "post";
@@ -284,7 +293,7 @@ export function PublishCommand({
   >({});
   const [postByDev, setPostByDev] = useState<Record<string, string | null>>({});
   // 하위별 선택한 글 종류(글/댓글/글+댓글). 종류를 바꾸면 그 종류 글만 목록에 뜬다.
-  const [kindByDev, setKindByDev] = useState<Record<string, PostKind>>({});
+  const [kindByDev, setKindByDev] = useState<Record<string, DeviceAction>>({});
   // 게시 대상은 **하위별로** 고른다 — 한 대는 종토, 다른 대는 카페처럼 서로 다를 수 있다.
   const [targetByDev, setTargetByDev] = useState<Record<string, Target>>({});
   const [cfgByDev, setCfgByDev] = useState<Record<string, ForumCfg>>({});
@@ -461,7 +470,7 @@ export function PublishCommand({
                     </Box>
                   </Group>
                 </Paper>
-                {/* 글 종류 먼저 고른다 → 그 종류 글만 아래 목록에 뜬다(안 섞임). */}
+                {/* 무엇을 게시할까 먼저 고른다: 글/댓글/글+댓글(종토·카페·밴드) 또는 블로그 새글. */}
                 <Select
                   size="xs"
                   disabled={!on}
@@ -469,39 +478,44 @@ export function PublishCommand({
                   value={devKind}
                   onChange={(v) => {
                     if (!v) return;
-                    setKindByDev((prev) => ({
-                      ...prev,
-                      [d.id]: v as PostKind,
-                    }));
+                    const action = v as DeviceAction;
+                    setKindByDev((prev) => ({ ...prev, [d.id]: action }));
                     // 종류가 바뀌면 이전에 고른 글 선택을 초기화(다른 종류 글이 남지 않게).
                     setPostByDev((prev) => ({ ...prev, [d.id]: null }));
+                    // "블로그 새글"이면 그 하위 대상을 블로그로 전환 → 제목/본문 작성기가 바로 뜬다.
+                    if (action === "blogWrite") {
+                      setTargetByDev((prev) => ({ ...prev, [d.id]: "blog" }));
+                    }
                   }}
-                  data={KIND_OPTS}
+                  data={KIND_ACTION_OPTS}
                   comboboxProps={{ withinPortal: true }}
                   aria-label={`${d.name} 글 종류 선택`}
                 />
-                <Select
-                  size="xs"
-                  disabled={!on || devKind == null}
-                  placeholder={
-                    devKind == null ? "글 종류 먼저" : "글을 선택하세요"
-                  }
-                  value={postByDev[d.id] ?? null}
-                  onChange={(v) =>
-                    setPostByDev((prev) => ({ ...prev, [d.id]: v }))
-                  }
-                  data={
-                    devKind != null
-                      ? postsForKind(d.id, devKind).map((p) => ({
-                          value: p.id,
-                          // 댓글은 제목이 없으니 작성한 댓글 내용을 보여준다(글=제목).
-                          label: shortTitle(postDisplay(p)),
-                        }))
-                      : []
-                  }
-                  comboboxProps={{ withinPortal: true }}
-                  aria-label={`${d.name} 글 선택`}
-                />
+                {/* 블로그 새글은 기존 글을 고를 필요가 없어 글-선택 드롭다운을 숨긴다. */}
+                {devKind !== "blogWrite" && (
+                  <Select
+                    size="xs"
+                    disabled={!on || devKind == null}
+                    placeholder={
+                      devKind == null ? "글 종류 먼저" : "글을 선택하세요"
+                    }
+                    value={postByDev[d.id] ?? null}
+                    onChange={(v) =>
+                      setPostByDev((prev) => ({ ...prev, [d.id]: v }))
+                    }
+                    data={
+                      devKind != null
+                        ? postsForKind(d.id, devKind).map((p) => ({
+                            value: p.id,
+                            // 댓글은 제목이 없으니 작성한 댓글 내용을 보여준다(글=제목).
+                            label: shortTitle(postDisplay(p)),
+                          }))
+                        : []
+                    }
+                    comboboxProps={{ withinPortal: true }}
+                    aria-label={`${d.name} 글 선택`}
+                  />
+                )}
               </Stack>
             );
           })}
@@ -518,24 +532,32 @@ export function PublishCommand({
             </Text>
           </Text>
           <Stack gap="md">
-            {selectedDevices.map((d) => (
-              <DeviceBlock
-                key={d.id}
-                device={d}
-                kind={kindByDev[d.id] ?? "post"}
-                postTitle={postLabelFor(d.id)}
-                postId={postByDev[d.id] ?? null}
-                postCommentCount={commentCountFor(d.id)}
-                accounts={accountsFor(d.id, targetByDev[d.id] ?? null)}
-                target={targetByDev[d.id] ?? null}
-                onSetTarget={(t) =>
-                  setTargetByDev((prev) => ({ ...prev, [d.id]: t }))
-                }
-                cfg={cfgByDev[d.id] ?? DEFAULT_CFG}
-                onPatch={(patch) => patchCfg(d.id, patch)}
-                onSchedule={onSchedule}
-              />
-            ))}
+            {selectedDevices.map((d) => {
+              // 블로그 새글이면 대상=블로그로 고정(제목/본문 작성기). kind는 블로그가 안 쓰므로 post로 코어션.
+              const act: DeviceAction = kindByDev[d.id] ?? "post";
+              const blogWrite = act === "blogWrite";
+              return (
+                <DeviceBlock
+                  key={d.id}
+                  device={d}
+                  kind={act === "blogWrite" ? "post" : act}
+                  postTitle={postLabelFor(d.id)}
+                  postId={postByDev[d.id] ?? null}
+                  postCommentCount={commentCountFor(d.id)}
+                  accounts={accountsFor(
+                    d.id,
+                    blogWrite ? "blog" : (targetByDev[d.id] ?? null),
+                  )}
+                  target={blogWrite ? "blog" : (targetByDev[d.id] ?? null)}
+                  onSetTarget={(t) =>
+                    setTargetByDev((prev) => ({ ...prev, [d.id]: t }))
+                  }
+                  cfg={cfgByDev[d.id] ?? DEFAULT_CFG}
+                  onPatch={(patch) => patchCfg(d.id, patch)}
+                  onSchedule={onSchedule}
+                />
+              );
+            })}
           </Stack>
         </Box>
       )}
