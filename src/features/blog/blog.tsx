@@ -18,7 +18,6 @@ import {
   Switch,
   Text,
   TextInput,
-  Textarea,
   Title,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
@@ -27,6 +26,9 @@ import { useEffect, useMemo, useState } from "react";
 import type { Account } from "@/shared/bindings/Account";
 import type { ViewId } from "@/shared/data/types";
 import { ipc } from "@/shared/ipc";
+
+import { BlockEditor } from "./block-editor";
+import type { Block } from "./blocks";
 
 /** 공개설정 UI 순서(전체공개>이웃>서로이웃>비공개) = openType 0/1/2/3. */
 const OPEN_TYPES = [
@@ -45,7 +47,7 @@ export function Blog(_props: { go?: (view: ViewId) => void }) {
   const [nameResult, setNameResult] = useState<null | boolean>(null);
 
   const [title, setTitle] = useState("");
-  const [content, setContent] = useState("");
+  const [blocks, setBlocks] = useState<Block[]>([]);
 
   const [openType, setOpenType] = useState("0");
   const [commentYn, setCommentYn] = useState(true);
@@ -129,7 +131,8 @@ export function Blog(_props: { go?: (view: ViewId) => void }) {
         accountId,
         blogId: blogId.trim(),
         title,
-        content,
+        content: "",
+        blocks,
         openType: Number(openType),
         commentYn,
         searchYn,
@@ -231,12 +234,16 @@ export function Blog(_props: { go?: (view: ViewId) => void }) {
             value={title}
             onChange={(e) => setTitle(e.currentTarget.value)}
           />
-          <Textarea
-            label="내용"
-            rows={8}
-            value={content}
-            onChange={(e) => setContent(e.currentTarget.value)}
-          />
+          <div>
+            <Text size="sm" mb={4}>
+              내용
+            </Text>
+            <BlockEditor
+              accountId={accountId}
+              blocks={blocks}
+              onChange={setBlocks}
+            />
+          </div>
         </Stack>
       </Paper>
 

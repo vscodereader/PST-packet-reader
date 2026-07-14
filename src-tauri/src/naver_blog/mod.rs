@@ -3,18 +3,26 @@
 //! 블로그 경로만 추가한다(ADD ONLY).
 
 pub mod comment_client;
+pub mod document_model;
 pub mod domain_client;
+pub mod editor_api;
 pub mod error;
 pub(crate) mod headers;
 pub mod post_list;
 pub mod write_client;
 
 pub use comment_client::{BlogCommentClient, BlogCommentResult};
+pub use document_model::Block;
 pub use domain_client::BlogDomainClient;
+pub use editor_api::{
+    BlogEditorApiClient, OglinkMeta, PlaceResult, StaticMapResult, StickerPack, UploadedFile,
+    UploadedImage,
+};
 pub use error::BlogError;
 pub use post_list::{BlogPost, BlogPostList, BlogPostListClient};
 pub use write_client::{
-    BlogPublishSettings, BlogWriteClient, BlogWriteResult, OpenType, PublishTime,
+    build_document_model_with_components, BlogPublishSettings, BlogWriteClient, BlogWriteResult,
+    OpenType, PublishTime,
 };
 
 /// 저장된 네이버 쿠키로 블로그 글에 댓글 1건을 등록한다(계정 단위 진입점, 큐 워커용).
@@ -97,6 +105,29 @@ pub async fn publish_blog_post_for_account(
         .await
 }
 
+/// 저장된 네이버 쿠키로 툴바 블록(텍스트/서식/삽입)으로 만든 새 글을 발행한다(HTTP RabbitWrite).
+///
+/// 네이버 편집기와 동일한 documentModel을 만들기 위해, 프론트가 보낸 블록 배열을
+/// [`document_model::blocks_to_components`]로 `components[]`에 옮기고 제목과 합쳐 발행한다.
+/// 사진/파일/링크/스티커/장소 블록은 프론트가 보조 API로 이미 해석한 데이터를 담고 온다.
+///
+/// # 쿠키 보안
+/// 계정 쿠키는 내부에서만 사용되며 반환 오류/로그에 절대 노출되지 않는다.
+pub async fn publish_blog_post_blocks_for_account(
+    account_id: &str,
+    blog_id: &str,
+    title: &str,
+    blocks: &[Block],
+    settings: &BlogPublishSettings,
+) -> Result<BlogWriteResult, BlogError> {
+    let cookie_header = resolve_cookie_header(account_id)?;
+    let components = document_model::blocks_to_components(blocks);
+    let document_model = build_document_model_with_components(title, components);
+    BlogWriteClient::new()
+        .publish_document(blog_id, document_model, settings, &cookie_header)
+        .await
+}
+
 /// 저장된 네이버 쿠키로 대체 블로그명 추천 목록을 조회한다(사용 중일 때 UI 제안용, best-effort).
 ///
 /// # 쿠키 보안
@@ -109,6 +140,115 @@ pub async fn recommend_blog_names_for_account(
     BlogDomainClient::new()
         .recommend(domain_id, Some(&cookie_header))
         .await
+}
+
+/// 저장된 네이버 쿠키로 링크(oglink) 메타데이터를 조회한다(링크 블록 삽입용).
+///
+/// # 쿠키 보안
+/// 계정 쿠키는 내부에서만 사용되며 반환 오류/로그에 절대 노출되지 않는다.
+pub async fn fetch_oglink_for_account(
+    account_id: &str,
+    url: &str,
+) -> Result<OglinkMeta, BlogError> {
+    let cookie = resolve_cookie_header(account_id)?;
+    BlogEditorApiClient::new().oglink(url, Some(&cookie)).await
+}
+
+/// 저장된 네이버 쿠키로 장소를 검색한다(장소 블록 삽입용).
+///
+/// # 쿠키 보안
+/// 계정 쿠키는 내부에서만 사용되며 반환 오류/로그에 절대 노출되지 않는다.
+pub async fn search_places_for_account(
+    account_id: &str,
+    query: &str,
+) -> Result<Vec<PlaceResult>, BlogError> {
+    let cookie = resolve_cookie_header(account_id)?;
+    BlogEditorApiClient::new().places(query, Some(&cookie)).await
+}
+
+/// 저장된 네이버 쿠키로 장소 좌표의 정적 지도 URL을 얻는다(장소 블록 썸네일용).
+///
+/// # 쿠키 보안
+/// 계정 쿠키는 내부에서만 사용되며 반환 오류/로그에 절대 노출되지 않는다.
+pub async fn fetch_staticmap_for_account(
+    account_id: &str,
+    latitude: &str,
+    longitude: &str,
+) -> Result<StaticMapResult, BlogError> {
+    let cookie = resolve_cookie_header(account_id)?;
+    BlogEditorApiClient::new()
+        .staticmap(latitude, longitude, Some(&cookie))
+        .await
+}
+
+/// 저장된 네이버 쿠키로 스티커 팩 목록을 조회한다(스티커 블록 삽입용).
+///
+/// # 쿠키 보안
+/// 계정 쿠키는 내부에서만 사용되며 반환 오류/로그에 절대 노출되지 않는다.
+pub async fn fetch_sticker_packs_for_account(
+    account_id: &str,
+) -> Result<Vec<StickerPack>, BlogError> {
+    let cookie = resolve_cookie_header(account_id)?;
+    BlogEditorApiClient::new().stickers(Some(&cookie)).await
+}
+
+/// 저장된 네이버 쿠키로 한 스티커 팩의 seq 목록을 조회한다(스티커 블록 삽입용).
+///
+/// # 쿠키 보안
+/// 계정 쿠키는 내부에서만 사용되며 반환 오류/로그에 절대 노출되지 않는다.
+pub async fn fetch_sticker_seqs_for_account(
+    account_id: &str,
+    pack_code: &str,
+) -> Result<Vec<u32>, BlogError> {
+    let cookie = resolve_cookie_header(account_id)?;
+    BlogEditorApiClient::new()
+        .sticker_pack_seqs(pack_code, Some(&cookie))
+        .await
+}
+
+/// 저장된 네이버 쿠키로 로컬 파일을 업로드하고 fileId 등을 얻는다(파일 블록 삽입용).
+///
+/// # 쿠키 보안
+/// 계정 쿠키는 내부에서만 사용되며 반환 오류/로그에 절대 노출되지 않는다.
+pub async fn upload_blog_file_for_account(
+    account_id: &str,
+    file_path: &str,
+) -> Result<UploadedFile, BlogError> {
+    let cookie = resolve_cookie_header(account_id)?;
+    let (file_name, bytes) = read_local_file(file_path)?;
+    BlogEditorApiClient::new()
+        .upload_file(&file_name, bytes, Some(&cookie))
+        .await
+}
+
+/// 저장된 네이버 쿠키로 로컬 이미지를 업로드하고 image 컴포넌트에 필요한 값을 얻는다(사진 블록용).
+///
+/// # 쿠키 보안
+/// 계정 쿠키는 내부에서만 사용되며 반환 오류/로그에 절대 노출되지 않는다.
+pub async fn upload_blog_photo_for_account(
+    account_id: &str,
+    file_path: &str,
+) -> Result<UploadedImage, BlogError> {
+    let cookie = resolve_cookie_header(account_id)?;
+    let (file_name, bytes) = read_local_file(file_path)?;
+    let client = BlogEditorApiClient::new();
+    let session_key = client.photo_session_key(Some(&cookie)).await?;
+    client
+        .upload_photo(&session_key, &file_name, bytes, Some(&cookie))
+        .await
+}
+
+/// 로컬 파일을 읽어 (파일명, 바이트)로 돌려준다. 경로/IO 오류는 사용자 메시지로 감싼다.
+fn read_local_file(file_path: &str) -> Result<(String, Vec<u8>), BlogError> {
+    let path = std::path::Path::new(file_path);
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(str::to_owned)
+        .ok_or_else(|| BlogError::new(format!("파일 경로가 올바르지 않습니다: {file_path}")))?;
+    let bytes = std::fs::read(path)
+        .map_err(|e| BlogError::new(format!("파일을 읽지 못했습니다: {e}")))?;
+    Ok((file_name, bytes))
 }
 
 /// 계정의 저장 세션 쿠키를 Cookie 헤더 문자열로 해석한다(카페 article_list와 동일 규약).

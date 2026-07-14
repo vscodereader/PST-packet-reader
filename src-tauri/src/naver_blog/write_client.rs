@@ -146,6 +146,24 @@ impl BlogWriteClient {
         cookie: &str,
     ) -> Result<BlogWriteResult, BlogError> {
         let document_model = build_document_model(title, content);
+        self.publish_document(blog_id, document_model, settings, cookie)
+            .await
+    }
+
+    /// 이미 조립된 documentModel(제목 + 본문 컴포넌트들)을 그대로 발행한다(툴바 블록 경로).
+    ///
+    /// 순수 텍스트 [`Self::publish`]와 발행 로직(폼·헤더·토큰·응답 파싱)을 공유하며, 차이는
+    /// documentModel을 호출부가 만들어 넘긴다는 점뿐이다.
+    ///
+    /// # 쿠키 보안
+    /// `cookie`는 사용자 인증 자격 증명이며 에러/로그에 노출하지 않는다.
+    pub async fn publish_document(
+        &self,
+        blog_id: &str,
+        document_model: Value,
+        settings: &BlogPublishSettings,
+        cookie: &str,
+    ) -> Result<BlogWriteResult, BlogError> {
         let population_params = build_population_params(settings);
         let token_id = generate_token_id();
         let form = [
@@ -224,6 +242,43 @@ pub fn build_document_model(title: &str, content: &str) -> Value {
             "language": "ko-KR",
             "id": ulid(),
             "components": [ title_component, text_component ]
+        }
+    })
+}
+
+/// 제목 컴포넌트 + 이미 조립된 본문 컴포넌트들로 documentModel(JSON)을 만든다(툴바 블록 경로).
+///
+/// [`build_document_model`]과 문서 골격(version/theme/language/id)은 동일하고, 본문만
+/// 호출부(블록 → 컴포넌트 빌더)가 만든 `content_components`를 그대로 싣는다. 본문이 비어 있으면
+/// 발행 가능한 최소 문서를 위해 빈 text 컴포넌트 하나를 넣는다.
+pub fn build_document_model_with_components(title: &str, content_components: Vec<Value>) -> Value {
+    let title_component = json!({
+        "id": se_id(),
+        "layout": "default",
+        "title": [ paragraph(title) ],
+        "subTitle": null,
+        "align": "left",
+        "@ctype": "documentTitle"
+    });
+    let mut components = vec![title_component];
+    if content_components.is_empty() {
+        components.push(json!({
+            "id": se_id(),
+            "layout": "default",
+            "value": [ paragraph("") ],
+            "@ctype": "text"
+        }));
+    } else {
+        components.extend(content_components);
+    }
+    json!({
+        "documentId": "",
+        "document": {
+            "version": "2.10.2",
+            "theme": "default",
+            "language": "ko-KR",
+            "id": ulid(),
+            "components": components
         }
     })
 }
@@ -325,7 +380,7 @@ fn generate_token_id() -> String {
 }
 
 /// SmartEditor 요소 id("SE-" + uuid v4 형식).
-fn se_id() -> String {
+pub(crate) fn se_id() -> String {
     format!("SE-{}", uuid_v4())
 }
 
@@ -347,7 +402,7 @@ fn uuid_v4() -> String {
 }
 
 /// ULID(26자 Crockford base32) — documentModel.document.id 용. 시간+랜덤.
-fn ulid() -> String {
+pub(crate) fn ulid() -> String {
     const ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
