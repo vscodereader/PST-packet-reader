@@ -147,6 +147,23 @@ fn report_one_account(account_id: &str, links: &[String], reason_code: &str) -> 
             Ok(()) => (true, "신고 완료".to_owned()),
             Err(error) => (false, error.to_string()),
         };
+        // 링크별 outcome을 로그로 남긴다 — 실패는 원문 사유를 트레이스 OFF여도 항상 warn!으로.
+        if success {
+            tracing::info!(
+                target: "report",
+                account = %crate::auth::mask_id(account_id),
+                link = %link,
+                "[REPORT] 링크 신고 성공"
+            );
+        } else {
+            tracing::warn!(
+                target: "report",
+                account = %crate::auth::mask_id(account_id),
+                link = %link,
+                reason = %message,
+                "[REPORT] 링크 신고 실패 — 원문 사유"
+            );
+        }
         outcomes.push(ReportOutcome {
             account_id: account_id.to_owned(),
             link: link.clone(),

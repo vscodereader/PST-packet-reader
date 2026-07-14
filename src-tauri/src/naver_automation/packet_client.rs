@@ -1736,7 +1736,7 @@ impl NaverPacketClient {
 /// 원문 그대로 로그에 남는다. 응답 바디는 각 호출부가 이미 `body={...}`로 남기므로(요청 원문 + 응답
 /// 헤더 + 기존 응답 바디 = 100% raw), 여기선 중복해서 읽지 않는다. 끄려면 환경변수
 /// `PSTMACRO_PACKET_TRACE=0`(또는 `false`/`off`).
-fn packet_trace_enabled() -> bool {
+pub(crate) fn packet_trace_enabled() -> bool {
     match std::env::var("PSTMACRO_PACKET_TRACE") {
         Ok(v) => {
             let v = v.trim();
@@ -1790,7 +1790,7 @@ fn redact_credentials(input: &str) -> String {
 /// 나가는 요청 하나를 원문 그대로 `target: "packet"`(CDP 트레이스의 `"cdp"` 와 짝) 에 남긴다.
 /// **주의(유출 위험)**: `Cookie` 를 포함한 모든 헤더와 바디를 원문 그대로 남긴다(사용자가 raw 를
 /// 원하고 쿠키로 디버그) — 로그 파일을 공유하면 세션 쿠키가 노출된다. 로그인류 비밀값만 가린다.
-fn log_packet_request(req: &reqwest::blocking::Request) {
+pub(crate) fn log_packet_request(req: &reqwest::blocking::Request) {
     let mut lines = format!("→ {} {}", req.method(), req.url());
     for (name, value) in req.headers() {
         let raw = String::from_utf8_lossy(value.as_bytes());
@@ -1810,7 +1810,7 @@ fn log_packet_request(req: &reqwest::blocking::Request) {
 }
 
 /// 응답 라인 + 헤더 전체를 원문 그대로 `target: "packet"` 에 남긴다(바디는 호출부가 이미 남김).
-fn log_packet_response(resp: &reqwest::blocking::Response) {
+pub(crate) fn log_packet_response(resp: &reqwest::blocking::Response) {
     let mut lines = format!("← {}", resp.status());
     for (name, value) in resp.headers() {
         lines.push_str(&format!(
@@ -1825,7 +1825,7 @@ fn log_packet_response(resp: &reqwest::blocking::Response) {
 /// 응답 라인·헤더를 남긴다. 실행 클라이언트를 인자로 받아, `self.client`(리다이렉트 추종)와 npay
 /// 가입용 `redirect::none` 클라이언트가 각자 자기 정책으로 실행되게 한다(둘을 섞으면 가입 홉 추종이
 /// 깨진다). 응답 바디는 소비하지 않는다 — 호출부가 그대로 읽어 `body={...}` 로 남긴다.
-trait TracedSend {
+pub(crate) trait TracedSend {
     fn send_traced(self, client: &Client) -> reqwest::Result<reqwest::blocking::Response>;
 }
 

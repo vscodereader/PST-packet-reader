@@ -1,5 +1,5 @@
 import { MantineProvider } from "@mantine/core";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -9,6 +9,15 @@ import { ReportModal } from "./report-modal";
 
 vi.mock("@tauri-apps/api/core", async () => ({
   invoke: (await import("@/test/ipc")).invoke,
+}));
+
+// report-finished 이벤트 핸들러를 붙잡아, 백엔드 완료 이벤트 도착을 테스트에서 흉내낸다.
+const listeners: Record<string, (e: { payload: unknown }) => void> = {};
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: (name: string, cb: (e: { payload: unknown }) => void) => {
+    listeners[name] = cb;
+    return Promise.resolve(() => {});
+  },
 }));
 
 // Mantine notifications를 목킹해 완료 토스트 호출을 검증한다.
@@ -45,13 +54,17 @@ describe("ReportModal", () => {
     expect(
       screen.getByRole("radio", { name: "스팸홍보/도배입니다" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "음란물입니다" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: "음란물입니다" }),
+    ).toBeInTheDocument();
     expect(screen.getAllByRole("radio")).toHaveLength(7);
     // 로그인된 종목토론방 계정이 체크박스로 뜨고, 실패(error) 계정은 제외.
     expect(await screen.findByText("invest_king7")).toBeInTheDocument();
     expect(screen.queryByText("day_trader_x")).not.toBeInTheDocument();
     // IP 회전 체크박스.
-    expect(screen.getByRole("checkbox", { name: /IP 회전/ })).toBeInTheDocument();
+    expect(
+      screen.getByRole("checkbox", { name: /IP 회전/ }),
+    ).toBeInTheDocument();
   });
 
   it("adds a link as a chip on Enter and clears the input", async () => {
@@ -114,13 +127,54 @@ describe("ReportModal", () => {
         ),
       ).toBe(true),
     );
-    // 비차단: 시작 안내 토스트(파랑) + 모달 닫힘.
+    // 비차단: 시작 안내 토스트(파랑). 모달은 열린 채 "신고 중…"으로 진행 상태를 보이고 닫지 않는다
+    // (완료 이벤트가 오면 결과 패널을 이 모달 안에 띄운다).
     await waitFor(() =>
       expect(showMock).toHaveBeenCalledWith(
         expect.objectContaining({ color: "blue" }),
       ),
     );
-    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(
+      await screen.findByRole("button", { name: "신고 중…" }),
+    ).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("shows a per-account×link result panel with raw failure reason on report-finished", async () => {
+    renderModal();
+    await screen.findByText("invest_king7");
+    // 백엔드 완료 이벤트를 흉내낸다(계정×링크별 성공/실패 + 실패 사유 원문).
+    const rawReason =
+      '신고 실패(status=400): {"success":false,"message":"거부됨"}';
+    act(() => {
+      listeners["report-finished"]?.({
+        payload: {
+          total: 2,
+          succeeded: 1,
+          outcomes: [
+            {
+              accountId: "invest_king7",
+              link: LINK1,
+              success: true,
+              message: "신고 완료",
+            },
+            {
+              accountId: "invest_king7",
+              link: LINK2,
+              success: false,
+              message: rawReason,
+            },
+          ],
+        },
+      });
+    });
+    // 결과 요약 + 실패 사유 원문이 패널에 보인다.
+    expect(await screen.findByText("총 2건 중 1건 성공")).toBeInTheDocument();
+    expect(screen.getByText(rawReason)).toBeInTheDocument();
+    // 일부만 성공 → 노랑 완료 토스트.
+    expect(showMock).toHaveBeenCalledWith(
+      expect.objectContaining({ color: "yellow" }),
+    );
   });
 
   it("defaults to the first reason (AA01) when none is changed", async () => {
