@@ -18,7 +18,6 @@ import {
   Switch,
   Text,
   TextInput,
-  Textarea,
   Title,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
@@ -27,6 +26,9 @@ import { useEffect, useMemo, useState } from "react";
 import type { Account } from "@/shared/bindings/Account";
 import type { ViewId } from "@/shared/data/types";
 import { ipc } from "@/shared/ipc";
+
+import { BlockEditor } from "./block-editor";
+import type { Block } from "./blocks";
 
 /** 공개설정 UI 순서(전체공개>이웃>서로이웃>비공개) = openType 0/1/2/3. */
 const OPEN_TYPES = [
@@ -45,7 +47,7 @@ export function Blog(_props: { go?: (view: ViewId) => void }) {
   const [nameResult, setNameResult] = useState<null | boolean>(null);
 
   const [title, setTitle] = useState("");
-  const [content, setContent] = useState("");
+  const [blocks, setBlocks] = useState<Block[]>([]);
 
   const [openType, setOpenType] = useState("0");
   const [commentYn, setCommentYn] = useState(true);
@@ -63,7 +65,11 @@ export function Blog(_props: { go?: (view: ViewId) => void }) {
   const [rMinute, setRMinute] = useState<number>(now.getMinutes());
 
   const [publishing, setPublishing] = useState(false);
-  const [result, setResult] = useState<null | { ok: boolean; msg: string; url?: string }>(null);
+  const [result, setResult] = useState<null | {
+    ok: boolean;
+    msg: string;
+    url?: string;
+  }>(null);
 
   useEffect(() => {
     // 밴드는 별도 쿠키(cookies-band)라 제외 — 블로그는 네이버 저장 쿠키(cookies/{id})를 쓴다.
@@ -74,7 +80,11 @@ export function Blog(_props: { go?: (view: ViewId) => void }) {
   }, []);
 
   const accountOptions = useMemo(
-    () => accounts.map((a) => ({ value: a.loginId, label: `${a.loginId} (${a.platform})` })),
+    () =>
+      accounts.map((a) => ({
+        value: a.loginId,
+        label: `${a.loginId} (${a.platform})`,
+      })),
     [accounts],
   );
 
@@ -93,7 +103,10 @@ export function Blog(_props: { go?: (view: ViewId) => void }) {
       const ok = await ipc.blog.checkName(accountId, blogId.trim());
       setNameResult(ok);
     } catch (e) {
-      notifications.show({ color: "red", message: `블로그명 확인 실패: ${String(e)}` });
+      notifications.show({
+        color: "red",
+        message: `블로그명 확인 실패: ${String(e)}`,
+      });
     } finally {
       setNameChecking(false);
     }
@@ -105,7 +118,10 @@ export function Blog(_props: { go?: (view: ViewId) => void }) {
       return;
     }
     if (!blogId.trim() || !title.trim()) {
-      notifications.show({ color: "red", message: "블로그명과 제목을 입력하세요." });
+      notifications.show({
+        color: "red",
+        message: "블로그명과 제목을 입력하세요.",
+      });
       return;
     }
     setPublishing(true);
@@ -115,7 +131,8 @@ export function Blog(_props: { go?: (view: ViewId) => void }) {
         accountId,
         blogId: blogId.trim(),
         title,
-        content,
+        content: "",
+        blocks,
         openType: Number(openType),
         commentYn,
         searchYn,
@@ -124,13 +141,23 @@ export function Blog(_props: { go?: (view: ViewId) => void }) {
         tags: tags.trim(),
         reserve:
           timeType === "reserve"
-            ? { year: rYear, month: rMonth, date: rDate, hour: rHour, minute: rMinute }
+            ? {
+                year: rYear,
+                month: rMonth,
+                date: rDate,
+                hour: rHour,
+                minute: rMinute,
+              }
             : undefined,
       });
       const url = r.logNo
         ? `https://blog.naver.com/${blogId.trim()}/${r.logNo}`
         : r.redirectUrl;
-      setResult({ ok: true, msg: r.logNo ? `발행 성공 (logNo ${r.logNo})` : "예약 발행 등록됨", url });
+      setResult({
+        ok: true,
+        msg: r.logNo ? `발행 성공 (logNo ${r.logNo})` : "예약 발행 등록됨",
+        url,
+      });
       notifications.show({ color: "teal", message: "블로그 글 발행 성공" });
     } catch (e) {
       setResult({ ok: false, msg: String(e) });
@@ -144,8 +171,8 @@ export function Blog(_props: { go?: (view: ViewId) => void }) {
     <Stack p="md" gap="md" maw={720}>
       <Title order={3}>네이버 블로그</Title>
       <Text size="sm" c="dimmed">
-        선택 로그인으로 저장된 쿠키로 새 글을 발행합니다(재로그인 없음). 실패 시 원문 로그는
-        pstmacro.log 의 [BLOG] 항목에서 확인하세요.
+        선택 로그인으로 저장된 쿠키로 새 글을 발행합니다(재로그인 없음). 실패 시
+        원문 로그는 pstmacro.log 의 [BLOG] 항목에서 확인하세요.
       </Text>
 
       <Paper withBorder p="md" radius="md">
@@ -181,14 +208,20 @@ export function Blog(_props: { go?: (view: ViewId) => void }) {
               style={{ flex: 1 }}
             />
             {isNewBlog && (
-              <Button variant="light" loading={nameChecking} onClick={onCheckName}>
+              <Button
+                variant="light"
+                loading={nameChecking}
+                onClick={onCheckName}
+              >
                 사용 가능 확인
               </Button>
             )}
           </Group>
           {isNewBlog && nameResult !== null && (
             <Text size="sm" c={nameResult ? "teal" : "red"}>
-              {nameResult ? "✓ 사용 가능한 블로그명입니다." : "✗ 이미 사용 중인 블로그명입니다."}
+              {nameResult
+                ? "✓ 사용 가능한 블로그명입니다."
+                : "✗ 이미 사용 중인 블로그명입니다."}
             </Text>
           )}
         </Stack>
@@ -201,12 +234,16 @@ export function Blog(_props: { go?: (view: ViewId) => void }) {
             value={title}
             onChange={(e) => setTitle(e.currentTarget.value)}
           />
-          <Textarea
-            label="내용"
-            rows={8}
-            value={content}
-            onChange={(e) => setContent(e.currentTarget.value)}
-          />
+          <div>
+            <Text size="sm" mb={4}>
+              내용
+            </Text>
+            <BlockEditor
+              accountId={accountId}
+              blocks={blocks}
+              onChange={setBlocks}
+            />
+          </div>
         </Stack>
       </Paper>
 
@@ -265,11 +302,44 @@ export function Blog(_props: { go?: (view: ViewId) => void }) {
           </Radio.Group>
           {timeType === "reserve" && (
             <Group gap="xs">
-              <NumberInput label="년" value={rYear} onChange={(v) => setRYear(Number(v))} w={90} />
-              <NumberInput label="월" value={rMonth} onChange={(v) => setRMonth(Number(v))} min={1} max={12} w={70} />
-              <NumberInput label="일" value={rDate} onChange={(v) => setRDate(Number(v))} min={1} max={31} w={70} />
-              <NumberInput label="시" value={rHour} onChange={(v) => setRHour(Number(v))} min={0} max={23} w={70} />
-              <NumberInput label="분" value={rMinute} onChange={(v) => setRMinute(Number(v))} min={0} max={59} w={70} />
+              <NumberInput
+                label="년"
+                value={rYear}
+                onChange={(v) => setRYear(Number(v))}
+                w={90}
+              />
+              <NumberInput
+                label="월"
+                value={rMonth}
+                onChange={(v) => setRMonth(Number(v))}
+                min={1}
+                max={12}
+                w={70}
+              />
+              <NumberInput
+                label="일"
+                value={rDate}
+                onChange={(v) => setRDate(Number(v))}
+                min={1}
+                max={31}
+                w={70}
+              />
+              <NumberInput
+                label="시"
+                value={rHour}
+                onChange={(v) => setRHour(Number(v))}
+                min={0}
+                max={23}
+                w={70}
+              />
+              <NumberInput
+                label="분"
+                value={rMinute}
+                onChange={(v) => setRMinute(Number(v))}
+                min={0}
+                max={59}
+                w={70}
+              />
             </Group>
           )}
         </Stack>
@@ -282,7 +352,10 @@ export function Blog(_props: { go?: (view: ViewId) => void }) {
       </Group>
 
       {result && (
-        <Alert color={result.ok ? "teal" : "red"} title={result.ok ? "성공" : "실패"}>
+        <Alert
+          color={result.ok ? "teal" : "red"}
+          title={result.ok ? "성공" : "실패"}
+        >
           <Text size="sm">{result.msg}</Text>
           {result.url && (
             <Anchor href={result.url} target="_blank" size="sm">

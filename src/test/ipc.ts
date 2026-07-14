@@ -1395,6 +1395,11 @@ export const invoke = vi.fn(
         return clone(outcomes);
       }
 
+      // --- 신고하기 (비차단 — 커맨드는 즉시 반환, 결과는 이벤트로 전달) ------
+      case "report_posts":
+        // 백엔드는 백그라운드로 n×m건을 신고하고 즉시 void를 반환한다. 목에서도 no-op.
+        return undefined;
+
       // --- 조회수 부스트 (모킹 — 실제 시크릿창 실행 없이 링크별 성공 반환) --
       case "boost_view_count": {
         const links = Array.isArray(args?.links)

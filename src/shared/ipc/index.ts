@@ -98,6 +98,40 @@ export interface ViewBoostOutcome {
   message: string;
 }
 
+/** 종목토론방 글 신고 사유(백엔드 REPORT_REASONS 미러, service=FIN 실측 7개). */
+export interface ReportReason {
+  /** 신고 사유 코드(예: "AA01") — reportReasonCode로 전송된다. */
+  code: string;
+  /** 사용자 표시 문구. */
+  label: string;
+}
+
+/** 종목토론방 신고 사유 7개(설계서 §2.4 실측). UI 라디오·검증에 그대로 쓴다. */
+export const REPORT_REASONS: ReportReason[] = [
+  { code: "AA01", label: "혐오/차별적/생명경시/욕설 표현입니다" },
+  { code: "AA29", label: "스팸홍보/도배입니다" },
+  { code: "AA14", label: "음란물입니다" },
+  { code: "AA68", label: "불법정보를 포함하고 있습니다" },
+  { code: "AA33", label: "청소년에게 유해한 내용입니다" },
+  { code: "AA24", label: "개인정보가 노출되었습니다" },
+  { code: "AB28", label: "불쾌한 표현이 있습니다" },
+];
+
+/** "신고하기"의 (계정×링크)별 결과(백엔드 ReportOutcome 미러). accountId는 loginId. */
+export interface ReportOutcome {
+  accountId: string;
+  link: string;
+  success: boolean;
+  message: string;
+}
+
+/** 신고 배치 완료 이벤트(report-finished) 페이로드(백엔드 ReportFinished 미러). */
+export interface ReportFinished {
+  total: number;
+  succeeded: number;
+  outcomes: ReportOutcome[];
+}
+
 /** 밴드 가입+게시 요청. accountId는 band 로그인 쿠키 키(loginId). */
 export interface BandPublishRequest {
   accountId: string;
@@ -164,6 +198,65 @@ function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
  * Outside Tauri (browser dev / Vitest) `@tauri-apps/api/core` is mocked by the
  * in-memory backend in `src/test/ipc.ts`.
  */
+/** 링크(oglink) 메타(백엔드 OglinkMeta, camelCase). */
+export interface OglinkMeta {
+  title: string;
+  domain: string;
+  description: string;
+  thumbnailSrc: string;
+  thumbnailWidth: number;
+  thumbnailHeight: number;
+  oglinkSign: string;
+}
+
+/** 장소 검색 결과 1건(백엔드 PlaceResult, camelCase). */
+export interface PlaceResult {
+  id: string;
+  name: string;
+  tel: string;
+  roadAddress: string;
+  address: string;
+  /** 경도(x). */
+  x: string;
+  /** 위도(y). */
+  y: string;
+  /** place.type(예: "s"). */
+  placeType: string;
+  thumUrl: string;
+}
+
+/** 정적 지도 이미지 URL(백엔드 StaticMapResult). */
+export interface StaticMapResult {
+  src: string;
+}
+
+/** 스티커 팩 1개(백엔드 StickerPack). */
+export interface StickerPack {
+  packCode: string;
+  stickerCount: number;
+  isFree: boolean;
+}
+
+/** 파일 업로드 결과(백엔드 UploadedFile). */
+export interface UploadedFile {
+  fileId: string;
+  fileName: string;
+  fileSize: number;
+}
+
+/** 사진 업로드 결과(백엔드 UploadedImage). */
+export interface UploadedImage {
+  src: string;
+  path: string;
+  domain: string;
+  fileSize: number;
+  width: number;
+  height: number;
+  originalWidth: number;
+  originalHeight: number;
+  fileName: string;
+}
+
 /** 블로그 새 글 발행 결과(백엔드 BlogWriteResult, camelCase). */
 export interface BlogWriteResult {
   /** 게시글 번호. 예약 발행은 아직 없어 null일 수 있다. */
@@ -384,7 +477,34 @@ export const ipc = {
             minute: number;
           }
         | undefined;
+      /** 편집기 툴바 블록(있으면 documentModel components[]로 발행, 없으면 content 문단). */
+      blocks?: unknown[] | undefined;
     }) => call<BlogWriteResult>("blog_publish", { ...input }),
+    /** 링크(oglink) 메타데이터 조회(링크 블록 삽입). */
+    oglink: (accountId: string, url: string) =>
+      call<OglinkMeta>("blog_oglink", { accountId, url }),
+    /** 장소 검색(장소 블록 삽입). */
+    places: (accountId: string, query: string) =>
+      call<PlaceResult[]>("blog_places", { accountId, query }),
+    /** 장소 좌표의 정적 지도 URL(장소 블록 썸네일). */
+    staticmap: (accountId: string, latitude: string, longitude: string) =>
+      call<StaticMapResult>("blog_staticmap", {
+        accountId,
+        latitude,
+        longitude,
+      }),
+    /** 스티커 팩 목록(스티커 블록 삽입). */
+    stickers: (accountId: string) =>
+      call<StickerPack[]>("blog_stickers", { accountId }),
+    /** 스티커 팩 내 seq 목록(스티커 블록 삽입). */
+    stickerSeqs: (accountId: string, packCode: string) =>
+      call<number[]>("blog_sticker_seqs", { accountId, packCode }),
+    /** 로컬 파일 업로드(파일 블록 삽입). */
+    uploadFile: (accountId: string, filePath: string) =>
+      call<UploadedFile>("blog_upload_file", { accountId, filePath }),
+    /** 로컬 이미지 업로드(사진 블록 삽입). */
+    uploadPhoto: (accountId: string, filePath: string) =>
+      call<UploadedImage>("blog_upload_photo", { accountId, filePath }),
   },
   diagnostics: {
     /** Probe Chrome install/version + ADB device connection (UI 새로고침). */
@@ -431,6 +551,19 @@ export const ipc = {
      * 링크별 성공/진행 결과를 돌려준다. */
     boost: (links: string[], repeats: number) =>
       call<ViewBoostOutcome[]>("boost_view_count", { links, repeats }),
+  },
+  // 종목토론방 글 신고하기(설계서 naver-report-design.md). 비차단 — 커맨드는 즉시 반환하고
+  // 백그라운드로 n×m건을 신고한다. 결과는 report-finished 이벤트로 전달된다.
+  report: {
+    /** 링크 n개 × 계정 m개를 신고한다. accountIds는 loginId(쿠키 키), reasonCode는 사유 7개 중 하나.
+     * rotateIp가 true면 계정 사이에 ADB로 IP를 회전하고 새 IP에서 재로그인한다. 즉시 반환(비차단). */
+    submit: (
+      links: string[],
+      accountIds: string[],
+      reasonCode: string,
+      rotateIp: boolean,
+    ) =>
+      call<void>("report_posts", { links, accountIds, reasonCode, rotateIp }),
   },
   // 엑셀(.xlsx) 내보내기/가져오기 — Rust에서 파일 처리, 프론트에서 경로 공급.
   excel: {

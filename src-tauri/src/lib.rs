@@ -33,6 +33,8 @@ mod forum_stocks;
 pub mod naver_automation;
 // 조회수 부스트: 시크릿창을 여닫으며 게시글 조회수를 올린다(#400). launch_debug_chrome + CdpClient 재사용.
 pub mod view_boost;
+// 종목토론방 글 신고하기: by-item/profile/report 순수 HTTP + ncaptcha 토큰만 CDP(설계서 naver-report-design.md).
+pub mod naver_report;
 
 use discussion_batch::{
     parse_discussion_template_csv, run_discussion_batch, run_forum_publish, search_naver_stocks,
@@ -311,6 +313,31 @@ async fn boost_view_count(
     tauri::async_runtime::spawn_blocking(move || view_boost::boost_views(&links, repeats))
         .await
         .map_err(|error| format!("조회수 작업 스레드 오류: {error}"))
+}
+
+/// "신고하기" 버튼: 게시글 링크 n개 × 선택 계정 m개를 종목토론방 API로 신고한다(설계서
+/// naver-report-design.md). **비차단** — 입력을 검증한 뒤 백그라운드 태스크로 n×m 루프를 돌리고
+/// 즉시 반환한다(모달은 닫히고 화면은 안 막힘). 결과는 `report-finished` 이벤트로 프론트에 전달한다.
+/// `rotate_ip`가 true면 계정 사이에 ADB로 IP를 회전하고 새 IP에서 재로그인한다(설계서 §6).
+#[tauri::command]
+async fn report_posts<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    links: Vec<String>,
+    account_ids: Vec<String>,
+    reason_code: String,
+    rotate_ip: bool,
+) -> Result<(), String> {
+    let links: Vec<String> = links
+        .into_iter()
+        .map(|link| link.trim().to_owned())
+        .filter(|link| !link.is_empty())
+        .collect();
+    naver_report::validate_request(&links, &account_ids, &reason_code)?;
+    // 즉시 반환하고(모달 닫힘), 브라우저·HTTP 왕복이 있는 배치는 백그라운드 태스크에서 돌린다.
+    tauri::async_runtime::spawn(async move {
+        naver_report::run_report_batch(app, links, account_ids, reason_code, rotate_ip).await;
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -730,6 +757,7 @@ async fn blog_publish(
     tags: Option<String>,
     notice_post_yn: Option<bool>,
     reserve: Option<BlogReserveInput>,
+    blocks: Option<Vec<naver_blog::Block>>,
 ) -> Result<naver_blog::BlogWriteResult, String> {
     use naver_blog::{BlogPublishSettings, OpenType, PublishTime};
     let mut s = BlogPublishSettings::default();
@@ -765,7 +793,98 @@ async fn blog_publish(
             minute: r.minute,
         };
     }
-    naver_blog::publish_blog_post_for_account(&account_id, &blog_id, &title, &content, &s)
+    // 툴바 블록이 오면 편집기와 동일한 documentModel(components[])로 발행하고, 없으면 기존
+    // 텍스트-only 경로(content 문단)로 발행한다(하위 호환).
+    match blocks {
+        Some(blocks) if !blocks.is_empty() => {
+            naver_blog::publish_blog_post_blocks_for_account(
+                &account_id,
+                &blog_id,
+                &title,
+                &blocks,
+                &s,
+            )
+            .await
+        }
+        _ => {
+            naver_blog::publish_blog_post_for_account(&account_id, &blog_id, &title, &content, &s)
+                .await
+        }
+    }
+    .map_err(|e| e.message().to_owned())
+}
+
+/// 링크(oglink) 메타데이터를 조회한다(링크 블록 삽입 시 프리뷰·컴포넌트 채우기용).
+#[tauri::command]
+async fn blog_oglink(
+    account_id: String,
+    url: String,
+) -> Result<naver_blog::OglinkMeta, String> {
+    naver_blog::fetch_oglink_for_account(&account_id, &url)
+        .await
+        .map_err(|e| e.message().to_owned())
+}
+
+/// 장소를 검색한다(장소 블록 삽입 시 후보 목록).
+#[tauri::command]
+async fn blog_places(
+    account_id: String,
+    query: String,
+) -> Result<Vec<naver_blog::PlaceResult>, String> {
+    naver_blog::search_places_for_account(&account_id, &query)
+        .await
+        .map_err(|e| e.message().to_owned())
+}
+
+/// 장소 좌표의 정적 지도 이미지 URL을 얻는다(장소 블록 썸네일).
+#[tauri::command]
+async fn blog_staticmap(
+    account_id: String,
+    latitude: String,
+    longitude: String,
+) -> Result<naver_blog::StaticMapResult, String> {
+    naver_blog::fetch_staticmap_for_account(&account_id, &latitude, &longitude)
+        .await
+        .map_err(|e| e.message().to_owned())
+}
+
+/// 스티커 팩 목록을 조회한다(스티커 블록 삽입).
+#[tauri::command]
+async fn blog_stickers(account_id: String) -> Result<Vec<naver_blog::StickerPack>, String> {
+    naver_blog::fetch_sticker_packs_for_account(&account_id)
+        .await
+        .map_err(|e| e.message().to_owned())
+}
+
+/// 스티커 팩 내 seq 목록을 조회한다(스티커 블록 삽입).
+#[tauri::command]
+async fn blog_sticker_seqs(
+    account_id: String,
+    pack_code: String,
+) -> Result<Vec<u32>, String> {
+    naver_blog::fetch_sticker_seqs_for_account(&account_id, &pack_code)
+        .await
+        .map_err(|e| e.message().to_owned())
+}
+
+/// 로컬 파일을 업로드하고 fileId 등을 얻는다(파일 블록 삽입).
+#[tauri::command]
+async fn blog_upload_file(
+    account_id: String,
+    file_path: String,
+) -> Result<naver_blog::UploadedFile, String> {
+    naver_blog::upload_blog_file_for_account(&account_id, &file_path)
+        .await
+        .map_err(|e| e.message().to_owned())
+}
+
+/// 로컬 이미지를 업로드하고 image 컴포넌트에 필요한 값을 얻는다(사진 블록 삽입).
+#[tauri::command]
+async fn blog_upload_photo(
+    account_id: String,
+    file_path: String,
+) -> Result<naver_blog::UploadedImage, String> {
+    naver_blog::upload_blog_photo_for_account(&account_id, &file_path)
         .await
         .map_err(|e| e.message().to_owned())
 }
@@ -1071,6 +1190,13 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         band_resolve_name,
         blog_check_name,
         blog_publish,
+        blog_oglink,
+        blog_places,
+        blog_staticmap,
+        blog_stickers,
+        blog_sticker_seqs,
+        blog_upload_file,
+        blog_upload_photo,
         rotate_ip,
         manual_add_account,
         get_account_cookies,
@@ -1081,6 +1207,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         like_discussion_post,
         dislike_discussion_post,
         boost_view_count,
+        report_posts,
         search_stocks,
         forum_stocks::list_forum_stocks,
         forum_stocks::search_forum_stocks,
