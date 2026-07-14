@@ -96,10 +96,19 @@ interface BlockEditorProps {
 
 type ModalKind = null | "link" | "sticker" | "schedule";
 
-/** 본문 불변식: 최소 1개의 문단(text)이 있고 마지막 블록은 항상 문단이어야 한다(이어쓸 자리). */
+/** 본문 불변식: 최소 1개의 문단(text)이 있고 마지막 블록은 항상 문단이어야 한다(이어쓸 자리).
+ *  또한 **연속된 빈 문단은 하나로 접는다** — 삽입/이동으로 빈 칸이 계속 쌓이던 문제를 막는다. */
 function normalize(list: Block[]): Block[] {
-  let next = list;
-  if (next.length === 0) next = [createTextBlock()];
+  const collapsed: Block[] = [];
+  for (const b of list) {
+    const prev = collapsed[collapsed.length - 1];
+    const isEmptyPara = b.type === "text" && b.text.trim() === "";
+    const prevEmptyPara =
+      prev && prev.type === "text" && prev.text.trim() === "";
+    if (isEmptyPara && prevEmptyPara) continue; // 직전도 빈 문단이면 접는다
+    collapsed.push(b);
+  }
+  let next = collapsed.length === 0 ? [createTextBlock()] : collapsed;
   const last = next[next.length - 1];
   if (!last || last.type !== "text") next = [...next, createTextBlock()];
   return next;
@@ -135,15 +144,24 @@ export function BlockEditor({ accountId, blocks, onChange }: BlockEditorProps) {
     onChange(normalize(list));
   }
 
-  /** 기준 문단(activeId) 바로 아래에 블록을 삽입하고, 이어쓸 새 빈 문단을 그 아래에 만든다. */
+  /** 기준 문단(activeId) 바로 아래에 블록을 삽입한다. 삽입 지점 뒤에 이미 이어쓸 문단이 있으면
+   *  **새 빈 문단을 만들지 않고** 그 문단으로 커서를 옮긴다(빈 칸이 매번 늘어나던 문제 해결). 뒤에
+   *  이어쓸 문단이 없을 때만 하나 만든다. */
   function insertAtCursor(block: Block) {
     const idx = activeId ? blocks.findIndex((b) => b.id === activeId) : -1;
     const pos = idx >= 0 ? idx + 1 : blocks.length;
-    const trailing = createTextBlock();
     const next = [...blocks];
-    next.splice(pos, 0, block, trailing);
-    update(next);
-    setFocusedId(trailing.id);
+    const after = next[pos];
+    if (after && after.type === "text") {
+      next.splice(pos, 0, block);
+      update(next);
+      setFocusedId(after.id);
+    } else {
+      const trailing = createTextBlock();
+      next.splice(pos, 0, block, trailing);
+      update(next);
+      setFocusedId(trailing.id);
+    }
   }
 
   async function onInsertPhoto() {
@@ -243,35 +261,50 @@ export function BlockEditor({ accountId, blocks, onChange }: BlockEditorProps) {
       <Stack gap="xs">
         {blocks.map((block) =>
           block.type === "text" ? (
-            <Textarea
-              key={block.id}
-              aria-label="문단 내용"
-              placeholder="내용을 입력하세요. 커서를 둔 자리에서 위 툴바로 사진·링크 등을 삽입할 수 있습니다."
-              rows={3}
-              value={block.text}
-              onFocus={() => setFocusedId(block.id)}
-              styles={{
-                input: {
-                  border:
-                    block.id === activeId
-                      ? "1px solid var(--mantine-color-blue-4)"
-                      : undefined,
-                  fontWeight: block.bold ? 700 : undefined,
-                  fontStyle: block.italic ? "italic" : undefined,
-                  textDecoration:
-                    [
-                      block.underline ? "underline" : "",
-                      block.strikeThrough ? "line-through" : "",
-                    ]
-                      .filter(Boolean)
-                      .join(" ") || undefined,
-                  textAlign: block.align,
-                },
-              }}
-              onChange={(e) =>
-                update(setText(blocks, block.id, e.currentTarget.value))
-              }
-            />
+            <Group key={block.id} gap={4} align="flex-start" wrap="nowrap">
+              <Textarea
+                aria-label="문단 내용"
+                placeholder="내용을 입력하세요. 커서를 둔 자리에서 위 툴바로 사진·링크 등을 삽입할 수 있습니다."
+                rows={3}
+                value={block.text}
+                onFocus={() => setFocusedId(block.id)}
+                style={{ flex: 1 }}
+                styles={{
+                  input: {
+                    border:
+                      block.id === activeId
+                        ? "1px solid var(--mantine-color-blue-4)"
+                        : undefined,
+                    fontWeight: block.bold ? 700 : undefined,
+                    fontStyle: block.italic ? "italic" : undefined,
+                    textDecoration:
+                      [
+                        block.underline ? "underline" : "",
+                        block.strikeThrough ? "line-through" : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ") || undefined,
+                    textAlign: block.align,
+                  },
+                }}
+                onChange={(e) =>
+                  update(setText(blocks, block.id, e.currentTarget.value))
+                }
+              />
+              {/* 문단 삭제 — 삽입하다 생긴 빈 문단을 지울 수 있게(마지막 1개는 normalize가 보장). */}
+              <Tooltip label="이 문단 삭제">
+                <ActionIcon
+                  variant="subtle"
+                  color="gray"
+                  size="sm"
+                  mt={4}
+                  aria-label="문단 삭제"
+                  onClick={() => update(removeBlock(blocks, block.id))}
+                >
+                  <IconTrash size={15} />
+                </ActionIcon>
+              </Tooltip>
+            </Group>
           ) : (
             <InsertedBlockRow
               key={block.id}
