@@ -48,6 +48,28 @@ describe("Posts", () => {
     expect(screen.getByRole("button", { name: /글쓰기/ })).toBeInTheDocument();
   });
 
+  it("renders 신고하기 between 엑셀 가져오기 and 조회수", async () => {
+    await renderPosts();
+    const excel = screen.getByRole("button", { name: /엑셀 가져오기/ });
+    const report = screen.getByRole("button", { name: /신고하기/ });
+    const viewCount = screen.getByRole("button", { name: "조회수" });
+    // DOM 순서: 엑셀 가져오기 → 신고하기 → 조회수 (툴바 삽입 위치 검증).
+    expect(
+      excel.compareDocumentPosition(report) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      report.compareDocumentPosition(viewCount) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("opens the report modal from 신고하기", async () => {
+    await renderPosts();
+    await userEvent.click(screen.getByRole("button", { name: /신고하기/ }));
+    expect(await screen.findByRole("dialog")).toHaveTextContent("신고 사유");
+  });
+
   it("opens the writer modal from 글쓰기", async () => {
     await renderPosts();
     await userEvent.click(screen.getByRole("button", { name: /글쓰기/ }));

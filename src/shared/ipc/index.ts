@@ -98,6 +98,40 @@ export interface ViewBoostOutcome {
   message: string;
 }
 
+/** 종목토론방 글 신고 사유(백엔드 REPORT_REASONS 미러, service=FIN 실측 7개). */
+export interface ReportReason {
+  /** 신고 사유 코드(예: "AA01") — reportReasonCode로 전송된다. */
+  code: string;
+  /** 사용자 표시 문구. */
+  label: string;
+}
+
+/** 종목토론방 신고 사유 7개(설계서 §2.4 실측). UI 라디오·검증에 그대로 쓴다. */
+export const REPORT_REASONS: ReportReason[] = [
+  { code: "AA01", label: "혐오/차별적/생명경시/욕설 표현입니다" },
+  { code: "AA29", label: "스팸홍보/도배입니다" },
+  { code: "AA14", label: "음란물입니다" },
+  { code: "AA68", label: "불법정보를 포함하고 있습니다" },
+  { code: "AA33", label: "청소년에게 유해한 내용입니다" },
+  { code: "AA24", label: "개인정보가 노출되었습니다" },
+  { code: "AB28", label: "불쾌한 표현이 있습니다" },
+];
+
+/** "신고하기"의 (계정×링크)별 결과(백엔드 ReportOutcome 미러). accountId는 loginId. */
+export interface ReportOutcome {
+  accountId: string;
+  link: string;
+  success: boolean;
+  message: string;
+}
+
+/** 신고 배치 완료 이벤트(report-finished) 페이로드(백엔드 ReportFinished 미러). */
+export interface ReportFinished {
+  total: number;
+  succeeded: number;
+  outcomes: ReportOutcome[];
+}
+
 /** 밴드 가입+게시 요청. accountId는 band 로그인 쿠키 키(loginId). */
 export interface BandPublishRequest {
   accountId: string;
@@ -392,6 +426,19 @@ export const ipc = {
      * 링크별 성공/진행 결과를 돌려준다. */
     boost: (links: string[], repeats: number) =>
       call<ViewBoostOutcome[]>("boost_view_count", { links, repeats }),
+  },
+  // 종목토론방 글 신고하기(설계서 naver-report-design.md). 비차단 — 커맨드는 즉시 반환하고
+  // 백그라운드로 n×m건을 신고한다. 결과는 report-finished 이벤트로 전달된다.
+  report: {
+    /** 링크 n개 × 계정 m개를 신고한다. accountIds는 loginId(쿠키 키), reasonCode는 사유 7개 중 하나.
+     * rotateIp가 true면 계정 사이에 ADB로 IP를 회전하고 새 IP에서 재로그인한다. 즉시 반환(비차단). */
+    submit: (
+      links: string[],
+      accountIds: string[],
+      reasonCode: string,
+      rotateIp: boolean,
+    ) =>
+      call<void>("report_posts", { links, accountIds, reasonCode, rotateIp }),
   },
   // 엑셀(.xlsx) 내보내기/가져오기 — Rust에서 파일 처리, 프론트에서 경로 공급.
   excel: {
