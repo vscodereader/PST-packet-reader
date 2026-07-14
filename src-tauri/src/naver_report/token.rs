@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use super::error::ReportError;
 use crate::auth::{launch_debug_chrome, ChromeHandle};
-use crate::naver_automation::CdpClient;
+use crate::naver_automation::{packet_trace_enabled, CdpClient};
 
 /// CDP가 붙는 로컬 DevTools 호스트(포트는 `launch_debug_chrome`가 확정).
 const DEVTOOLS_HOST: &str = "127.0.0.1";
@@ -95,26 +95,72 @@ impl TokenBrowser {
     /// srp2 report 페이지를 열어 이 링크(글)의 ncaptcha 토큰을 만들어 읽는다. best-effort —
     /// 튜닝 전이라 토큰을 못 얻으면 [`ReportError::Token`]으로 실패를 돌려준다(패닉 없음).
     pub fn acquire_token(&mut self, _post_id: &str) -> Result<String, ReportError> {
-        self.client
-            .navigate(SRP2_REPORT_PAGE)
-            .map_err(|error| ReportError::Token(format!("신고 페이지 이동 실패: {error}")))?;
-        self.client
-            .wait_for_ready_state(PAGE_READY_TIMEOUT)
-            .map_err(|error| ReportError::Token(format!("신고 페이지 로딩 대기 실패: {error}")))?;
+        // srp2 어느 URL로 이동하는지 원문으로 남긴다(토큰을 어디서 만들려 했는지).
+        tracing::info!(target: "report", url = SRP2_REPORT_PAGE, "[REPORT-TOKEN] 신고 페이지 navigate 시작");
+        self.client.navigate(SRP2_REPORT_PAGE).map_err(|error| {
+            tracing::warn!(target: "report", url = SRP2_REPORT_PAGE, %error, "[REPORT-TOKEN] navigate 실패");
+            ReportError::Token(format!("신고 페이지 이동 실패: {error}"))
+        })?;
+        // ready state 도달 여부(도달/타임아웃)를 남긴다.
+        match self.client.wait_for_ready_state(PAGE_READY_TIMEOUT) {
+            Ok(()) => tracing::info!(target: "report", "[REPORT-TOKEN] 페이지 ready 도달"),
+            Err(error) => {
+                tracing::warn!(target: "report", %error, "[REPORT-TOKEN] 페이지 ready 대기 실패(타임아웃 등)");
+                return Err(ReportError::Token(format!(
+                    "신고 페이지 로딩 대기 실패: {error}"
+                )));
+            }
+        }
 
-        // 토큰이 비동기로 준비되므로 상한까지 폴링한다.
+        // 토큰이 비동기로 준비되므로 상한까지 폴링한다. 매 폴링/최종 evaluate가 실제로 돌려준 원문
+        // 문자열(빈 값이면 "빈 문자열")을 남겨, "토큰을 왜 못 얻었는지"가 로그로 보이게 한다.
         let deadline = Instant::now() + TOKEN_POLL_TIMEOUT;
+        let mut polls: u32 = 0;
+        let mut last_raw = String::new();
         loop {
+            polls += 1;
             match self.client.evaluate_string(TOKEN_EXTRACT_JS) {
-                Ok(token) if !token.trim().is_empty() => return Ok(token.trim().to_owned()),
-                Ok(_) => {}
+                Ok(token) => {
+                    last_raw = token.clone();
+                    // 폴링 원문은 노이즈 방지로 트레이스 ON일 때만(최종 결과는 아래서 항상 남긴다).
+                    if packet_trace_enabled() {
+                        let shown = if token.trim().is_empty() {
+                            "빈 문자열".to_owned()
+                        } else {
+                            token.clone()
+                        };
+                        tracing::info!(target: "report", poll = polls, raw = %shown, "[REPORT-TOKEN] evaluate 원문");
+                    }
+                    if !token.trim().is_empty() {
+                        tracing::info!(
+                            target: "report",
+                            poll = polls,
+                            len = token.trim().len(),
+                            "[REPORT-TOKEN] 토큰 획득"
+                        );
+                        return Ok(token.trim().to_owned());
+                    }
+                }
                 Err(error) => {
+                    tracing::warn!(target: "report", poll = polls, %error, "[REPORT-TOKEN] evaluate 실패 — 원문");
                     return Err(ReportError::Token(format!(
                         "토큰 추출 evaluate 실패: {error}"
-                    )))
+                    )));
                 }
             }
             if Instant::now() >= deadline {
+                // 타임아웃 사유 + 마지막 evaluate 원문을 트레이스 OFF여도 항상 남긴다.
+                let shown = if last_raw.trim().is_empty() {
+                    "빈 문자열".to_owned()
+                } else {
+                    last_raw.clone()
+                };
+                tracing::warn!(
+                    target: "report",
+                    polls,
+                    last_raw = %shown,
+                    "[REPORT-TOKEN] 토큰 획득 타임아웃 — 마지막 evaluate 원문"
+                );
                 return Err(ReportError::Token(
                     "ncaptcha 토큰을 얻지 못했습니다(실기기 튜닝 필요 — token.rs TODO)".to_owned(),
                 ));
