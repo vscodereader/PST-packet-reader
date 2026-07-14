@@ -315,28 +315,36 @@ const SUBMIT_CLICK_JS: &str = r#"
     const desc = el => el ? { tag: el.tagName, text: norm(el.textContent).slice(0, 40),
                               type: el.getAttribute('type'), disabled: el.disabled === true,
                               html: (el.outerHTML || '').slice(0, 200) } : null;
-    const POS = /(신고하기|신고|제출|확인|완료|접수)/;
-    const NEG = /(취소|닫기|이전|뒤로|cancel|close)/i;
-
+    // 실측(srp2 신고 페이지): 진짜 제출 버튼은 <a class="btn_submit">신고하기</a>. help 링크는
+    // <a class="link_btn">…신고 접수</a>(불법정보/불법촬영물 안내) — 텍스트에 "신고"가 들어가지만
+    // 누르면 help.naver.com 이 열린다. 그래서 (1) submit 클래스/id 최우선, (2) type=submit, (3) 정확히
+    // "신고하기", (4) 그 밖 제출류 텍스트 순으로 **점수화**해 고르고, "접수"(=안내 링크)·취소/닫기는 배제.
+    const NEG = /(취소|닫기|이전|뒤로|접수|안내|도움말|자세히|cancel|close)/i;
+    const POS = /(신고하기|제출하기|제출|확인|완료|보내기)/;
+    const submitClass = el => {
+      const c = ((el.className && el.className.baseVal) || el.className || '') + ' ' + (el.id || '');
+      return /(btn[_-]?submit|submit|btn[_-]?report|report[_-]?submit)/i.test(c);
+    };
     const buttons = Array.from(document.querySelectorAll(
       'button, [role="button"], input[type="submit"], input[type="button"], a'
     ));
-    let pick = null;
+    const scored = [];
     for (const b of buttons) {
       const t = norm(b.textContent) || norm(b.value) || '';
-      const isSubmit = (b.getAttribute('type') === 'submit');
-      const match = isSubmit || (POS.test(t) && !NEG.test(t));
-      if (match) {
+      if (NEG.test(t)) continue;
+      let score = 0;
+      if (submitClass(b)) score += 100;
+      if (b.getAttribute('type') === 'submit') score += 50;
+      if (/^\s*신고하기\s*$/.test(t)) score += 40;
+      else if (POS.test(t)) score += 10;
+      if (score > 0) {
         out.candidates.push(desc(b));
-        if (!pick && b.disabled !== true) pick = b;
+        scored.push({ b: b, score: score, disabled: b.disabled === true });
       }
     }
-    if (!pick) {
-      // 활성 후보가 없으면 첫 후보라도(대개 disabled) — 로그로 "왜 못 눌렀나"가 보이게.
-      const c = buttons.find(b => { const t = norm(b.textContent) || norm(b.value) || '';
-        return (b.getAttribute('type') === 'submit') || (POS.test(t) && !NEG.test(t)); });
-      if (c) pick = c;
-    }
+    // 점수 높은 순, 같은 점수면 활성(비disabled) 우선. 활성 후보가 없으면 최고점(대개 disabled)이라도.
+    scored.sort((a, c) => (c.score - a.score) || ((a.disabled ? 1 : 0) - (c.disabled ? 1 : 0)));
+    let pick = (scored.find(s => !s.disabled) || scored[0] || {}).b || null;
     if (pick) {
       out.target = desc(pick);
       try { pick.scrollIntoView({ block: 'center' }); pick.click(); out.clicked = true; }
