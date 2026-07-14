@@ -756,6 +756,7 @@ async fn blog_publish(
     tags: Option<String>,
     notice_post_yn: Option<bool>,
     reserve: Option<BlogReserveInput>,
+    blocks: Option<Vec<naver_blog::Block>>,
 ) -> Result<naver_blog::BlogWriteResult, String> {
     use naver_blog::{BlogPublishSettings, OpenType, PublishTime};
     let mut s = BlogPublishSettings::default();
@@ -791,7 +792,98 @@ async fn blog_publish(
             minute: r.minute,
         };
     }
-    naver_blog::publish_blog_post_for_account(&account_id, &blog_id, &title, &content, &s)
+    // 툴바 블록이 오면 편집기와 동일한 documentModel(components[])로 발행하고, 없으면 기존
+    // 텍스트-only 경로(content 문단)로 발행한다(하위 호환).
+    match blocks {
+        Some(blocks) if !blocks.is_empty() => {
+            naver_blog::publish_blog_post_blocks_for_account(
+                &account_id,
+                &blog_id,
+                &title,
+                &blocks,
+                &s,
+            )
+            .await
+        }
+        _ => {
+            naver_blog::publish_blog_post_for_account(&account_id, &blog_id, &title, &content, &s)
+                .await
+        }
+    }
+    .map_err(|e| e.message().to_owned())
+}
+
+/// 링크(oglink) 메타데이터를 조회한다(링크 블록 삽입 시 프리뷰·컴포넌트 채우기용).
+#[tauri::command]
+async fn blog_oglink(
+    account_id: String,
+    url: String,
+) -> Result<naver_blog::OglinkMeta, String> {
+    naver_blog::fetch_oglink_for_account(&account_id, &url)
+        .await
+        .map_err(|e| e.message().to_owned())
+}
+
+/// 장소를 검색한다(장소 블록 삽입 시 후보 목록).
+#[tauri::command]
+async fn blog_places(
+    account_id: String,
+    query: String,
+) -> Result<Vec<naver_blog::PlaceResult>, String> {
+    naver_blog::search_places_for_account(&account_id, &query)
+        .await
+        .map_err(|e| e.message().to_owned())
+}
+
+/// 장소 좌표의 정적 지도 이미지 URL을 얻는다(장소 블록 썸네일).
+#[tauri::command]
+async fn blog_staticmap(
+    account_id: String,
+    latitude: String,
+    longitude: String,
+) -> Result<naver_blog::StaticMapResult, String> {
+    naver_blog::fetch_staticmap_for_account(&account_id, &latitude, &longitude)
+        .await
+        .map_err(|e| e.message().to_owned())
+}
+
+/// 스티커 팩 목록을 조회한다(스티커 블록 삽입).
+#[tauri::command]
+async fn blog_stickers(account_id: String) -> Result<Vec<naver_blog::StickerPack>, String> {
+    naver_blog::fetch_sticker_packs_for_account(&account_id)
+        .await
+        .map_err(|e| e.message().to_owned())
+}
+
+/// 스티커 팩 내 seq 목록을 조회한다(스티커 블록 삽입).
+#[tauri::command]
+async fn blog_sticker_seqs(
+    account_id: String,
+    pack_code: String,
+) -> Result<Vec<u32>, String> {
+    naver_blog::fetch_sticker_seqs_for_account(&account_id, &pack_code)
+        .await
+        .map_err(|e| e.message().to_owned())
+}
+
+/// 로컬 파일을 업로드하고 fileId 등을 얻는다(파일 블록 삽입).
+#[tauri::command]
+async fn blog_upload_file(
+    account_id: String,
+    file_path: String,
+) -> Result<naver_blog::UploadedFile, String> {
+    naver_blog::upload_blog_file_for_account(&account_id, &file_path)
+        .await
+        .map_err(|e| e.message().to_owned())
+}
+
+/// 로컬 이미지를 업로드하고 image 컴포넌트에 필요한 값을 얻는다(사진 블록 삽입).
+#[tauri::command]
+async fn blog_upload_photo(
+    account_id: String,
+    file_path: String,
+) -> Result<naver_blog::UploadedImage, String> {
+    naver_blog::upload_blog_photo_for_account(&account_id, &file_path)
         .await
         .map_err(|e| e.message().to_owned())
 }
@@ -1097,6 +1189,13 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         band_resolve_name,
         blog_check_name,
         blog_publish,
+        blog_oglink,
+        blog_places,
+        blog_staticmap,
+        blog_stickers,
+        blog_sticker_seqs,
+        blog_upload_file,
+        blog_upload_photo,
         rotate_ip,
         manual_add_account,
         get_account_cookies,

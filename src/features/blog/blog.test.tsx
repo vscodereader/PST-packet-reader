@@ -29,8 +29,22 @@ vi.mock("@/shared/ipc", () => ({
         },
       ]),
     },
-    blog: { checkName: vi.fn(), publish: vi.fn() },
+    blog: {
+      checkName: vi.fn(),
+      publish: vi.fn(),
+      oglink: vi.fn(),
+      places: vi.fn(),
+      staticmap: vi.fn(),
+      stickers: vi.fn(),
+      stickerSeqs: vi.fn(),
+      uploadFile: vi.fn(),
+      uploadPhoto: vi.fn(),
+    },
   },
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn().mockResolvedValue(null),
 }));
 
 function renderBlog() {

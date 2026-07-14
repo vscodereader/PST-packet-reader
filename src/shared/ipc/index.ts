@@ -198,6 +198,65 @@ function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
  * Outside Tauri (browser dev / Vitest) `@tauri-apps/api/core` is mocked by the
  * in-memory backend in `src/test/ipc.ts`.
  */
+/** 링크(oglink) 메타(백엔드 OglinkMeta, camelCase). */
+export interface OglinkMeta {
+  title: string;
+  domain: string;
+  description: string;
+  thumbnailSrc: string;
+  thumbnailWidth: number;
+  thumbnailHeight: number;
+  oglinkSign: string;
+}
+
+/** 장소 검색 결과 1건(백엔드 PlaceResult, camelCase). */
+export interface PlaceResult {
+  id: string;
+  name: string;
+  tel: string;
+  roadAddress: string;
+  address: string;
+  /** 경도(x). */
+  x: string;
+  /** 위도(y). */
+  y: string;
+  /** place.type(예: "s"). */
+  placeType: string;
+  thumUrl: string;
+}
+
+/** 정적 지도 이미지 URL(백엔드 StaticMapResult). */
+export interface StaticMapResult {
+  src: string;
+}
+
+/** 스티커 팩 1개(백엔드 StickerPack). */
+export interface StickerPack {
+  packCode: string;
+  stickerCount: number;
+  isFree: boolean;
+}
+
+/** 파일 업로드 결과(백엔드 UploadedFile). */
+export interface UploadedFile {
+  fileId: string;
+  fileName: string;
+  fileSize: number;
+}
+
+/** 사진 업로드 결과(백엔드 UploadedImage). */
+export interface UploadedImage {
+  src: string;
+  path: string;
+  domain: string;
+  fileSize: number;
+  width: number;
+  height: number;
+  originalWidth: number;
+  originalHeight: number;
+  fileName: string;
+}
+
 /** 블로그 새 글 발행 결과(백엔드 BlogWriteResult, camelCase). */
 export interface BlogWriteResult {
   /** 게시글 번호. 예약 발행은 아직 없어 null일 수 있다. */
@@ -418,7 +477,34 @@ export const ipc = {
             minute: number;
           }
         | undefined;
+      /** 편집기 툴바 블록(있으면 documentModel components[]로 발행, 없으면 content 문단). */
+      blocks?: unknown[] | undefined;
     }) => call<BlogWriteResult>("blog_publish", { ...input }),
+    /** 링크(oglink) 메타데이터 조회(링크 블록 삽입). */
+    oglink: (accountId: string, url: string) =>
+      call<OglinkMeta>("blog_oglink", { accountId, url }),
+    /** 장소 검색(장소 블록 삽입). */
+    places: (accountId: string, query: string) =>
+      call<PlaceResult[]>("blog_places", { accountId, query }),
+    /** 장소 좌표의 정적 지도 URL(장소 블록 썸네일). */
+    staticmap: (accountId: string, latitude: string, longitude: string) =>
+      call<StaticMapResult>("blog_staticmap", {
+        accountId,
+        latitude,
+        longitude,
+      }),
+    /** 스티커 팩 목록(스티커 블록 삽입). */
+    stickers: (accountId: string) =>
+      call<StickerPack[]>("blog_stickers", { accountId }),
+    /** 스티커 팩 내 seq 목록(스티커 블록 삽입). */
+    stickerSeqs: (accountId: string, packCode: string) =>
+      call<number[]>("blog_sticker_seqs", { accountId, packCode }),
+    /** 로컬 파일 업로드(파일 블록 삽입). */
+    uploadFile: (accountId: string, filePath: string) =>
+      call<UploadedFile>("blog_upload_file", { accountId, filePath }),
+    /** 로컬 이미지 업로드(사진 블록 삽입). */
+    uploadPhoto: (accountId: string, filePath: string) =>
+      call<UploadedImage>("blog_upload_photo", { accountId, filePath }),
   },
   diagnostics: {
     /** Probe Chrome install/version + ADB device connection (UI 새로고침). */
