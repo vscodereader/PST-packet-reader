@@ -744,9 +744,9 @@ async fn drain_events<R: Runtime>(
         // post-report로 회신한다. HTTP 블로킹이라 백그라운드로 돌린다(엔진 무손상, ADD ONLY).
         if cmd.kind == "publish_blog_write" {
             if let Some(bw) = cmd.blog_write.clone() {
-                let (client2, cfg2) = (client.clone(), cfg.clone());
+                let (app2, client2, cfg2) = (app.clone(), client.clone(), cfg.clone());
                 tauri::async_runtime::spawn(async move {
-                    run_blog_write_command(client2, cfg2, bw).await;
+                    run_blog_write_command(app2, client2, cfg2, bw).await;
                 });
             }
         }
@@ -984,11 +984,17 @@ fn blog_write_report_body(title: &str, items: Vec<serde_json::Value>) -> serde_j
 /// 직접 호출한다(엔진 무손상): 각 대상 계정마다 `publish_blog_post_blocks_for_account`로 같은 제목/블록/
 /// 설정을 자기 블로그에 발행하고, 결과를 PostItemDto로 모아 post-report로 회신한다. blocks가 하나라도
 /// 파싱되지 않으면 발행을 시도하지 않고 전 대상 실패로 보고한다(무엇이 잘못됐는지 원문 로그에 남김).
-async fn run_blog_write_command(
+async fn run_blog_write_command<R: Runtime>(
+    app: AppHandle<R>,
     client: reqwest::Client,
     cfg: AgentConfig,
     bw: BlogWriteCmd,
 ) {
+    use crate::ipc::activity::{record, ActivityItem, ActivityType};
+    use crate::store::JsonStore;
+    // 로컬 알림(시스템 탭)에 기록한다 — Admin 원격 발행도 데스크톱 직접 발행과 똑같이 하위 pstmacro
+    // 알림에 뜨게(사용자 지적: Admin 명령 발행글은 알림이 안 떴다). 서버 post_report는 그대로 유지(ADD ONLY).
+    let activity = app.state::<JsonStore<ActivityItem>>();
     let title = bw.title.clone();
     let settings = blog_write_settings(&bw.settings);
     // 블록 파싱(프론트 blocks.ts → naver_blog::Block). id 등 미지 필드는 serde가 무시한다.
@@ -1014,6 +1020,11 @@ async fn run_blog_write_command(
                 .collect();
             let body = blog_write_report_body(&title, items);
             let _ = net::post_report(&client, &cfg.server_url, &cfg.device_token, &body).await;
+            record(
+                activity.inner(),
+                ActivityType::Error,
+                format!("블로그 글 발행 실패 — 본문 블록 형식 오류: {e}"),
+            );
             return;
         }
     };
@@ -1045,6 +1056,11 @@ async fn run_blog_write_command(
                     login_id = %t.login_id, blog_id = %blog_id, url = %url,
                     "[AGENT] 블로그 새 글 발행 성공"
                 );
+                record(
+                    activity.inner(),
+                    ActivityType::Success,
+                    format!("블로그 글 발행 성공({blog_id}) — {url}"),
+                );
                 blog_write_item(
                     &t.login_id,
                     &blog_id,
@@ -1059,6 +1075,11 @@ async fn run_blog_write_command(
                 tracing::warn!(
                     login_id = %t.login_id, blog_id = %blog_id,
                     "[AGENT] 블로그 새 글 발행 실패: {msg}"
+                );
+                record(
+                    activity.inner(),
+                    ActivityType::Error,
+                    format!("블로그 글 발행 실패({blog_id}) — {msg}"),
                 );
                 blog_write_item(&t.login_id, &blog_id, &title, false, &msg, None)
             }

@@ -17,27 +17,33 @@ use super::error::BlogError;
 /// 블로그 본문 발행 호스트.
 const BLOG_HOST: &str = "https://blog.naver.com";
 
-/// 공개 설정(공개 범위). 패킷 확정(예약+공개범위): openType 숫자값과 UI 순서 일치.
+/// 공개 설정(공개 범위). UI 개념(전체/이웃/서로이웃/비공개) — wire 숫자는 [`OpenType::code`] 참고.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenType {
-    /// 전체공개(0).
+    /// 전체공개.
     Public,
-    /// 이웃공개(1).
+    /// 이웃공개.
     Neighbor,
-    /// 서로이웃공개(2).
+    /// 서로이웃공개.
     MutualNeighbor,
-    /// 비공개(3).
+    /// 비공개.
     Private,
 }
 
 impl OpenType {
-    /// populationParams.configuration.openType 에 들어가는 숫자값.
+    /// populationParams.configuration.openType 에 들어가는 네이버 **실측 wire 숫자**.
+    ///
+    /// 패킷 복호화(2026-07-14, 가입/예약+공개범위/이미생성된블로그 pcap)로 확정: **2=전체공개**(기본값·
+    /// 검색허용·외부허용), **1=이웃**, **0=비공개**. UI 표시 순서(0=전체…3=비공개)와 **다르다** — 예전
+    /// 코드는 UI 순서를 그대로 보내 전체공개를 0으로 전송했고, 네이버가 0을 비공개로 해석해 "전체공개인데
+    /// 비공개로 발행"되던 버그의 원인이었다. 서로이웃은 캡처에 없어 이웃(1)과 같은 버킷으로 잠정 처리한다
+    /// (전체공개로 새지 않는 안전값 — 실측 캡처 확보 시 확정).
     pub fn code(self) -> u8 {
         match self {
-            OpenType::Public => 0,
+            OpenType::Public => 2,
             OpenType::Neighbor => 1,
-            OpenType::MutualNeighbor => 2,
-            OpenType::Private => 3,
+            OpenType::MutualNeighbor => 1,
+            OpenType::Private => 0,
         }
     }
 }
@@ -173,7 +179,7 @@ impl BlogWriteClient {
         // 발행 설정 원문 로그(형님 필수): 실제 보내는 공개범위(openType)·설정을 그대로 남겨,
         // "전체공개로 했는데 비공개로 올라간다" 같은 문제를 요청 원문으로 바로 확인한다.
         tracing::info!(
-            "[BLOG] RabbitWrite 요청 설정 — openType={}(0=전체공개/1=이웃/2=서로이웃/3=비공개) populationParams={}",
+            "[BLOG] RabbitWrite 요청 설정 — openType={}(네이버 wire: 2=전체공개/1=이웃/0=비공개) populationParams={}",
             settings.open_type.code(),
             population_params
         );
@@ -526,7 +532,7 @@ mod tests {
             ..Default::default()
         };
         let p = build_population_params(&s);
-        assert_eq!(p["configuration"]["openType"], 2);
+        assert_eq!(p["configuration"]["openType"], 1); // 서로이웃 → 이웃 버킷(1) 잠정 처리
         assert_eq!(p["populationMeta"]["postWriteTimeType"], "now");
         assert_eq!(p["populationMeta"]["tags"], "첫글 인생");
         assert_eq!(p["populationMeta"]["categoryId"], 1);
@@ -561,7 +567,7 @@ mod tests {
             ..Default::default()
         };
         let p = build_population_params(&s);
-        assert_eq!(p["configuration"]["openType"], 0);
+        assert_eq!(p["configuration"]["openType"], 2); // 전체공개 = 네이버 wire 2(실측)
         assert_eq!(p["populationMeta"]["postWriteTimeType"], "pre");
         assert_eq!(p["populationMeta"]["prePostYear"], 2026);
         assert_eq!(p["populationMeta"]["prePostMonth"], 7);
@@ -570,12 +576,17 @@ mod tests {
         assert_eq!(p["populationMeta"]["prePostMinute"], 30);
     }
 
+    // 네이버 실측 wire 값(패킷 복호화 2026-07-14: 가입/예약+공개범위/이미생성된블로그 pcap):
+    // openType 2=전체공개(기본·검색허용·외부허용), 1=이웃, 0=비공개. UI 순서(0=전체…3=비공개)와 **다르다**.
+    // 이전 코드가 UI 순서를 그대로 wire 값으로 보내(전체공개→0) 네이버가 0=비공개로 해석 → 전체공개인데
+    // 비공개로 발행되던 버그. 서로이웃은 캡처에 없어 이웃(1)과 같은 버킷으로 잠정 처리(공개 유출 없는 안전값).
     #[test]
-    fn open_type_codes_match_ui_order() {
-        assert_eq!(OpenType::Public.code(), 0);
-        assert_eq!(OpenType::Neighbor.code(), 1);
-        assert_eq!(OpenType::MutualNeighbor.code(), 2);
-        assert_eq!(OpenType::Private.code(), 3);
+    fn open_type_codes_match_naver_wire_values() {
+        assert_eq!(OpenType::Public.code(), 2); // 전체공개 — 실측
+        assert_eq!(OpenType::Neighbor.code(), 1); // 이웃 — 실측
+        assert_eq!(OpenType::Private.code(), 0); // 비공개 — 실측
+        // 서로이웃: 패킷 미확보 — 이웃(1)과 동일 버킷(공개 아님)으로 안전 처리(추후 캡처로 확정).
+        assert_eq!(OpenType::MutualNeighbor.code(), 1);
     }
 
     #[test]
