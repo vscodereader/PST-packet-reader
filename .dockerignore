@@ -1,0 +1,11 @@
+# Docker 빌드 컨텍스트에서 제외(이미지 크기·빌드속도). 빌드는 소스에서 새로 함.
+.git
+node_modules
+dist
+target
+src-tauri/target
+server/target
+**/*.log
+.env
+server/.env
+scratchpad
