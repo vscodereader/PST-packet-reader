@@ -32,6 +32,8 @@ mod forum_stocks;
 pub mod naver_automation;
 // 조회수 부스트: 시크릿창을 여닫으며 게시글 조회수를 올린다(#400). launch_debug_chrome + CdpClient 재사용.
 pub mod view_boost;
+// 종목토론방 글 신고하기: by-item/profile/report 순수 HTTP + ncaptcha 토큰만 CDP(설계서 naver-report-design.md).
+pub mod naver_report;
 
 use discussion_batch::{
     parse_discussion_template_csv, run_discussion_batch, run_forum_publish, search_naver_stocks,
@@ -310,6 +312,31 @@ async fn boost_view_count(
     tauri::async_runtime::spawn_blocking(move || view_boost::boost_views(&links, repeats))
         .await
         .map_err(|error| format!("조회수 작업 스레드 오류: {error}"))
+}
+
+/// "신고하기" 버튼: 게시글 링크 n개 × 선택 계정 m개를 종목토론방 API로 신고한다(설계서
+/// naver-report-design.md). **비차단** — 입력을 검증한 뒤 백그라운드 태스크로 n×m 루프를 돌리고
+/// 즉시 반환한다(모달은 닫히고 화면은 안 막힘). 결과는 `report-finished` 이벤트로 프론트에 전달한다.
+/// `rotate_ip`가 true면 계정 사이에 ADB로 IP를 회전하고 새 IP에서 재로그인한다(설계서 §6).
+#[tauri::command]
+async fn report_posts<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    links: Vec<String>,
+    account_ids: Vec<String>,
+    reason_code: String,
+    rotate_ip: bool,
+) -> Result<(), String> {
+    let links: Vec<String> = links
+        .into_iter()
+        .map(|link| link.trim().to_owned())
+        .filter(|link| !link.is_empty())
+        .collect();
+    naver_report::validate_request(&links, &account_ids, &reason_code)?;
+    // 즉시 반환하고(모달 닫힘), 브라우저·HTTP 왕복이 있는 배치는 백그라운드 태스크에서 돌린다.
+    tauri::async_runtime::spawn(async move {
+        naver_report::run_report_batch(app, links, account_ids, reason_code, rotate_ip).await;
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -1002,6 +1029,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         like_discussion_post,
         dislike_discussion_post,
         boost_view_count,
+        report_posts,
         search_stocks,
         forum_stocks::list_forum_stocks,
         forum_stocks::search_forum_stocks,
