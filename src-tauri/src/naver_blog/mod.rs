@@ -316,9 +316,11 @@ pub async fn upload_blog_photo_for_account(
 ) -> Result<UploadedImage, BlogError> {
     let (client, cookie) = editor_client_for_account(account_id).await?;
     let (file_name, bytes) = read_local_file(file_path)?;
-    // 사진도 파일과 동일한 `/v2/upload/file`(userId+file). 별도 session-key 단계는 실측상 불필요.
+    // 실측(photo.pcapng): 본문 사진은 2단계 — 1) photo-uploader 세션키 발급,
+    // 2) upphoto simpleUpload(sessionKey URL 인증). `upload_file`(파일)과 다른 경로다.
+    let session_key = client.photo_session_key(Some(&cookie)).await?;
     client
-        .upload_photo(account_id, &file_name, bytes, Some(&cookie))
+        .upload_photo(account_id, &session_key, &file_name, bytes, Some(&cookie))
         .await
 }
 
