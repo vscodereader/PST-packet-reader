@@ -1,9 +1,19 @@
+import { existsSync } from "node:fs";
 import { fileURLToPath, URL } from "node:url";
 
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 const host = process.env.TAURI_DEV_HOST;
+
+// Admin 웹 엔트리는 Admin 브랜치(#324)에만 존재한다(master는 pstmacro 전용).
+// 파일이 있을 때만 멀티페이지 입력에 추가해, master(admin.html 없음)·#324(있음)
+// 양쪽에서 `vite build`가 깨지지 않게 한다.
+const adminHtml = fileURLToPath(new URL("./admin.html", import.meta.url));
+const buildInput = {
+  main: fileURLToPath(new URL("./index.html", import.meta.url)),
+  ...(existsSync(adminHtml) ? { admin: adminHtml } : {}),
+};
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
@@ -32,14 +42,11 @@ export default defineConfig(async () => ({
     include: ["@mantine/core", "@mantine/hooks", "@mantine/notifications"],
   },
 
-  // 멀티페이지 빌드 입력: 메인 앱(index.html) + Admin 웹(admin.html). 기본 `vite build`는
-  // index.html만 내보내므로, 하위 COM 서버가 서빙할 admin.html도 dist/에 나오도록 명시한다.
+  // 멀티페이지 빌드 입력: 메인 앱(index.html) + (있으면) Admin 웹(admin.html).
+  // admin.html은 #324에만 있으므로 buildInput에서 조건부로 포함한다(위 참고).
   build: {
     rollupOptions: {
-      input: {
-        main: fileURLToPath(new URL("./index.html", import.meta.url)),
-        admin: fileURLToPath(new URL("./admin.html", import.meta.url)),
-      },
+      input: buildInput,
     },
   },
 
