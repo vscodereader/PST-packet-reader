@@ -82,10 +82,16 @@ impl BlogDomainClient {
             .http
             .post(&url)
             .header("User-Agent", crate::naver_cafe::post::BROWSER_USER_AGENT)
-            .header("Accept", "application/json, text/plain, */*")
+            .header("Accept", "*/*")
+            // 실측 패킷 확정: 이 POST는 XHR이라 x-requested-with 헤더가 있어야 서버가 처리한다
+            // (없으면 응답이 null 로 떨어져 자동 생성 실패).
+            .header("X-Requested-With", "XMLHttpRequest")
             .header("Origin", SECTION_BLOG_HOST)
-            .header("Referer", "https://section.blog.naver.com/BlogHome.naver")
-            .header("Content-Type", "application/x-www-form-urlencoded")
+            .header(
+                "Referer",
+                "https://section.blog.naver.com/BlogHome.naver?directoryNo=0&currentPage=1&groupId=0",
+            )
+            .header("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
             .form(&form);
         if let Some(c) = cookie {
             req = req.header("Cookie", c);

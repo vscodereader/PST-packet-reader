@@ -291,23 +291,27 @@ impl BlogEditorApiClient {
     /// `cookie`는 사용자 인증 자격 증명이며 에러/로그에 노출하지 않는다.
     pub async fn upload_file(
         &self,
+        user_id: &str,
         file_name: &str,
         bytes: Vec<u8>,
         cookie: Option<&str>,
     ) -> Result<UploadedFile, BlogError> {
         let url = format!("{}/api/blogpc001/v2/upload/file", self.base);
-        // TODO(실기기 튜닝): multipart 파트 이름("file")과 부가 필드를 실제 편집기 트래픽으로 확정.
+        // 실측(2026-07-14): 파트는 `userId`(블로그 계정) + `file`(파일 바이트) 2개. 응답 {fileId,fileName,fileSize}.
         let part = reqwest::multipart::Part::bytes(bytes)
             .file_name(file_name.to_owned())
-            .mime_str("application/octet-stream")
+            .mime_str(mime_from_name(file_name))
             .map_err(|e| BlogError::new(format!("업로드 파트 생성 실패: {e}")))?;
-        let form = reqwest::multipart::Form::new().part("file", part);
+        let form = reqwest::multipart::Form::new()
+            .text("userId", user_id.to_owned())
+            .part("file", part);
         let mut req = self
             .http
             .post(&url)
             .header("User-Agent", crate::naver_cafe::post::BROWSER_USER_AGENT)
-            .header("Accept", "application/json, text/plain, */*")
-            .header("Referer", "https://blog.naver.com/");
+            .header("Accept", "application/json")
+            .header("Referer", write_form_referer(user_id))
+            .header("sec-fetch-site", "same-site");
         req = self.apply_session_headers(req);
         if let Some(c) = cookie {
             req = req.header("Cookie", c);
@@ -337,27 +341,29 @@ impl BlogEditorApiClient {
     /// `cookie`는 사용자 인증 자격 증명이며 에러/로그에 노출하지 않는다.
     pub async fn upload_photo(
         &self,
-        session_key: &str,
+        user_id: &str,
         file_name: &str,
         bytes: Vec<u8>,
         cookie: Option<&str>,
     ) -> Result<UploadedImage, BlogError> {
-        // TODO(실기기 튜닝): 사진 업로드 엔드포인트/파트 이름/응답 필드를 실제 편집기 트래픽으로 확정.
-        let url = format!(
-            "{}/api/blogpc001/v1/photo-uploader/upload?sessionKey={session_key}",
-            self.base
-        );
+        // 실측(2026-07-14): 사진도 파일과 동일한 `/v2/upload/file` 엔드포인트에 `userId`+`file` 파트로
+        // 올린다(예전의 `/photo-uploader/upload?sessionKey=` 는 추측 스텁이라 제거). 사진 응답 스키마는
+        // 아래 원문 로그로 확인해 [`parse_uploaded_image`]와 맞춘다.
+        let url = format!("{}/api/blogpc001/v2/upload/file", self.base);
         let part = reqwest::multipart::Part::bytes(bytes)
             .file_name(file_name.to_owned())
-            .mime_str("application/octet-stream")
+            .mime_str(mime_from_name(file_name))
             .map_err(|e| BlogError::new(format!("업로드 파트 생성 실패: {e}")))?;
-        let form = reqwest::multipart::Form::new().part("image", part);
+        let form = reqwest::multipart::Form::new()
+            .text("userId", user_id.to_owned())
+            .part("file", part);
         let mut req = self
             .http
             .post(&url)
             .header("User-Agent", crate::naver_cafe::post::BROWSER_USER_AGENT)
-            .header("Accept", "application/json, text/plain, */*")
-            .header("Referer", "https://blog.naver.com/");
+            .header("Accept", "application/json")
+            .header("Referer", write_form_referer(user_id))
+            .header("sec-fetch-site", "same-site");
         req = self.apply_session_headers(req);
         if let Some(c) = cookie {
             req = req.header("Cookie", c);
@@ -372,13 +378,36 @@ impl BlogEditorApiClient {
             .text()
             .await
             .map_err(|e| BlogError::new(format!("사진 업로드 응답 읽기 실패: {e}")))?;
+        // 사진 응답은 스키마 확정 전이라 **원문 전부**를 남긴다(형님 지시: 와이어샤크처럼).
         tracing::info!(
             "[BLOG] 사진 업로드 응답 — status={} body={}",
             status.as_u16(),
-            snippet(&text)
+            text
         );
         parse_uploaded_image(&text)
             .ok_or_else(|| BlogError::new(format!("사진 업로드 응답 해석 실패: {}", snippet(&text))))
+    }
+}
+
+/// 글쓰기 폼 Referer(업로드/편집기 POST용) — 실측 패킷의 값 그대로. `user_id`=블로그 계정.
+fn write_form_referer(user_id: &str) -> String {
+    format!(
+        "{BLOG_HOST}/PostWriteForm.naver?blogId={user_id}&Redirect=Write&redirect=Write&widgetTypeCall=true&topReferer=https%3A%2F%2Fwww.naver.com%2F&trackingCode=naver_main&directAccess=false"
+    )
+}
+
+/// 파일명 확장자로 대략적인 MIME을 고른다(업로드 파트용). 모르면 octet-stream.
+fn mime_from_name(name: &str) -> &'static str {
+    match name.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        Some("txt") => "text/plain",
+        Some("pdf") => "application/pdf",
+        Some("zip") => "application/zip",
+        _ => "application/octet-stream",
     }
 }
 
@@ -396,23 +425,78 @@ pub async fn fetch_editor_session(
     blog_id: &str,
     cookie: Option<&str>,
 ) -> Result<EditorSession, BlogError> {
-    fetch_editor_session_with_base(BLOG_HOST, blog_id, cookie).await
+    Ok(establish_editor_session(blog_id, cookie).await?.0)
 }
 
-/// 주입된 `blog_base`로 [`fetch_editor_session`]을 수행한다(wiremock 테스트용).
+/// 편집기 세션을 **브라우저와 동일한 순서**로 확립한다: 글쓰기 폼을 먼저 열어(HTTP GET, 크롬 아님)
+/// 서버가 글쓰기 세션 쿠키(JSESSIONID/BUC)를 심게 한 뒤 SeOptions로 토큰을 받는다.
+///
+/// 반환은 `(세션, 보강된 Cookie 헤더)` — 이 보강 쿠키를 이후 편집기 보조/업로드 호출에 그대로 써야
+/// `platform.editor.naver.com` 이 통과한다. 워밍업을 생략하면(예전 방식) SeOptions가
+/// "게시물이 삭제되었거나 다른 페이지로 변경되었습니다" 에러 HTML을 돌려줘 토큰이 안 나온다(실측 확인).
+///
+/// # 쿠키 보안
+/// `cookie`는 사용자 인증 자격 증명이며 에러/로그에 노출하지 않는다.
+pub async fn establish_editor_session(
+    blog_id: &str,
+    cookie: Option<&str>,
+) -> Result<(EditorSession, String), BlogError> {
+    establish_editor_session_with_base(BLOG_HOST, blog_id, cookie).await
+}
+
+/// 주입된 base로 세션만 얻는다(wiremock 테스트/존재확인용, 보강 쿠키는 버린다).
 pub async fn fetch_editor_session_with_base(
     blog_base: &str,
     blog_id: &str,
     cookie: Option<&str>,
 ) -> Result<EditorSession, BlogError> {
-    let url = format!("{blog_base}/PostWriteFormSeOptions.naver?blogId={blog_id}");
+    Ok(establish_editor_session_with_base(blog_base, blog_id, cookie)
+        .await?
+        .0)
+}
+
+/// 주입된 `blog_base`로 [`establish_editor_session`]을 수행한다(wiremock 테스트용).
+pub async fn establish_editor_session_with_base(
+    blog_base: &str,
+    blog_id: &str,
+    cookie: Option<&str>,
+) -> Result<(EditorSession, String), BlogError> {
     let http = crate::naver_cafe::shared_http_client();
+    // 1) 글쓰기 폼을 먼저 연다(브라우저 실측 순서). 서버가 이 GET 응답의 Set-Cookie로 글쓰기 세션
+    //    쿠키(JSESSIONID/BUC)를 준다. 공용 클라이언트엔 쿠키 저장소가 없으니 응답 Set-Cookie를 직접
+    //    파싱해 Cookie 헤더에 병합한다(CookieJar).
+    let mut jar = CookieJar::from_header(cookie.unwrap_or_default());
+    for warm_url in [
+        format!("{blog_base}/{blog_id}?Redirect=Write"),
+        format!(
+            "{blog_base}/PostWriteForm.naver?blogId={blog_id}&Redirect=Write&redirect=Write&widgetTypeCall=true&topReferer=https%3A%2F%2Fwww.naver.com%2F&trackingCode=naver_main&directAccess=false"
+        ),
+    ] {
+        let mut req = http
+            .get(&warm_url)
+            .header("User-Agent", crate::naver_cafe::post::BROWSER_USER_AGENT)
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+            .header("Referer", format!("{blog_base}/"));
+        let hdr = jar.to_header();
+        if !hdr.is_empty() {
+            req = req.header("Cookie", hdr);
+        }
+        match req.send().await {
+            Ok(resp) => jar.merge_set_cookie(resp.headers()),
+            Err(e) => tracing::warn!("[BLOG] 글쓰기 폼 워밍업 실패(계속 진행) url={warm_url} err={e}"),
+        }
+    }
+    // 2) 워밍업으로 얻은 세션 쿠키를 실어 토큰을 받는다(요청 자체는 브라우저 실측과 동일).
+    let enriched = jar.to_header();
+    let url = format!("{blog_base}/PostWriteFormSeOptions.naver?blogId={blog_id}");
     let mut req = http
         .get(&url)
         .header("User-Agent", crate::naver_cafe::post::BROWSER_USER_AGENT)
         .header("Accept", "application/json, text/plain, */*")
-        // 실측 패킷의 referer 그대로: 네이버는 이 값으로 "글쓰기 폼에서 온 요청"인지 검사하며,
-        // 틀리면 "게시물이 삭제되었거나 다른 페이지로 변경되었습니다" 에러 HTML을 준다.
+        // 실측 패킷의 referer 그대로: 네이버는 이 값으로 "글쓰기 폼에서 온 요청"인지 검사한다.
         .header(
             "Referer",
             format!(
@@ -422,8 +506,8 @@ pub async fn fetch_editor_session_with_base(
         .header("sec-fetch-site", "same-origin")
         .header("sec-fetch-mode", "cors")
         .header("sec-fetch-dest", "empty");
-    if let Some(c) = cookie {
-        req = req.header("Cookie", c);
+    if !enriched.is_empty() {
+        req = req.header("Cookie", &enriched);
     }
     let resp = req
         .send()
@@ -448,11 +532,70 @@ pub async fn fetch_editor_session_with_base(
             snippet(&text)
         ))
     })?;
-    Ok(EditorSession {
-        se_authorization: token,
-        // se-app-id: SmartEditor 요소 id 생성기가 만드는 "SE-<uuid>"와 동일 형식(write_client::se_id 재사용).
-        se_app_id: super::write_client::se_id(),
-    })
+    Ok((
+        EditorSession {
+            se_authorization: token,
+            // se-app-id: SmartEditor 요소 id 생성기가 만드는 "SE-<uuid>"와 동일 형식(write_client::se_id 재사용).
+            se_app_id: super::write_client::se_id(),
+        },
+        enriched,
+    ))
+}
+
+/// Cookie 헤더 ↔ Set-Cookie 병합용 소형 저장소(쿠키 저장 기능 없는 공용 reqwest 클라이언트 보완).
+///
+/// 삽입 순서를 보존하고 같은 이름은 나중 값으로 덮어쓴다. 글쓰기 폼 워밍업 응답의 Set-Cookie
+/// (JSESSIONID/BUC)를 기존 로그인 쿠키에 얹어, 이어지는 SeOptions·편집기 API 호출이 통과하게 한다.
+struct CookieJar {
+    items: Vec<(String, String)>,
+}
+
+impl CookieJar {
+    fn from_header(header: &str) -> Self {
+        let mut jar = Self { items: Vec::new() };
+        for pair in header.split(';') {
+            let pair = pair.trim();
+            if let Some((k, v)) = pair.split_once('=') {
+                jar.set(k.trim(), v.trim());
+            }
+        }
+        jar
+    }
+
+    fn set(&mut self, name: &str, value: &str) {
+        if name.is_empty() {
+            return;
+        }
+        if let Some(slot) = self.items.iter_mut().find(|(k, _)| k == name) {
+            slot.1 = value.to_owned();
+        } else {
+            self.items.push((name.to_owned(), value.to_owned()));
+        }
+    }
+
+    /// 응답 헤더의 모든 `Set-Cookie`에서 `name=value`(첫 세그먼트)만 취해 병합한다.
+    fn merge_set_cookie(&mut self, headers: &reqwest::header::HeaderMap) {
+        for hv in headers.get_all(reqwest::header::SET_COOKIE) {
+            let Ok(s) = hv.to_str() else { continue };
+            let Some(first) = s.split(';').next() else {
+                continue;
+            };
+            if let Some((k, v)) = first.split_once('=') {
+                let (k, v) = (k.trim(), v.trim());
+                if !k.is_empty() && !v.is_empty() {
+                    self.set(k, v);
+                }
+            }
+        }
+    }
+
+    fn to_header(&self) -> String {
+        self.items
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
 }
 
 /// `PostWriteFormSeOptions.naver` 응답에서 `result.token`(se-authorization JWT)을 뽑는다(순수 함수).

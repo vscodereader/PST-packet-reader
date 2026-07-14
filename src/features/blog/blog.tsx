@@ -158,10 +158,21 @@ export function Blog(_props: { go?: (view: ViewId) => void }) {
         msg: r.logNo ? `발행 성공 (logNo ${r.logNo})` : "예약 발행 등록됨",
         url,
       });
-      notifications.show({ color: "teal", message: "블로그 글 발행 성공" });
+      // 종토처럼 성공 알림에 **블로그 링크를 함께** 싣고, 지나쳐 못 보지 않게 자동으로 닫지 않는다.
+      notifications.show({
+        color: "teal",
+        title: "블로그 글 발행 성공",
+        message: url ? `${url}` : "예약 발행이 등록되었습니다.",
+        autoClose: false,
+      });
     } catch (e) {
       setResult({ ok: false, msg: String(e) });
-      notifications.show({ color: "red", message: `발행 실패: ${String(e)}` });
+      notifications.show({
+        color: "red",
+        title: "발행 실패",
+        message: String(e),
+        autoClose: false,
+      });
     } finally {
       setPublishing(false);
     }

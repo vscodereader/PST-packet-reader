@@ -105,6 +105,7 @@ pub struct EnsureBlogResult {
 /// `cookie`는 사용자 인증 자격 증명이며 에러/로그에 노출하지 않는다.
 async fn ensure_blog_exists_with_cookie(
     blog_id: &str,
+    naver_id: &str,
     cookie: &str,
 ) -> Result<EnsureBlogResult, BlogError> {
     match editor_api::fetch_editor_session(blog_id, Some(cookie)).await {
@@ -114,8 +115,9 @@ async fn ensure_blog_exists_with_cookie(
         }),
         Err(_) => {
             // 토큰 없음 = 블로그 없음으로 해석하고 자동 생성한다(생성 실패는 에러로 전파).
+            // 실측 확정: domainId=새 블로그명, naverId=**로그인 계정 아이디**(서로 다름).
             BlogDomainClient::new()
-                .register(blog_id, blog_id, Some(cookie))
+                .register(blog_id, naver_id, Some(cookie))
                 .await?;
             Ok(EnsureBlogResult {
                 existed: false,
@@ -137,7 +139,8 @@ pub async fn ensure_blog_exists_for_account(
     blog_id: &str,
 ) -> Result<EnsureBlogResult, BlogError> {
     let cookie_header = resolve_cookie_header(account_id)?;
-    ensure_blog_exists_with_cookie(blog_id, &cookie_header).await
+    // naverId = 로그인 계정(account_id), domainId = 만들 블로그명(blog_id).
+    ensure_blog_exists_with_cookie(blog_id, account_id, &cookie_header).await
 }
 
 /// 저장된 네이버 쿠키로 블로그 새 글을 발행한다(계정 단위 진입점, HTTP RabbitWrite 경로).
@@ -220,8 +223,11 @@ async fn editor_client_for_account(
     account_id: &str,
 ) -> Result<(BlogEditorApiClient, String), BlogError> {
     let cookie = resolve_cookie_header(account_id)?;
-    let session = editor_api::fetch_editor_session(account_id, Some(&cookie)).await?;
-    Ok((BlogEditorApiClient::new().with_session(session), cookie))
+    // 글쓰기 폼 워밍업으로 세션쿠키(JSESSIONID/BUC)까지 보강한 쿠키를 받아, 이후 편집기/업로드
+    // 호출에 그대로 쓴다(그래야 platform.editor.naver.com 이 401 없이 통과한다).
+    let (session, enriched) =
+        editor_api::establish_editor_session(account_id, Some(&cookie)).await?;
+    Ok((BlogEditorApiClient::new().with_session(session), enriched))
 }
 
 /// 저장된 네이버 쿠키로 링크(oglink) 메타데이터를 조회한다(링크 블록 삽입용).
@@ -294,7 +300,10 @@ pub async fn upload_blog_file_for_account(
 ) -> Result<UploadedFile, BlogError> {
     let (client, cookie) = editor_client_for_account(account_id).await?;
     let (file_name, bytes) = read_local_file(file_path)?;
-    client.upload_file(&file_name, bytes, Some(&cookie)).await
+    // userId = 블로그 계정(=account_id). 실측 파트 `userId`+`file`.
+    client
+        .upload_file(account_id, &file_name, bytes, Some(&cookie))
+        .await
 }
 
 /// 저장된 네이버 쿠키로 로컬 이미지를 업로드하고 image 컴포넌트에 필요한 값을 얻는다(사진 블록용).
@@ -307,9 +316,9 @@ pub async fn upload_blog_photo_for_account(
 ) -> Result<UploadedImage, BlogError> {
     let (client, cookie) = editor_client_for_account(account_id).await?;
     let (file_name, bytes) = read_local_file(file_path)?;
-    let session_key = client.photo_session_key(Some(&cookie)).await?;
+    // 사진도 파일과 동일한 `/v2/upload/file`(userId+file). 별도 session-key 단계는 실측상 불필요.
     client
-        .upload_photo(&session_key, &file_name, bytes, Some(&cookie))
+        .upload_photo(account_id, &file_name, bytes, Some(&cookie))
         .await
 }
 
