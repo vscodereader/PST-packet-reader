@@ -856,6 +856,25 @@ pub fn run_naver_post_with_comment_macro<R: Runtime>(
     Ok(reports)
 }
 
+/// 특정 엔드포인트(예: `/api/report`) 한 건의 브라우저 요청/응답을 CDP Network 이벤트로 포착한 결과.
+/// 신고는 페이지의 ncaptcha SDK가 직접 `POST /api/report`를 쏘므로(우리 Rust 패킷이 아니다), 요청
+/// 바디(진짜 `ncaptchaTokenId`가 여기 담긴다)와 응답을 CDP 이벤트로만 볼 수 있다. 진단·성공판정용.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct NetworkCapture {
+    /// 포착된 요청의 CDP requestId(응답 바디를 `Network.getResponseBody`로 읽을 때 쓴다).
+    pub request_id: Option<String>,
+    /// 포착된 요청의 최종 URL(원문).
+    pub url: Option<String>,
+    /// 요청 POST 바디 원문(`requestWillBeSent`의 `request.postData` — 진짜 ncaptchaTokenId 포함).
+    pub request_body: Option<String>,
+    /// 응답 HTTP status(`responseReceived`).
+    pub status: Option<u16>,
+    /// 로딩이 정상 종료됐는지(`loadingFinished`) — 응답 바디를 읽을 수 있는 시점.
+    pub finished: bool,
+    /// 로딩 실패 사유(`loadingFailed`의 errorText) — 있으면 요청 자체가 실패한 것.
+    pub failed: Option<String>,
+}
+
 pub(crate) struct CdpClient {
     socket: WebSocket<MaybeTlsStream<TcpStream>>,
     next_id: u64,
@@ -874,6 +893,10 @@ pub(crate) struct CdpClient {
     // "직전 페이지의 stale readyState=complete" 를 오판하지 않도록, 폴링 대신 이 이벤트 카운터로
     // "새 문서 로드 완료" 를 판정한다(조회수 부스트 view_boost 등에서 사용). Page.enable 필요.
     page_loads: u64,
+    // 특정 엔드포인트(URL 부분일치) 한 건의 요청/응답을 포착하는 감시자. `(needle, capture)` — needle 을
+    // 포함하는 URL 의 첫 요청을 잡는다. 신고 제출은 페이지 SDK 가 `POST /api/report` 를 직접 쏘므로,
+    // 이 감시자로 요청 바디(진짜 ncaptchaTokenId)·응답을 CDP 이벤트에서 건져 성공을 판정한다. None 이면 미감시.
+    net_watch: Option<(String, NetworkCapture)>,
 }
 
 impl CdpClient {
@@ -888,6 +911,7 @@ impl CdpClient {
             net_inflight: std::collections::HashMap::new(),
             net_recent: Vec::new(),
             page_loads: 0,
+            net_watch: None,
         })
     }
 
@@ -1119,6 +1143,52 @@ impl CdpClient {
         let Some(request_id) = request_id else {
             return;
         };
+        // 감시 중인 엔드포인트가 있으면 이 이벤트로 요청/응답을 포착한다(신고 /api/report 성공판정용).
+        // net_inflight 매치와 별개 필드라 순차 borrow — 충돌 없음.
+        if let Some((needle, cap)) = self.net_watch.as_mut() {
+            match method {
+                "Network.requestWillBeSent" => {
+                    let url = params
+                        .and_then(|p| p.pointer("/request/url"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    // 아직 안 잡았고 URL 이 needle 을 포함하면 이 요청을 감시 대상으로 고정한다.
+                    if cap.request_id.is_none() && url.contains(needle.as_str()) {
+                        cap.request_id = Some(request_id.to_owned());
+                        cap.url = Some(url.to_owned());
+                        cap.request_body = params
+                            .and_then(|p| p.pointer("/request/postData"))
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned);
+                    }
+                }
+                "Network.responseReceived" => {
+                    if cap.request_id.as_deref() == Some(request_id) {
+                        cap.status = params
+                            .and_then(|p| p.pointer("/response/status"))
+                            .and_then(Value::as_u64)
+                            .map(|s| s as u16);
+                    }
+                }
+                "Network.loadingFinished" => {
+                    if cap.request_id.as_deref() == Some(request_id) {
+                        cap.finished = true;
+                    }
+                }
+                "Network.loadingFailed" => {
+                    if cap.request_id.as_deref() == Some(request_id) {
+                        cap.failed = Some(
+                            params
+                                .and_then(|p| p.get("errorText"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("(원인 불명)")
+                                .to_owned(),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
         match method {
             "Network.requestWillBeSent" => {
                 if let Some(url) = params
@@ -1203,6 +1273,65 @@ impl CdpClient {
                 None => format!("[응답 대기중(status 없음)] {url}"),
             })
             .collect()
+    }
+
+    /// URL 에 `needle`(부분일치)을 포함하는 브라우저 요청 한 건을 포착하도록 감시자를 무장한다(이전
+    /// 감시 결과는 리셋). 신고 드라이버는 제출 클릭 **전에** `/api/report` 로 무장해, SDK 가 쏘는 요청을
+    /// 놓치지 않는다. Network 도메인이 켜져 있어야 이벤트가 흐른다(`set_naver_cookies`가 켠다).
+    pub(crate) fn arm_network_capture(&mut self, needle: &str) {
+        self.net_watch = Some((needle.to_owned(), NetworkCapture::default()));
+    }
+
+    /// 무장된 감시 요청이 **끝(loadingFinished)**나거나 **실패(loadingFailed)**할 때까지 메시지 펌프를
+    /// 돌리며 기다린다(가벼운 `Runtime.evaluate "0"`로 소켓의 큐된 Network 이벤트를 읽어들인다 —
+    /// `wait_for_new_load` 와 동일 기법). 상한까지 못 끝나면 그 시점의 스냅샷을 돌려준다(요청조차 못
+    /// 잡았으면 request_id=None). 감시자는 소비하지 않는다(호출부가 결과를 여러 번 읽을 수 있다).
+    pub(crate) fn wait_for_network_capture(&mut self, timeout: Duration) -> NetworkCapture {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some((_, cap)) = self.net_watch.as_ref() {
+                if cap.finished || cap.failed.is_some() {
+                    return cap.clone();
+                }
+            }
+            if Instant::now() >= deadline {
+                return self
+                    .net_watch
+                    .as_ref()
+                    .map(|(_, cap)| cap.clone())
+                    .unwrap_or_default();
+            }
+            // 메시지 펌프: 가벼운 호출의 read 루프가 큐된 Network 이벤트를 `record_network_event`로 흘린다.
+            // 이동/컨텍스트 파괴로 evaluate 가 실패해도 무해(감시 필드만 보고 판정하며 재시도한다).
+            let _ = self.evaluate("0");
+            sleep(Duration::from_millis(150));
+        }
+    }
+
+    /// 포착한 요청의 응답 바디 원문을 `Network.getResponseBody`로 읽는다(loadingFinished 이후에만 유효).
+    /// base64 로 오면 디코드해 문자열로 돌려준다. 신고 응답(`{"success":true}`) 확인·원문 로깅에 쓴다.
+    pub(crate) fn network_get_response_body(&mut self, request_id: &str) -> AutomationResult<String> {
+        let result = self.call(
+            "Network.getResponseBody",
+            json!({ "requestId": request_id }),
+        )?;
+        let body = result
+            .get("body")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let base64_encoded = result
+            .get("base64Encoded")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if base64_encoded {
+            use base64::{engine::general_purpose::STANDARD, Engine as _};
+            let bytes = STANDARD
+                .decode(body)
+                .map_err(|error| AutomationError::new(format!("응답 바디 base64 디코드 실패: {error}")))?;
+            Ok(String::from_utf8_lossy(&bytes).into_owned())
+        } else {
+            Ok(body.to_owned())
+        }
     }
 
     // Chrome DevTools WebSocket으로 메시지를 보내는 함수입니다.

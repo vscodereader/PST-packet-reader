@@ -22,9 +22,9 @@ use tauri::{AppHandle, Runtime};
 pub use error::ReportError;
 pub use report_client::{ReportReason, REPORT_REASONS};
 
-use content_resolver::{build_content_id, parse_discussion_link, resolve_encrypted_user_id};
-use report_client::{build_report_body, is_valid_reason_code, ReportHttp};
-use token::TokenBrowser;
+use content_resolver::{build_content_id, parse_discussion_link, resolve_target};
+use report_client::{is_valid_reason_code, reason_label, ReportHttp};
+use token::ReportBrowser;
 
 /// 계정×링크 한 건의 신고 결과(프론트 표시용 — TS `ReportOutcome` 미러). accountId는 loginId(쿠키 키).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -133,18 +133,20 @@ fn report_one_account(account_id: &str, links: &[String], reason_code: &str) -> 
     };
 
     // 계정당 크롬 1회(설계서 §4.2). navigate 전에 이 계정 세션 쿠키를 주입해 로그인 상태로 신고
-    // 페이지를 연다(비로그인이면 nid 로그인으로 튕겨 토큰이 안 만들어짐). 열기 실패면 이 계정 전부 실패.
-    let mut browser = match TokenBrowser::open(&cookies) {
+    // 페이지를 연다(비로그인이면 nid 로그인으로 튕겨 SDK 가 안 뜸). 열기 실패면 이 계정 전부 실패.
+    let mut browser = match ReportBrowser::open(&cookies) {
         Ok(browser) => browser,
         Err(error) => return fail_all(account_id, links, &error.to_string()),
     };
+    // 사유 라벨은 코드 1개당 고정이라 계정 루프 밖에서 한 번 구한다(사유 UI 텍스트 매칭 폴백용).
+    let reason_label = reason_label(reason_code);
 
     let mut outcomes = Vec::with_capacity(links.len());
     for (index, link) in links.iter().enumerate() {
         if index > 0 {
             sleep(REPORT_GAP); // 사람같은 간격(위험점수 완화).
         }
-        let result = report_one_link(&http, &mut browser, link, reason_code);
+        let result = report_one_link(&http, &mut browser, link, reason_code, reason_label);
         let (success, message) = match result {
             Ok(()) => (true, "신고 완료".to_owned()),
             Err(error) => (false, error.to_string()),
@@ -177,19 +179,19 @@ fn report_one_account(account_id: &str, links: &[String], reason_code: &str) -> 
     outcomes
 }
 
-/// 링크 한 건의 신고: 파싱 → encryptedUserId 해석 → contentId → 토큰 → 바디 → 제출.
+/// 링크 한 건의 신고: 파싱 → 대상 해석(encryptedUserId + 표시용 title/nickname) → contentId →
+/// 신고 페이지를 브라우저로 열어 사유 선택·제출(페이지 SDK 가 ncaptcha 토큰 생성 후 스스로 POST).
 fn report_one_link(
     http: &ReportHttp,
-    browser: &mut TokenBrowser,
+    browser: &mut ReportBrowser,
     link: &str,
     reason_code: &str,
+    reason_label: &str,
 ) -> Result<(), ReportError> {
     let parsed = parse_discussion_link(link)?;
-    let encrypted_user_id = resolve_encrypted_user_id(http, &parsed)?;
+    let target = resolve_target(http, &parsed)?;
     let content_id = build_content_id(&parsed.post_id);
-    let token = browser.acquire_token(&parsed.post_id)?;
-    let body = build_report_body(&content_id, &encrypted_user_id, reason_code, &token);
-    http.submit_report(&body).map_err(ReportError::Submit)
+    browser.submit_report(&content_id, &target, reason_code, reason_label)
 }
 
 /// 저장 쿠키(storage-state)를 한 번 읽어 신고 HTTP 클라이언트와 토큰 브라우저 주입용 네이버 쿠키
