@@ -485,33 +485,8 @@ pub async fn establish_editor_session_with_base(
     cookie: Option<&str>,
 ) -> Result<(EditorSession, String), BlogError> {
     let http = crate::naver_cafe::shared_http_client();
-    // 1) 글쓰기 폼을 먼저 연다(브라우저 실측 순서). 서버가 이 GET 응답의 Set-Cookie로 글쓰기 세션
-    //    쿠키(JSESSIONID/BUC)를 준다. 공용 클라이언트엔 쿠키 저장소가 없으니 응답 Set-Cookie를 직접
-    //    파싱해 Cookie 헤더에 병합한다(CookieJar).
-    let mut jar = CookieJar::from_header(cookie.unwrap_or_default());
-    for warm_url in [
-        format!("{blog_base}/{blog_id}?Redirect=Write"),
-        format!(
-            "{blog_base}/PostWriteForm.naver?blogId={blog_id}&Redirect=Write&redirect=Write&widgetTypeCall=true&topReferer=https%3A%2F%2Fwww.naver.com%2F&trackingCode=naver_main&directAccess=false"
-        ),
-    ] {
-        let mut req = http
-            .get(&warm_url)
-            .header("User-Agent", crate::naver_cafe::post::BROWSER_USER_AGENT)
-            .header(
-                "Accept",
-                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            )
-            .header("Referer", format!("{blog_base}/"));
-        let hdr = jar.to_header();
-        if !hdr.is_empty() {
-            req = req.header("Cookie", hdr);
-        }
-        match req.send().await {
-            Ok(resp) => jar.merge_set_cookie(resp.headers()),
-            Err(e) => tracing::warn!("[BLOG] 글쓰기 폼 워밍업 실패(계속 진행) url={warm_url} err={e}"),
-        }
-    }
+    // 1) 글쓰기 폼을 먼저 연다(브라우저 실측 순서) → 세션쿠키(JSESSIONID/BUC) 보강.
+    let jar = warm_up_write_session(&http, blog_base, blog_id, cookie).await;
     // 2) 워밍업으로 얻은 세션 쿠키를 실어 토큰을 받는다(요청 자체는 브라우저 실측과 동일).
     let enriched = jar.to_header();
     let url = format!("{blog_base}/PostWriteFormSeOptions.naver?blogId={blog_id}");
@@ -619,6 +594,112 @@ impl CookieJar {
             .collect::<Vec<_>>()
             .join("; ")
     }
+}
+
+/// 글쓰기 폼을 먼저 열어(HTTP GET, 크롬 아님) 서버가 심는 세션쿠키(JSESSIONID/BUC)를 `CookieJar`에
+/// 병합해 돌려준다. 공용 reqwest 클라이언트엔 쿠키 저장소가 없어 응답 Set-Cookie를 직접 병합한다.
+async fn warm_up_write_session(
+    http: &reqwest::Client,
+    blog_base: &str,
+    blog_id: &str,
+    cookie: Option<&str>,
+) -> CookieJar {
+    let mut jar = CookieJar::from_header(cookie.unwrap_or_default());
+    for warm_url in [
+        format!("{blog_base}/{blog_id}?Redirect=Write"),
+        format!(
+            "{blog_base}/PostWriteForm.naver?blogId={blog_id}&Redirect=Write&redirect=Write&widgetTypeCall=true&topReferer=https%3A%2F%2Fwww.naver.com%2F&trackingCode=naver_main&directAccess=false"
+        ),
+    ] {
+        let mut req = http
+            .get(&warm_url)
+            .header("User-Agent", crate::naver_cafe::post::BROWSER_USER_AGENT)
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+            .header("Referer", format!("{blog_base}/"));
+        let hdr = jar.to_header();
+        if !hdr.is_empty() {
+            req = req.header("Cookie", hdr);
+        }
+        match req.send().await {
+            Ok(resp) => jar.merge_set_cookie(resp.headers()),
+            Err(e) => tracing::warn!("[BLOG] 글쓰기 폼 워밍업 실패(계속 진행) url={warm_url} err={e}"),
+        }
+    }
+    jar
+}
+
+/// 발행 직전 세션 준비: 글쓰기 폼 워밍업으로 세션쿠키를 얻고, `PostWriteFormManagerOptions.naver`에서
+/// **editorSource(발행 검증 토큰)** 를 받는다. 반환 `(보강된 Cookie 헤더, editorSource 옵션)`.
+///
+/// editorSource가 없으면 네이버가 공개범위(openType)를 무시하고 **비공개로 강제**한다(실측 2026-07-14).
+/// 그래서 발행 직전에 이 함수로 받아 populationParams에 실어야 전체공개/이웃공개가 그대로 반영된다.
+///
+/// # 쿠키 보안
+/// `cookie`는 사용자 인증 자격 증명이며 에러/로그에 노출하지 않는다.
+pub async fn prepare_publish_session(
+    blog_id: &str,
+    category_no: u32,
+    cookie: Option<&str>,
+) -> Result<(String, Option<String>), BlogError> {
+    prepare_publish_session_with_base(BLOG_HOST, blog_id, category_no, cookie).await
+}
+
+/// 주입된 `blog_base`로 [`prepare_publish_session`]을 수행한다(wiremock 테스트용).
+pub async fn prepare_publish_session_with_base(
+    blog_base: &str,
+    blog_id: &str,
+    category_no: u32,
+    cookie: Option<&str>,
+) -> Result<(String, Option<String>), BlogError> {
+    let http = crate::naver_cafe::shared_http_client();
+    let jar = warm_up_write_session(&http, blog_base, blog_id, cookie).await;
+    let enriched = jar.to_header();
+    let url = format!(
+        "{blog_base}/PostWriteFormManagerOptions.naver?blogId={blog_id}&categoryNo={category_no}"
+    );
+    let mut req = http
+        .get(&url)
+        .header("User-Agent", crate::naver_cafe::post::BROWSER_USER_AGENT)
+        .header("Accept", "application/json, text/plain, */*")
+        .header("Referer", write_form_referer(blog_id))
+        .header("sec-fetch-site", "same-origin")
+        .header("sec-fetch-mode", "cors")
+        .header("sec-fetch-dest", "empty");
+    if !enriched.is_empty() {
+        req = req.header("Cookie", &enriched);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| BlogError::new(format!("ManagerOptions 요청 실패: {e}")))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| BlogError::new(format!("ManagerOptions 응답 읽기 실패: {e}")))?;
+    let editor_source = parse_editor_source(&text);
+    // 원문 로그: editorSource를 실제로 받았는지(공개범위 반영 핵심)를 사람이 확인할 수 있게 남긴다.
+    tracing::info!(
+        "[BLOG] PostWriteFormManagerOptions 응답 — status={} editorSource={} body={}",
+        status.as_u16(),
+        editor_source.as_deref().unwrap_or("(없음)"),
+        snippet(&text)
+    );
+    Ok((enriched, editor_source))
+}
+
+/// `PostWriteFormManagerOptions.naver` 응답에서 `result.formView.editorSource`를 뽑는다(순수 함수).
+pub fn parse_editor_source(text: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    v.get("result")?
+        .get("formView")?
+        .get("editorSource")?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
 }
 
 /// `PostWriteFormSeOptions.naver` 응답에서 `result.token`(se-authorization JWT)을 뽑는다(순수 함수).
@@ -1015,6 +1096,20 @@ mod tests {
         assert!(parse_se_token(r#"{"isSuccess":false}"#).is_none());
         assert!(parse_se_token(r#"{"result":{"token":""}}"#).is_none());
         assert!(parse_se_token("<html>bot</html>").is_none());
+    }
+
+    #[test]
+    fn parse_editor_source_reads_form_view() {
+        // 실측(PostWriteFormManagerOptions): result.formView.editorSource.
+        let body =
+            r#"{"result":{"blogId":"x","formView":{"editorSource":"NeSLXG8/HbwtOlr4QcLl4A=="}}}"#;
+        assert_eq!(
+            parse_editor_source(body).as_deref(),
+            Some("NeSLXG8/HbwtOlr4QcLl4A==")
+        );
+        assert!(parse_editor_source(r#"{"result":{"formView":{"editorSource":""}}}"#).is_none());
+        assert!(parse_editor_source(r#"{"result":{}}"#).is_none());
+        assert!(parse_editor_source("<html>bot</html>").is_none());
     }
 
     #[tokio::test]

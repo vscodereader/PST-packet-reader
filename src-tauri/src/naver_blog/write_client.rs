@@ -61,6 +61,10 @@ pub enum PublishTime {
 #[derive(Debug, Clone)]
 pub struct BlogPublishSettings {
     pub open_type: OpenType,
+    /// 발행 검증 토큰(populationParams.editorSource). `PostWriteFormManagerOptions.naver` 응답
+    /// `result.formView.editorSource`에서 받아 채운다. **비면 네이버가 공개범위를 무시하고 비공개로
+    /// 강제**한다(실측 2026-07-14). 발행 직전 세션에서 받은 값을 넣어야 한다.
+    pub editor_source: Option<String>,
     pub comment_yn: bool,
     pub search_yn: bool,
     pub sympathy_yn: bool,
@@ -83,6 +87,7 @@ impl Default for BlogPublishSettings {
     fn default() -> Self {
         Self {
             open_type: OpenType::Public,
+            editor_source: None,
             comment_yn: true,
             search_yn: true,
             sympathy_yn: true,
@@ -165,6 +170,13 @@ impl BlogWriteClient {
         cookie: &str,
     ) -> Result<BlogWriteResult, BlogError> {
         let population_params = build_population_params(settings);
+        // 발행 설정 원문 로그(형님 필수): 실제 보내는 공개범위(openType)·설정을 그대로 남겨,
+        // "전체공개로 했는데 비공개로 올라간다" 같은 문제를 요청 원문으로 바로 확인한다.
+        tracing::info!(
+            "[BLOG] RabbitWrite 요청 설정 — openType={}(0=전체공개/1=이웃/2=서로이웃/3=비공개) populationParams={}",
+            settings.open_type.code(),
+            population_params
+        );
         let token_id = generate_token_id();
         let form = [
             ("blogId", blog_id.to_string()),
@@ -326,7 +338,7 @@ pub fn build_population_params(s: &BlogPublishSettings) -> Value {
             minute,
         } => ("pre", (year, month, date, hour, minute)),
     };
-    json!({
+    let mut params = json!({
         "configuration": {
             "openType": s.open_type.code(),
             "commentYn": s.comment_yn,
@@ -362,7 +374,15 @@ pub fn build_population_params(s: &BlogPublishSettings) -> Value {
             "prePostHour": hour,
             "prePostMinute": minute
         }
-    })
+    });
+    // editorSource(발행 검증 토큰)를 실측 위치(populationParams 최상위)에 싣는다. 비면 네이버가
+    // 공개범위를 무시하고 비공개로 강제하므로, 발행부가 PostWriteFormManagerOptions에서 받아 채운다.
+    if let Some(es) = &s.editor_source {
+        if !es.is_empty() {
+            params["editorSource"] = Value::String(es.clone());
+        }
+    }
+    params
 }
 
 /// RabbitWrite 성공 응답에서 redirectUrl·logNo를 뽑는다(순수 함수). 실패/봇차단 응답이면 `None`.
@@ -511,6 +531,20 @@ mod tests {
         assert_eq!(p["populationMeta"]["tags"], "첫글 인생");
         assert_eq!(p["populationMeta"]["categoryId"], 1);
         assert_eq!(p["populationMeta"]["directorySeq"], 0);
+    }
+
+    #[test]
+    fn population_params_includes_editor_source_when_present() {
+        // editorSource가 있으면 populationParams 최상위에 실린다(없으면 네이버가 비공개 강제).
+        let s = BlogPublishSettings {
+            editor_source: Some("NeSLXG8/HbwtOlr4QcLl4A==".to_owned()),
+            ..Default::default()
+        };
+        let p = build_population_params(&s);
+        assert_eq!(p["editorSource"], "NeSLXG8/HbwtOlr4QcLl4A==");
+        // 없으면 키 자체가 없다.
+        let p2 = build_population_params(&BlogPublishSettings::default());
+        assert!(p2.get("editorSource").is_none());
     }
 
     #[test]
