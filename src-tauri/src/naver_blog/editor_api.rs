@@ -411,7 +411,14 @@ pub async fn fetch_editor_session_with_base(
         .get(&url)
         .header("User-Agent", crate::naver_cafe::post::BROWSER_USER_AGENT)
         .header("Accept", "application/json, text/plain, */*")
-        .header("Referer", format!("{blog_base}/{blog_id}?Redirect=Write"))
+        // 실측 패킷의 referer 그대로: 네이버는 이 값으로 "글쓰기 폼에서 온 요청"인지 검사하며,
+        // 틀리면 "게시물이 삭제되었거나 다른 페이지로 변경되었습니다" 에러 HTML을 준다.
+        .header(
+            "Referer",
+            format!(
+                "{blog_base}/PostWriteForm.naver?blogId={blog_id}&Redirect=Write&redirect=Write&widgetTypeCall=true&topReferer=https%3A%2F%2Fwww.naver.com%2F&trackingCode=naver_main&directAccess=false"
+            ),
+        )
         .header("sec-fetch-site", "same-origin")
         .header("sec-fetch-mode", "cors")
         .header("sec-fetch-dest", "empty");
