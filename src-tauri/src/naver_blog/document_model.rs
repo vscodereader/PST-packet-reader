@@ -359,12 +359,19 @@ fn image_component(b: &ImageBlock) -> Value {
 
 /// oglink 컴포넌트.
 fn oglink_component(b: &OglinkBlock) -> Value {
+    // 실측 컴포넌트의 link는 스킴 포함 절대 URL("http://www.naver.com"). 사용자가 "www.naver.com"처럼
+    // 스킴 없이 입력하면 서버가 링크를 거부할 수 있어(발행 not acceptable) https://를 붙여 정규화한다.
+    let link = if b.link.starts_with("http://") || b.link.starts_with("https://") {
+        b.link.clone()
+    } else {
+        format!("https://{}", b.link)
+    };
     json!({
         "id": se_id(),
         "layout": "image",
         "title": b.title,
         "domain": b.domain,
-        "link": b.link,
+        "link": link,
         "thumbnail": {
             "src": b.thumbnail_src,
             "width": b.thumbnail_width,

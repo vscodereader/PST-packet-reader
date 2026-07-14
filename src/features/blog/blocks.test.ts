@@ -71,6 +71,7 @@ describe("blocks model", () => {
 
   it("createOglinkBlock keeps the original link and meta", () => {
     const meta: OglinkMeta = {
+      url: "https://naver.com",
       title: "네이버",
       domain: "naver.com",
       description: "검색",

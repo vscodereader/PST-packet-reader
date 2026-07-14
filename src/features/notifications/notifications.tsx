@@ -372,6 +372,40 @@ interface SystemRow {
   at: number;
 }
 
+/** 시스템 알림 한 줄. 텍스트에 URL이 있으면 그 부분을 클릭 가능한 링크로 렌더한다(블로그 발행 성공
+ *  시 게시글 링크를 종토 결과처럼 눌러서 열 수 있게). URL이 없으면 평문(말줄임)으로 그린다. */
+function SystemTitle({ title }: { title: string }) {
+  const match = title.match(/https?:\/\/\S+/);
+  if (!match) {
+    return (
+      <Text fz={13.5} fw={600} c="gray.7" truncate style={{ flex: 1 }}>
+        {title}
+      </Text>
+    );
+  }
+  const url = match[0];
+  const before = title.slice(0, match.index).trimEnd();
+  return (
+    <Text fz={13.5} fw={600} c="gray.7" style={{ flex: 1 }}>
+      {before && <span>{before} </span>}
+      <Anchor
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        fz={11.5}
+        ff="monospace"
+        style={{ wordBreak: "break-all" }}
+        onClick={(e) => {
+          e.preventDefault();
+          void ipc.diagnostics.openUrl(url).catch(() => {});
+        }}
+      >
+        {url}
+      </Anchor>
+    </Text>
+  );
+}
+
 export function Notifications({ filter }: { filter: LogFilter | null }) {
   const [cat, setCat] = useState<string>(filter?.batchId ? "post" : "all");
   const [status, setStatus] = useState("all");
@@ -919,15 +953,7 @@ export function Notifications({ filter }: { filter: LogFilter | null }) {
                   <Badge size="sm" color="gray" variant="light">
                     시스템
                   </Badge>
-                  <Text
-                    fz={13.5}
-                    fw={600}
-                    c="gray.7"
-                    truncate
-                    style={{ flex: 1 }}
-                  >
-                    {row.s.title}
-                  </Text>
+                  <SystemTitle title={row.s.title} />
                   <Text fz={12} c="dimmed" w={70} ta="right">
                     {formatRelative(row.s.at)}
                   </Text>
