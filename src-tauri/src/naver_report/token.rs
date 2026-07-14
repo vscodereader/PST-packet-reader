@@ -66,8 +66,12 @@ pub struct TokenBrowser {
 }
 
 impl TokenBrowser {
-    /// 이 계정용 보이는 크롬을 열고 CDP를 붙인다(Page 도메인만 활성화). 실패하면 토큰을 만들 수 없다.
-    pub fn open() -> Result<Self, ReportError> {
+    /// 이 계정용 보이는 크롬을 열고 CDP를 붙인다(Page 도메인만 활성화). 붙인 직후 신고 페이지로
+    /// 이동하기 **전에** 이 계정의 네이버 세션 쿠키(`cookies`: name/value 쌍)를 CDP로 주입해 로그인
+    /// 상태를 만든다 — 비로그인이면 srp2 신고 페이지가 nid 로그인으로 리다이렉트돼 ncaptcha 토큰이
+    /// 안 만들어진다(2026-07-14 로그 근거). 쿠키 값은 자격증명이라 로그에 남기지 않는다. 실패하면
+    /// 토큰을 만들 수 없다.
+    pub fn open(cookies: &[(String, String)]) -> Result<Self, ReportError> {
         let handle = launch_debug_chrome(false)
             .map_err(|error| ReportError::Token(format!("신고용 크롬 실행 실패: {error}")))?;
         let mut client = match CdpClient::connect_to_existing_chrome(DEVTOOLS_HOST, handle.port) {
@@ -84,6 +88,14 @@ impl TokenBrowser {
             drop(handle);
             return Err(ReportError::Token(format!(
                 "Page 도메인 활성화 실패: {error}"
+            )));
+        }
+        // navigate 전에 세션 쿠키 주입(Network 도메인 활성화 + Network.setCookies). 로그인 상태로
+        // 신고 페이지가 열려야 토큰 화면이 뜬다.
+        if let Err(error) = client.set_naver_cookies(cookies) {
+            drop(handle);
+            return Err(ReportError::Token(format!(
+                "신고용 세션 쿠키 주입 실패: {error}"
             )));
         }
         Ok(Self {
