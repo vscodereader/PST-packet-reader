@@ -729,6 +729,18 @@ async fn blog_check_name(account_id: String, domain_id: String) -> Result<bool, 
         .map_err(|e| e.message().to_owned())
 }
 
+/// 계정에 블로그가 있는지 확인하고, 없으면 자동 생성한다(발행 전 사전확인용, 저장 쿠키).
+/// 반환: `existed`=이미 있었음, `created`=이번 호출로 자동 생성함. `blog_id`는 계정 기본값(loginId).
+#[tauri::command]
+async fn blog_ensure_exists(
+    account_id: String,
+    blog_id: String,
+) -> Result<naver_blog::EnsureBlogResult, String> {
+    naver_blog::ensure_blog_exists_for_account(&account_id, &blog_id)
+        .await
+        .map_err(|e| e.message().to_owned())
+}
+
 /// 블로그 예약 발행 시각(연·월·일·시·분). 없으면 현재 발행.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1189,6 +1201,7 @@ pub fn register_handlers<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         band_comment,
         band_resolve_name,
         blog_check_name,
+        blog_ensure_exists,
         blog_publish,
         blog_oglink,
         blog_places,

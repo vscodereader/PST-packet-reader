@@ -60,6 +60,61 @@ impl BlogDomainClient {
         })
     }
 
+    /// 블로그가 없는 계정에 블로그를 자동 생성한다(도메인 등록). 성공 시 `true`.
+    ///
+    /// 패킷(2026-07-13) 확정: `POST section.blog.naver.com/blogdomain/BlogDomainRegistration.naver`
+    /// (application/x-www-form-urlencoded) body `domainId={loginId}&naverId={loginId}&tokenId={생성값}`
+    /// → `{"result":true}`(성공). `tokenId`는 클라이언트가 만드는 32바이트 값이라 발행과 동일하게
+    /// [`write_client::generate_token_id`]로 생성한다. 실패면 상태·본문 원문 로그를 남기고 에러로 알린다.
+    ///
+    /// # 쿠키 보안
+    /// `cookie`는 사용자 인증 자격 증명이며 에러/로그에 노출하지 않는다.
+    pub async fn register(
+        &self,
+        domain_id: &str,
+        naver_id: &str,
+        cookie: Option<&str>,
+    ) -> Result<bool, BlogError> {
+        let url = format!("{}/blogdomain/BlogDomainRegistration.naver", self.base);
+        let token_id = super::write_client::generate_token_id();
+        let form = build_registration_form(domain_id, naver_id, &token_id);
+        let mut req = self
+            .http
+            .post(&url)
+            .header("User-Agent", crate::naver_cafe::post::BROWSER_USER_AGENT)
+            .header("Accept", "application/json, text/plain, */*")
+            .header("Origin", SECTION_BLOG_HOST)
+            .header("Referer", "https://section.blog.naver.com/BlogHome.naver")
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .form(&form);
+        if let Some(c) = cookie {
+            req = req.header("Cookie", c);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| BlogError::new(format!("블로그 생성 요청 실패: {e}")))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| BlogError::new(format!("블로그 생성 응답 읽기 실패: {e}")))?;
+        // 게시 API 원문 로그 원칙: 상태/본문을 필터 없이 남긴다(쿠키는 본문에 없어 안전).
+        tracing::info!(
+            "[BLOG] 블로그 생성 응답 — status={} body={}",
+            status.as_u16(),
+            snippet(&text)
+        );
+        match parse_result_bool(&text) {
+            Some(true) => Ok(true),
+            _ => Err(BlogError::new(format!(
+                "블로그 자동 생성에 실패했습니다. status={} 응답={}",
+                status.as_u16(),
+                snippet(&text)
+            ))),
+        }
+    }
+
     /// 사용 중일 때 대체 블로그명 추천 목록을 조회한다(best-effort — 응답이 비면 빈 목록).
     ///
     /// # 쿠키 보안
@@ -155,6 +210,20 @@ fn parse_recommend_list(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// 블로그 생성(BlogDomainRegistration) 폼 필드를 만든다(순수 함수). `domainId`/`naverId`/`tokenId` 3개.
+/// reqwest `.form()`이 url-encoding을 담당하므로 값만 그대로 담는다.
+fn build_registration_form(
+    domain_id: &str,
+    naver_id: &str,
+    token_id: &str,
+) -> [(&'static str, String); 3] {
+    [
+        ("domainId", domain_id.to_string()),
+        ("naverId", naver_id.to_string()),
+        ("tokenId", token_id.to_string()),
+    ]
+}
+
 /// 로그·에러용 응답 앞부분 스니펫(최대 200자).
 fn snippet(text: &str) -> String {
     text.chars().take(200).collect()
@@ -236,6 +305,53 @@ mod tests {
             .check_availability("nblog4test", Some("NID_SES=abc"))
             .await
             .unwrap());
+    }
+
+    #[test]
+    fn build_registration_form_has_three_fields() {
+        let form = build_registration_form("choisw0404", "choisw0404", "TOK-123");
+        assert_eq!(form[0], ("domainId", "choisw0404".to_string()));
+        assert_eq!(form[1], ("naverId", "choisw0404".to_string()));
+        assert_eq!(form[2], ("tokenId", "TOK-123".to_string()));
+    }
+
+    #[tokio::test]
+    async fn register_true_on_result_true() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/blogdomain/BlogDomainRegistration.naver"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"result":true}"#))
+            .mount(&server)
+            .await;
+        let client = BlogDomainClient::with_base_url(server.uri());
+        assert!(client
+            .register("choisw0404", "choisw0404", Some("NID_SES=abc"))
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn register_errors_when_result_false() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/blogdomain/BlogDomainRegistration.naver"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"result":false}"#))
+            .mount(&server)
+            .await;
+        let client = BlogDomainClient::with_base_url(server.uri());
+        assert!(client.register("x", "x", None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn register_errors_on_bot_html() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/blogdomain/BlogDomainRegistration.naver"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>bot</html>"))
+            .mount(&server)
+            .await;
+        let client = BlogDomainClient::with_base_url(server.uri());
+        assert!(client.register("x", "x", None).await.is_err());
     }
 
     #[tokio::test]

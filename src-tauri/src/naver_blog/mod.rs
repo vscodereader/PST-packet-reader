@@ -14,6 +14,7 @@ pub mod write_client;
 pub use comment_client::{BlogCommentClient, BlogCommentResult};
 pub use document_model::Block;
 pub use domain_client::BlogDomainClient;
+// EnsureBlogResult는 이 모듈에서 정의(발행 전 블로그 존재확인/자동생성 결과).
 pub use editor_api::{
     BlogEditorApiClient, OglinkMeta, PlaceResult, StaticMapResult, StickerPack, UploadedFile,
     UploadedImage,
@@ -84,9 +85,65 @@ pub async fn check_blog_name_for_account(
         .await
 }
 
+/// 블로그 존재 보장 결과. `existed`=이미 있었음, `created`=이번 호출로 자동 생성함.
+/// 발행 전 사전확인(프론트 표시)과 발행 흐름 내부 배선에서 공유한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureBlogResult {
+    pub existed: bool,
+    pub created: bool,
+}
+
+/// 블로그 존재를 보장한다: 있으면 그대로, 없으면 자동 생성한다(발행 전 선행 단계).
+///
+/// SeOptions(`fetch_editor_session`)로 세션 토큰을 받으면 블로그가 있는 것으로 본다(존재확인 겸용).
+/// 토큰이 없으면(블로그 없음/로그인 만료 등) 지시대로 "블로그 없음"으로 해석하고
+/// `BlogDomainRegistration`으로 블로그를 자동 생성한다(`domainId=naverId=blog_id`, 계정 기본값).
+/// 각 단계 원문 로그는 하위 클라이언트(`fetch_editor_session`/`register`)가 남긴다.
+///
+/// # 쿠키 보안
+/// `cookie`는 사용자 인증 자격 증명이며 에러/로그에 노출하지 않는다.
+async fn ensure_blog_exists_with_cookie(
+    blog_id: &str,
+    cookie: &str,
+) -> Result<EnsureBlogResult, BlogError> {
+    match editor_api::fetch_editor_session(blog_id, Some(cookie)).await {
+        Ok(_) => Ok(EnsureBlogResult {
+            existed: true,
+            created: false,
+        }),
+        Err(_) => {
+            // 토큰 없음 = 블로그 없음으로 해석하고 자동 생성한다(생성 실패는 에러로 전파).
+            BlogDomainClient::new()
+                .register(blog_id, blog_id, Some(cookie))
+                .await?;
+            Ok(EnsureBlogResult {
+                existed: false,
+                created: true,
+            })
+        }
+    }
+}
+
+/// 저장된 네이버 쿠키로 계정에 블로그가 있는지 확인하고, 없으면 자동 생성한다(계정 단위 진입점).
+///
+/// 프론트가 발행 전에 사전확인/결과표시할 수 있게 존재/생성 여부를 돌려준다. `blog_id`는 계정
+/// 기본값(loginId)을 넘긴다. 쿠키가 없으면 `BlogError`로 알린다.
+///
+/// # 쿠키 보안
+/// 계정 쿠키는 내부에서만 사용되며 반환 오류/로그에 절대 노출되지 않는다.
+pub async fn ensure_blog_exists_for_account(
+    account_id: &str,
+    blog_id: &str,
+) -> Result<EnsureBlogResult, BlogError> {
+    let cookie_header = resolve_cookie_header(account_id)?;
+    ensure_blog_exists_with_cookie(blog_id, &cookie_header).await
+}
+
 /// 저장된 네이버 쿠키로 블로그 새 글을 발행한다(계정 단위 진입점, HTTP RabbitWrite 경로).
 ///
-/// `blog_id`(그 계정의 블로그명)에 제목/내용/발행설정으로 새 글을 올린다. 봇탐지 tokenId는
+/// `blog_id`(그 계정의 블로그명)에 제목/내용/발행설정으로 새 글을 올린다. 발행 전에 SeOptions로
+/// 블로그 존재를 확인하고, 없으면 자동 생성한다(존재확인→없으면 생성→게시). 봇탐지 tokenId는
 /// 클라이언트가 생성해 실측하며(서버가 강하게 검증하면 CDP 경로로 대체), 성공하면 게시글
 /// 번호(logNo)와 링크를 돌려준다. 쿠키가 없으면 `BlogError`로 알린다.
 ///
@@ -100,6 +157,7 @@ pub async fn publish_blog_post_for_account(
     settings: &BlogPublishSettings,
 ) -> Result<BlogWriteResult, BlogError> {
     let cookie_header = resolve_cookie_header(account_id)?;
+    ensure_blog_exists_with_cookie(blog_id, &cookie_header).await?;
     BlogWriteClient::new()
         .publish(blog_id, title, content, settings, &cookie_header)
         .await
@@ -121,6 +179,7 @@ pub async fn publish_blog_post_blocks_for_account(
     settings: &BlogPublishSettings,
 ) -> Result<BlogWriteResult, BlogError> {
     let cookie_header = resolve_cookie_header(account_id)?;
+    ensure_blog_exists_with_cookie(blog_id, &cookie_header).await?;
     let components = document_model::blocks_to_components(blocks);
     let document_model = build_document_model_with_components(title, components);
     BlogWriteClient::new()
