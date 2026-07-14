@@ -207,7 +207,9 @@ export function createOglinkBlock(link: string, meta: OglinkMeta): OglinkBlock {
     type: "oglink",
     title: meta.title,
     domain: meta.domain,
-    link,
+    // oglinkSign이 서명한 정규화 URL(meta.url)을 우선 사용한다(없으면 사용자 입력 link).
+    // 사용자 입력을 그대로 쓰면 서명 URL과 달라 발행이 "not acceptable"로 거부된다.
+    link: meta.url || link,
     thumbnailSrc: meta.thumbnailSrc,
     thumbnailWidth: meta.thumbnailWidth,
     thumbnailHeight: meta.thumbnailHeight,

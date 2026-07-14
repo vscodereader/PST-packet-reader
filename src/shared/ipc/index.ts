@@ -200,6 +200,8 @@ function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
  */
 /** 링크(oglink) 메타(백엔드 OglinkMeta, camelCase). */
 export interface OglinkMeta {
+  /** 정규화된 URL(oglinkSign이 서명한 값) — 링크 블록의 link로 써야 발행이 통과. */
+  url: string;
   title: string;
   domain: string;
   description: string;

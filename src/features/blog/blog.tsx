@@ -165,6 +165,15 @@ export function Blog(_props: { go?: (view: ViewId) => void }) {
         message: url ? `${url}` : "예약 발행이 등록되었습니다.",
         autoClose: false,
       });
+      // 종토처럼 **알림창(활동 로그)**에도 남긴다 — 링크가 있으면 함께 넣어 나중에 눌러 열 수 있게 한다.
+      void ipc.activity
+        .append(
+          "success",
+          url
+            ? `블로그 글 발행 성공 — ${url}`
+            : "블로그 예약 발행이 등록되었습니다.",
+        )
+        .catch(() => {});
     } catch (e) {
       setResult({ ok: false, msg: String(e) });
       notifications.show({
@@ -173,6 +182,9 @@ export function Blog(_props: { go?: (view: ViewId) => void }) {
         message: String(e),
         autoClose: false,
       });
+      void ipc.activity
+        .append("error", `블로그 글 발행 실패 — ${String(e)}`)
+        .catch(() => {});
     } finally {
       setPublishing(false);
     }

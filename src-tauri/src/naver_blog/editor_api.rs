@@ -41,6 +41,9 @@ pub struct EditorSession {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OglinkMeta {
+    /// oglink 응답의 정규화된 URL(`oglink.url`, 예 "http://www.naver.com"). oglinkSign이 이 URL을
+    /// 서명하므로 컴포넌트 link는 사용자가 친 원본이 아니라 **이 값**을 써야 발행이 통과한다.
+    pub url: String,
     pub title: String,
     pub domain: String,
     pub description: String,
@@ -634,17 +637,53 @@ pub fn parse_se_token(text: &str) -> Option<String> {
 pub fn parse_oglink(text: &str) -> Option<OglinkMeta> {
     let v: Value = serde_json::from_str(text).ok()?;
     let oglink = v.get("oglink")?;
-    let summary = oglink.get("summary")?;
-    let image = summary.get("image");
+    // 스크랩 성공이면 summary(제목/도메인/썸네일)가 있고, og태그 없는 URL이면 summary가 아예 없다
+    // (실측: `{"oglink":{"isComplete":false,"error":...},"oglinkSign":"..."}`). summary가 없어도
+    // 링크는 URL만으로 삽입 가능해야 하므로 응답 URL로 최소 메타를 채운다(예전엔 여기서 None→링크 실패).
+    let summary = oglink.get("summary");
+    let image = summary.and_then(|s| s.get("image"));
+    let response_url = oglink
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let domain = summary
+        .map(|s| str_field(s, "domain"))
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| domain_from_url(&response_url));
+    let title = summary
+        .map(|s| str_field(s, "title"))
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| {
+            if domain.is_empty() {
+                response_url.clone()
+            } else {
+                domain.clone()
+            }
+        });
     Some(OglinkMeta {
-        title: str_field(summary, "title"),
-        domain: str_field(summary, "domain"),
-        description: str_field(summary, "description"),
+        url: response_url,
+        title,
+        domain,
+        description: summary.map(|s| str_field(s, "description")).unwrap_or_default(),
         thumbnail_src: image.map(|i| str_field(i, "url")).unwrap_or_default(),
         thumbnail_width: image.and_then(|i| u32_field(i, "width")).unwrap_or(0),
         thumbnail_height: image.and_then(|i| u32_field(i, "height")).unwrap_or(0),
         oglink_sign: str_field(&v, "oglinkSign"),
     })
+}
+
+/// URL 문자열에서 도메인(host)만 뽑는다(순수 함수). 스킴/경로가 없어도 best-effort.
+fn domain_from_url(url: &str) -> String {
+    let no_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    no_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .to_owned()
 }
 
 /// places 응답에서 장소 목록을 뽑는다(순수 함수). `result.place.list[]`.
