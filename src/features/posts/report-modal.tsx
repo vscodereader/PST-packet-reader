@@ -15,11 +15,13 @@ import {
   ThemeIcon,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
+import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 
 import { isPostable } from "@/shared/data/config";
 import type { Account } from "@/shared/data/types";
 import { ipc, REPORT_REASONS } from "@/shared/ipc";
+import type { ReportFinished } from "@/shared/ipc";
 import { Icon } from "@/shared/ui/icons";
 import { PlatformLogo } from "@/shared/ui/platform-logo";
 
@@ -39,12 +41,16 @@ function postLabel(url: string): string {
 /** 사유 라디오의 기본 선택 — 실측 7개 중 첫 번째(없으면 빈 문자열, noUncheckedIndexedAccess 가드). */
 const DEFAULT_REASON = REPORT_REASONS[0]?.code ?? "";
 
+/** 신고 배치 완료 이벤트 이름(백엔드 REPORT_FINISHED_EVENT 미러). 백엔드가 계정×링크별 결과를 싣는다. */
+const REPORT_FINISHED_EVENT = "report-finished";
+
 /** 글 관리 화면의 "신고하기" 버튼이 여는 모달(설계서 naver-report-design.md).
  *
  * 좋아요 모달과 같은 방식으로 게시글 링크를 여러 개(엔터/추가 → 칩) 넣고, 신고 사유(라디오 7개)를
  * 고른 뒤 로그인된 종목토론방 계정을 체크박스([`AccountRow`] 재사용)로 고른다. "IP 회전"을 켜면
- * 계정 사이에 ADB로 IP를 돌리고 새 IP에서 재로그인한다. "신고하기"를 누르면 **모달이 닫히고**
- * 백그라운드로 n×m건이 신고된다(비차단 — 화면 안 막힘). 결과는 알림으로 전달된다.
+ * 계정 사이에 ADB로 IP를 돌리고 새 IP에서 재로그인한다. "신고하기"를 누르면 백그라운드로 n×m건이
+ * 신고되고(비차단 — 화면 안 막힘) **모달은 열린 채** 진행 상태를 보인다. 완료 이벤트(report-finished)가
+ * 오면 계정×링크별 성공/실패 + 실패 사유 원문을 결과 패널·완료 토스트로 표시한다.
  */
 export function ReportModal({ open, onClose }: ReportModalProps) {
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -53,11 +59,33 @@ export function ReportModal({ open, onClose }: ReportModalProps) {
   const [linkInput, setLinkInput] = useState("");
   const [reasonCode, setReasonCode] = useState(DEFAULT_REASON);
   const [rotateIp, setRotateIp] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
+  // null=대기, "running"=백그라운드 신고 진행 중, ReportFinished=완료(계정×링크별 결과 패널).
+  const [flow, setFlow] = useState<null | "running" | ReportFinished>(null);
 
   useEffect(() => {
     if (!open) return;
     void ipc.accounts.list().then(setAccounts);
+  }, [open]);
+
+  // 백그라운드 신고 완료 이벤트를 받아 결과 패널·완료 토스트를 띄운다(비차단이라 await로 못 받는다).
+  // listen은 프로미스라 언마운트/닫힘 시 해제한다 — 해제 함수가 아직 안 왔으면 도착 즉시 해제한다.
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    void listen<ReportFinished>(REPORT_FINISHED_EVENT, (e) => {
+      setFlow(e.payload);
+      const { total, succeeded } = e.payload;
+      notifications.show({
+        message: `신고 완료 — 총 ${total}건 중 ${succeeded}건 성공`,
+        color:
+          succeeded === total ? "green" : succeeded === 0 ? "red" : "yellow",
+      });
+    }).then((un) => (active ? (unlisten = un) : un()));
+    return () => {
+      active = false;
+      if (unlisten) unlisten();
+    };
   }, [open]);
 
   // 입력칸의 링크를 목록에 추가한다(중복 제거, trim). 추가 후 입력칸을 비운다.
@@ -94,23 +122,25 @@ export function ReportModal({ open, onClose }: ReportModalProps) {
     .filter((a): a is Account => !!a)
     .map((a) => a.loginId);
 
+  const running = flow === "running";
+  const finished = flow && flow !== "running" ? flow : null;
   const canSubmit =
     links.length > 0 &&
     selectedLoginIds.length > 0 &&
     reasonCode.length > 0 &&
-    !submitting;
+    !running;
 
   const submit = async () => {
     if (!canSubmit) return;
-    setSubmitting(true);
+    // 비차단: 커맨드는 즉시 반환한다(백엔드가 백그라운드로 n×m건 신고). 모달은 열어 둔 채 진행
+    // 상태로 두고, 완료 이벤트(report-finished)가 오면 결과 패널·완료 토스트를 띄운다.
+    setFlow("running");
     try {
-      // 비차단: 커맨드는 즉시 반환한다(백엔드가 백그라운드로 n×m건 신고). 모달을 닫고 안내한다.
       await ipc.report.submit(links, selectedLoginIds, reasonCode, rotateIp);
       notifications.show({
         message: `신고를 시작했습니다 — 링크 ${links.length}개 × 계정 ${selectedLoginIds.length}개(백그라운드 진행)`,
         color: "blue",
       });
-      close();
     } catch (err) {
       notifications.show({
         message:
@@ -118,8 +148,7 @@ export function ReportModal({ open, onClose }: ReportModalProps) {
           (err instanceof Error ? err.message : String(err)),
         color: "red",
       });
-    } finally {
-      setSubmitting(false);
+      setFlow(null);
     }
   };
 
@@ -129,6 +158,7 @@ export function ReportModal({ open, onClose }: ReportModalProps) {
     setSelected([]);
     setReasonCode(DEFAULT_REASON);
     setRotateIp(false);
+    setFlow(null);
     onClose();
   };
 
@@ -294,14 +324,72 @@ export function ReportModal({ open, onClose }: ReportModalProps) {
           description="연결된 폰이 없으면 회전을 건너뛰고 현재 IP로 진행합니다."
         />
 
+        {/* 진행 중 안내 — 백그라운드로 신고가 도는 동안 완료 이벤트를 기다린다. */}
+        {running && (
+          <Group gap={8} px={4}>
+            <Loader size={14} color="red" />
+            <Text fz={12.5} c="dimmed">
+              백그라운드로 신고 중입니다 — 완료되면 계정×링크별 결과가 여기
+              표시됩니다.
+            </Text>
+          </Group>
+        )}
+
+        {/* 결과 패널: 완료 이벤트를 받아 계정×링크별 성공/실패 + 실패 사유 원문을 보여준다. */}
+        {finished && (
+          <Stack gap={6}>
+            <Text fz={13} fw={700}>
+              총 {finished.total}건 중 {finished.succeeded}건 성공
+            </Text>
+            <Stack gap={4} style={{ maxHeight: 200, overflowY: "auto" }}>
+              {finished.outcomes.map((o, i) => (
+                <Group
+                  key={`${o.accountId}-${o.link}-${i}`}
+                  gap={8}
+                  px={10}
+                  py={7}
+                  wrap="nowrap"
+                  style={{
+                    borderRadius: "var(--mantine-radius-sm)",
+                    border: "1px solid var(--mantine-color-gray-2)",
+                    background: "var(--mantine-color-gray-0)",
+                  }}
+                >
+                  <ThemeIcon
+                    size={20}
+                    radius="xl"
+                    variant="light"
+                    color={o.success ? "green" : "red"}
+                  >
+                    {o.success ? (
+                      <Icon.checkCircle size={13} />
+                    ) : (
+                      <Icon.alert size={13} />
+                    )}
+                  </ThemeIcon>
+                  <Badge size="xs" variant="default" radius="sm">
+                    {o.accountId}
+                  </Badge>
+                  <Badge size="xs" variant="default" radius="sm">
+                    {postLabel(o.link)}
+                  </Badge>
+                  <Text fz={11.5} c={o.success ? "dimmed" : "red"} truncate>
+                    {o.message}
+                  </Text>
+                </Group>
+              ))}
+            </Stack>
+          </Stack>
+        )}
+
         <Group justify="flex-end" gap={9}>
-          <Button variant="default" onClick={close} disabled={submitting}>
+          <Button variant="default" onClick={close}>
             닫기
           </Button>
           <Button
             color="red"
             leftSection={
-              submitting ? (
+              running ? (
                 <Loader size={14} color="white" />
               ) : (
                 <Icon.alert size={16} />
@@ -310,7 +398,7 @@ export function ReportModal({ open, onClose }: ReportModalProps) {
             onClick={submit}
             disabled={!canSubmit}
           >
-            {submitting ? "신고 시작 중…" : "신고하기"}
+            {running ? "신고 중…" : "신고하기"}
           </Button>
         </Group>
       </Stack>

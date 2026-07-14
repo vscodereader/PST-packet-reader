@@ -283,6 +283,12 @@ fn clarify_profile_status_error(
 /// 건드리지 않는다). 여기서 재수출해 기존 호출부(`lib.rs`)의 import 경로를 유지한다.
 pub use like_flow::{run_naver_dislike, run_naver_like, LikeVerdict};
 
+/// 와이어샤크식 원문 패킷 트레이스 헬퍼(요청/응답 원문 로그 + on/off 게이트 + 트레이스 전송)를
+/// 크레이트 내부에 재수출한다 — `naver_report` 등 다른 모듈이 같은 패턴을 복제하지 않고 그대로
+/// 재사용한다(요청 원문·헤더·바디는 `TracedSend::send_traced`가, on/off는 `packet_trace_enabled`가
+/// 담당). `packet_client`는 private 모듈이라 여기서 노출해 경로를 크레이트 공용으로 연다.
+pub(crate) use packet_client::{packet_trace_enabled, TracedSend};
+
 /// 내용 변경(설계서 §5, #400): 원글 게시 성공 직후 호출하면 edit를 **백그라운드**로 돌린다.
 /// `change.delay_sec`초 뒤 저장 쿠키로 새 패킷 클라이언트를 만들어 제목/본문을 새 값으로 교체하고,
 /// 성공하면 알림 패널에 "내용 변경" LogBatch 카드를 남기고 토스트 이벤트(`forum-content-edited`)를

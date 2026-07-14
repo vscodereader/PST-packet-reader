@@ -9,6 +9,8 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use crate::naver_automation::{packet_trace_enabled, TracedSend};
+
 /// 신고 사유(설계서 §2.4, service=FIN 실측 7개). `code`는 `reportReasonCode`로 전송된다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReportReason {
@@ -141,6 +143,11 @@ impl ReportHttp {
     }
 
     /// stock.naver.com JSON API를 쿠키 달아 GET하고 JSON으로 파싱한다(by-item/profile 공용).
+    ///
+    /// 와이어샤크식 원문 로그: `send_traced`가 요청 원문(메서드·URL·모든 헤더·쿠키 원문)과 응답
+    /// 라인·헤더를 `target:"packet"`에 남기고(트레이스 ON일 때), 응답 바디 원문은 여기서 남긴다.
+    /// 실패(비-2xx·JSON 파싱 실패)의 응답 바디 원문은 트레이스가 꺼져 있어도 `warn!`로 항상 남겨,
+    /// "왜 조회가 실패했는지"가 로그에 늘 보이게 한다.
     pub fn get_json(&self, url: &str) -> Result<Value, String> {
         let response = self
             .client
@@ -149,19 +156,45 @@ impl ReportHttp {
             .header("referer", "https://stock.naver.com/")
             .header("user-agent", BROWSER_USER_AGENT)
             .header("cookie", self.cookie_header())
-            .send()
-            .map_err(|error| format!("GET 전송 실패: {error}"))?;
+            .send_traced(&self.client)
+            .map_err(|error| {
+                tracing::warn!(target: "report", %url, %error, "[REPORT] GET 전송 실패 — 원문");
+                format!("GET 전송 실패: {error}")
+            })?;
         let status = response.status();
         let text = response
             .text()
             .map_err(|error| format!("GET 본문 읽기 실패: {error}"))?;
+        if packet_trace_enabled() {
+            tracing::info!(target: "packet", "← body={text}");
+        }
         if !status.is_success() {
+            tracing::warn!(
+                target: "report",
+                %url,
+                status = status.as_u16(),
+                body = %text,
+                "[REPORT] GET 응답 실패 — 네이버 원문"
+            );
             return Err(format!("GET 응답 실패(status={status}): {text}"));
         }
-        serde_json::from_str(&text).map_err(|error| format!("GET JSON 파싱 실패: {error}"))
+        serde_json::from_str(&text).map_err(|error| {
+            tracing::warn!(
+                target: "report",
+                %url,
+                body = %text,
+                "[REPORT] GET JSON 파싱 실패 — 네이버 원문"
+            );
+            format!("GET JSON 파싱 실패: {error}")
+        })
     }
 
     /// 완성된 신고 바디를 `POST /api/report`로 제출한다. `{"success":true}`면 Ok, 아니면 원문 오류.
+    ///
+    /// 와이어샤크식 원문 로그: `send_traced`가 요청 원문(메서드·URL·모든 헤더·쿠키 원문·바디 원문)과
+    /// 응답 라인·헤더를 `target:"packet"`에 남기고(트레이스 ON일 때), 응답 바디 원문은 여기서 남긴다.
+    /// **신고 거부 시** 네이버가 왜 거부했는지 응답 바디 원문을 트레이스가 꺼져 있어도 `warn!`로 항상
+    /// 남긴다(사용자가 실패 사유를 늘 볼 수 있게).
     pub fn submit_report(&self, body: &Value) -> Result<(), String> {
         let response = self
             .client
@@ -173,16 +206,34 @@ impl ReportHttp {
             .header("user-agent", BROWSER_USER_AGENT)
             .header("cookie", self.cookie_header())
             .body(body.to_string())
-            .send()
-            .map_err(|error| format!("report POST 전송 실패: {error}"))?;
+            .send_traced(&self.client)
+            .map_err(|error| {
+                tracing::warn!(target: "report", %error, "[REPORT] report POST 전송 실패 — 원문");
+                format!("report POST 전송 실패: {error}")
+            })?;
         let status = response.status();
         let text = response
             .text()
             .map_err(|error| format!("report 본문 읽기 실패: {error}"))?;
+        if packet_trace_enabled() {
+            tracing::info!(target: "packet", "← body={text}");
+        }
         let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         if parsed.get("success").and_then(Value::as_bool) == Some(true) {
+            tracing::info!(
+                target: "report",
+                status = status.as_u16(),
+                "[REPORT] 신고 제출 성공 — 네이버 원문 success:true"
+            );
             return Ok(());
         }
+        // 신고 거부: 네이버 응답 바디 원문을 트레이스 OFF여도 항상 남긴다(거부 사유가 여기 담긴다).
+        tracing::warn!(
+            target: "report",
+            status = status.as_u16(),
+            body = %text,
+            "[REPORT] 신고 거부 — 네이버 응답 원문"
+        );
         Err(format!("신고 실패(status={status}): {text}"))
     }
 }
