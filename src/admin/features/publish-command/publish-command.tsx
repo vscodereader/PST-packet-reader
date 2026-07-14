@@ -33,6 +33,7 @@ import { Icon } from "@/shared/ui/icons";
 
 import { api, isOffline, type InvAccountDto } from "../../api";
 
+import { BlogWriteConfig } from "./blog-write";
 import type { ScheduledItem } from "./scheduled-posts";
 import {
   distributeEvenly,
@@ -372,10 +373,15 @@ export function PublishCommand({
   // 종토 목록에 섞이던 문제 수정 — 각 target은 자기 platform 계정만).
   const accountsFor = (deviceId: string, target: Target | null): string[] => {
     if (!target) return invByDev[deviceId]?.accounts ?? mockAccounts(deviceId);
-    const filtered = filterAccountsByTarget(target, invByDev[deviceId]?.accountRows);
+    const filtered = filterAccountsByTarget(
+      target,
+      invByDev[deviceId]?.accountRows,
+    );
     if (filtered !== null) return filtered;
     // 오프라인/미보고 → 더미 폴백(카페는 전용 더미).
-    return target === "cafe" ? mockCafeAccounts(deviceId) : mockAccounts(deviceId);
+    return target === "cafe"
+      ? mockCafeAccounts(deviceId)
+      : mockAccounts(deviceId);
   };
 
   const toggleDev = (id: string) =>
@@ -1277,7 +1283,11 @@ export function ForumCommentConfig({
   // 닉네임 랜덤 flag는 게이트(≥2)가 열렸고 체크됐을 때만 payload에 싣는다. 숨겨지면 항상 false.
   const commentNicknameRandom = showNicknameRandom && nicknameRandom;
   // 계정별 변경 가능 잔여 횟수(§6-2 실시간) — 공유 훅이 원격 조회·폴링을 담당한다.
-  const remaining = useNicknameRemaining(device.id, accts, commentNicknameRandom);
+  const remaining = useNicknameRemaining(
+    device.id,
+    accts,
+    commentNicknameRandom,
+  );
 
   // 댓글은 계정마다 같은 URL들에 단다(나눠서 없음). assignment는 계정만(종목 없음).
   const buildAssignments = () =>
@@ -2037,6 +2047,8 @@ function BlogConfig({
   accounts: string[];
   onSchedule: (item: ScheduledItem) => void;
 }) {
+  // 블로그 모드: 댓글(기존) / 새 글 발행(16-블로그새글). 새 글 발행은 BlockEditor로 작성해 직접 발행.
+  const [writeMode, setWriteMode] = useState<"comment" | "write">("comment");
   const [blogMode, setBlogMode] = useState<BlogMode>("specific");
   const [link, setLink] = useState("");
   const [count, setCount] = useState<number | "">(1);
@@ -2199,188 +2211,222 @@ function BlogConfig({
 
   return (
     <Box>
-      {/* 댓글 대상 모드 — 특정 게시글 / 최신글 / 인기글(최신글·인기글은 동일 동작). */}
+      {/* 블로그 종류 — 댓글(기존) / 새 글 발행(16-블로그새글). 새 글 발행은 편집기로 작성해 직접 발행. */}
       <Text size="xs" c="dimmed" mb={4}>
-        댓글 대상
+        블로그 작업
       </Text>
       <Group gap="xs" mb="sm">
-        {BLOG_MODES.map((m) => (
-          <Button
-            key={m.key}
-            size="xs"
-            variant={blogMode === m.key ? "filled" : "default"}
-            color={blogMode === m.key ? "blue" : "gray"}
-            onClick={() => {
-              setBlogMode(m.key);
-              setLink("");
-            }}
-          >
-            {m.label}
-          </Button>
-        ))}
-      </Group>
-
-      {/* 링크 입력 + 추가. 특정 게시글=글 링크, 최신글/인기글=블로그 링크 + 개수 N. */}
-      <Text size="xs" c="dimmed" mb={4}>
-        {isList
-          ? "블로그 링크 (블로그의 최신 N개 글에 댓글을 답니다)"
-          : "글 링크 (넣은 글에 저장된 댓글을 답니다)"}
-      </Text>
-      <Group gap={8} align="flex-end" wrap="nowrap" mb="sm">
-        <TextInput
-          size="xs"
-          style={{ flex: 1 }}
-          placeholder={
-            isList
-              ? "https://blog.naver.com/press02"
-              : "https://blog.naver.com/press02/224311392458"
-          }
-          value={link}
-          onChange={(e) => setLink(e.currentTarget.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") addLink();
-          }}
-          styles={{ input: { fontFamily: "monospace" } }}
-          aria-label={isList ? "블로그 링크" : "블로그 글 링크"}
-        />
-        {isList && (
-          <NumberInput
-            size="xs"
-            label="개수"
-            w={90}
-            min={1}
-            max={50}
-            value={count}
-            onChange={(v) => setCount(typeof v === "number" ? v : "")}
-            aria-label="최신 글 개수"
-          />
-        )}
         <Button
           size="xs"
-          variant="light"
-          color="blue"
-          disabled={!link.trim()}
-          onClick={addLink}
+          variant={writeMode === "comment" ? "filled" : "default"}
+          color={writeMode === "comment" ? "blue" : "gray"}
+          onClick={() => setWriteMode("comment")}
         >
-          추가
+          댓글
+        </Button>
+        <Button
+          size="xs"
+          variant={writeMode === "write" ? "filled" : "default"}
+          color={writeMode === "write" ? "blue" : "gray"}
+          onClick={() => setWriteMode("write")}
+        >
+          새 글 발행
         </Button>
       </Group>
 
-      {items.length > 0 ? (
-        <Group gap={6} mb="sm">
-          {items.map((it) => {
-            const key = blogItemKey(it);
-            return (
-              <Badge
-                key={key}
-                color="blue"
-                variant="light"
-                radius="sm"
-                rightSection={
-                  <ActionIcon
-                    size={14}
-                    variant="transparent"
-                    color="blue"
-                    aria-label={`${blogItemLabel(it)} 제거`}
-                    onClick={() => onRemove(key)}
-                  >
-                    <Icon.x size={10} />
-                  </ActionIcon>
-                }
-              >
-                {blogItemLabel(it)}
-              </Badge>
-            );
-          })}
-        </Group>
+      {writeMode === "write" ? (
+        <BlogWriteConfig device={device} accounts={accounts} />
       ) : (
-        <Text fz={12} c="orange.7" mb="sm">
-          댓글을 달 {isList ? "블로그를" : "블로그 글을"} 추가하세요.
-        </Text>
-      )}
-
-      {/* 계정 선택 — 블로그는 유효 쿠키 필요(로그인 성공 계정만). */}
-      <Text size="xs" c="dimmed" mb={4}>
-        계정 (이 하위의 블로그 로그인 성공 계정만 · {accts.length}명 선택)
-      </Text>
-      <Group gap={6}>
-        {accounts.length === 0 ? (
-          <Text size="xs" c="dimmed">
-            이 하위에 로그인 성공한 블로그 계정이 없습니다(계정 분배에서
-            플랫폼=네이버 블로그로 분배·로그인하세요).
+        <>
+          {/* 댓글 대상 모드 — 특정 게시글 / 최신글 / 인기글(최신글·인기글은 동일 동작). */}
+          <Text size="xs" c="dimmed" mb={4}>
+            댓글 대상
           </Text>
-        ) : (
-          accounts.map((a) => {
-            const on = accts.includes(a);
-            return (
+          <Group gap="xs" mb="sm">
+            {BLOG_MODES.map((m) => (
               <Button
-                key={a}
+                key={m.key}
                 size="xs"
-                variant={on ? "filled" : "default"}
-                color={on ? "blue" : "gray"}
-                onClick={() =>
-                  setAccts((prev) =>
-                    on ? prev.filter((x) => x !== a) : [...prev, a],
-                  )
-                }
+                variant={blogMode === m.key ? "filled" : "default"}
+                color={blogMode === m.key ? "blue" : "gray"}
+                onClick={() => {
+                  setBlogMode(m.key);
+                  setLink("");
+                }}
               >
-                {maskId(a)}
+                {m.label}
               </Button>
-            );
-          })
-        )}
-      </Group>
+            ))}
+          </Group>
 
-      {/* 지금/예약 게시(블로그 댓글은 나눠서 없음 — 계정마다 같은 대상에 단다). */}
-      <Stack gap={8} mt="md">
-        <Group grow gap="xs">
-          <Button
-            size="sm"
-            fw={700}
-            disabled={!valid}
-            leftSection={<Icon.bolt size={15} />}
-            onClick={runNow}
-          >
-            지금 게시
-          </Button>
-          <Button
-            size="sm"
-            fw={700}
-            variant={armed ? "filled" : "light"}
-            color="grape"
-            disabled={!valid}
-            leftSection={<Icon.calendar size={15} />}
-            onClick={() => setArmed(true)}
-          >
-            예약 게시
-          </Button>
-        </Group>
-        {armed && (
-          <Paper withBorder radius="md" p="sm" bg="var(--mantine-color-gray-0)">
-            <Text fz={12} fw={700} mb={6}>
-              블로그 예약 — 게시 시각 선택
-            </Text>
-            <Group gap="sm" wrap="wrap">
-              <DateTimePicker
-                date={sched.date}
-                time={sched.time}
-                onChange={setSched}
+          {/* 링크 입력 + 추가. 특정 게시글=글 링크, 최신글/인기글=블로그 링크 + 개수 N. */}
+          <Text size="xs" c="dimmed" mb={4}>
+            {isList
+              ? "블로그 링크 (블로그의 최신 N개 글에 댓글을 답니다)"
+              : "글 링크 (넣은 글에 저장된 댓글을 답니다)"}
+          </Text>
+          <Group gap={8} align="flex-end" wrap="nowrap" mb="sm">
+            <TextInput
+              size="xs"
+              style={{ flex: 1 }}
+              placeholder={
+                isList
+                  ? "https://blog.naver.com/press02"
+                  : "https://blog.naver.com/press02/224311392458"
+              }
+              value={link}
+              onChange={(e) => setLink(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") addLink();
+              }}
+              styles={{ input: { fontFamily: "monospace" } }}
+              aria-label={isList ? "블로그 링크" : "블로그 글 링크"}
+            />
+            {isList && (
+              <NumberInput
+                size="xs"
+                label="개수"
+                w={90}
+                min={1}
+                max={50}
+                value={count}
+                onChange={(v) => setCount(typeof v === "number" ? v : "")}
+                aria-label="최신 글 개수"
               />
-              <Button size="sm" color="grape" onClick={confirmSchedule}>
-                예약 확정
+            )}
+            <Button
+              size="xs"
+              variant="light"
+              color="blue"
+              disabled={!link.trim()}
+              onClick={addLink}
+            >
+              추가
+            </Button>
+          </Group>
+
+          {items.length > 0 ? (
+            <Group gap={6} mb="sm">
+              {items.map((it) => {
+                const key = blogItemKey(it);
+                return (
+                  <Badge
+                    key={key}
+                    color="blue"
+                    variant="light"
+                    radius="sm"
+                    rightSection={
+                      <ActionIcon
+                        size={14}
+                        variant="transparent"
+                        color="blue"
+                        aria-label={`${blogItemLabel(it)} 제거`}
+                        onClick={() => onRemove(key)}
+                      >
+                        <Icon.x size={10} />
+                      </ActionIcon>
+                    }
+                  >
+                    {blogItemLabel(it)}
+                  </Badge>
+                );
+              })}
+            </Group>
+          ) : (
+            <Text fz={12} c="orange.7" mb="sm">
+              댓글을 달 {isList ? "블로그를" : "블로그 글을"} 추가하세요.
+            </Text>
+          )}
+
+          {/* 계정 선택 — 블로그는 유효 쿠키 필요(로그인 성공 계정만). */}
+          <Text size="xs" c="dimmed" mb={4}>
+            계정 (이 하위의 블로그 로그인 성공 계정만 · {accts.length}명 선택)
+          </Text>
+          <Group gap={6}>
+            {accounts.length === 0 ? (
+              <Text size="xs" c="dimmed">
+                이 하위에 로그인 성공한 블로그 계정이 없습니다(계정 분배에서
+                플랫폼=네이버 블로그로 분배·로그인하세요).
+              </Text>
+            ) : (
+              accounts.map((a) => {
+                const on = accts.includes(a);
+                return (
+                  <Button
+                    key={a}
+                    size="xs"
+                    variant={on ? "filled" : "default"}
+                    color={on ? "blue" : "gray"}
+                    onClick={() =>
+                      setAccts((prev) =>
+                        on ? prev.filter((x) => x !== a) : [...prev, a],
+                      )
+                    }
+                  >
+                    {maskId(a)}
+                  </Button>
+                );
+              })
+            )}
+          </Group>
+
+          {/* 지금/예약 게시(블로그 댓글은 나눠서 없음 — 계정마다 같은 대상에 단다). */}
+          <Stack gap={8} mt="md">
+            <Group grow gap="xs">
+              <Button
+                size="sm"
+                fw={700}
+                disabled={!valid}
+                leftSection={<Icon.bolt size={15} />}
+                onClick={runNow}
+              >
+                지금 게시
               </Button>
               <Button
                 size="sm"
-                variant="subtle"
-                color="gray"
-                onClick={() => setArmed(false)}
+                fw={700}
+                variant={armed ? "filled" : "light"}
+                color="grape"
+                disabled={!valid}
+                leftSection={<Icon.calendar size={15} />}
+                onClick={() => setArmed(true)}
               >
-                취소
+                예약 게시
               </Button>
             </Group>
-          </Paper>
-        )}
-      </Stack>
+            {armed && (
+              <Paper
+                withBorder
+                radius="md"
+                p="sm"
+                bg="var(--mantine-color-gray-0)"
+              >
+                <Text fz={12} fw={700} mb={6}>
+                  블로그 예약 — 게시 시각 선택
+                </Text>
+                <Group gap="sm" wrap="wrap">
+                  <DateTimePicker
+                    date={sched.date}
+                    time={sched.time}
+                    onChange={setSched}
+                  />
+                  <Button size="sm" color="grape" onClick={confirmSchedule}>
+                    예약 확정
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="subtle"
+                    color="gray"
+                    onClick={() => setArmed(false)}
+                  >
+                    취소
+                  </Button>
+                </Group>
+              </Paper>
+            )}
+          </Stack>
+        </>
+      )}
     </Box>
   );
 }

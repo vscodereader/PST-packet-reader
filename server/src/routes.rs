@@ -56,6 +56,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/devices/:id", delete(delete_device))
         .route("/devices/:id/commands", post(issue_command))
         .route("/admin/publish", post(issue_publish))
+        .route("/admin/blog-write", post(issue_blog_write))
         .route("/admin/forum-stocks", get(forum_stocks))
         .route("/admin/scheduled", post(create_scheduled).get(list_scheduled))
         .route("/admin/scheduled/:id", delete(delete_scheduled))
@@ -489,6 +490,147 @@ async fn issue_publish(
         &cid,
         &req.spec,
         &format!("operator={}", op.login_id),
+    )
+    .await;
+
+    Ok(Json(serde_json::json!({ "ok": true, "commandId": cid })))
+}
+
+// ───────────────────────── 블로그 새 글 발행(publish_blog_write, 16-블로그새글) ─────────────────────────
+
+/// 블로그 발행 설정(Admin이 고른 공개범위·댓글·검색·태그). 서버는 값만 통과시킨다(해석은 하위).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlogWriteSettingsReq {
+    /// 공개 범위 코드: 0=전체공개·1=이웃공개·2=서로이웃공개·3=비공개.
+    #[serde(default)]
+    open_type: u8,
+    #[serde(default)]
+    comment_yn: bool,
+    #[serde(default)]
+    search_yn: bool,
+    #[serde(default)]
+    tags: String,
+}
+
+/// 블로그 새 글 발행 대상 1건 — (계정 loginId, 발행할 블로그명). blogId가 비면 하위가 loginId를 쓴다.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlogWriteTargetReq {
+    login_id: String,
+    #[serde(default)]
+    blog_id: String,
+}
+
+/// Admin → 서버 블로그 새 글 발행 요청(16-블로그새글). 제목·본문 블록·발행설정은 대상 공통이고,
+/// targets가 계정별 블로그명을 담는다. blocks는 편집기 블록 배열(프론트 blocks.ts) — 서버는 해석하지
+/// 않고 그대로 하위에 통과시킨다(하위 document_model이 SmartEditor documentModel로 변환).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlogWriteReq {
+    device_id: String,
+    #[serde(default)]
+    command_id: Option<String>,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    blocks: Vec<serde_json::Value>,
+    settings: BlogWriteSettingsReq,
+    targets: Vec<BlogWriteTargetReq>,
+}
+
+/// 블로그 새 글 발행 SSE 페이로드를 조립한다(순수 함수 — 테스트 대상). 하위 `publish_blog_write`
+/// 명령 모양(type/commandId/blogWrite)을 만든다. 서버는 blocks를 해석하지 않고 그대로 싣는다.
+fn blog_write_payload(cid: &str, req: &BlogWriteReq) -> serde_json::Value {
+    let targets: Vec<serde_json::Value> = req
+        .targets
+        .iter()
+        .map(|t| serde_json::json!({ "loginId": t.login_id, "blogId": t.blog_id }))
+        .collect();
+    serde_json::json!({
+        "type": "publish_blog_write",
+        "commandId": cid,
+        "blogWrite": {
+            "title": req.title,
+            "blocks": req.blocks,
+            "settings": {
+                "openType": req.settings.open_type,
+                "commentYn": req.settings.comment_yn,
+                "searchYn": req.settings.search_yn,
+                "tags": req.settings.tags,
+            },
+            "targets": targets,
+        }
+    })
+}
+
+/// 블로그 새 글 발행 명령 발행(16-블로그새글) — Admin이 편집기로 작성한 새 글을 그 하위 SSE로 내려
+/// 보낸다. 게시 명령과 동일하게 online 게이트(409)·[CMD] 원문 로그를 적용한다. 하위는 게시 큐가 아닌
+/// 직접 발행 경로(`publish_blog_post_blocks_for_account`)로 각 계정 블로그에 발행하고 결과를 회신한다.
+async fn issue_blog_write(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<BlogWriteReq>,
+) -> AppResult<Json<serde_json::Value>> {
+    let op = st.auth_operator(&headers).await?;
+    let uid = Uuid::parse_str(&req.device_id)
+        .map_err(|_| AppError::BadRequest("기기 id 형식 오류".into()))?;
+    let device = st
+        .repo
+        .find_device(uid)
+        .await?
+        .ok_or_else(|| AppError::NotFound("없는 기기".into()))?;
+    let cid = req
+        .command_id
+        .clone()
+        .unwrap_or_else(|| format!("c-{}", Uuid::new_v4()));
+
+    if !AppState::is_commandable(device.state) {
+        let reason = match device.state {
+            DeviceState::Rotating => "대상 컴퓨터 IP 변경 중(ROTATING·거부코드 409)",
+            DeviceState::Reconnecting => "대상 컴퓨터 재연결 중(거부코드 409)",
+            _ => "대상 컴퓨터 꺼짐(offline·거부코드 409)",
+        };
+        st.audit(
+            "[REJECT]",
+            &format!("Admin → {}", device.name),
+            &req.device_id,
+            &format!(
+                "거부: publish_blog_write(블로그 새 글 발행) commandId={cid} 사유={reason} operator={} 제목=\"{}\"",
+                op.login_id, req.title
+            ),
+            "fail",
+        )
+        .await;
+        return Err(AppError::Conflict(format!("{reason} — 재연결 후 다시 시도")));
+    }
+
+    let payload = blog_write_payload(&cid, &req);
+    st.hub.device_push(device.id, payload.to_string());
+
+    let target_ids: Vec<String> = req
+        .targets
+        .iter()
+        .map(|t| {
+            if t.blog_id.trim().is_empty() {
+                t.login_id.clone()
+            } else {
+                format!("{}({})", t.login_id, t.blog_id)
+            }
+        })
+        .collect();
+    st.audit(
+        "[CMD]",
+        &format!("Admin → {}", device.name),
+        &device.id.to_string(),
+        &format!(
+            "publish_blog_write(블로그 새 글 발행) commandId={cid} operator={} · 제목=\"{}\" · 블록 {}개 · 대상 계정×블로그: {} · payload={payload}",
+            op.login_id,
+            req.title,
+            req.blocks.len(),
+            target_ids.join(", "),
+        ),
+        "cmd",
     )
     .await;
 
@@ -1685,6 +1827,46 @@ mod tests {
             login_ids: login_ids.into_iter().map(String::from).collect(),
             repeats,
         }
+    }
+
+    #[test]
+    fn blog_write_payload_builds_publish_blog_write_command() {
+        let req = BlogWriteReq {
+            device_id: "d1".into(),
+            command_id: None,
+            title: "새 글".into(),
+            blocks: vec![serde_json::json!({ "type": "text", "text": "본문" })],
+            settings: BlogWriteSettingsReq {
+                open_type: 2,
+                comment_yn: false,
+                search_yn: true,
+                tags: "태그".into(),
+            },
+            targets: vec![
+                BlogWriteTargetReq {
+                    login_id: "acc1".into(),
+                    blog_id: "press02".into(),
+                },
+                BlogWriteTargetReq {
+                    login_id: "acc2".into(),
+                    blog_id: String::new(),
+                },
+            ],
+        };
+        let p = blog_write_payload("c-1", &req);
+        assert_eq!(p["type"], "publish_blog_write");
+        assert_eq!(p["commandId"], "c-1");
+        assert_eq!(p["blogWrite"]["title"], "새 글");
+        assert_eq!(p["blogWrite"]["blocks"][0]["type"], "text");
+        assert_eq!(p["blogWrite"]["settings"]["openType"], 2);
+        assert_eq!(p["blogWrite"]["settings"]["commentYn"], false);
+        assert_eq!(p["blogWrite"]["settings"]["searchYn"], true);
+        assert_eq!(p["blogWrite"]["settings"]["tags"], "태그");
+        assert_eq!(p["blogWrite"]["targets"][0]["loginId"], "acc1");
+        assert_eq!(p["blogWrite"]["targets"][0]["blogId"], "press02");
+        // blogId 비면 그대로 빈 문자열로 싣고(하위가 loginId로 폴백), targets 순서 보존.
+        assert_eq!(p["blogWrite"]["targets"][1]["loginId"], "acc2");
+        assert_eq!(p["blogWrite"]["targets"][1]["blogId"], "");
     }
 
     #[test]

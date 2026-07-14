@@ -57,6 +57,70 @@ struct Command {
     /// 기타 명령(`like_posts`/`dislike_posts`/`boost_view`/`rotate_ip`)일 때만 채워진다(15-기타명령 §2).
     #[serde(default)]
     etc: Option<EtcCmd>,
+    /// 블로그 새 글 발행 명령(`publish_blog_write`)일 때만 채워진다(16-블로그새글). Admin이 편집기
+    /// 툴바로 작성한 제목·본문 블록·발행설정 + 대상 계정(계정별 블로그명)을 실어 보낸다. 하위는 이
+    /// 명령을 게시 큐에 태우지 않고, 계정 쿠키로 `naver_blog::publish_blog_post_blocks_for_account`를
+    /// 직접 호출해 RabbitWrite로 발행한다(카페/밴드 게시 큐 경로와 별개).
+    #[serde(rename = "blogWrite", default)]
+    blog_write: Option<BlogWriteCmd>,
+}
+
+/// 블로그 새 글 발행 페이로드(16-블로그새글). 제목·본문 블록·발행설정은 대상 계정 전체에 공통이며,
+/// `targets`가 계정별 (loginId, 블로그명) 쌍을 담는다. 각 계정이 자기 블로그에 같은 글을 발행한다.
+#[derive(Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct BlogWriteCmd {
+    #[serde(default)]
+    title: String,
+    /// 편집기 블록 배열(프론트 blocks.ts 모양). 서버는 그대로 통과시키고, 하위가 여기서
+    /// `naver_blog::Block`으로 파싱한다(파싱 실패 블록은 무시하지 않고 발행 자체를 실패로 보고).
+    #[serde(default)]
+    blocks: Vec<serde_json::Value>,
+    #[serde(default)]
+    settings: BlogWriteSettings,
+    #[serde(default)]
+    targets: Vec<BlogWriteTarget>,
+}
+
+/// 블로그 발행 설정(Admin이 고른 공개범위·댓글·검색·태그). 나머지 세부 설정은 하위 기본값을 쓴다.
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct BlogWriteSettings {
+    /// 공개 범위: 0=전체공개·1=이웃공개·2=서로이웃공개·3=비공개.
+    #[serde(default)]
+    open_type: u8,
+    #[serde(default = "default_true")]
+    comment_yn: bool,
+    #[serde(default = "default_true")]
+    search_yn: bool,
+    /// 태그(# 없이 공백 구분). 빈 문자열이면 태그 없음.
+    #[serde(default)]
+    tags: String,
+}
+
+impl Default for BlogWriteSettings {
+    fn default() -> Self {
+        Self {
+            open_type: 0,
+            comment_yn: true,
+            search_yn: true,
+            tags: String::new(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// 블로그 새 글 발행 대상 1건 — (계정 loginId, 발행할 블로그명). blogId가 비면 loginId를 블로그명으로.
+#[derive(Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct BlogWriteTarget {
+    #[serde(default)]
+    login_id: String,
+    #[serde(default)]
+    blog_id: String,
 }
 
 /// 닉네임 잔여 횟수 조회 페이로드(15-기타명령 §3). Admin이 닉네임 랜덤 체크박스를 켤 때, 선택한
@@ -676,6 +740,16 @@ async fn drain_events<R: Runtime>(
                 run_etc_command(app2, client2, cfg2, kind, etc).await;
             });
         }
+        // 블로그 새 글 발행(16-블로그새글) 실제 실행 — 계정 쿠키로 RabbitWrite를 호출하고 결과를
+        // post-report로 회신한다. HTTP 블로킹이라 백그라운드로 돌린다(엔진 무손상, ADD ONLY).
+        if cmd.kind == "publish_blog_write" {
+            if let Some(bw) = cmd.blog_write.clone() {
+                let (client2, cfg2) = (client.clone(), cfg.clone());
+                tauri::async_runtime::spawn(async move {
+                    run_blog_write_command(client2, cfg2, bw).await;
+                });
+            }
+        }
     }
 }
 
@@ -850,6 +924,151 @@ async fn run_etc_command<R: Runtime>(
     let _ = net::post_report(&client, &cfg.server_url, &cfg.device_token, &body).await;
 }
 
+// ───────────────────────── 블로그 새 글 발행(16-블로그새글) ─────────────────────────
+
+/// Admin 발행 설정(공개범위 코드·댓글·검색·태그)을 데스크톱 `BlogPublishSettings`로 변환(순수 함수).
+/// open_type: 0=전체공개·1=이웃공개·2=서로이웃공개·3=비공개(그 외=전체공개). 나머지 세부 설정은
+/// 데스크톱 기본값(카테고리/공감/스크랩 등)을 그대로 쓴다(Admin은 공개범위·댓글·검색·태그만 고른다).
+fn blog_write_settings(s: &BlogWriteSettings) -> crate::naver_blog::BlogPublishSettings {
+    use crate::naver_blog::{BlogPublishSettings, OpenType};
+    let open_type = match s.open_type {
+        1 => OpenType::Neighbor,
+        2 => OpenType::MutualNeighbor,
+        3 => OpenType::Private,
+        _ => OpenType::Public,
+    };
+    BlogPublishSettings {
+        open_type,
+        comment_yn: s.comment_yn,
+        search_yn: s.search_yn,
+        tags: s.tags.clone(),
+        ..BlogPublishSettings::default()
+    }
+}
+
+/// 블로그 발행 결과 1줄(post-report items 모양 = PostItemDto). 성공이면 게시글 URL을 posted로 싣는다
+/// (Admin '게시 결과'가 링크를 그대로 보여준다). 순수 함수(테스트 대상).
+fn blog_write_item(
+    login_id: &str,
+    blog_id: &str,
+    title: &str,
+    success: bool,
+    msg: &str,
+    url: Option<&str>,
+) -> serde_json::Value {
+    let mut item = serde_json::json!({
+        "platform": "blog",
+        "target": blog_id,
+        "loginId": login_id,
+        "status": if success { "success" } else { "fail" },
+        "msg": msg,
+    });
+    if let Some(u) = url {
+        item["posted"] = serde_json::json!({ "title": title, "body": "", "url": u });
+    }
+    item
+}
+
+/// 블로그 발행 결과 회신 본문(PostReportReq 모양 + 종류 태그 "게시"). 순수 함수(테스트 대상).
+fn blog_write_report_body(title: &str, items: Vec<serde_json::Value>) -> serde_json::Value {
+    serde_json::json!({
+        "id": format!("blogwrite-{}", now_ms()),
+        "title": title,
+        "at": now_ms() as i64,
+        "kind": "게시",
+        "items": items,
+    })
+}
+
+/// 블로그 새 글 발행 실행 + 결과 회신(16-블로그새글). 게시 큐를 타지 않고 계정 쿠키로 RabbitWrite를
+/// 직접 호출한다(엔진 무손상): 각 대상 계정마다 `publish_blog_post_blocks_for_account`로 같은 제목/블록/
+/// 설정을 자기 블로그에 발행하고, 결과를 PostItemDto로 모아 post-report로 회신한다. blocks가 하나라도
+/// 파싱되지 않으면 발행을 시도하지 않고 전 대상 실패로 보고한다(무엇이 잘못됐는지 원문 로그에 남김).
+async fn run_blog_write_command(
+    client: reqwest::Client,
+    cfg: AgentConfig,
+    bw: BlogWriteCmd,
+) {
+    let title = bw.title.clone();
+    let settings = blog_write_settings(&bw.settings);
+    // 블록 파싱(프론트 blocks.ts → naver_blog::Block). id 등 미지 필드는 serde가 무시한다.
+    let parsed: Result<Vec<crate::naver_blog::Block>, _> =
+        serde_json::from_value(serde_json::Value::Array(bw.blocks.clone()));
+    let blocks = match parsed {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("[AGENT] 블로그 새 글 발행 — 블록 파싱 실패: {e}");
+            let items = bw
+                .targets
+                .iter()
+                .map(|t| {
+                    blog_write_item(
+                        &t.login_id,
+                        &t.blog_id,
+                        &title,
+                        false,
+                        &format!("본문 블록 형식 오류: {e}"),
+                        None,
+                    )
+                })
+                .collect();
+            let body = blog_write_report_body(&title, items);
+            let _ = net::post_report(&client, &cfg.server_url, &cfg.device_token, &body).await;
+            return;
+        }
+    };
+    tracing::info!(
+        title = %title,
+        targets = bw.targets.len(),
+        blocks = blocks.len(),
+        "[AGENT] publish_blog_write 수신 — 블로그 새 글 발행 시작(계정×블로그명)"
+    );
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    for t in &bw.targets {
+        let blog_id = if t.blog_id.trim().is_empty() {
+            t.login_id.clone()
+        } else {
+            t.blog_id.clone()
+        };
+        let item = match crate::naver_blog::publish_blog_post_blocks_for_account(
+            &t.login_id,
+            &blog_id,
+            &title,
+            &blocks,
+            &settings,
+        )
+        .await
+        {
+            Ok(res) => {
+                let url = res.redirect_url.clone();
+                tracing::info!(
+                    login_id = %t.login_id, blog_id = %blog_id, url = %url,
+                    "[AGENT] 블로그 새 글 발행 성공"
+                );
+                blog_write_item(
+                    &t.login_id,
+                    &blog_id,
+                    &title,
+                    true,
+                    &format!("발행 성공 · {url}"),
+                    Some(&url),
+                )
+            }
+            Err(e) => {
+                let msg = e.message().to_owned();
+                tracing::warn!(
+                    login_id = %t.login_id, blog_id = %blog_id,
+                    "[AGENT] 블로그 새 글 발행 실패: {msg}"
+                );
+                blog_write_item(&t.login_id, &blog_id, &title, false, &msg, None)
+            }
+        };
+        items.push(item);
+    }
+    let body = blog_write_report_body(&title, items);
+    let _ = net::post_report(&client, &cfg.server_url, &cfg.device_token, &body).await;
+}
+
 /// 명령 디스패치(동기). 반환: (level, 즉시 메시지, 로그인 결과 후속).
 fn dispatch<R: Runtime>(
     app: &AppHandle<R>,
@@ -939,6 +1158,16 @@ fn dispatch<R: Runtime>(
                 .map(|q| q.login_ids.len())
                 .unwrap_or(0);
             ("info", format!("닉네임 잔여 조회 {n}건 시작"), None)
+        }
+        // 블로그 새 글 발행(16-블로그새글) — 게시 큐를 타지 않는 직접 발행이라 dispatch는 ack만 남기고,
+        // 실제 RabbitWrite 호출 + 결과 회신(post-report)은 drain_events가 백그라운드로 돌린다(HTTP 블로킹).
+        "publish_blog_write" => {
+            let n = cmd
+                .blog_write
+                .as_ref()
+                .map(|b| b.targets.len())
+                .unwrap_or(0);
+            ("info", format!("블로그 새 글 발행 {n}건 시작"), None)
         }
         other => ("fail", format!("알 수 없는 명령: {other}"), None),
     }
@@ -3544,5 +3773,97 @@ mod tests {
         assert_eq!(it["status"], "fail");
         assert_eq!(it["target"], "IP");
         assert_eq!(it["msg"], "IP 변경 실패: 폰 없음");
+    }
+
+    // ── 블로그 새 글 발행(16-블로그새글) ──
+
+    #[test]
+    fn blog_write_settings_maps_open_type_and_flags() {
+        use crate::naver_blog::OpenType;
+        let s = BlogWriteSettings {
+            open_type: 2,
+            comment_yn: false,
+            search_yn: false,
+            tags: "첫글 인생".into(),
+        };
+        let out = blog_write_settings(&s);
+        assert_eq!(out.open_type, OpenType::MutualNeighbor);
+        assert!(!out.comment_yn);
+        assert!(!out.search_yn);
+        assert_eq!(out.tags, "첫글 인생");
+    }
+
+    #[test]
+    fn blog_write_settings_defaults_to_public_on_unknown_open_type() {
+        use crate::naver_blog::OpenType;
+        let s = BlogWriteSettings {
+            open_type: 9,
+            ..BlogWriteSettings::default()
+        };
+        let out = blog_write_settings(&s);
+        assert_eq!(out.open_type, OpenType::Public);
+        assert!(out.comment_yn, "기본 댓글 허용");
+        assert!(out.search_yn, "기본 검색 허용");
+    }
+
+    #[test]
+    fn blog_write_item_success_carries_posted_url() {
+        let it = blog_write_item(
+            "acc",
+            "press02",
+            "제목",
+            true,
+            "발행 성공",
+            Some("https://blog.naver.com/PostView.naver?logNo=1"),
+        );
+        assert_eq!(it["platform"], "blog");
+        assert_eq!(it["target"], "press02");
+        assert_eq!(it["loginId"], "acc");
+        assert_eq!(it["status"], "success");
+        assert_eq!(it["posted"]["title"], "제목");
+        assert_eq!(
+            it["posted"]["url"],
+            "https://blog.naver.com/PostView.naver?logNo=1"
+        );
+    }
+
+    #[test]
+    fn blog_write_item_failure_has_no_posted() {
+        let it = blog_write_item("acc", "press02", "제목", false, "쿠키 없음", None);
+        assert_eq!(it["status"], "fail");
+        assert_eq!(it["msg"], "쿠키 없음");
+        assert!(it.get("posted").is_none());
+    }
+
+    #[test]
+    fn blog_write_report_body_tags_as_publish() {
+        let items = vec![blog_write_item("acc", "b", "제목", true, "ok", Some("u"))];
+        let body = blog_write_report_body("제목", items);
+        assert_eq!(body["kind"], "게시");
+        assert_eq!(body["title"], "제목");
+        assert_eq!(body["items"][0]["loginId"], "acc");
+        assert!(body["at"].is_i64());
+    }
+
+    #[test]
+    fn blog_write_cmd_parses_blocks_as_naver_blog_blocks() {
+        // 프론트 blocks.ts 모양(id 포함)이 naver_blog::Block으로 파싱되는지 — id 등 미지 필드는 무시.
+        let cmd: BlogWriteCmd = serde_json::from_value(serde_json::json!({
+            "title": "새 글",
+            "blocks": [
+                { "id": "blk-1", "type": "text", "text": "본문", "align": "left" },
+                { "id": "blk-2", "type": "code", "code": "let x = 1;" }
+            ],
+            "settings": { "openType": 3, "commentYn": false, "searchYn": true, "tags": "태그" },
+            "targets": [ { "loginId": "acc", "blogId": "press02" } ]
+        }))
+        .unwrap();
+        assert_eq!(cmd.title, "새 글");
+        assert_eq!(cmd.targets.len(), 1);
+        assert_eq!(cmd.targets[0].blog_id, "press02");
+        assert_eq!(cmd.settings.open_type, 3);
+        let blocks: Vec<crate::naver_blog::Block> =
+            serde_json::from_value(serde_json::Value::Array(cmd.blocks.clone())).unwrap();
+        assert_eq!(blocks.len(), 2);
     }
 }

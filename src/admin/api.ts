@@ -409,9 +409,7 @@ export const api = {
         { type: "boost_view", links, repeats },
       );
     },
-    rotateIp(
-      deviceId: string,
-    ): Promise<{ ok: boolean; commandId: string }> {
+    rotateIp(deviceId: string): Promise<{ ok: boolean; commandId: string }> {
       return request(
         "POST",
         `/devices/${encodeURIComponent(deviceId)}/commands`,
@@ -498,6 +496,27 @@ export const api = {
       }[];
     }): Promise<{ ok: boolean; commandId: string }> {
       return request("POST", "/admin/publish", req);
+    },
+  },
+  blogWrite: {
+    // 블로그 새 글 발행(16-블로그새글) — Admin 편집기 툴바로 작성한 새 글을 그 하위로 내려보낸다.
+    // 블로그 댓글(publish 경로)과 별개의 직접 발행 명령이다. blocks는 편집기 블록 배열(blocks.ts) —
+    // 서버는 해석하지 않고 그대로 하위에 통과시키고, 하위가 documentModel로 변환해 RabbitWrite 발행한다.
+    // targets는 계정별 (loginId, 블로그명). blogId가 비면 하위가 loginId를 블로그명으로 쓴다.
+    send(req: {
+      deviceId: string;
+      commandId?: string;
+      title: string;
+      blocks: unknown[];
+      settings: {
+        openType: number; // 0=전체공개·1=이웃공개·2=서로이웃공개·3=비공개
+        commentYn: boolean;
+        searchYn: boolean;
+        tags: string;
+      };
+      targets: { loginId: string; blogId: string }[];
+    }): Promise<{ ok: boolean; commandId: string }> {
+      return request("POST", "/admin/blog-write", req);
     },
   },
   scheduled: {
