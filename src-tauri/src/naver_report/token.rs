@@ -33,9 +33,6 @@ const REASON_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const AFTER_REASON_SETTLE: Duration = Duration::from_millis(900);
 /// 제출 클릭 후 페이지 SDK 가 토큰을 만들어 `/api/report`를 쏘고 응답이 올 때까지의 상한.
 const SUBMIT_RESULT_TIMEOUT: Duration = Duration::from_secs(30);
-/// 신고 결과 alert("접수되었습니다") 가 응답 처리 직후 열릴 때까지 폴링하며 자동 수락하는 상한·간격.
-const RESULT_DIALOG_TIMEOUT: Duration = Duration::from_secs(3);
-const RESULT_DIALOG_POLL: Duration = Duration::from_millis(300);
 /// 신고 제출 요청 — 이 URL 부분일치로 CDP Network 감시자를 무장한다.
 const REPORT_API_NEEDLE: &str = "/api/report";
 
@@ -79,6 +76,9 @@ impl ReportBrowser {
                 "신고용 세션 쿠키 주입 실패: {error}"
             )));
         }
+        // 네이티브 alert 자동수락 ON — 성공 alert("접수되었습니다")가 뜨는 즉시 read 루프가 수락해,
+        // 응답 대기·창 종료·다음 글 진행을 막지 않게 한다(사람이 확인 누를 필요 없음).
+        client.set_auto_accept_dialogs(true);
         Ok(Self {
             client,
             _handle: handle,
@@ -172,34 +172,11 @@ impl ReportBrowser {
             }
         }
 
-        // 페이지가 쏜 /api/report 요청/응답을 CDP Network 이벤트로 기다린다.
-        let result = self.await_report_result();
-
-        // 성공 시 네이버가 띄우는 alert("신고가 성공적으로 접수되었습니다.")를 자동 수락한다. 이 모달이
-        // 열린 채 남으면 단건 신고 후 크롬이 사람이 엔터를 칠 때까지 안 닫힌다(2026-07-14 로그 근거).
-        // 여러 건일 땐 다음 navigate 가 대신 닫아줘 안 보였던 문제. 다건에서도 다음 글로 넘어가기 전에
-        // 미리 정리해 둔다. alert 는 /api/report 응답을 페이지 JS 가 처리한 **직후** 열려 이 시점보다
-        // 살짝 늦을 수 있으므로, 열릴 때까지 짧게 폴링하며 수락한다(열린 게 없으면 no-op).
-        self.dismiss_result_dialog();
-
-        result
-    }
-
-    /// 신고 결과 alert 가 열릴 때까지 짧게 폴링하며 자동 수락한다(Bug: 단건 신고 후 크롬 미종료).
-    /// `Page.handleJavaScriptDialog` 는 모달이 열려 있어도 블로킹되지 않으므로 폴링이 안전하다. 한 번
-    /// 수락하면 즉시 끝내고, 상한까지 안 열리면 조용히 넘어간다(성공 문구 없이 종료되는 흐름도 있다).
-    fn dismiss_result_dialog(&mut self) {
-        let deadline = Instant::now() + RESULT_DIALOG_TIMEOUT;
-        loop {
-            if self.client.accept_pending_js_dialog() {
-                tracing::info!(target: "report", "[REPORT-SUBMIT] 결과 alert 자동 수락 — 크롬 종료/다음 글 진행 차단 해제");
-                return;
-            }
-            if Instant::now() >= deadline {
-                return;
-            }
-            sleep(RESULT_DIALOG_POLL);
-        }
+        // 페이지가 쏜 /api/report 요청/응답을 CDP Network 이벤트로 기다린다. 성공 시 뜨는
+        // alert("접수되었습니다")는 이 대기 도중 열리는데, **read 루프의 자동수락**(open()에서 켠
+        // set_auto_accept_dialogs)이 뜨는 즉시 수락하므로 여기서 따로 닫을 필요가 없다(대기·창종료·다음
+        // 글 진행이 막히지 않는다).
+        self.await_report_result()
     }
 
     /// 사유 UI 가 DOM 에 렌더될 때까지 폴링한다(SPA + `/api/reason` 응답 후 렌더). 후보 사유 요소가
