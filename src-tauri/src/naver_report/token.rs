@@ -115,8 +115,12 @@ impl ReportBrowser {
         // 제출 클릭 전에 /api/report 감시자를 무장한다(SDK 가 쏘는 요청을 놓치지 않게).
         self.client.arm_network_capture(REPORT_API_NEEDLE);
 
-        // 1) 사유 선택 — 무엇을 찾고 무엇을 클릭했는지 원문 로그.
-        let select_js = build_select_reason_js(reason_code, reason_label);
+        // 1) 사유 선택 — 무엇을 찾고 무엇을 클릭했는지 원문 로그. index 는 /api/reason 순서 폴백용
+        // (사유 라디오가 REPORT_REASONS 와 같은 순서로 렌더된다는 실측 근거).
+        let reason_index = super::report_client::REPORT_REASONS
+            .iter()
+            .position(|r| r.code == reason_code);
+        let select_js = build_select_reason_js(reason_code, reason_label, reason_index);
         match self.client.evaluate_string(&select_js) {
             Ok(log) => tracing::info!(target: "report", reason = %reason_code, result = %log, "[REPORT-SUBMIT] 사유 선택 시도 — DOM 원문"),
             Err(error) => {
@@ -224,78 +228,77 @@ impl ReportBrowser {
 /// 사유 선택 JS 를 만든다. `code`(예: `AA29`)와 `label`(예: `스팸홍보/도배입니다`)를 안전하게 JSON
 /// 임베드해, 동적 SPA 의 라이브 DOM 을 **일반적으로** 훑어 사유 요소를 찾아 클릭한다(정확한 셀렉터를
 /// 하드코딩할 수 없다). 찾은/클릭한 것을 전부 JSON 문자열로 돌려준다(원문 로깅용).
-fn build_select_reason_js(code: &str, label: &str) -> String {
+fn build_select_reason_js(code: &str, label: &str, index: Option<usize>) -> String {
     // serde_json 직렬화는 &str 에 대해 실패하지 않는다(따옴표/유니코드 안전 이스케이프).
     let code_js = serde_json::to_string(code).unwrap_or_else(|_| "\"\"".to_owned());
     let label_js = serde_json::to_string(label).unwrap_or_else(|_| "\"\"".to_owned());
+    let index_js = match index {
+        Some(i) => i.to_string(),
+        None => "-1".to_owned(),
+    };
     format!(
         r#"
 (() => {{
-  const out = {{ code: {code_js}, label: {label_js}, strategy: null, clicked: false,
-                 target: null, candidates: [] }};
+  const out = {{ code: {code_js}, label: {label_js}, index: {index_js}, strategy: null,
+                 clicked: false, target: null, candidates: [] }};
   try {{
     const code = {code_js};
+    const idx = {index_js};
     // 라벨 정규화(뒤 마침표/공백 제거) — /api/reason text 는 "...입니다." 처럼 마침표가 붙는다.
     const norm = s => (s || '').replace(/\s+/g, ' ').replace(/[.\s]+$/, '').trim();
     const wantLabel = norm({label_js});
+    const desc = el => el ? {{ tag: el.tagName, text: (el.textContent || '').trim().slice(0, 80),
+                              html: (el.outerHTML || '').slice(0, 300) }} : null;
+    const labelFor = inp => (inp && inp.id) ? document.querySelector('label[for="' + inp.id + '"]') : null;
 
-    const clickEl = el => {{
+    // 라디오를 React 가 인식하도록 확실히 선택한다: 네이티브 checked + click/input/change 이벤트.
+    // (라벨만 click 하면 React 제어 컴포넌트의 내부 state 가 안 바뀌어 제출 시 기본값으로 나갈 수 있다.)
+    const selectRadio = (input, labelEl) => {{
       try {{
-        el.scrollIntoView({{ block: 'center' }});
-        el.click();
-        if (el.tagName === 'INPUT') {{
-          el.checked = true;
-          el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-          el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-        }}
+        input.scrollIntoView({{ block: 'center' }});
+        input.checked = true;
+        input.dispatchEvent(new MouseEvent('click', {{ bubbles: true }}));
+        input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+        if (labelEl) {{ try {{ labelEl.click(); }} catch (e) {{}} }}
         return true;
-      }} catch (e) {{ return false; }}
-    }};
-    const desc = el => {{
-      if (!el) return null;
-      const h = (el.outerHTML || '').slice(0, 300);
-      return {{ tag: el.tagName, text: (el.textContent || '').trim().slice(0, 80), html: h }};
+      }} catch (e) {{ out.error = String(e); return false; }}
     }};
 
-    // 1) code 로 직접 매칭(value / 각종 data-* 속성).
-    let el = document.querySelector(
-      'input[value="' + code + '"], [data-code="' + code + '"], [data-value="' + code + '"], ' +
-      '[data-reason-code="' + code + '"], [data-reason="' + code + '"], [value="' + code + '"]'
-    );
-    if (el) out.strategy = 'code-attr';
+    let input = null, labelEl = null;
 
-    // 2) 라벨 텍스트 매칭 — 라디오/라벨/리스트/버튼 등 클릭 가능한 후보를 넓게 훑는다.
-    const clickable = Array.from(document.querySelectorAll(
-      'label, li, button, [role="radio"], [role="option"], [role="button"], a, div, span'
-    ));
-    for (const c of clickable) {{
-      const t = norm(c.textContent);
-      if (t && wantLabel && (t === wantLabel || t.indexOf(wantLabel) !== -1) && t.length < 120) {{
-        out.candidates.push(desc(c));
+    // 1) 라벨 텍스트로 라디오 찾기(가장 신뢰) — label 의 for=id 로 연결된 input.
+    for (const l of Array.from(document.querySelectorAll('label'))) {{
+      const t = norm(l.textContent);
+      if (t && wantLabel && (t === wantLabel || t.indexOf(wantLabel) !== -1) && t.length <= wantLabel.length + 40) {{
+        out.candidates.push(desc(l));
+        const inp = l.getAttribute('for') ? document.getElementById(l.getAttribute('for'))
+                                          : (l.querySelector ? l.querySelector('input') : null);
+        if (inp && !input) {{ input = inp; labelEl = l; out.strategy = 'label-text'; }}
       }}
     }}
-    if (!el && wantLabel) {{
-      // 라벨 텍스트가 정확히 일치하거나 포함하는 가장 작은(가장 구체적인) 요소를 고른다.
-      let best = null;
-      for (const c of clickable) {{
-        const t = norm(c.textContent);
-        if (!t) continue;
-        if (t === wantLabel || (t.indexOf(wantLabel) !== -1 && t.length <= wantLabel.length + 40)) {{
-          if (!best || (c.textContent || '').length < (best.textContent || '').length) best = c;
-        }}
-      }}
-      if (best) {{ el = best; out.strategy = 'label-text'; }}
+
+    // 2) code 속성 매칭.
+    if (!input) {{
+      const el = document.querySelector(
+        'input[value="' + code + '"], [data-code="' + code + '"], ' +
+        '[data-reason-code="' + code + '"], [data-reason="' + code + '"]'
+      );
+      if (el) {{ input = (el.tagName === 'INPUT' ? el : (el.querySelector && el.querySelector('input'))) || el;
+                out.strategy = 'code-attr'; }}
     }}
 
-    if (el) {{
-      // input 이면 연결된 label(for=id) 도 함께 눌러 확실히 선택되게 한다.
-      let clickTarget = el;
-      if (el.tagName === 'INPUT' && el.id) {{
-        const lab = document.querySelector('label[for="' + el.id + '"]');
-        if (lab) clickTarget = lab;
-      }}
-      out.target = desc(el);
-      out.clicked = clickEl(clickTarget) || clickEl(el);
+    // 3) 순서(index) 폴백 — 사유 라디오는 /api/reason 순서대로 렌더된다(id=0,1,2...).
+    if (!input && idx >= 0) {{
+      const radios = Array.from(document.querySelectorAll(
+        'input.report_reason, input[name="select"], input[type="radio"], [role="radio"]'
+      ));
+      if (radios[idx]) {{ input = radios[idx]; labelEl = labelFor(input); out.strategy = 'index'; }}
+    }}
+
+    if (input) {{
+      out.target = desc(input);
+      out.clicked = selectRadio(input, labelEl || labelFor(input));
     }}
   }} catch (e) {{ out.error = String(e); }}
   return JSON.stringify(out);
