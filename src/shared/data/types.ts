@@ -3,6 +3,7 @@ import type { PublishPlan } from "@/shared/bindings/PublishPlan";
 export type ViewId =
   | "dashboard"
   | "posts"
+  | "blog"
   | "queue"
   | "log"
   | "accounts"

@@ -198,6 +198,14 @@ function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
  * Outside Tauri (browser dev / Vitest) `@tauri-apps/api/core` is mocked by the
  * in-memory backend in `src/test/ipc.ts`.
  */
+/** 블로그 새 글 발행 결과(백엔드 BlogWriteResult, camelCase). */
+export interface BlogWriteResult {
+  /** 게시글 번호. 예약 발행은 아직 없어 null일 수 있다. */
+  logNo: string | null;
+  /** 게시글/리다이렉트 URL. */
+  redirectUrl: string;
+}
+
 export const ipc = {
   accounts: {
     list: () => call<Account[]>("list_accounts"),
@@ -380,6 +388,37 @@ export const ipc = {
         trace?: string;
       }[];
     }) => call<void>("record_band_batch", { ...input }),
+  },
+  // 네이버 블로그 새 글 발행 — 순수 HTTP(RabbitWrite). 로그인 저장 쿠키로 게시(크롬 안 뜸, 종토 미러).
+  blog: {
+    /** 블로그명(도메인) 사용 가능 여부. true=사용가능 / false=이미 사용중. */
+    checkName: (accountId: string, domainId: string) =>
+      call<boolean>("blog_check_name", { accountId, domainId }),
+    /** 기존 블로그에 새 글 발행. 성공 시 게시글 번호(logNo)·링크를 돌려준다. */
+    publish: (input: {
+      accountId: string;
+      blogId: string;
+      title: string;
+      content: string;
+      /** 공개설정: 0=전체공개·1=이웃·2=서로이웃·3=비공개(생략 시 전체공개). */
+      openType?: number;
+      commentYn?: boolean;
+      searchYn?: boolean;
+      sympathyYn?: boolean;
+      /** 태그: # 없이 공백구분 단어("첫글 인생"). */
+      tags?: string;
+      noticePostYn?: boolean;
+      /** 예약 발행 시각(생략/undefined면 현재 발행). */
+      reserve?:
+        | {
+            year: number;
+            month: number;
+            date: number;
+            hour: number;
+            minute: number;
+          }
+        | undefined;
+    }) => call<BlogWriteResult>("blog_publish", { ...input }),
   },
   diagnostics: {
     /** Probe Chrome install/version + ADB device connection (UI 새로고침). */

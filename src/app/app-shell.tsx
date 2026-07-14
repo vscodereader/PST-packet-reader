@@ -15,6 +15,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useState } from "react";
 
 import { Accounts } from "@/features/accounts/accounts";
+import { Blog } from "@/features/blog/blog";
 import { Dashboard } from "@/features/dashboard/dashboard";
 import { Notifications } from "@/features/notifications/notifications";
 import { Posts } from "@/features/posts/posts";
@@ -23,7 +24,14 @@ import type { GoFn, LogFilter, ViewId } from "@/shared/data/types";
 import { ipc } from "@/shared/ipc";
 import { Icon, type IconName } from "@/shared/ui/icons";
 
-const VIEWS: ViewId[] = ["dashboard", "posts", "queue", "log", "accounts"];
+const VIEWS: ViewId[] = [
+  "dashboard",
+  "posts",
+  "blog",
+  "queue",
+  "log",
+  "accounts",
+];
 
 interface NavEntry {
   id: ViewId;
@@ -194,6 +202,7 @@ export function MacroApp() {
   const nav: NavEntry[] = [
     { id: "dashboard", icon: "dashboard", label: "대시보드" },
     { id: "posts", icon: "pencil", label: "글 관리", badge: counts.posts },
+    { id: "blog", icon: "pencil", label: "네이버 블로그" },
     {
       id: "queue",
       icon: "layers",
@@ -295,6 +304,7 @@ export function MacroApp() {
         <Box style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
           {view === "dashboard" && <Dashboard go={go} />}
           {view === "posts" && <Posts go={go} />}
+          {view === "blog" && <Blog go={go} />}
           {view === "queue" && <Queue go={go} />}
           {view === "log" && (
             <Notifications key={logNonce} filter={logFilter} />
