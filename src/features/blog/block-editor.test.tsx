@@ -36,7 +36,7 @@ function Harness() {
 }
 
 describe("BlockEditor", () => {
-  it("상단 삽입 툴바에 7개 버튼만 렌더한다", () => {
+  it("상단 삽입 툴바에 6개 버튼만 렌더한다(장소 제거)", () => {
     render(<Harness />);
     for (const label of [
       "사진",
@@ -45,21 +45,18 @@ describe("BlockEditor", () => {
       "파일",
       "일정",
       "소스코드",
-      "장소",
     ]) {
       expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
     }
+    // 장소 버튼과 명시적 "문단 추가" 버튼은 제거됐다.
+    expect(screen.queryByRole("button", { name: "장소" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "문단 추가" })).toBeNull();
   });
 
-  it("소스코드 버튼은 소스코드 블록을 추가한다", () => {
+  it("기본 문단이 시딩되고 서식 툴바(B·I·U·취소선)로 굵게를 토글한다", () => {
     render(<Harness />);
-    fireEvent.click(screen.getByRole("button", { name: "소스코드" }));
-    expect(screen.getByLabelText("소스코드")).toBeInTheDocument();
-  });
-
-  it("문단 추가 후 서식 툴바(B·I·U·취소선)가 보이고 굵게를 토글한다", () => {
-    render(<Harness />);
-    fireEvent.click(screen.getByRole("button", { name: "문단 추가" }));
+    // 시드된 문단이 바로 보인다(타이핑할 자리).
+    expect(screen.getByLabelText("문단 내용")).toBeInTheDocument();
     const bold = screen.getByLabelText("굵게");
     expect(bold).toBeInTheDocument();
     expect(screen.getByLabelText("기울임")).toBeInTheDocument();
@@ -73,7 +70,13 @@ describe("BlockEditor", () => {
     );
   });
 
-  it("삭제 버튼은 블록을 제거한다", () => {
+  it("소스코드 버튼은 커서 위치에 소스코드 블록을 삽입한다", () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: "소스코드" }));
+    expect(screen.getByLabelText("소스코드")).toBeInTheDocument();
+  });
+
+  it("삭제 버튼은 삽입 블록을 제거한다", () => {
     render(<Harness />);
     fireEvent.click(screen.getByRole("button", { name: "소스코드" }));
     expect(screen.getByLabelText("소스코드")).toBeInTheDocument();

@@ -592,7 +592,8 @@ function DeviceBlock({
         )}
       </Group>
 
-      {/* 게시 대상 — 하위별(글 선택돼야 활성). 카페/블로그/밴드는 추후(비활성). */}
+      {/* 게시 대상 — 하위별. 대부분 대상은 기존 글을 골라야 활성이지만, **네이버블로그는 새 글
+          발행이 글 선택과 무관**하므로 글 없이도 고를 수 있다(BlogConfig가 글 없으면 새 글 발행으로 연다). */}
       <Text size="xs" c="dimmed" mb={4}>
         게시 대상
       </Text>
@@ -602,7 +603,7 @@ function DeviceBlock({
             key={t.key}
             size="xs"
             variant={target === t.key ? "filled" : "default"}
-            disabled={t.soon || postTitle == null}
+            disabled={t.soon || (t.key !== "blog" && postTitle == null)}
             onClick={() => onSetTarget(t.key)}
             rightSection={
               t.soon ? (
@@ -2048,7 +2049,11 @@ function BlogConfig({
   onSchedule: (item: ScheduledItem) => void;
 }) {
   // 블로그 모드: 댓글(기존) / 새 글 발행(16-블로그새글). 새 글 발행은 BlockEditor로 작성해 직접 발행.
-  const [writeMode, setWriteMode] = useState<"comment" | "write">("comment");
+  // 댓글은 **기존 글을 골라야** 그 글의 저장 댓글을 다는 모드라 글이 없으면 새 글 발행으로 시작한다
+  // (사용자 혼동 수정: 기존 글을 안 골라도 바로 작성기로 간다).
+  const [writeMode, setWriteMode] = useState<"comment" | "write">(
+    postTitle ? "comment" : "write",
+  );
   const [blogMode, setBlogMode] = useState<BlogMode>("specific");
   const [link, setLink] = useState("");
   const [count, setCount] = useState<number | "">(1);
@@ -2220,6 +2225,7 @@ function BlogConfig({
           size="xs"
           variant={writeMode === "comment" ? "filled" : "default"}
           color={writeMode === "comment" ? "blue" : "gray"}
+          disabled={postTitle == null}
           onClick={() => setWriteMode("comment")}
         >
           댓글
@@ -2233,6 +2239,12 @@ function BlogConfig({
           새 글 발행
         </Button>
       </Group>
+      {postTitle == null && (
+        <Text fz={11} c="dimmed" mb="sm">
+          댓글 달기는 위에서 기존 글을 골라야 쓸 수 있습니다. 새 글 발행은 글
+          선택 없이 바로 작성합니다.
+        </Text>
+      )}
 
       {writeMode === "write" ? (
         <BlogWriteConfig device={device} accounts={accounts} />

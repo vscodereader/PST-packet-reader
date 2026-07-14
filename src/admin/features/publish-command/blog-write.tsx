@@ -148,10 +148,22 @@ export function BlogWriteConfig({
         aria-label="블로그 글 제목"
       />
 
-      {/* 본문 — 편집기 툴바(BlockEditor 재사용). 미디어 삽입은 하위 쿠키 필요(텍스트 위주 작성 권장). */}
+      {/* 본문 — 편집기 툴바(BlockEditor 재사용). 사진/스티커/링크 등 미디어 삽입은 계정 쿠키로 백엔드
+          보조 API를 호출하므로 **대상 계정을 최소 1개 선택**해야 동작한다(미선택이면 아래 안내). */}
       <Text size="xs" c="dimmed" mb={4}>
         본문 (편집기 툴바)
       </Text>
+      {composeAccount == null ? (
+        <Text fz={11} c="orange.7" mb={4}>
+          아래에서 대상 계정을 먼저 선택하세요. 계정을 골라야 사진·스티커·링크
+          등 미디어를 삽입할 수 있습니다(텍스트·서식·소스코드·일정은 계정 없이도
+          작성 가능).
+        </Text>
+      ) : (
+        <Text fz={11} c="dimmed" mb={4}>
+          미디어 삽입 계정: {composeAccount}
+        </Text>
+      )}
       <Box mb="sm">
         <BlockEditor
           accountId={composeAccount}

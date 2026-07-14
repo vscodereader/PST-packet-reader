@@ -1,7 +1,12 @@
-// 네이버 블로그 편집기 미러 — 본문을 블록 배열로 편집한다. 상단 삽입 툴바 7개(사진·스티커·링크·
-// 파일·일정·소스코드·장소)와 텍스트 블록 하단 서식 툴바(B·I·U·취소선·정렬)를 제공한다. 삽입 중
-// 보조 데이터가 필요한 블록(링크/스티커/장소/사진/파일)은 계정 쿠키로 백엔드 보조 API를 호출해
-// 채운다. 발행 시 이 블록 배열이 documentModel components[]로 변환된다(백엔드 document_model.rs).
+// 네이버 블로그 편집기 미러 — 제목은 부모가, 본문은 이 컴포넌트가 담당한다. 본문은 "흐르는" 편집
+// 영역이다: 글은 그냥 문단(Textarea)에 타이핑하고, 상단 삽입 툴바 6개(사진·스티커·링크·파일·일정·
+// 소스코드) 버튼을 누르면 **커서가 있던 문단 바로 아래**에 그 블록이 삽입되고, 그 아래 새 빈 문단이
+// 생겨 이어서 쓸 수 있다(네이버 편집기처럼 삽입 위치가 눈에 보인다). 서식(B·I·U·취소선·정렬)은 상단
+// 서식 툴바로 현재(포커스된) 문단에 적용한다. 삽입 보조 데이터가 필요한 블록(링크/스티커/사진/파일)은
+// 계정 쿠키로 백엔드 보조 API를 호출해 채운다.
+//
+// ⚠️ 백엔드 계약 유지: onChange로 내보내는 값은 이전과 동일한 **순서대로 나열된 Block[]**이다. 발행 시
+// 이 배열이 documentModel components[]로 변환된다(백엔드 document_model.rs). UX만 재설계했다.
 
 import {
   ActionIcon,
@@ -33,7 +38,6 @@ import {
   IconCode,
   IconItalic,
   IconLink,
-  IconMapPin,
   IconMoodSmile,
   IconPaperclip,
   IconPhoto,
@@ -42,17 +46,16 @@ import {
   IconUnderline,
 } from "@tabler/icons-react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { ipc } from "@/shared/ipc";
-import type { PlaceResult, StickerPack } from "@/shared/ipc";
+import type { StickerPack } from "@/shared/ipc";
 
 import {
   createCodeBlock,
   createFileBlock,
   createImageBlock,
   createOglinkBlock,
-  createPlacesMapBlock,
   createScheduleBlock,
   createStickerBlock,
   createTextBlock,
@@ -91,11 +94,34 @@ interface BlockEditorProps {
   onChange: (blocks: Block[]) => void;
 }
 
-type ModalKind = null | "link" | "sticker" | "schedule" | "place";
+type ModalKind = null | "link" | "sticker" | "schedule";
+
+/** 본문 불변식: 최소 1개의 문단(text)이 있고 마지막 블록은 항상 문단이어야 한다(이어쓸 자리). */
+function normalize(list: Block[]): Block[] {
+  let next = list;
+  if (next.length === 0) next = [createTextBlock()];
+  const last = next[next.length - 1];
+  if (!last || last.type !== "text") next = [...next, createTextBlock()];
+  return next;
+}
 
 export function BlockEditor({ accountId, blocks, onChange }: BlockEditorProps) {
   const [modal, setModal] = useState<ModalKind>(null);
   const [busy, setBusy] = useState(false);
+  // 커서가 있는 문단(text) id. 삽입은 이 문단 바로 아래에, 서식은 이 문단에 적용한다.
+  const [focusedId, setFocusedId] = useState<string | null>(null);
+
+  // 본문이 비어 있으면 첫 문단을 시딩한다(항상 타이핑할 자리가 있게). 불변식은 normalize가 지킨다.
+  useEffect(() => {
+    if (blocks.length === 0) onChange(normalize([]));
+  }, [blocks.length, onChange]);
+
+  // 서식/삽입의 기준 문단 = 포커스된 문단, 없으면 마지막 문단.
+  const textBlocks = blocks.filter((b): b is TextBlock => b.type === "text");
+  const focusedText =
+    focusedId != null ? textBlocks.find((b) => b.id === focusedId) : undefined;
+  const activeText = focusedText ?? textBlocks[textBlocks.length - 1];
+  const activeId = activeText?.id ?? null;
 
   function requireAccount(): string | null {
     if (!accountId) {
@@ -105,8 +131,19 @@ export function BlockEditor({ accountId, blocks, onChange }: BlockEditorProps) {
     return accountId;
   }
 
-  function append(block: Block) {
-    onChange([...blocks, block]);
+  function update(list: Block[]) {
+    onChange(normalize(list));
+  }
+
+  /** 기준 문단(activeId) 바로 아래에 블록을 삽입하고, 이어쓸 새 빈 문단을 그 아래에 만든다. */
+  function insertAtCursor(block: Block) {
+    const idx = activeId ? blocks.findIndex((b) => b.id === activeId) : -1;
+    const pos = idx >= 0 ? idx + 1 : blocks.length;
+    const trailing = createTextBlock();
+    const next = [...blocks];
+    next.splice(pos, 0, block, trailing);
+    update(next);
+    setFocusedId(trailing.id);
   }
 
   async function onInsertPhoto() {
@@ -117,7 +154,7 @@ export function BlockEditor({ accountId, blocks, onChange }: BlockEditorProps) {
     setBusy(true);
     try {
       const img = await ipc.blog.uploadPhoto(id, path);
-      append(createImageBlock(img));
+      insertAtCursor(createImageBlock(img));
     } catch (e) {
       notifications.show({
         color: "red",
@@ -136,7 +173,7 @@ export function BlockEditor({ accountId, blocks, onChange }: BlockEditorProps) {
     setBusy(true);
     try {
       const f = await ipc.blog.uploadFile(id, path);
-      append(createFileBlock(f));
+      insertAtCursor(createFileBlock(f));
     } catch (e) {
       notifications.show({
         color: "red",
@@ -168,13 +205,13 @@ export function BlockEditor({ accountId, blocks, onChange }: BlockEditorProps) {
     {
       label: "소스코드",
       icon: IconCode,
-      onClick: () => append(createCodeBlock()),
+      onClick: () => insertAtCursor(createCodeBlock()),
     },
-    { label: "장소", icon: IconMapPin, onClick: () => setModal("place") },
   ];
 
   return (
     <Stack gap="sm">
+      {/* 삽입 툴바 — 커서(현재 문단) 아래에 삽입한다. */}
       <Group gap="xs" wrap="wrap">
         {insertButtons.map((b) => (
           <Button
@@ -191,39 +228,67 @@ export function BlockEditor({ accountId, blocks, onChange }: BlockEditorProps) {
         {busy && <Loader size="xs" />}
       </Group>
 
-      <Stack gap="sm">
-        {blocks.length === 0 && (
-          <Text size="sm" c="dimmed">
-            위 툴바에서 블록을 추가하거나 아래 &quot;문단 추가&quot;로 글을
-            작성하세요.
-          </Text>
-        )}
-        {blocks.map((block) => (
-          <BlockRow
-            key={block.id}
-            block={block}
-            onChange={onChange}
-            blocks={blocks}
-          />
-        ))}
-      </Stack>
+      {/* 서식 툴바 — 현재(포커스된) 문단에 적용. */}
+      <FormatToolbar
+        block={activeText}
+        onToggle={(mark) =>
+          activeId && update(toggleMark(blocks, activeId, mark))
+        }
+        onAlign={(align) =>
+          activeId && update(setAlign(blocks, activeId, align))
+        }
+      />
 
-      <Group>
-        <Button
-          size="xs"
-          variant="default"
-          onClick={() => append(createTextBlock())}
-        >
-          문단 추가
-        </Button>
-      </Group>
+      {/* 본문 흐름 — 문단과 삽입 블록이 순서대로 보인다. 문단은 바로 타이핑, 삽입물은 그 사이에. */}
+      <Stack gap="xs">
+        {blocks.map((block) =>
+          block.type === "text" ? (
+            <Textarea
+              key={block.id}
+              aria-label="문단 내용"
+              placeholder="내용을 입력하세요. 커서를 둔 자리에서 위 툴바로 사진·링크 등을 삽입할 수 있습니다."
+              rows={3}
+              value={block.text}
+              onFocus={() => setFocusedId(block.id)}
+              styles={{
+                input: {
+                  border:
+                    block.id === activeId
+                      ? "1px solid var(--mantine-color-blue-4)"
+                      : undefined,
+                  fontWeight: block.bold ? 700 : undefined,
+                  fontStyle: block.italic ? "italic" : undefined,
+                  textDecoration:
+                    [
+                      block.underline ? "underline" : "",
+                      block.strikeThrough ? "line-through" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ") || undefined,
+                  textAlign: block.align,
+                },
+              }}
+              onChange={(e) =>
+                update(setText(blocks, block.id, e.currentTarget.value))
+              }
+            />
+          ) : (
+            <InsertedBlockRow
+              key={block.id}
+              block={block}
+              blocks={blocks}
+              onChange={update}
+            />
+          ),
+        )}
+      </Stack>
 
       <LinkModal
         opened={modal === "link"}
         accountId={accountId}
         onClose={() => setModal(null)}
         onInsert={(link, meta) => {
-          append(createOglinkBlock(link, meta));
+          insertAtCursor(createOglinkBlock(link, meta));
           setModal(null);
         }}
       />
@@ -231,7 +296,7 @@ export function BlockEditor({ accountId, blocks, onChange }: BlockEditorProps) {
         opened={modal === "schedule"}
         onClose={() => setModal(null)}
         onInsert={(title, startAt, dateOnly) => {
-          append(createScheduleBlock(title, startAt, dateOnly));
+          insertAtCursor(createScheduleBlock(title, startAt, dateOnly));
           setModal(null);
         }}
       />
@@ -240,16 +305,7 @@ export function BlockEditor({ accountId, blocks, onChange }: BlockEditorProps) {
         accountId={accountId}
         onClose={() => setModal(null)}
         onInsert={(packCode, seq) => {
-          append(createStickerBlock(packCode, seq));
-          setModal(null);
-        }}
-      />
-      <PlaceModal
-        opened={modal === "place"}
-        accountId={accountId}
-        onClose={() => setModal(null)}
-        onInsert={(thumbnailSrc, place) => {
-          append(createPlacesMapBlock(thumbnailSrc, place));
+          insertAtCursor(createStickerBlock(packCode, seq));
           setModal(null);
         }}
       />
@@ -272,8 +328,8 @@ async function pickFile(kind: string): Promise<string | null> {
   }
 }
 
-/** 블록 1개의 행 — 이동/삭제 컨트롤 + 타입별 편집/미리보기. */
-function BlockRow({
+/** 삽입된 non-text 블록 1개의 행 — 이동/삭제 컨트롤 + 타입별 미리보기(소스코드는 편집). */
+function InsertedBlockRow({
   block,
   blocks,
   onChange,
@@ -283,7 +339,7 @@ function BlockRow({
   onChange: (blocks: Block[]) => void;
 }) {
   return (
-    <Paper withBorder p="xs" radius="sm">
+    <Paper withBorder p="xs" radius="sm" bg="var(--mantine-color-gray-0)">
       <Group justify="space-between" align="flex-start" gap="xs" mb={6}>
         <Text size="xs" c="dimmed">
           {blockLabel(block)}
@@ -360,33 +416,7 @@ function BlockBody({
 }) {
   switch (block.type) {
     case "text":
-      return (
-        <Stack gap={6}>
-          <FormatToolbar block={block} blocks={blocks} onChange={onChange} />
-          <Textarea
-            aria-label="문단 내용"
-            rows={3}
-            value={block.text}
-            styles={{
-              input: {
-                fontWeight: block.bold ? 700 : undefined,
-                fontStyle: block.italic ? "italic" : undefined,
-                textDecoration:
-                  [
-                    block.underline ? "underline" : "",
-                    block.strikeThrough ? "line-through" : "",
-                  ]
-                    .filter(Boolean)
-                    .join(" ") || undefined,
-                textAlign: block.align,
-              },
-            }}
-            onChange={(e) =>
-              onChange(setText(blocks, block.id, e.currentTarget.value))
-            }
-          />
-        </Stack>
-      );
+      return null;
     case "code":
       return (
         <Textarea
@@ -457,26 +487,27 @@ function BlockBody({
   }
 }
 
-/** 텍스트 블록 하단 서식 툴바(B·I·U·취소선 + 정렬 4). */
+/** 상단 서식 툴바(B·I·U·취소선 + 정렬 4) — 현재 문단에 적용. 문단이 없으면 비활성. */
 function FormatToolbar({
   block,
-  blocks,
-  onChange,
+  onToggle,
+  onAlign,
 }: {
-  block: TextBlock;
-  blocks: Block[];
-  onChange: (blocks: Block[]) => void;
+  block: TextBlock | undefined;
+  onToggle: (mark: TextMark) => void;
+  onAlign: (align: Align) => void;
 }) {
   return (
     <Group gap={4}>
       {MARKS.map((m) => (
         <Tooltip key={m.key} label={m.label}>
           <ActionIcon
-            variant={block[m.key] ? "filled" : "subtle"}
+            variant={block?.[m.key] ? "filled" : "subtle"}
             size="sm"
             aria-label={m.label}
-            aria-pressed={block[m.key]}
-            onClick={() => onChange(toggleMark(blocks, block.id, m.key))}
+            aria-pressed={block ? block[m.key] : false}
+            disabled={!block}
+            onClick={() => onToggle(m.key)}
           >
             <m.icon size={16} />
           </ActionIcon>
@@ -484,8 +515,9 @@ function FormatToolbar({
       ))}
       <SegmentedControl
         size="xs"
-        value={block.align}
-        onChange={(v) => onChange(setAlign(blocks, block.id, v as Align))}
+        disabled={!block}
+        value={block?.align ?? "left"}
+        onChange={(v) => onAlign(v as Align)}
         data={ALIGNS.map((a) => ({
           value: a.value,
           label: <a.icon size={14} aria-label={a.label} />,
@@ -693,88 +725,6 @@ function StickerModal({
             </Group>
           </ScrollArea.Autosize>
         )}
-      </Stack>
-    </Modal>
-  );
-}
-
-/** 장소 삽입 모달 — 검색 → 선택 → staticmap 조회. */
-function PlaceModal({
-  opened,
-  accountId,
-  onClose,
-  onInsert,
-}: {
-  opened: boolean;
-  accountId: string | null;
-  onClose: () => void;
-  onInsert: (thumbnailSrc: string, place: PlaceResult) => void;
-}) {
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<PlaceResult[]>([]);
-  const [loading, setLoading] = useState(false);
-
-  async function search() {
-    if (!accountId || !query.trim()) return;
-    setLoading(true);
-    try {
-      setResults(await ipc.blog.places(accountId, query.trim()));
-    } catch (e) {
-      notifications.show({
-        color: "red",
-        message: `장소 검색 실패: ${String(e)}`,
-      });
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function pick(place: PlaceResult) {
-    if (!accountId) return;
-    setLoading(true);
-    try {
-      const map = await ipc.blog.staticmap(accountId, place.y, place.x);
-      onInsert(map.src, place);
-      setQuery("");
-      setResults([]);
-    } catch (e) {
-      notifications.show({
-        color: "red",
-        message: `지도 조회 실패: ${String(e)}`,
-      });
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <Modal opened={opened} onClose={onClose} title="장소 삽입" centered>
-      <Stack gap="sm">
-        <Group gap="xs">
-          <TextInput
-            style={{ flex: 1 }}
-            placeholder="장소 검색어"
-            value={query}
-            onChange={(e) => setQuery(e.currentTarget.value)}
-          />
-          <Button loading={loading} onClick={() => void search()}>
-            검색
-          </Button>
-        </Group>
-        <ScrollArea.Autosize mah={260}>
-          <Stack gap={4}>
-            {results.map((p) => (
-              <Button
-                key={p.id}
-                variant="light"
-                size="xs"
-                onClick={() => void pick(p)}
-              >
-                {p.name} — {p.roadAddress || p.address}
-              </Button>
-            ))}
-          </Stack>
-        </ScrollArea.Autosize>
       </Stack>
     </Modal>
   );
