@@ -160,12 +160,15 @@ pub async fn publish_blog_post_for_account(
     settings: &BlogPublishSettings,
 ) -> Result<BlogWriteResult, BlogError> {
     let cookie_header = resolve_cookie_header(account_id)?;
-    // 어제까지 되던 "순수 API 직접 발행"을 그대로 쓴다: 블로그가 있는 계정은 SeOptions 존재확인
-    // 없이 바로 RabbitWrite로 게시된다. 블로그 자동생성은 발행을 막지 않는 별도 기능
-    // (`ensure_blog_exists_for_account` 커맨드)으로 분리했다 — SeOptions 실패를 "블로그 없음"으로
-    // 단정해 발행을 가로막던 회귀를 제거.
+    // 발행 검증 토큰(editorSource) + 세션쿠키 보강(위 블록 발행과 동일 이유 — 없으면 비공개 강제).
+    let (enriched_cookie, editor_source) =
+        editor_api::prepare_publish_session(blog_id, settings.category_id, Some(&cookie_header))
+            .await
+            .unwrap_or_else(|_| (cookie_header.clone(), None));
+    let mut settings = settings.clone();
+    settings.editor_source = editor_source;
     BlogWriteClient::new()
-        .publish(blog_id, title, content, settings, &cookie_header)
+        .publish(blog_id, title, content, &settings, &enriched_cookie)
         .await
 }
 
@@ -185,11 +188,18 @@ pub async fn publish_blog_post_blocks_for_account(
     settings: &BlogPublishSettings,
 ) -> Result<BlogWriteResult, BlogError> {
     let cookie_header = resolve_cookie_header(account_id)?;
-    // 존재확인 게이트 제거(위 publish_blog_post_for_account와 동일 이유) — 어제까지 되던 직접 발행 복구.
+    // 발행 검증 토큰(editorSource) + 세션쿠키 보강을 발행 직전에 받는다. editorSource가 없으면
+    // 네이버가 공개범위(openType)를 무시하고 **비공개로 강제**하므로 반드시 실어야 한다(실측 2026-07-14).
+    let (enriched_cookie, editor_source) =
+        editor_api::prepare_publish_session(blog_id, settings.category_id, Some(&cookie_header))
+            .await
+            .unwrap_or_else(|_| (cookie_header.clone(), None));
+    let mut settings = settings.clone();
+    settings.editor_source = editor_source;
     let components = document_model::blocks_to_components(blocks);
     let document_model = build_document_model_with_components(title, components);
     BlogWriteClient::new()
-        .publish_document(blog_id, document_model, settings, &cookie_header)
+        .publish_document(blog_id, document_model, &settings, &enriched_cookie)
         .await
 }
 
