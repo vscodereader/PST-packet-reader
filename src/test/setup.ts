@@ -26,6 +26,20 @@ if (typeof globalThis.ResizeObserver === "undefined") {
   };
 }
 
+// jsdom lacks visualViewport; Mantine Textarea `autosize` listens on it and
+// throws (addEventListener on undefined) at mount otherwise.
+if (typeof window !== "undefined" && !window.visualViewport) {
+  Object.defineProperty(window, "visualViewport", {
+    writable: true,
+    value: {
+      width: 1024,
+      height: 768,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    },
+  });
+}
+
 // jsdom lacks scrollIntoView; Mantine Select/Combobox calls it on open.
 if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};

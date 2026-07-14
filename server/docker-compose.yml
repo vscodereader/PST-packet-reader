@@ -1,0 +1,27 @@
+# 로컬 개발/테스트용 PostgreSQL. 서버 DB 연결을 손쉽게 세우기 위한 것이다.
+#   docker compose up -d
+# 후 DATABASE_URL 을 postgres://pstmacro:pstmacro@localhost:5432/pstmacro 로 두면,
+# 서버가 기동 시 연결하고 스키마(테이블 7개)를 자동 생성한다(postgres.rs connect).
+#
+# ⚠️ 운영은 이 compose 가 아니라 실제 PG(클라우드/사내 서버)에 DATABASE_URL 을 맞춘다.
+#    이 파일의 계정/비번은 로컬 전용 개발값이다.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pstmacro-postgres
+    environment:
+      POSTGRES_USER: pstmacro
+      POSTGRES_PASSWORD: pstmacro
+      POSTGRES_DB: pstmacro
+    ports:
+      - "5432:5432"
+    volumes:
+      - pstmacro_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pstmacro -d pstmacro"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pstmacro_pg:

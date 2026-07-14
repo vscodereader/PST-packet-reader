@@ -17,6 +17,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Accounts } from "@/features/accounts/accounts";
 import { Blog } from "@/features/blog/blog";
 import { Dashboard } from "@/features/dashboard/dashboard";
+import { DeviceRegister } from "@/features/device-register/device-register";
 import { Notifications } from "@/features/notifications/notifications";
 import { Posts } from "@/features/posts/posts";
 import { Queue } from "@/features/queue/queue";
@@ -31,6 +32,7 @@ const VIEWS: ViewId[] = [
   "queue",
   "log",
   "accounts",
+  "device-register",
 ];
 
 interface NavEntry {
@@ -216,6 +218,7 @@ export function MacroApp() {
       label: "계정 관리",
       badge: counts.accounts,
     },
+    { id: "device-register", icon: "globe", label: "원격제어" },
   ];
 
   return (
@@ -310,6 +313,7 @@ export function MacroApp() {
             <Notifications key={logNonce} filter={logFilter} />
           )}
           {view === "accounts" && <Accounts go={go} />}
+          {view === "device-register" && <DeviceRegister />}
         </Box>
       </AppShell.Main>
     </AppShell>

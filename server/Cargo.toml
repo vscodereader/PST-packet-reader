@@ -1,0 +1,49 @@
+[package]
+name = "pstmacro-server"
+version = "0.1.0"
+edition = "2021"
+description = "Admin–하위 원격제어 중앙 서버 (axum + PostgreSQL). 설계.md §9·§10 구현."
+
+# Tauri 앱(src-tauri)과 독립된 별도 크레이트. 워크스페이스로 묶지 않아 기존 빌드 무손상.
+
+[[bin]]
+name = "pstmacro-server"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# DB = PostgreSQL (사수 확정, PR #324). 런타임 쿼리 API만 사용하므로 빌드 시 DB 불필요.
+sqlx = { version = "0.8", default-features = false, features = [
+  "runtime-tokio",
+  "tls-rustls",
+  "postgres",
+  "uuid",
+  "chrono",
+] }
+jsonwebtoken = "9"
+argon2 = "0.5"
+aes-gcm = "0.10"
+rand = "0.8"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+futures = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+base64 = "0.22"
+async-trait = "0.1"
+# 종목 프록시(07-게시명령 2단계): 네이버 공개 front-api(m.stock.naver.com, 무쿠키) 호출.
+# rustls-tls로 sqlx와 TLS 백엔드 일치. 하위 forum_stocks 클라이언트를 서버로 이식(reqwest 사용).
+reqwest = { version = "0.12", default-features = false, features = [
+  "rustls-tls",
+] }
+urlencoding = "2"
+
+[dev-dependencies]
+# 종목 프록시 클라이언트 HTTP 계약 테스트(하위 forum_stocks와 동일하게 wiremock 주입).
+wiremock = "0.6"

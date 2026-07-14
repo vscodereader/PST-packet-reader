@@ -82,6 +82,8 @@ pub(crate) struct IpRotation {
 pub async fn toggle_airplane_mode() -> Result<IpRotation, OrchestratorError> {
     tracing::info!("========== [1] ADB IP 회전 시작 ==========");
     let before = fetch_external_ip().await;
+    // 원격제어 에이전트에 IP 회전 시작 신호(§4-2). 등록 안 됐으면 no-op(추가만, 기존 로직 무영향).
+    crate::agent::report_state_change("rotating", None);
     tracing::info!("[ADB] ← 회전 전 외부 IP(raw): {before}");
     tracing::info!("[ADB] ✈ 비행기모드 ON");
     let on_args: Vec<String> = airplane_mode_args(true)
@@ -121,6 +123,8 @@ pub async fn toggle_airplane_mode() -> Result<IpRotation, OrchestratorError> {
     tracing::info!("[ADB] ────────────────────────────────────");
     // 회전 직후 폰의 실제 네트워크 세대·통신사·DNS를 원문 그대로 남긴다(LTE→3G 변경 시 비교용).
     log_phone_network_state().await;
+    // 재연결·새 IP 신호(§4-1) — 에이전트가 서버에 online + 바뀐 IP 보고.
+    crate::agent::report_state_change("online", Some(after.clone()));
     tracing::info!("========== [1] ADB IP 회전 끝 ({before} → {after}) ==========");
     Ok(IpRotation {
         before,

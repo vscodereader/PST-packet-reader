@@ -202,14 +202,36 @@ impl BlogWriteClient {
             status.as_u16(),
             snippet(&text)
         );
-        parse_write_response(&text).ok_or_else(|| {
-            BlogError::new(format!(
-                "블로그 발행 실패(성공 응답이 아님). status={} 응답={}",
-                status.as_u16(),
-                snippet(&text)
-            ))
-        })
+        if let Some(result) = parse_write_response(&text) {
+            return Ok(result);
+        }
+        // 실패 응답 분류: 종토→블로그로 바꾼 계정은 네이버 블로그가 없어 `{"isSuccess":false,
+        // "errorCode":"no privilege"}`가 온다(실측). 이때는 "블로그 없음(생성 필요)"으로 명확히 알려
+        // 프론트가 계정별로 표시하게 한다. 그 외 실패는 봇차단 등 일반 실패로 남긴다.
+        if is_no_privilege(&text) {
+            return Err(BlogError::new(format!(
+                "이 계정에 네이버 블로그가 없습니다(블로그 생성이 필요합니다). blogId={blog_id}"
+            )));
+        }
+        Err(BlogError::new(format!(
+            "블로그 발행 실패(성공 응답이 아님). status={} 응답={}",
+            status.as_u16(),
+            snippet(&text)
+        )))
     }
+}
+
+/// RabbitWrite 실패 응답이 "블로그 없음"(`errorCode == "no privilege"`)인지 판정한다(순수 함수).
+/// 발행 흐름은 사전에 SeOptions로 존재확인+자동생성하므로 정상적으론 안 오지만, 최종 백스톱이다.
+fn is_no_privilege(text: &str) -> bool {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|v| {
+            v.get("errorCode")
+                .and_then(Value::as_str)
+                .map(|c| c.trim().eq_ignore_ascii_case("no privilege"))
+        })
+        .unwrap_or(false)
 }
 
 /// 제목·내용을 SmartEditor v2.10.2 documentModel(JSON)로 만든다(순수 함수). 내용은 줄바꿈마다
@@ -372,7 +394,8 @@ fn extract_log_no(url: &str) -> Option<String> {
 }
 
 /// 클라이언트 생성 tokenId(32바이트) — base64url(패딩 포함). 서버가 주지 않는 값이라 직접 만든다.
-fn generate_token_id() -> String {
+/// 블로그 자동 생성(BlogDomainRegistration)도 같은 방식의 tokenId를 쓰므로 `pub(crate)`로 공유한다.
+pub(crate) fn generate_token_id() -> String {
     use base64::Engine;
     let mut bytes = [0u8; 32];
     fill_random(&mut bytes);
@@ -544,6 +567,34 @@ mod tests {
     fn parse_write_response_none_on_failure() {
         assert!(parse_write_response(r#"{"isSuccess":false}"#).is_none());
         assert!(parse_write_response("<html>bot</html>").is_none());
+    }
+
+    #[test]
+    fn is_no_privilege_detects_missing_blog() {
+        assert!(is_no_privilege(
+            r#"{"isSuccess":false,"errorCode":"no privilege"}"#
+        ));
+        assert!(is_no_privilege(r#"{"errorCode":"No Privilege"}"#));
+        assert!(!is_no_privilege(r#"{"isSuccess":false,"errorCode":"bot"}"#));
+        assert!(!is_no_privilege("<html>bot</html>"));
+    }
+
+    #[tokio::test]
+    async fn publish_errors_no_blog_on_no_privilege() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/RabbitWrite.naver"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"isSuccess":false,"errorCode":"no privilege"}"#,
+            ))
+            .mount(&server)
+            .await;
+        let client = BlogWriteClient::with_base_url(server.uri());
+        let err = client
+            .publish("b", "t", "c", &BlogPublishSettings::default(), "NID_SES=abc")
+            .await
+            .expect_err("no privilege는 Err여야 함");
+        assert!(err.message().contains("블로그가 없습니다"));
     }
 
     #[test]

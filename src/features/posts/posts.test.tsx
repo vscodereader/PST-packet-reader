@@ -55,8 +55,7 @@ describe("Posts", () => {
     const viewCount = screen.getByRole("button", { name: "조회수" });
     // DOM 순서: 엑셀 가져오기 → 신고하기 → 조회수 (툴바 삽입 위치 검증).
     expect(
-      excel.compareDocumentPosition(report) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
+      excel.compareDocumentPosition(report) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(
       report.compareDocumentPosition(viewCount) &

@@ -1,0 +1,802 @@
+import {
+  Anchor,
+  Badge,
+  Box,
+  Button,
+  Divider,
+  Group,
+  Menu,
+  Paper,
+  ScrollArea,
+  SegmentedControl,
+  Stack,
+  Text,
+  ThemeIcon,
+} from "@mantine/core";
+import { IconDeviceDesktop } from "@tabler/icons-react";
+import { useEffect, useState } from "react";
+
+import { Icon } from "@/shared/ui/icons";
+import { PlatformLogo } from "@/shared/ui/platform-logo";
+
+import { api, type DeviceDailyDto } from "../../api";
+
+import {
+  toDailyView,
+  toDeviceReport,
+  toPostBatch,
+  type DeviceReport,
+  type Line,
+  type PostBatch,
+  type PostItem,
+  type Posted,
+} from "./mapping";
+
+// 결과 보고 화면(§10-4). Admin은 하위에서 일어난 일을 전부 본다:
+//  ① 로그인 결과(성공/보류/대기초과/실패 + 누적)
+//  ② 게시 결과 — 어디에 게시했는지 + 성공 시 게시 내용·링크 / 실패 시 사유 + "자세히 보기" 백트레이스.
+// 기존 데스크톱 앱 알림(notifications.tsx의 BatchItem/SubLog)과 같은 모델을 그대로 쓴다.
+
+// ───────────────────────── 로그인 결과 ─────────────────────────
+// 모델·매핑(Line/DeviceReport, toDeviceReport)은 `./mapping`에 분리(테스트 대상).
+
+// §10-4 예시를 그대로 더미화. pw는 실제처럼 두고 화면에서 마스킹(앞 2글자만 노출).
+const REPORTS: DeviceReport[] = [
+  {
+    device: "하위-001",
+    batch: {
+      success: 3,
+      onhold: [{ loginId: "stock_id041", pw: "ik7!naver22", reason: "캡차" }],
+      timedout: [
+        { loginId: "stock_id052", pw: "vp@2024kr" },
+        { loginId: "stock_id058", pw: "mlab2024!!" },
+      ],
+      failed: [
+        { loginId: "stock_id063", pw: "daily#stock1", reason: "비번오류" },
+        {
+          loginId: "stock_id067",
+          pw: "stockpw22",
+          reason: "연결 실패(CDP 소켓 중단)",
+          trace:
+            "연결이 닫혔습니다 (os error 10053)\n" +
+            "   0: pstmacro_lib::auth::login_flow::run_inner\n" +
+            "   1: pstmacro_lib::auth::process_account\n   at login_flow.rs:317:5",
+        },
+        { loginId: "stock_id071", pw: "naverabc1", reason: "비번오류" },
+        { loginId: "stock_id074", pw: "qwer1234!", reason: "잠금" },
+      ],
+    },
+    cumulative: { received: 20, success: 6, onhold: 3, timedout: 5, failed: 6 },
+    registered: 4,
+    registeredVisible: 4,
+  },
+  {
+    device: "하위-003",
+    batch: {
+      success: 5,
+      onhold: [
+        { loginId: "stock_id102", pw: "phone1234", reason: "전화번호 입력" },
+        { loginId: "stock_id108", pw: "cap!2024", reason: "캡차" },
+      ],
+      timedout: [{ loginId: "stock_id115", pw: "wait9999" }],
+      failed: [
+        { loginId: "stock_id121", pw: "chal0001", reason: "추가인증 필요" },
+      ],
+    },
+    cumulative: { received: 9, success: 5, onhold: 2, timedout: 1, failed: 1 },
+    registered: 5,
+    registeredVisible: 5,
+  },
+];
+
+// 앞 2글자만 보이고 나머지는 마스킹(•). ID·PW 공통.
+function maskHead(s: string, visible = 2): string {
+  if (s.length <= visible) return s;
+  return s.slice(0, visible) + "•".repeat(s.length - visible);
+}
+
+// 모든 섹션이 같은 고정폭을 써서 ID·PW 열이 세로로 정렬되게 한다.
+function LineRow({ line, withReason }: { line: Line; withReason: boolean }) {
+  const [showTrace, setShowTrace] = useState(false);
+  return (
+    <Box>
+      <Group gap="md" wrap="nowrap" style={{ fontSize: 12 }}>
+        <Text w={150} ff="monospace" truncate>
+          {maskHead(line.loginId)}
+        </Text>
+        <Text w={120} ff="monospace" c="dimmed" truncate>
+          {maskHead(line.pw)}
+        </Text>
+        {withReason && (
+          <Text c="dimmed" style={{ flex: 1 }} truncate>
+            {line.reason ?? ""}
+          </Text>
+        )}
+        {/* 실패 줄에 백트레이스가 있으면 게시 결과와 동일하게 "자세히 보기" 토글. */}
+        {line.trace && (
+          <Button
+            size="compact-xs"
+            variant="default"
+            radius="xl"
+            onClick={() => setShowTrace((s) => !s)}
+          >
+            {showTrace ? "접기" : "자세히 보기"}
+          </Button>
+        )}
+      </Group>
+      {line.trace && showTrace && (
+        <Box
+          component="pre"
+          mt={6}
+          p="sm"
+          style={{
+            background: "#1f2329",
+            color: "#e6e8eb",
+            borderRadius: "var(--mantine-radius-sm)",
+            fontSize: 11.5,
+            lineHeight: 1.6,
+            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+            whiteSpace: "pre-wrap",
+            overflowX: "auto",
+          }}
+        >
+          {line.trace}
+        </Box>
+      )}
+    </Box>
+  );
+}
+
+function Section({
+  title,
+  color,
+  lines,
+  withReason,
+}: {
+  title: string;
+  color: string;
+  lines: Line[];
+  withReason: boolean;
+}) {
+  if (lines.length === 0) return null;
+  return (
+    <Box>
+      <Text fw={700} size="xs" c={color} mb={4}>
+        {title} {lines.length}
+      </Text>
+      <Stack gap={2}>
+        {lines.map((l, i) => (
+          <LineRow key={i} line={l} withReason={withReason} />
+        ))}
+      </Stack>
+    </Box>
+  );
+}
+
+function LoginReportCard({
+  r,
+  daily,
+}: {
+  r: DeviceReport;
+  daily?: DeviceDailyDto | undefined;
+}) {
+  // 날짜 분류: 날짜를 고르면 그 날(KST)의 4분류만 보여준다(절대 날짜 섞임 없음). 미선택이면 최신 배치.
+  // (중지는 로그인 결과가 아니라 "게시 결과"에 성공N 중지M으로 뜬다 — 사용자 요청 2026-07-06.)
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const dates = daily?.days.map((d) => d.date) ?? [];
+  const day = selectedDate
+    ? daily?.days.find((d) => d.date === selectedDate)
+    : undefined;
+  const batch = day ? toDailyView(day).batch : r.batch;
+  // 누적도 선택 날짜에 맞춘다(사용자 요청): 그 날 집계 = 그 날의 총계. 미선택이면 전체 누적.
+  const c = day
+    ? {
+        received:
+          day.success +
+          day.onhold.length +
+          day.timedout.length +
+          day.failed.length,
+        success: day.success,
+        onhold: day.onhold.length,
+        timedout: day.timedout.length,
+        failed: day.failed.length,
+      }
+    : r.cumulative;
+  return (
+    <Paper withBorder radius="md" p="lg">
+      <Group justify="space-between" mb="xs">
+        <Group gap="sm">
+          <ThemeIcon size={38} radius="md" variant="light" color="blue">
+            <IconDeviceDesktop size={22} />
+          </ThemeIcon>
+          <Text fw={800} size="lg">
+            {r.device}
+          </Text>
+          {/* 계정 등록 확인(§10-1): 등록 N건 + 로그인 엔진이 본 수. 둘이 같으면 ✓(초록),
+              다르면 등록은 됐지만 로그인 대상에 안 잡힌 것(주황 — 과거 account not found 신호). */}
+          {r.registered > 0 && (
+            <Badge
+              color={r.registeredVisible === r.registered ? "teal" : "orange"}
+              variant="light"
+              radius="sm"
+            >
+              {r.registeredVisible === r.registered
+                ? `등록 ${r.registered}건 ✓`
+                : `등록 ${r.registered}건 (로그인 대상 ${r.registeredVisible}건)`}
+            </Badge>
+          )}
+          {/* 날짜 분류(사용자 요청): 날짜를 고르면 그 날 결과만 보여준다. 처음엔 "날짜를 선택하세요". */}
+          <Menu shadow="md" width={200} position="bottom-start">
+            <Menu.Target>
+              <Button
+                size="compact-xs"
+                variant="light"
+                color="gray"
+                leftSection={<Icon.calendar size={13} />}
+                rightSection={<Icon.chevronDown size={12} />}
+              >
+                {selectedDate ?? "날짜를 선택하세요"}
+              </Button>
+            </Menu.Target>
+            <Menu.Dropdown>
+              <Menu.Label>날짜별 결과</Menu.Label>
+              {dates.length === 0 ? (
+                <Menu.Item disabled>기록 없음</Menu.Item>
+              ) : (
+                dates.map((d) => (
+                  <Menu.Item
+                    key={d}
+                    onClick={() => setSelectedDate(d)}
+                    fw={d === selectedDate ? 700 : undefined}
+                  >
+                    {d}
+                  </Menu.Item>
+                ))
+              )}
+              {selectedDate != null && (
+                <>
+                  <Menu.Divider />
+                  <Menu.Item c="dimmed" onClick={() => setSelectedDate(null)}>
+                    최신 배치로
+                  </Menu.Item>
+                </>
+              )}
+            </Menu.Dropdown>
+          </Menu>
+        </Group>
+        <Group gap={6}>
+          <Text size="xs" c="dimmed" fw={600}>
+            {selectedDate ?? "이번 배치"}
+          </Text>
+          <Badge color="green" variant="light">
+            성공 {batch.success}
+          </Badge>
+          <Badge color="yellow" variant="light">
+            보류 {batch.onhold.length}
+          </Badge>
+          <Badge color="gray" variant="light">
+            대기초과 {batch.timedout.length}
+          </Badge>
+          <Badge color="red" variant="light">
+            실패 {batch.failed.length}
+          </Badge>
+        </Group>
+      </Group>
+
+      <Text size="xs" c="dimmed" mb="sm">
+        이번 배치(최신 1건) — 성공은 개수만, 보류·대기초과·실패만 ID·PW(앞
+        2글자만 노출)+사유 표시. 실패 중 <b>비밀번호 오류만</b> 자동 삭제되고,
+        일시적·인프라성 실패(네트워크·타임아웃·account not found 등)는 보존된다.
+        맨 아래 누적 값은 여러 배치의 합계라 이번 배치 수치와 다를 수 있다.
+      </Text>
+
+      {/* 결과가 누적돼 길어지면 일정 높이까지만 보여주고 나머지는 스크롤(드래그바). */}
+      <ScrollArea.Autosize mah={260} type="auto" offsetScrollbars>
+        <Stack gap="sm" pr="sm">
+          <Section
+            title="보류"
+            color="yellow.7"
+            lines={batch.onhold}
+            withReason
+          />
+          <Section
+            title="대기초과"
+            color="gray.7"
+            lines={batch.timedout}
+            withReason={false}
+          />
+          <Section title="실패" color="red.6" lines={batch.failed} withReason />
+        </Stack>
+      </ScrollArea.Autosize>
+
+      <Divider my="sm" />
+
+      <Group gap="xs">
+        <Text fw={700} size="sm">
+          누적
+        </Text>
+        <Text size="sm" c="dimmed">
+          총 받은 계정 {c.received} · 성공 {c.success} / 보류 {c.onhold} /
+          대기초과 {c.timedout} / 실패 {c.failed}
+        </Text>
+      </Group>
+    </Paper>
+  );
+}
+
+// ───────────────────────── 게시 결과 ─────────────────────────
+// 데스크톱 앱 알림(notifications.tsx)의 BatchItem/PostedContent/SubLog 모델 그대로.
+//  - 성공: posted(제목/본문/댓글/URL) → [게시 내용] 펼치면 내용 + 글 링크.
+//  - 실패: trace(백트레이스) → [자세히 보기] 펼치면 어두운 콘솔 박스에 그대로.
+// 모델·매핑(Posted/PostItem/PostBatch, toPostBatch, fmtAt)은 `./mapping`에 분리(테스트 대상).
+
+// 더미 게시 결과 — 실제로는 하위가 자기 로컬 LogBatch(게시 완료 로그)를 Admin에 보고한 것.
+// trace는 실제 백트레이스 형식(원인 체인 + at 함수(파일:줄) + 스택)을 그대로 재현.
+function ok(target: string, loginId: string, posted: Posted): PostItem {
+  return {
+    platform: "forum",
+    target,
+    loginId,
+    status: "success",
+    msg: "게시 완료",
+    posted,
+  };
+}
+
+const POST_BATCHES: PostBatch[] = [
+  {
+    // 한 컴퓨터에 10곳 게시 → 8개까지 보이고 나머지는 스크롤(드래그바)로 확인.
+    device: "하위-001",
+    title: "10개 종목토론방 게시",
+    at: "2026-06-28 10:31",
+    kind: "게시",
+    items: [
+      ok("삼성전자 종목토론방", "chol_invest", {
+        title: "삼성전자 오늘 흐름 정리",
+        body: "오전 외국인 순매수 전환… (종목별 토큰 치환 후 실제 본문)",
+        url: "https://finance.naver.com/item/board_read.naver?code=005930&nid=298451023",
+      }),
+      ok("카카오 종목토론방", "moa_stock7", {
+        title: "카카오 반등 가능할까",
+        body: "전일 종가 대비… (실제 게시된 본문)",
+        comment: "지표상 단기 바닥 신호 보이네요",
+        url: "https://finance.naver.com/item/board_read.naver?code=035720&nid=298451044",
+      }),
+      ok("SK하이닉스 종목토론방", "nara_pick", {
+        title: "하이닉스 HBM 수급",
+        body: "HBM 단가 상승 기대… (실제 본문)",
+        url: "https://finance.naver.com/item/board_read.naver?code=000660&nid=298451077",
+      }),
+      ok("현대차 종목토론방", "sun_invest", {
+        title: "현대차 배당 매력",
+        body: "배당수익률 기준… (실제 본문)",
+        url: "https://finance.naver.com/item/board_read.naver?code=005380&nid=298451090",
+      }),
+      ok("LG에너지솔루션 종목토론방", "hana_trade", {
+        title: "엘솔 수주 모멘텀",
+        body: "북미 공장 가동… (실제 본문)",
+        url: "https://finance.naver.com/item/board_read.naver?code=373220&nid=298451101",
+      }),
+      ok("셀트리온 종목토론방", "kim_value", {
+        title: "셀트리온 바이오시밀러",
+        body: "신규 품목 허가… (실제 본문)",
+        url: "https://finance.naver.com/item/board_read.naver?code=068270&nid=298451115",
+      }),
+      ok("NAVER 종목토론방", "park_long", {
+        title: "네이버 광고 회복",
+        body: "검색 광고 단가… (실제 본문)",
+        url: "https://finance.naver.com/item/board_read.naver?code=035420&nid=298451128",
+      }),
+      {
+        platform: "forum",
+        target: "POSCO홀딩스 종목토론방",
+        loginId: "viptrade77",
+        status: "fail",
+        msg: "[연결 실패] 게시 요청 전송 오류 — 잠시 후 자동 재시도",
+        trace:
+          "HTTP 전송 오류가 발생했습니다: [연결 실패] error sending request for url (https://finance.naver.com/item/board_write.naver) → 원인: connection reset by peer (os error 104)\n\n" +
+          "at pstmacro_lib::forum_stocks::post::create_discussion (src-tauri/src/forum_stocks/post.rs:212)\n\n" +
+          "   0: pstmacro_lib::util::backtrace_string\n" +
+          "   1: pstmacro_lib::forum_stocks::post::create_discussion\n" +
+          "   2: pstmacro_lib::ipc::queue_runner::run_post_job\n" +
+          "   3: pstmacro_lib::ipc::queue_runner::process_account\n" +
+          "   4: tokio::runtime::task::harness::poll\n",
+      },
+      {
+        platform: "forum",
+        target: "기아 종목토론방",
+        loginId: "blue_chip",
+        status: "fail",
+        msg: "[타임아웃] 게시 응답 지연 — 다음 차례에 재시도",
+        trace:
+          "HTTP 전송 오류가 발생했습니다: [타임아웃] error sending request for url (https://finance.naver.com/item/board_write.naver) → 원인: operation timed out\n\n" +
+          "at pstmacro_lib::forum_stocks::post::create_discussion (src-tauri/src/forum_stocks/post.rs:212)\n\n" +
+          "   0: pstmacro_lib::util::backtrace_string\n" +
+          "   1: pstmacro_lib::forum_stocks::post::create_discussion\n" +
+          "   2: pstmacro_lib::ipc::queue_runner::run_post_job\n",
+      },
+      {
+        platform: "forum",
+        target: "카카오뱅크 종목토론방",
+        loginId: "value_kim",
+        status: "fail",
+        msg: "글쓰기 폼을 찾지 못했습니다 — 로그인 세션 만료 의심",
+        trace:
+          "글쓰기 페이지 진입 실패: 글쓰기 폼(textarea)을 찾지 못했습니다\n\n" +
+          "at pstmacro_lib::forum_stocks::post::open_write_form (src-tauri/src/forum_stocks/post.rs:148)\n\n" +
+          "   0: pstmacro_lib::util::backtrace_string\n" +
+          "   1: pstmacro_lib::forum_stocks::post::open_write_form\n" +
+          "   2: pstmacro_lib::forum_stocks::post::create_discussion\n" +
+          "   3: pstmacro_lib::ipc::queue_runner::run_post_job\n",
+      },
+    ],
+  },
+  {
+    device: "하위-003",
+    title: "3개 종목토론방 게시",
+    at: "2026-06-28 10:42",
+    kind: "좋아요",
+    items: [
+      ok("LG화학 종목토론방", "good_pick", {
+        title: "LG화학 소재 전망",
+        body: "양극재 출하… (실제 본문)",
+        url: "https://finance.naver.com/item/board_read.naver?code=051910&nid=298452010",
+      }),
+      ok("두산에너빌리티 종목토론방", "steady7", {
+        title: "두산 원전 수주",
+        body: "체코 계약 기대… (실제 본문)",
+        url: "https://finance.naver.com/item/board_read.naver?code=034020&nid=298452021",
+      }),
+      {
+        platform: "forum",
+        target: "한미반도체 종목토론방",
+        loginId: "trade_min",
+        status: "fail",
+        msg: "[연결 실패] 게시 요청 전송 오류 — 잠시 후 자동 재시도",
+        trace:
+          "HTTP 전송 오류가 발생했습니다: [연결 실패] error sending request for url (https://finance.naver.com/item/board_write.naver) → 원인: connection refused (os error 111)\n\n" +
+          "at pstmacro_lib::forum_stocks::post::create_discussion (src-tauri/src/forum_stocks/post.rs:212)\n\n" +
+          "   0: pstmacro_lib::util::backtrace_string\n" +
+          "   1: pstmacro_lib::forum_stocks::post::create_discussion\n" +
+          "   2: pstmacro_lib::ipc::queue_runner::run_post_job\n",
+      },
+    ],
+  },
+];
+
+function statusColor(s: PostItem["status"]) {
+  return s === "success" ? "green" : s === "stopped" ? "orange" : "red";
+}
+
+// 데스크톱 앱 SubLog와 동일한 한 행: 상태 아이콘 + 플랫폼 + 어디에 + 계정 + 사유,
+// 성공이면 [게시 내용], 실패면 [자세히 보기] 토글.
+function PostSubLog({ item }: { item: PostItem }) {
+  const [showTrace, setShowTrace] = useState(false);
+  const [showPosted, setShowPosted] = useState(false);
+  const ok = item.status === "success";
+  const color = statusColor(item.status);
+  return (
+    <Box
+      px={14}
+      py={9}
+      style={{ borderTop: "1px solid var(--mantine-color-gray-2)" }}
+    >
+      <Group gap={11} wrap="nowrap">
+        <ThemeIcon size={22} radius="xl" variant="light" color={color}>
+          {ok ? <Icon.check size={13} /> : <Icon.x size={13} />}
+        </ThemeIcon>
+        <PlatformLogo id={item.platform} size={20} />
+        <Group gap={6} style={{ flex: 1, minWidth: 0 }} wrap="nowrap">
+          <Text fz={12.5} fw={700} truncate>
+            {item.target}
+          </Text>
+          <Text fz={11.5} c="dimmed" ff="monospace">
+            · {maskHead(item.loginId)}
+          </Text>
+        </Group>
+        <Text
+          fz={11.5}
+          c={ok ? "dimmed" : item.status === "stopped" ? "orange" : "red"}
+          truncate
+          maw="40%"
+        >
+          {item.msg}
+        </Text>
+        {item.status === "fail" && item.trace && (
+          <Button
+            size="compact-xs"
+            variant="default"
+            radius="xl"
+            onClick={() => setShowTrace((s) => !s)}
+          >
+            {showTrace ? "접기" : "자세히 보기"}
+          </Button>
+        )}
+        {item.posted && (
+          <Button
+            size="compact-xs"
+            variant="default"
+            radius="xl"
+            onClick={() => setShowPosted((s) => !s)}
+          >
+            {showPosted ? "접기" : "게시 내용"}
+          </Button>
+        )}
+      </Group>
+
+      {/* 성공 — 실제 게시된 제목/본문/댓글 + 글 링크(클릭하면 새 탭). */}
+      {item.posted && showPosted && (
+        <Box
+          ml={33}
+          mt={9}
+          p="sm"
+          style={{
+            background: "var(--mantine-color-gray-1)",
+            borderRadius: "var(--mantine-radius-sm)",
+          }}
+        >
+          {item.posted.title && (
+            <Text fz={13} fw={700} mb={6} style={{ whiteSpace: "pre-wrap" }}>
+              {item.posted.title}
+            </Text>
+          )}
+          {item.posted.body && (
+            <Text
+              fz={12.5}
+              mb={item.posted.comment ? 8 : 0}
+              style={{ whiteSpace: "pre-wrap" }}
+            >
+              {item.posted.body}
+            </Text>
+          )}
+          {item.posted.comment && (
+            <>
+              <Text fz={11.5} c="dimmed" mb={2}>
+                댓글
+              </Text>
+              <Text
+                fz={12.5}
+                mb={item.posted.url ? 8 : 0}
+                style={{ whiteSpace: "pre-wrap" }}
+              >
+                {item.posted.comment}
+              </Text>
+            </>
+          )}
+          {item.posted.url && (
+            <Anchor
+              href={item.posted.url}
+              target="_blank"
+              rel="noreferrer"
+              fz={11.5}
+              ff="monospace"
+              style={{ wordBreak: "break-all" }}
+            >
+              {item.posted.url}
+            </Anchor>
+          )}
+        </Box>
+      )}
+
+      {/* 실패 — 백트레이스(원인 체인 + at 함수(파일:줄) + 스택)를 그대로. */}
+      {item.status === "fail" && item.trace && showTrace && (
+        <Box
+          component="pre"
+          ml={33}
+          mt={9}
+          p="sm"
+          style={{
+            background: "#1f2329",
+            color: "#e6e8eb",
+            borderRadius: "var(--mantine-radius-sm)",
+            fontSize: 11.5,
+            lineHeight: 1.6,
+            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+            whiteSpace: "pre-wrap",
+            overflowX: "auto",
+          }}
+        >
+          {item.trace}
+        </Box>
+      )}
+    </Box>
+  );
+}
+
+// 결과 종류 태그 색(15-기타명령 §6-3) — 데스크톱 좋아요=빨강/싫어요=남색/조회수=청록과 맞춘다.
+function kindColor(kind: string): string {
+  switch (kind) {
+    case "좋아요":
+      return "red";
+    case "싫어요":
+      return "indigo";
+    case "조회수":
+      return "teal";
+    case "IP":
+      return "grape";
+    default:
+      return "blue"; // 게시
+  }
+}
+
+function PostBatchCard({ b }: { b: PostBatch }) {
+  // 성공/실패 배지를 누르면 그 상태만 필터(다시 누르면 전체). 컴퓨터(카드)마다 따로.
+  const [filter, setFilter] = useState<"all" | "success" | "fail" | "stopped">(
+    "all",
+  );
+  const okN = b.items.filter((i) => i.status === "success").length;
+  const failN = b.items.filter((i) => i.status === "fail").length;
+  // 사용자 중지(kill)로 안 올린 글(설계서 08). 로컬 🗑·Admin 원격 중지 둘 다 여기 집계된다.
+  const stoppedN = b.items.filter((i) => i.status === "stopped").length;
+  const shown = b.items.filter((i) => filter === "all" || i.status === filter);
+  const toggle = (f: "success" | "fail" | "stopped") =>
+    setFilter((cur) => (cur === f ? "all" : f));
+  return (
+    <Paper withBorder radius="md" p={0} style={{ overflow: "hidden" }}>
+      <Group justify="space-between" p="md">
+        <Group gap="sm">
+          <ThemeIcon size={38} radius="md" variant="light" color="blue">
+            <IconDeviceDesktop size={22} />
+          </ThemeIcon>
+          <Box>
+            <Group gap={6} align="center">
+              <Text fw={800} size="lg" lh={1.2}>
+                {b.device}
+              </Text>
+              {/* 결과 종류 태그(15-기타명령 §6-3) — 게시가 아닌 기타 명령을 구분해 표시. */}
+              <Badge
+                size="sm"
+                radius="sm"
+                variant="light"
+                color={kindColor(b.kind)}
+              >
+                {b.kind}
+              </Badge>
+            </Group>
+            <Text size="xs" c="dimmed">
+              {b.title} · {b.at}
+            </Text>
+          </Box>
+        </Group>
+        <Group gap={6}>
+          <Badge
+            color="green"
+            variant={filter === "success" ? "filled" : "light"}
+            style={{ cursor: "pointer" }}
+            onClick={() => toggle("success")}
+          >
+            성공 {okN}
+          </Badge>
+          {failN > 0 && (
+            <Badge
+              color="red"
+              variant={filter === "fail" ? "filled" : "light"}
+              style={{ cursor: "pointer" }}
+              onClick={() => toggle("fail")}
+            >
+              실패 {failN}
+            </Badge>
+          )}
+          {stoppedN > 0 && (
+            <Badge
+              color="orange"
+              variant={filter === "stopped" ? "filled" : "light"}
+              style={{ cursor: "pointer" }}
+              onClick={() => toggle("stopped")}
+            >
+              중지 {stoppedN}
+            </Badge>
+          )}
+          {filter !== "all" && (
+            <Button
+              size="compact-xs"
+              variant="subtle"
+              color="gray"
+              onClick={() => setFilter("all")}
+            >
+              전체 보기
+            </Button>
+          )}
+        </Group>
+      </Group>
+      {/* 한 컴퓨터당 8개까지 보이고, 그 이상은 세로 스크롤(드래그바)로 내려서 확인. */}
+      <ScrollArea.Autosize mah={336} type="auto">
+        {shown.map((it, i) => (
+          <PostSubLog key={i} item={it} />
+        ))}
+      </ScrollArea.Autosize>
+    </Paper>
+  );
+}
+
+// ───────────────────────── 화면 ─────────────────────────
+
+export function ResultReport() {
+  const [view, setView] = useState<"login" | "post">("login");
+  // 결과 보고(§10-4): 서버에서 하위들의 로그인·게시 결과를 받아 렌더. 연결되면 실데이터,
+  // 오프라인 미리보기/빈 서버면 더미 유지(통신 로그 화면과 동일 폴백). 3초 폴링(즉시 반영).
+  const [loginReports, setLoginReports] = useState<DeviceReport[]>(REPORTS);
+  const [postBatches, setPostBatches] = useState<PostBatch[]>(POST_BATCHES);
+  // 날짜별 결과(날짜 분류): device 이름 → 날짜별 결과. 로그인 카드의 날짜 선택 메뉴가 쓴다.
+  const [dailyByDevice, setDailyByDevice] = useState<
+    Record<string, DeviceDailyDto>
+  >({});
+  useEffect(() => {
+    const load = () => {
+      api.loginReports
+        .list()
+        .then((rows) => {
+          if (rows.length === 0) return; // 빈 서버 → 더미 유지(미리보기)
+          setLoginReports(rows.map(toDeviceReport));
+        })
+        .catch(() => {
+          /* 오프라인 → 더미 유지 */
+        });
+      api.dailyResults
+        .list()
+        .then((rows) => {
+          const m: Record<string, DeviceDailyDto> = {};
+          rows.forEach((r) => {
+            m[r.device] = r;
+          });
+          setDailyByDevice(m);
+        })
+        .catch(() => {
+          /* 오프라인 → 빈 상태 유지(날짜 메뉴는 "기록 없음") */
+        });
+      api.postReports
+        .list()
+        .then((rows) => {
+          if (rows.length === 0) return; // 빈 서버 → 더미 유지(미리보기)
+          setPostBatches(rows.map(toPostBatch));
+        })
+        .catch(() => {
+          /* 오프라인 → 더미 유지 */
+        });
+    };
+    load();
+    const id = window.setInterval(load, 3000);
+    return () => window.clearInterval(id);
+  }, []);
+  return (
+    <Box p="lg">
+      <Group justify="space-between" mb="md">
+        <Text fw={800} size="xl">
+          결과 보고
+        </Text>
+      </Group>
+
+      <SegmentedControl
+        mb="md"
+        value={view}
+        onChange={(v) => setView(v as "login" | "post")}
+        data={[
+          { value: "login", label: "로그인 결과" },
+          { value: "post", label: "게시 결과" },
+        ]}
+      />
+
+      {view === "login" ? (
+        <Stack gap="md">
+          {loginReports.map((r) => (
+            <LoginReportCard
+              key={r.device}
+              r={r}
+              daily={dailyByDevice[r.device]}
+            />
+          ))}
+        </Stack>
+      ) : (
+        <Stack gap="md">
+          <Text size="xs" c="dimmed">
+            어디에 게시했는지 + 성공 시 [게시 내용]·링크 / 실패 시 사유 +
+            [자세히 보기] 백트레이스. (데스크톱 앱 알림과 동일 모델)
+          </Text>
+          {postBatches.map((b, i) => (
+            <PostBatchCard key={i} b={b} />
+          ))}
+        </Stack>
+      )}
+    </Box>
+  );
+}

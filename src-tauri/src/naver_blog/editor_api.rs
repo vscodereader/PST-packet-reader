@@ -16,8 +16,24 @@ use super::error::BlogError;
 
 /// 편집기 보조 API 호스트.
 const EDITOR_HOST: &str = "https://platform.editor.naver.com";
+/// 글쓰기 폼 옵션(se-authorization 토큰 발급) 호스트.
+const BLOG_HOST: &str = "https://blog.naver.com";
 /// 사진 업로드 결과가 올라가는 도메인.
 const BLOGFILES_DOMAIN: &str = "https://blogfiles.pstatic.net";
+
+/// 편집기 보조 API 인증 세션(글쓰기 페이지에서 발급). `platform.editor.naver.com` API는 쿠키만으론
+/// 401("the token must not be empty")을 돌려주고, 아래 두 헤더가 있어야 통과한다.
+///
+/// - `se_authorization`: `PostWriteFormSeOptions.naver` 응답 `result.token`(HS256 JWT). 실측 확정.
+/// - `se_app_id`: 에디터가 세션마다 만드는 `SE-<uuid>` 클라이언트 생성값. 우리도 세션당 1개를 만들어
+///   그 세션의 모든 호출에서 재사용한다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorSession {
+    /// `se-authorization` 헤더값(JWT). 자격 증명이므로 에러 메시지에 노출하지 않는다.
+    pub se_authorization: String,
+    /// `se-app-id` 헤더값(`SE-<uuid>`, 세션당 고정 재사용).
+    pub se_app_id: String,
+}
 
 /// oglink API가 준 링크 메타데이터(컴포넌트 `oglink`용).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -94,6 +110,8 @@ pub struct UploadedImage {
 pub struct BlogEditorApiClient {
     base: String,
     http: reqwest::Client,
+    /// 편집기 인증 세션(se-authorization/se-app-id). 없으면 401이 나므로 [`Self::with_session`]로 실어야 한다.
+    session: Option<EditorSession>,
 }
 
 impl Default for BlogEditorApiClient {
@@ -113,10 +131,28 @@ impl BlogEditorApiClient {
         Self {
             base: base.into(),
             http: crate::naver_cafe::shared_http_client(),
+            session: None,
         }
     }
 
-    /// 공용 GET — 위장 헤더(same-origin XHR) + 저장 쿠키를 싣고 본문 텍스트를 돌려준다.
+    /// 편집기 인증 세션(se-authorization/se-app-id)을 실어 이후 모든 API 호출에 헤더로 붙인다.
+    pub fn with_session(mut self, session: EditorSession) -> Self {
+        self.session = Some(session);
+        self
+    }
+
+    /// 세션이 있으면 편집기 인증 헤더(se-authorization/se-app-id + Origin)를 요청에 붙인다.
+    fn apply_session_headers(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(s) = &self.session {
+            req = req
+                .header("se-authorization", s.se_authorization.as_str())
+                .header("se-app-id", s.se_app_id.as_str())
+                .header("Origin", BLOG_HOST);
+        }
+        req
+    }
+
+    /// 공용 GET — 위장 헤더(same-origin XHR) + 편집기 인증 헤더 + 저장 쿠키를 싣고 본문 텍스트를 돌려준다.
     async fn get_text(&self, url: &str, cookie: Option<&str>) -> Result<String, BlogError> {
         let mut req = self
             .http
@@ -127,6 +163,7 @@ impl BlogEditorApiClient {
             .header("sec-fetch-site", "same-site")
             .header("sec-fetch-mode", "cors")
             .header("sec-fetch-dest", "empty");
+        req = self.apply_session_headers(req);
         if let Some(c) = cookie {
             req = req.header("Cookie", c);
         }
@@ -271,6 +308,7 @@ impl BlogEditorApiClient {
             .header("User-Agent", crate::naver_cafe::post::BROWSER_USER_AGENT)
             .header("Accept", "application/json, text/plain, */*")
             .header("Referer", "https://blog.naver.com/");
+        req = self.apply_session_headers(req);
         if let Some(c) = cookie {
             req = req.header("Cookie", c);
         }
@@ -320,6 +358,7 @@ impl BlogEditorApiClient {
             .header("User-Agent", crate::naver_cafe::post::BROWSER_USER_AGENT)
             .header("Accept", "application/json, text/plain, */*")
             .header("Referer", "https://blog.naver.com/");
+        req = self.apply_session_headers(req);
         if let Some(c) = cookie {
             req = req.header("Cookie", c);
         }
@@ -341,6 +380,84 @@ impl BlogEditorApiClient {
         parse_uploaded_image(&text)
             .ok_or_else(|| BlogError::new(format!("사진 업로드 응답 해석 실패: {}", snippet(&text))))
     }
+}
+
+/// 편집기 보조 API 인증 세션(se-authorization/se-app-id)을 발급받는다(실서버 호스트).
+///
+/// `GET blog.naver.com/PostWriteFormSeOptions.naver?blogId={blog_id}`(계정 쿠키)의 응답
+/// `result.token`(HS256 JWT)이 `se-authorization` 헤더값이다(실측 확정). `se-app-id`는 에디터가
+/// 세션마다 만드는 `SE-<uuid>` 클라이언트 생성값이라 우리도 하나 만들어 그 세션에서 재사용한다.
+///
+/// 토큰을 못 찾으면(블로그 없음/로그인 만료 등) 응답 원문 스니펫을 실은 `BlogError`로 알린다.
+///
+/// # 쿠키 보안
+/// `cookie`는 사용자 인증 자격 증명이며 에러/로그에 노출하지 않는다.
+pub async fn fetch_editor_session(
+    blog_id: &str,
+    cookie: Option<&str>,
+) -> Result<EditorSession, BlogError> {
+    fetch_editor_session_with_base(BLOG_HOST, blog_id, cookie).await
+}
+
+/// 주입된 `blog_base`로 [`fetch_editor_session`]을 수행한다(wiremock 테스트용).
+pub async fn fetch_editor_session_with_base(
+    blog_base: &str,
+    blog_id: &str,
+    cookie: Option<&str>,
+) -> Result<EditorSession, BlogError> {
+    let url = format!("{blog_base}/PostWriteFormSeOptions.naver?blogId={blog_id}");
+    let http = crate::naver_cafe::shared_http_client();
+    let mut req = http
+        .get(&url)
+        .header("User-Agent", crate::naver_cafe::post::BROWSER_USER_AGENT)
+        .header("Accept", "application/json, text/plain, */*")
+        .header("Referer", format!("{blog_base}/{blog_id}?Redirect=Write"))
+        .header("sec-fetch-site", "same-origin")
+        .header("sec-fetch-mode", "cors")
+        .header("sec-fetch-dest", "empty");
+    if let Some(c) = cookie {
+        req = req.header("Cookie", c);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| BlogError::new(format!("편집기 세션 발급 요청 실패: {e}")))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| BlogError::new(format!("편집기 세션 발급 응답 읽기 실패: {e}")))?;
+    // 원문 로그(형님 지시): 토큰 위치를 사람이 확인할 수 있게 상태·본문을 필터 없이 남긴다
+    // (쿠키는 본문에 없어 안전). 토큰은 우리가 실으려는 값이라 그대로 남긴다.
+    tracing::info!(
+        "[BLOG] PostWriteFormSeOptions 응답 — status={} body={}",
+        status.as_u16(),
+        text
+    );
+    let token = parse_se_token(&text).ok_or_else(|| {
+        BlogError::new(format!(
+            "편집기 세션 토큰(se-authorization)을 찾지 못했습니다(이 계정에 블로그가 없거나 로그인이 만료됐을 수 있음). status={} 응답={}",
+            status.as_u16(),
+            snippet(&text)
+        ))
+    })?;
+    Ok(EditorSession {
+        se_authorization: token,
+        // se-app-id: SmartEditor 요소 id 생성기가 만드는 "SE-<uuid>"와 동일 형식(write_client::se_id 재사용).
+        se_app_id: super::write_client::se_id(),
+    })
+}
+
+/// `PostWriteFormSeOptions.naver` 응답에서 `result.token`(se-authorization JWT)을 뽑는다(순수 함수).
+/// `{"isSuccess":true,"result":{"token":"<JWT>",...}}`. 빈 문자열이면 없음으로 본다.
+pub fn parse_se_token(text: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    v.get("result")
+        .and_then(|r| r.get("token"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
 }
 
 /// oglink 응답에서 메타를 뽑는다(순수 함수). `oglink.summary.{domain,title,description,image}` + `oglinkSign`.
@@ -657,5 +774,83 @@ mod tests {
         let m = client.oglink("https://x", Some("NID_SES=abc")).await.unwrap();
         assert_eq!(m.title, "t");
         assert_eq!(m.oglink_sign, "S");
+    }
+
+    #[test]
+    fn parse_se_token_extracts_result_token() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJibG9ncGMwMDEifQ.sig";
+        let body = format!(
+            r#"{{"isSuccess":true,"result":{{"appCode":"blogpc001","token":"{jwt}","documentModel":null}}}}"#
+        );
+        assert_eq!(parse_se_token(&body).as_deref(), Some(jwt));
+    }
+
+    #[test]
+    fn parse_se_token_none_when_missing_or_empty() {
+        assert!(parse_se_token(r#"{"isSuccess":false}"#).is_none());
+        assert!(parse_se_token(r#"{"result":{"token":""}}"#).is_none());
+        assert!(parse_se_token("<html>bot</html>").is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_editor_session_reads_token_and_generates_app_id() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/PostWriteFormSeOptions.naver"))
+            .and(query_param("blogId", "myblog"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"isSuccess":true,"result":{"appCode":"blogpc001","token":"JWT-TOKEN-XYZ"}}"#,
+            ))
+            .mount(&server)
+            .await;
+        let s = fetch_editor_session_with_base(&server.uri(), "myblog", Some("NID_SES=abc"))
+            .await
+            .unwrap();
+        assert_eq!(s.se_authorization, "JWT-TOKEN-XYZ");
+        assert!(s.se_app_id.starts_with("SE-"), "se-app-id는 SE-<uuid> 형식");
+    }
+
+    #[tokio::test]
+    async fn fetch_editor_session_errors_when_no_token() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/PostWriteFormSeOptions.naver"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(r#"{"isSuccess":false}"#),
+            )
+            .mount(&server)
+            .await;
+        assert!(
+            fetch_editor_session_with_base(&server.uri(), "noblog", None)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn oglink_sends_session_headers() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/blogpc001/v1/oglink"))
+            .and(header("se-authorization", "JWT-XYZ"))
+            .and(header("se-app-id", "SE-abc"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"oglink":{"summary":{"domain":"d","title":"t","description":"x","image":{"url":"u","width":1,"height":2}}},"oglinkSign":"S"}"#,
+            ))
+            .mount(&server)
+            .await;
+        let client = BlogEditorApiClient::with_base_url(server.uri()).with_session(EditorSession {
+            se_authorization: "JWT-XYZ".to_string(),
+            se_app_id: "SE-abc".to_string(),
+        });
+        // 세션 헤더가 매칭돼야만 200이 온다(없으면 mock 미스로 실패).
+        let m = client.oglink("https://x", Some("NID_SES=abc")).await.unwrap();
+        assert_eq!(m.title, "t");
     }
 }
