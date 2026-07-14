@@ -334,6 +334,34 @@ pub async fn upload_blog_photo_for_account(
         .await
 }
 
+/// 파일을 **메모리 바이트**로 업로드한다(원격/Admin 경로: 하위 디스크에 파일이 없고 Admin이
+/// base64로 실어 보낸다). 로컬 경로 버전 [`upload_blog_file_for_account`]와 로직 동일, `read_local_file`만
+/// 생략하고 호출부가 (파일명, 바이트)를 넘긴다.
+pub async fn upload_blog_file_for_account_bytes(
+    account_id: &str,
+    file_name: &str,
+    bytes: Vec<u8>,
+) -> Result<UploadedFile, BlogError> {
+    let (client, cookie) = editor_client_for_account(account_id).await?;
+    client
+        .upload_file(account_id, file_name, bytes, Some(&cookie))
+        .await
+}
+
+/// 이미지를 **메모리 바이트**로 업로드한다(원격/Admin 경로). 로컬 경로 버전
+/// [`upload_blog_photo_for_account`]와 로직 동일(2단계: 세션키→simpleUpload), `read_local_file`만 생략.
+pub async fn upload_blog_photo_for_account_bytes(
+    account_id: &str,
+    file_name: &str,
+    bytes: Vec<u8>,
+) -> Result<UploadedImage, BlogError> {
+    let (client, cookie) = editor_client_for_account(account_id).await?;
+    let session_key = client.photo_session_key(Some(&cookie)).await?;
+    client
+        .upload_photo(account_id, &session_key, file_name, bytes, Some(&cookie))
+        .await
+}
+
 /// 로컬 파일을 읽어 (파일명, 바이트)로 돌려준다. 경로/IO 오류는 사용자 메시지로 감싼다.
 fn read_local_file(file_path: &str) -> Result<(String, Vec<u8>), BlogError> {
     let path = std::path::Path::new(file_path);

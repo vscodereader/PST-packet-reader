@@ -980,6 +980,116 @@ fn blog_write_report_body(title: &str, items: Vec<serde_json::Value>) -> serde_j
     })
 }
 
+/// Admin 원격 발행이 보내는 **원본(raw) 미디어 블록** — Admin은 브라우저라 계정 세션이 없어 사진/파일을
+/// base64로, 링크를 URL만으로 미해결 상태로 보낸다. 하위 에이전트가 계정 세션으로 업로드/조회해 실제
+/// 블록으로 바꾼다. 데스크톱은 이미 해결된 블록을 보내므로 이 타입을 쓰지 않는다.
+#[derive(Debug, PartialEq)]
+enum BlogMediaInput {
+    Image { file_name: String, data_base64: String },
+    File { file_name: String, data_base64: String },
+    Oglink { link: String },
+}
+
+/// 원본 블록 JSON을 분류한다(순수). `imageUpload`/`fileUpload`/`oglinkUrl`만 미디어 입력으로 보고, 그 외
+/// (text/code/schedule/sticker/이미 해결된 image 등)는 `None` → 호출부가 **기존대로** Block으로 역직렬화한다.
+/// 즉 raw 미디어가 없으면 동작이 지금과 100% 동일하다(기존 경로 무손상).
+fn blog_media_input(value: &serde_json::Value) -> Option<BlogMediaInput> {
+    let get = |k: &str| value.get(k).and_then(|v| v.as_str()).map(str::to_owned);
+    match value.get("type").and_then(|v| v.as_str())? {
+        "imageUpload" => Some(BlogMediaInput::Image {
+            file_name: get("fileName").unwrap_or_default(),
+            data_base64: get("dataBase64")?,
+        }),
+        "fileUpload" => Some(BlogMediaInput::File {
+            file_name: get("fileName").unwrap_or_default(),
+            data_base64: get("dataBase64")?,
+        }),
+        "oglinkUrl" => Some(BlogMediaInput::Oglink { link: get("link")? }),
+        _ => None,
+    }
+}
+
+/// OglinkMeta(JSON)를 oglink 블록 JSON으로 바꾼다(순수). 핵심: OglinkMeta의 `url`(정규화·서명된 URL)을
+/// OglinkBlock의 `link`로 옮긴다 — 발행이 통과하려면 oglinkSign이 서명한 그 url이 link여야 한다. 나머지
+/// 필드(title/domain/description/thumbnail*/oglinkSign)는 1:1. `type:"oglink"` 태그를 붙인다.
+fn remap_oglink_meta_to_block(mut meta_json: serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = meta_json.as_object_mut() {
+        if let Some(url) = obj.remove("url") {
+            obj.insert("link".to_owned(), url);
+        }
+        obj.insert(
+            "type".to_owned(),
+            serde_json::Value::String("oglink".to_owned()),
+        );
+    }
+    meta_json
+}
+
+/// 원본 블록들을 **이 계정의 세션으로** 해결한다: `imageUpload`/`fileUpload`는 base64를 디코드해 계정
+/// 세션으로 업로드하고 실제 image/file 블록으로, `oglinkUrl`은 조회해 oglink 블록으로 바꾼다. 그 외
+/// 블록은 그대로 `naver_blog::Block`으로 역직렬화한다(기존 경로 무손상). 하나라도 실패하면
+/// 사람이 읽는 사유로 `Err`. Admin 원격 미디어(사진/파일/링크) 배선의 핵심 — 계정마다 자기 블로그로
+/// 업로드해야 하므로 대상 계정별로 호출한다(공유 불가).
+async fn resolve_blocks_for_account(
+    account_id: &str,
+    raw_blocks: &[serde_json::Value],
+) -> Result<Vec<crate::naver_blog::Block>, String> {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let mut out = Vec::with_capacity(raw_blocks.len());
+    for raw in raw_blocks {
+        let block_json = match blog_media_input(raw) {
+            Some(BlogMediaInput::Image {
+                file_name,
+                data_base64,
+            }) => {
+                let bytes = b64
+                    .decode(data_base64.trim())
+                    .map_err(|e| format!("사진 base64 디코드 실패({file_name}): {e}"))?;
+                let img = crate::naver_blog::upload_blog_photo_for_account_bytes(
+                    account_id, &file_name, bytes,
+                )
+                .await
+                .map_err(|e| format!("사진 업로드 실패({file_name}): {}", e.message()))?;
+                let mut v = serde_json::to_value(&img)
+                    .map_err(|e| format!("사진 블록 직렬화 실패: {e}"))?;
+                v["type"] = serde_json::Value::String("image".to_owned());
+                v
+            }
+            Some(BlogMediaInput::File {
+                file_name,
+                data_base64,
+            }) => {
+                let bytes = b64
+                    .decode(data_base64.trim())
+                    .map_err(|e| format!("파일 base64 디코드 실패({file_name}): {e}"))?;
+                let f = crate::naver_blog::upload_blog_file_for_account_bytes(
+                    account_id, &file_name, bytes,
+                )
+                .await
+                .map_err(|e| format!("파일 업로드 실패({file_name}): {}", e.message()))?;
+                let mut v =
+                    serde_json::to_value(&f).map_err(|e| format!("파일 블록 직렬화 실패: {e}"))?;
+                v["type"] = serde_json::Value::String("file".to_owned());
+                v
+            }
+            Some(BlogMediaInput::Oglink { link }) => {
+                let meta = crate::naver_blog::fetch_oglink_for_account(account_id, &link)
+                    .await
+                    .map_err(|e| format!("링크 조회 실패({link}): {}", e.message()))?;
+                let meta_json = serde_json::to_value(&meta)
+                    .map_err(|e| format!("링크 블록 직렬화 실패: {e}"))?;
+                remap_oglink_meta_to_block(meta_json)
+            }
+            None => raw.clone(),
+        };
+        let block: crate::naver_blog::Block = serde_json::from_value(block_json)
+            .map_err(|e| format!("블록 형식 오류: {e}"))?;
+        out.push(block);
+    }
+    Ok(out)
+}
+
 /// 블로그 새 글 발행 실행 + 결과 회신(16-블로그새글). 게시 큐를 타지 않고 계정 쿠키로 RabbitWrite를
 /// 직접 호출한다(엔진 무손상): 각 대상 계정마다 `publish_blog_post_blocks_for_account`로 같은 제목/블록/
 /// 설정을 자기 블로그에 발행하고, 결과를 PostItemDto로 모아 post-report로 회신한다. blocks가 하나라도
@@ -997,41 +1107,10 @@ async fn run_blog_write_command<R: Runtime>(
     let activity = app.state::<JsonStore<ActivityItem>>();
     let title = bw.title.clone();
     let settings = blog_write_settings(&bw.settings);
-    // 블록 파싱(프론트 blocks.ts → naver_blog::Block). id 등 미지 필드는 serde가 무시한다.
-    let parsed: Result<Vec<crate::naver_blog::Block>, _> =
-        serde_json::from_value(serde_json::Value::Array(bw.blocks.clone()));
-    let blocks = match parsed {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!("[AGENT] 블로그 새 글 발행 — 블록 파싱 실패: {e}");
-            let items = bw
-                .targets
-                .iter()
-                .map(|t| {
-                    blog_write_item(
-                        &t.login_id,
-                        &t.blog_id,
-                        &title,
-                        false,
-                        &format!("본문 블록 형식 오류: {e}"),
-                        None,
-                    )
-                })
-                .collect();
-            let body = blog_write_report_body(&title, items);
-            let _ = net::post_report(&client, &cfg.server_url, &cfg.device_token, &body).await;
-            record(
-                activity.inner(),
-                ActivityType::Error,
-                format!("블로그 글 발행 실패 — 본문 블록 형식 오류: {e}"),
-            );
-            return;
-        }
-    };
     tracing::info!(
         title = %title,
         targets = bw.targets.len(),
-        blocks = blocks.len(),
+        blocks = bw.blocks.len(),
         "[AGENT] publish_blog_write 수신 — 블로그 새 글 발행 시작(계정×블로그명)"
     );
     let mut items: Vec<serde_json::Value> = Vec::new();
@@ -1040,6 +1119,22 @@ async fn run_blog_write_command<R: Runtime>(
             t.login_id.clone()
         } else {
             t.blog_id.clone()
+        };
+        // 원본 블록을 **이 계정 세션으로** 해결한다(Admin 원격 미디어: 사진/파일 업로드, 링크 조회).
+        // raw 미디어(imageUpload/fileUpload/oglinkUrl)가 없으면 기존과 동일하게 그대로 Block으로 파싱된다
+        // (무손상). 계정마다 자기 블로그에 업로드해야 하므로 대상별로 해결한다.
+        let blocks = match resolve_blocks_for_account(&t.login_id, &bw.blocks).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(login_id = %t.login_id, blog_id = %blog_id, "[AGENT] 블로그 블록 해결 실패: {e}");
+                record(
+                    activity.inner(),
+                    ActivityType::Error,
+                    format!("블로그 글 발행 실패({blog_id}) — {e}"),
+                );
+                items.push(blog_write_item(&t.login_id, &blog_id, &title, false, &e, None));
+                continue;
+            }
         };
         let item = match crate::naver_blog::publish_blog_post_blocks_for_account(
             &t.login_id,
@@ -3825,6 +3920,67 @@ mod tests {
         assert_eq!(out.open_type, OpenType::Public);
         assert!(out.comment_yn, "기본 댓글 허용");
         assert!(out.search_yn, "기본 검색 허용");
+    }
+
+    // Admin 원격 미디어: 원본 블록 분류. imageUpload/fileUpload/oglinkUrl만 미디어 입력으로 잡고,
+    // 나머지(text/sticker/이미 해결된 image 등)는 None → 기존 파싱 경로 무손상.
+    #[test]
+    fn blog_media_input_classifies_image_upload() {
+        let v = serde_json::json!({"type":"imageUpload","fileName":"a.png","dataBase64":"AAAA"});
+        assert_eq!(
+            blog_media_input(&v),
+            Some(BlogMediaInput::Image {
+                file_name: "a.png".into(),
+                data_base64: "AAAA".into()
+            })
+        );
+    }
+
+    #[test]
+    fn blog_media_input_classifies_file_and_oglink() {
+        let f = serde_json::json!({"type":"fileUpload","fileName":"b.pdf","dataBase64":"Qk0="});
+        assert_eq!(
+            blog_media_input(&f),
+            Some(BlogMediaInput::File {
+                file_name: "b.pdf".into(),
+                data_base64: "Qk0=".into()
+            })
+        );
+        let o = serde_json::json!({"type":"oglinkUrl","link":"https://naver.com"});
+        assert_eq!(
+            blog_media_input(&o),
+            Some(BlogMediaInput::Oglink {
+                link: "https://naver.com".into()
+            })
+        );
+    }
+
+    #[test]
+    fn blog_media_input_none_for_non_media_blocks() {
+        // 기존 블록들은 None → 호출부가 지금과 똑같이 Block으로 역직렬화(무손상).
+        for v in [
+            serde_json::json!({"type":"text","text":"hi"}),
+            serde_json::json!({"type":"sticker","packCode":"cafe_001","seq":1}),
+            serde_json::json!({"type":"image","src":"x","path":"y"}), // 이미 해결된 image
+            serde_json::json!({"type":"oglinkUrl"}),                  // link 없음 → None(불완전)
+            serde_json::json!({}),                                    // type 없음
+        ] {
+            assert_eq!(blog_media_input(&v), None, "value={v}");
+        }
+    }
+
+    #[test]
+    fn remap_oglink_meta_moves_url_to_link_and_tags_oglink() {
+        let meta = serde_json::json!({
+            "url":"https://naver.com/x","title":"T","domain":"naver.com",
+            "thumbnailSrc":"t","oglinkSign":"sig","description":"d"
+        });
+        let b = remap_oglink_meta_to_block(meta);
+        assert_eq!(b["type"], "oglink");
+        assert_eq!(b["link"], "https://naver.com/x"); // url → link
+        assert!(b.get("url").is_none(), "url 키는 제거돼야 한다");
+        assert_eq!(b["oglinkSign"], "sig"); // 나머지 필드 보존
+        assert_eq!(b["title"], "T");
     }
 
     #[test]
