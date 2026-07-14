@@ -125,14 +125,16 @@ pub async fn run_report_batch<R: Runtime>(
 /// 조회→토큰→제출을 수행한 뒤 크롬을 닫는다. 쿠키/크롬 준비 실패는 그 계정의 모든 링크를 같은
 /// 사유로 실패 처리한다.
 fn report_one_account(account_id: &str, links: &[String], reason_code: &str) -> Vec<ReportOutcome> {
-    // 저장 로그인 쿠키 로드 → HTTP 클라이언트. 없으면 이 계정 전부 실패(재로그인 필요).
-    let http = match load_http(account_id) {
-        Ok(http) => http,
+    // 저장 로그인 쿠키(storage-state)를 한 번 로드해 HTTP 클라이언트와 토큰 브라우저 주입용 쿠키를
+    // 함께 만든다. 없으면 이 계정 전부 실패(재로그인 필요).
+    let (http, cookies) = match load_session(account_id) {
+        Ok(session) => session,
         Err(error) => return fail_all(account_id, links, &error.to_string()),
     };
 
-    // 계정당 크롬 1회(설계서 §4.2). 열기 실패면 토큰을 못 만드니 이 계정 전부 실패.
-    let mut browser = match TokenBrowser::open() {
+    // 계정당 크롬 1회(설계서 §4.2). navigate 전에 이 계정 세션 쿠키를 주입해 로그인 상태로 신고
+    // 페이지를 연다(비로그인이면 nid 로그인으로 튕겨 토큰이 안 만들어짐). 열기 실패면 이 계정 전부 실패.
+    let mut browser = match TokenBrowser::open(&cookies) {
         Ok(browser) => browser,
         Err(error) => return fail_all(account_id, links, &error.to_string()),
     };
@@ -190,8 +192,10 @@ fn report_one_link(
     http.submit_report(&body).map_err(ReportError::Submit)
 }
 
-/// 저장 쿠키를 읽어 신고 HTTP 클라이언트를 만든다. 쿠키가 없거나 세션이 없으면 실패.
-fn load_http(account_id: &str) -> Result<ReportHttp, ReportError> {
+/// 저장 쿠키(storage-state)를 한 번 읽어 신고 HTTP 클라이언트와 토큰 브라우저 주입용 네이버 쿠키
+/// (name/value 쌍)를 함께 만든다. 쿠키가 없거나 세션이 없으면 실패. 쿠키 값은 자격증명이라 로그에
+/// 남기지 않는다(주입 시점 이름/개수만 남긴다 — token.rs 참고).
+fn load_session(account_id: &str) -> Result<(ReportHttp, Vec<(String, String)>), ReportError> {
     let storage = crate::auth::read_account_cookies(account_id)
         .map_err(|error| ReportError::NoCookies(format!("쿠키 조회 실패: {error}")))?
         .ok_or_else(|| {
@@ -199,7 +203,33 @@ fn load_http(account_id: &str) -> Result<ReportHttp, ReportError> {
                 "저장된 로그인 쿠키가 없거나 만료됨 — 재로그인이 필요합니다.".to_owned(),
             )
         })?;
-    ReportHttp::from_storage_state(&storage).map_err(ReportError::NoCookies)
+    let http = ReportHttp::from_storage_state(&storage).map_err(ReportError::NoCookies)?;
+    let cookies = naver_cookie_pairs(&storage);
+    Ok((http, cookies))
+}
+
+/// storage-state JSON에서 네이버 도메인 쿠키만 골라 (name, value) 쌍으로 뽑는다(토큰 브라우저 CDP
+/// 주입용). `cookie_header_from_storage_state`와 같은 필터(도메인에 "naver" 포함)를 쓴다. 값은
+/// 자격증명이라 여기서도 로그에 남기지 않는다(호출부가 이름/개수만 남긴다).
+fn naver_cookie_pairs(storage: &serde_json::Value) -> Vec<(String, String)> {
+    storage
+        .get("cookies")
+        .and_then(|cookies| cookies.as_array())
+        .map(|cookies| {
+            cookies
+                .iter()
+                .filter_map(|cookie| {
+                    let domain = cookie.get("domain")?.as_str()?;
+                    if !domain.contains("naver") {
+                        return None;
+                    }
+                    let name = cookie.get("name")?.as_str()?;
+                    let value = cookie.get("value")?.as_str()?;
+                    Some((name.to_owned(), value.to_owned()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// 계정 준비 실패 시 그 계정의 모든 링크를 같은 사유로 실패 처리한다.
@@ -289,5 +319,29 @@ mod tests {
     #[test]
     fn report_reasons_reexported_are_seven() {
         assert_eq!(REPORT_REASONS.len(), 7);
+    }
+
+    #[test]
+    fn naver_cookie_pairs_keeps_only_naver_domain_cookies() {
+        let storage = serde_json::json!({
+            "cookies": [
+                { "name": "NID_AUT", "value": "aaa", "domain": ".naver.com" },
+                { "name": "NID_SES", "value": "bbb", "domain": ".naver.com" },
+                { "name": "other", "value": "ccc", "domain": ".example.com" }
+            ]
+        });
+        let pairs = naver_cookie_pairs(&storage);
+        assert_eq!(
+            pairs,
+            vec![
+                ("NID_AUT".to_owned(), "aaa".to_owned()),
+                ("NID_SES".to_owned(), "bbb".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn naver_cookie_pairs_empty_when_no_cookies_field() {
+        assert!(naver_cookie_pairs(&serde_json::json!({})).is_empty());
     }
 }

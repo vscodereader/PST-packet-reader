@@ -147,6 +147,21 @@ fn login_netlog_enabled() -> bool {
 /// (`text`/`key`/`unmodifiedText`)만 `•` 로 가린다 — 아이디/비밀번호 원문이 로그 파일에 남아
 /// 공유 시 유출되는 것을 막기 위함(진단에 필요한 code·keyCode·modifiers·응답은 그대로 남는다).
 fn redact_cdp_params(method: &str, params: &Value) -> String {
+    // 쿠키 주입(Network.setCookies)의 `value`는 사용자 인증 자격증명이라 원문 트레이스에서 가린다 —
+    // 이름/도메인/경로/보안플래그는 진단에 필요하니 그대로 남기고 값만 `•`로 대체한다.
+    if method == "Network.setCookies" {
+        let mut p = params.clone();
+        if let Some(cookies) = p.pointer_mut("/cookies").and_then(Value::as_array_mut) {
+            for cookie in cookies.iter_mut() {
+                if let Some(v) = cookie.get_mut("value") {
+                    if v.is_string() {
+                        *v = Value::String("•".to_owned());
+                    }
+                }
+            }
+        }
+        return p.to_string();
+    }
     if method != "Input.dispatchKeyEvent" {
         return params.to_string();
     }
@@ -957,6 +972,41 @@ impl CdpClient {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// 신고 토큰 브라우저용: Network 도메인을 켜고 이 계정의 네이버 세션 쿠키를 CDP로 주입한다.
+    /// srp2 신고 페이지는 비로그인이면 `nid.naver.com/nidlogin.login`으로 리다이렉트돼 ncaptcha SDK가
+    /// 토큰을 만들지 못한다(2026-07-14 CDP 로그 근거). navigate 전에 저장 세션 쿠키(NID_AUT/NID_SES 등)를
+    /// `.naver.com`/`/`/secure로 넣어 로그인 상태로 신고 페이지가 열리게 한다.
+    ///
+    /// ⚠️ 쿠키 값은 사용자 인증 자격증명이라 **로그에 남기지 않는다**(이름/개수만). CDP 원문 트레이스도
+    /// `redact_cdp_params`가 `Network.setCookies`의 value를 가려 값이 새지 않는다. Network.enable/setCookies
+    /// 실패는 그대로 전파한다 — 주입이 안 되면 어차피 로그인 화면으로 튕겨 토큰을 못 만든다.
+    pub(crate) fn set_naver_cookies(&mut self, cookies: &[(String, String)]) -> AutomationResult<()> {
+        self.call("Network.enable", json!({}))
+            .map_err(|error| AutomationError::new(format!("Network.enable 실패: {error}")))?;
+        let params: Vec<Value> = cookies
+            .iter()
+            .map(|(name, value)| {
+                json!({
+                    "name": name,
+                    "value": value,
+                    "domain": ".naver.com",
+                    "path": "/",
+                    "secure": true,
+                })
+            })
+            .collect();
+        let names: Vec<&str> = cookies.iter().map(|(name, _)| name.as_str()).collect();
+        tracing::info!(
+            target: "report",
+            count = params.len(),
+            names = ?names,
+            "[REPORT-TOKEN] 세션 쿠키 주입(.naver.com) — 값은 로깅하지 않음"
+        );
+        self.call("Network.setCookies", json!({ "cookies": params }))
+            .map_err(|error| AutomationError::new(format!("Network.setCookies 실패: {error}")))?;
         Ok(())
     }
 
