@@ -157,7 +157,10 @@ pub async fn publish_blog_post_for_account(
     settings: &BlogPublishSettings,
 ) -> Result<BlogWriteResult, BlogError> {
     let cookie_header = resolve_cookie_header(account_id)?;
-    ensure_blog_exists_with_cookie(blog_id, &cookie_header).await?;
+    // 어제까지 되던 "순수 API 직접 발행"을 그대로 쓴다: 블로그가 있는 계정은 SeOptions 존재확인
+    // 없이 바로 RabbitWrite로 게시된다. 블로그 자동생성은 발행을 막지 않는 별도 기능
+    // (`ensure_blog_exists_for_account` 커맨드)으로 분리했다 — SeOptions 실패를 "블로그 없음"으로
+    // 단정해 발행을 가로막던 회귀를 제거.
     BlogWriteClient::new()
         .publish(blog_id, title, content, settings, &cookie_header)
         .await
@@ -179,7 +182,7 @@ pub async fn publish_blog_post_blocks_for_account(
     settings: &BlogPublishSettings,
 ) -> Result<BlogWriteResult, BlogError> {
     let cookie_header = resolve_cookie_header(account_id)?;
-    ensure_blog_exists_with_cookie(blog_id, &cookie_header).await?;
+    // 존재확인 게이트 제거(위 publish_blog_post_for_account와 동일 이유) — 어제까지 되던 직접 발행 복구.
     let components = document_model::blocks_to_components(blocks);
     let document_model = build_document_model_with_components(title, components);
     BlogWriteClient::new()
