@@ -142,6 +142,26 @@ pub async fn recommend_blog_names_for_account(
         .await
 }
 
+/// 편집기 보조 API 클라이언트를 세션(se-authorization/se-app-id)까지 실어 준비한다.
+///
+/// `platform.editor.naver.com` API는 쿠키만으론 401("the token must not be empty")이라, 먼저
+/// `PostWriteFormSeOptions.naver`로 세션 토큰을 발급받아 클라이언트에 싣는다(#블로그 편집기 401 수정).
+///
+/// 세션 발급은 그 계정 **자기 블로그**의 글쓰기 폼을 여는 것이므로 `blogId`가 필요하다. 이 편집기
+/// 보조 커맨드들은 프론트에서 `blogId`를 따로 안 넘겨(account만) 온다 — 네이버 기본값대로
+/// `blogId == loginId(account_id)`로 발급한다(대부분의 계정이 그렇다). 커스텀 blogId 계정에서 실패가
+/// 나오면 발급 응답 원문 로그로 확인해 blogId를 넘기도록 확장한다.
+///
+/// # 쿠키 보안
+/// 계정 쿠키는 내부에서만 사용되며 반환 오류/로그에 절대 노출되지 않는다.
+async fn editor_client_for_account(
+    account_id: &str,
+) -> Result<(BlogEditorApiClient, String), BlogError> {
+    let cookie = resolve_cookie_header(account_id)?;
+    let session = editor_api::fetch_editor_session(account_id, Some(&cookie)).await?;
+    Ok((BlogEditorApiClient::new().with_session(session), cookie))
+}
+
 /// 저장된 네이버 쿠키로 링크(oglink) 메타데이터를 조회한다(링크 블록 삽입용).
 ///
 /// # 쿠키 보안
@@ -150,8 +170,8 @@ pub async fn fetch_oglink_for_account(
     account_id: &str,
     url: &str,
 ) -> Result<OglinkMeta, BlogError> {
-    let cookie = resolve_cookie_header(account_id)?;
-    BlogEditorApiClient::new().oglink(url, Some(&cookie)).await
+    let (client, cookie) = editor_client_for_account(account_id).await?;
+    client.oglink(url, Some(&cookie)).await
 }
 
 /// 저장된 네이버 쿠키로 장소를 검색한다(장소 블록 삽입용).
@@ -162,8 +182,8 @@ pub async fn search_places_for_account(
     account_id: &str,
     query: &str,
 ) -> Result<Vec<PlaceResult>, BlogError> {
-    let cookie = resolve_cookie_header(account_id)?;
-    BlogEditorApiClient::new().places(query, Some(&cookie)).await
+    let (client, cookie) = editor_client_for_account(account_id).await?;
+    client.places(query, Some(&cookie)).await
 }
 
 /// 저장된 네이버 쿠키로 장소 좌표의 정적 지도 URL을 얻는다(장소 블록 썸네일용).
@@ -175,10 +195,8 @@ pub async fn fetch_staticmap_for_account(
     latitude: &str,
     longitude: &str,
 ) -> Result<StaticMapResult, BlogError> {
-    let cookie = resolve_cookie_header(account_id)?;
-    BlogEditorApiClient::new()
-        .staticmap(latitude, longitude, Some(&cookie))
-        .await
+    let (client, cookie) = editor_client_for_account(account_id).await?;
+    client.staticmap(latitude, longitude, Some(&cookie)).await
 }
 
 /// 저장된 네이버 쿠키로 스티커 팩 목록을 조회한다(스티커 블록 삽입용).
@@ -188,8 +206,8 @@ pub async fn fetch_staticmap_for_account(
 pub async fn fetch_sticker_packs_for_account(
     account_id: &str,
 ) -> Result<Vec<StickerPack>, BlogError> {
-    let cookie = resolve_cookie_header(account_id)?;
-    BlogEditorApiClient::new().stickers(Some(&cookie)).await
+    let (client, cookie) = editor_client_for_account(account_id).await?;
+    client.stickers(Some(&cookie)).await
 }
 
 /// 저장된 네이버 쿠키로 한 스티커 팩의 seq 목록을 조회한다(스티커 블록 삽입용).
@@ -200,10 +218,8 @@ pub async fn fetch_sticker_seqs_for_account(
     account_id: &str,
     pack_code: &str,
 ) -> Result<Vec<u32>, BlogError> {
-    let cookie = resolve_cookie_header(account_id)?;
-    BlogEditorApiClient::new()
-        .sticker_pack_seqs(pack_code, Some(&cookie))
-        .await
+    let (client, cookie) = editor_client_for_account(account_id).await?;
+    client.sticker_pack_seqs(pack_code, Some(&cookie)).await
 }
 
 /// 저장된 네이버 쿠키로 로컬 파일을 업로드하고 fileId 등을 얻는다(파일 블록 삽입용).
@@ -214,11 +230,9 @@ pub async fn upload_blog_file_for_account(
     account_id: &str,
     file_path: &str,
 ) -> Result<UploadedFile, BlogError> {
-    let cookie = resolve_cookie_header(account_id)?;
+    let (client, cookie) = editor_client_for_account(account_id).await?;
     let (file_name, bytes) = read_local_file(file_path)?;
-    BlogEditorApiClient::new()
-        .upload_file(&file_name, bytes, Some(&cookie))
-        .await
+    client.upload_file(&file_name, bytes, Some(&cookie)).await
 }
 
 /// 저장된 네이버 쿠키로 로컬 이미지를 업로드하고 image 컴포넌트에 필요한 값을 얻는다(사진 블록용).
@@ -229,9 +243,8 @@ pub async fn upload_blog_photo_for_account(
     account_id: &str,
     file_path: &str,
 ) -> Result<UploadedImage, BlogError> {
-    let cookie = resolve_cookie_header(account_id)?;
+    let (client, cookie) = editor_client_for_account(account_id).await?;
     let (file_name, bytes) = read_local_file(file_path)?;
-    let client = BlogEditorApiClient::new();
     let session_key = client.photo_session_key(Some(&cookie)).await?;
     client
         .upload_photo(&session_key, &file_name, bytes, Some(&cookie))
