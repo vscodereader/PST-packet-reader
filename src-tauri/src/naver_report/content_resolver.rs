@@ -102,6 +102,39 @@ pub fn extract_profile_id(by_item: &Value, post_id: &str) -> Option<String> {
     None
 }
 
+/// by-item 목록에서 `id == post_id`인 글의 `title`을 뽑는다(순수 함수, best-effort). 신고 페이지
+/// URL 의 `ctitle`(표시 전용) 파라미터에 쓴다. 없으면 None(빈 문자열로 둔다 — 표시용이라 실패시키지 않음).
+pub fn extract_post_title(by_item: &Value, post_id: &str) -> Option<String> {
+    let posts = find_posts_array(by_item)?;
+    posts.iter().find_map(|post| {
+        let id = post.get("id").map(value_to_id_string).unwrap_or_default();
+        if id != post_id {
+            return None;
+        }
+        post.get("title")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+/// by-item 목록에서 `id == post_id`인 글의 `writer.nickname`을 뽑는다(순수 함수, best-effort). 신고
+/// 페이지 URL 의 `cnickname`(표시 전용) 파라미터에 쓴다. 없으면 None(빈 문자열로 둔다 — 실패시키지 않음).
+pub fn extract_writer_nickname(by_item: &Value, post_id: &str) -> Option<String> {
+    let posts = find_posts_array(by_item)?;
+    posts.iter().find_map(|post| {
+        let id = post.get("id").map(value_to_id_string).unwrap_or_default();
+        if id != post_id {
+            return None;
+        }
+        post.get("writer")
+            .and_then(|w| w.get("nickname"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
 /// profile/users/{profileId} 응답 JSON에서 `encryptedUserId`(=cwriterenc)를 뽑는다(순수 함수).
 /// 응답이 `{...}` 또는 `{"result":{...}}`로 감싸일 수 있어 두 경로를 모두 본다.
 pub fn extract_encrypted_user_id(profile: &Value) -> Option<String> {
@@ -111,6 +144,30 @@ pub fn extract_encrypted_user_id(profile: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned)
+}
+
+/// srp2 신고센터 report 페이지의 오리진(설계서 §2.1). 쿼리스트링을 붙여 SPA 를 연다.
+const SRP2_REPORT_PAGE: &str = "https://srp2.naver.com/report";
+
+/// 신고 페이지 전체 URL 을 만든다(실측 파라미터·순서 재현, 순수 함수). 브라우저가 실제로 연 URL 과
+/// 동일하게 `env,dark,svc,vsvc,ctype,cid,ctitle,cnickname,cwriterenc` 순으로 붙이고,
+/// `application/x-www-form-urlencoded` 방식(공백→`+`, `;`→`%3B`, base64 의 `/`→`%2F`·`=`→`%3D`)으로
+/// 인코딩한다(serde_urlencoded — 실측 인코딩과 일치). `ctitle`/`cnickname`은 표시 전용이라 비어 있어도 된다.
+pub fn build_report_page_url(content_id: &str, target: &ReportTarget) -> String {
+    let params = [
+        ("env", "pc"),
+        ("dark", "disable"),
+        ("svc", "FIN"),
+        ("vsvc", "FIN"),
+        ("ctype", "AC01"),
+        ("cid", content_id),
+        ("ctitle", target.title.as_str()),
+        ("cnickname", target.nickname.as_str()),
+        ("cwriterenc", target.encrypted_user_id.as_str()),
+    ];
+    // serde_urlencoded 는 실패하지 않는 &str 시퀀스 직렬화다(다른 폼 빌더와 동일 패턴, expect 관용).
+    let query = serde_urlencoded::to_string(params).expect("신고 URL 쿼리 직렬화는 실패하지 않음");
+    format!("{SRP2_REPORT_PAGE}?{query}")
 }
 
 /// by-item 응답에서 글 배열을 찾는다. 실측은 `{"posts":[...]}`이나, 스키마 변동에 대비해
@@ -138,13 +195,28 @@ fn value_to_id_string(value: &Value) -> String {
     }
 }
 
-/// 저장 쿠키만으로 링크의 encryptedUserId를 해석한다(best-effort HTTP — 실기기 검증 대상).
-/// by-item(itemCode) → id==postId → profileId → profile/users → encryptedUserId 체인을 탄다.
-/// 순수 파싱은 위 함수들로 분리·테스트되고, 여기서는 네트워크 왕복만 담당한다.
-pub fn resolve_encrypted_user_id(
+/// 신고 페이지 URL 조립에 필요한, 링크에서 해석한 대상 정보. `encrypted_user_id`(cwriterenc)만
+/// 실제 신고 바디에 필요하고, `title`/`nickname`은 신고 페이지 URL 의 표시 전용 파라미터
+/// (ctitle/cnickname)다 — by-item 응답에서 best-effort 로 뽑고, 없으면 빈 문자열로 둔다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportTarget {
+    /// contentWriterIdEncrypted / cwriterenc — 신고 바디·URL 모두에 필요(필수).
+    pub encrypted_user_id: String,
+    /// 글 제목(표시 전용, ctitle). 못 찾으면 빈 문자열.
+    pub title: String,
+    /// 작성자 닉네임(표시 전용, cnickname). 못 찾으면 빈 문자열.
+    pub nickname: String,
+}
+
+/// 저장 쿠키만으로 링크의 신고 대상 정보(encryptedUserId + 표시용 title/nickname)를 해석한다
+/// (best-effort HTTP — 실기기 검증 대상). by-item(itemCode) → id==postId → profileId →
+/// profile/users → encryptedUserId 체인을 타며, 같은 by-item 응답에서 title/nickname 도 함께 뽑는다
+/// (표시용이라 없어도 실패시키지 않는다). 순수 파싱은 위 함수들로 분리·테스트되고, 여기서는 네트워크
+/// 왕복만 담당한다.
+pub fn resolve_target(
     http: &ReportHttp,
     link: &DiscussionLink,
-) -> Result<String, ReportError> {
+) -> Result<ReportTarget, ReportError> {
     // 실측(신고 패킷 + 400 응답 원문 확정): by-item 은 bool 파라미터 isHolderOnly/excludesItemNews/
     // isItemNewsOnly 를 **필수**로 요구한다(누락 시 400 `{"fieldErrors":{...:["Required"]}}`). 브라우저와
     // 동일하게 셋 다 false 로 붙인다. isCleanbotPassedOnly=false 는 서버가 그대로 받아들인다(에러 없음).
@@ -164,15 +236,23 @@ pub fn resolve_encrypted_user_id(
             link.post_id
         ))
     })?;
+    // 표시 전용(ctitle/cnickname) — best-effort. 없으면 빈 문자열(신고는 계속 진행).
+    let title = extract_post_title(&by_item, &link.post_id).unwrap_or_default();
+    let nickname = extract_writer_nickname(&by_item, &link.post_id).unwrap_or_default();
 
     let profile_url = format!("https://stock.naver.com/api/community/profile/users/{profile_id}");
     let profile = http
         .get_json(&profile_url)
         .map_err(|e| ReportError::Resolve(format!("profile 조회 실패({profile_id}): {e}")))?;
-    extract_encrypted_user_id(&profile).ok_or_else(|| {
+    let encrypted_user_id = extract_encrypted_user_id(&profile).ok_or_else(|| {
         ReportError::Resolve(format!(
             "profile 응답에 encryptedUserId 없음(profileId={profile_id})"
         ))
+    })?;
+    Ok(ReportTarget {
+        encrypted_user_id,
+        title,
+        nickname,
     })
 }
 
@@ -254,6 +334,69 @@ mod tests {
     fn extracts_profile_id_returns_none_when_absent() {
         let body = json!({ "posts": [ { "id": "1", "writer": { "profileId": "x" } } ] });
         assert_eq!(extract_profile_id(&body, "425406371"), None);
+    }
+
+    #[test]
+    fn extracts_title_and_nickname_for_matching_post() {
+        // 실측 스키마: title 은 글 최상위, nickname 은 writer 안.
+        let body = json!({
+            "posts": [
+                { "id": "111", "title": "wrong", "writer": { "nickname": "wrong-nick" } },
+                { "id": "425484706", "title": "레버리지 손보는거 불가능에 가깝다...",
+                  "writer": { "nickname": "2026년주린이입성" } }
+            ]
+        });
+        assert_eq!(
+            extract_post_title(&body, "425484706"),
+            Some("레버리지 손보는거 불가능에 가깝다...".to_owned())
+        );
+        assert_eq!(
+            extract_writer_nickname(&body, "425484706"),
+            Some("2026년주린이입성".to_owned())
+        );
+    }
+
+    #[test]
+    fn extracts_title_and_nickname_none_when_absent_or_empty() {
+        let missing = json!({ "posts": [ { "id": "1" } ] });
+        assert_eq!(extract_post_title(&missing, "1"), None);
+        assert_eq!(extract_writer_nickname(&missing, "1"), None);
+        // 빈 문자열은 없는 것으로 취급(표시용 파라미터를 비운다).
+        let empty = json!({ "posts": [ { "id": "1", "title": "", "writer": { "nickname": "" } } ] });
+        assert_eq!(extract_post_title(&empty, "1"), None);
+        assert_eq!(extract_writer_nickname(&empty, "1"), None);
+    }
+
+    #[test]
+    fn builds_report_page_url_with_measured_order_and_form_encoding() {
+        // 실측 URL(수동 캡처)과 동일: 파라미터 순서·인코딩(공백→`+`, `;`→`%3B`, base64 `/`→`%2F`·`=`→`%3D`).
+        let target = ReportTarget {
+            encrypted_user_id: "TRpwsmDome6akQxRMnfYePOSWI/f/obfDHdVxok1EPU=".to_owned(),
+            title: "5000중후반 까지".to_owned(),
+            nickname: "명석한매매원리왕".to_owned(),
+        };
+        let url = build_report_page_url("FIN_001;item;board;425484658", &target);
+        assert_eq!(
+            url,
+            "https://srp2.naver.com/report?env=pc&dark=disable&svc=FIN&vsvc=FIN&ctype=AC01\
+&cid=FIN_001%3Bitem%3Bboard%3B425484658\
+&ctitle=5000%EC%A4%91%ED%9B%84%EB%B0%98+%EA%B9%8C%EC%A7%80\
+&cnickname=%EB%AA%85%EC%84%9D%ED%95%9C%EB%A7%A4%EB%A7%A4%EC%9B%90%EB%A6%AC%EC%99%95\
+&cwriterenc=TRpwsmDome6akQxRMnfYePOSWI%2Ff%2FobfDHdVxok1EPU%3D"
+        );
+    }
+
+    #[test]
+    fn builds_report_page_url_allows_empty_display_params() {
+        // ctitle/cnickname 이 비어도(표시 전용) URL 은 유효하게 만들어진다.
+        let target = ReportTarget {
+            encrypted_user_id: "enc=".to_owned(),
+            title: String::new(),
+            nickname: String::new(),
+        };
+        let url = build_report_page_url("FIN_001;item;board;1", &target);
+        assert!(url.contains("&ctitle=&cnickname=&cwriterenc=enc%3D"));
+        assert!(url.starts_with("https://srp2.naver.com/report?env=pc&dark=disable"));
     }
 
     #[test]

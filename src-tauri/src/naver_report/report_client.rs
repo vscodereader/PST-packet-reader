@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::naver_automation::{packet_trace_enabled, TracedSend};
 
@@ -57,30 +57,20 @@ pub fn is_valid_reason_code(code: &str) -> bool {
     REPORT_REASONS.iter().any(|reason| reason.code == code)
 }
 
-/// `POST /api/report`의 JSON 바디를 만든다(순수 함수 — 설계서 §2.3 실측 필드를 그대로 재현).
-/// contentId/encryptedUserId/reasonCode/token만 가변이고 나머지는 실측 고정값이다.
-pub fn build_report_body(
-    content_id: &str,
-    encrypted_user_id: &str,
-    reason_code: &str,
-    ncaptcha_token_id: &str,
-) -> Value {
-    json!({
-        "serviceCode": "FIN",
-        "virtualServiceCode": "FIN",
-        "contentTypeCode": "AC01",
-        "contentId": content_id,
-        "contentWriterId": "",
-        "contentWriterIdEncrypted": encrypted_user_id,
-        "reportCountryCode": "",
-        "reportLanguageCode": "",
-        "environment": "pc",
-        "reportReasonCode": reason_code,
-        "addInformation": {},
-        "ncaptchaTokenId": ncaptcha_token_id,
-        "reportSystemId": ""
-    })
+/// 사유 코드의 표시 라벨을 돌려준다(없으면 빈 문자열). 브라우저 신고 드라이버가 사유 UI 를 텍스트로
+/// 매칭할 때 쓴다(코드 속성 매칭이 실패하는 SPA 대비 폴백 근거).
+pub fn reason_label(code: &str) -> &'static str {
+    REPORT_REASONS
+        .iter()
+        .find(|reason| reason.code == code)
+        .map(|reason| reason.label)
+        .unwrap_or("")
 }
+
+// 신고 바디(`/api/report`의 13개 필드)는 이제 **페이지의 ncaptcha SDK 가 직접** 만들어 POST 한다
+// (브라우저 구동, token.rs 참고). 그래서 Rust 쪽 바디 빌더는 제거했다 — 실측 원문은 신고 시 CDP
+// Network 이벤트의 요청 바디로 로그에 남는다(진짜 ncaptchaTokenId 포함). 이 모듈은 조회(by-item/
+// profile) GET 만 담당한다.
 
 /// naver.com 도메인 로그인 쿠키를 주입한 신고 전용 HTTP 클라이언트. `read_account_cookies`가 준
 /// storageState JSON을 소비한다. by-item/profile GET과 report POST가 이 하나를 공유한다.
@@ -90,8 +80,6 @@ pub struct ReportHttp {
     cookies: Vec<(String, String)>,
 }
 
-/// srp2 신고센터 API 오리진(설계서 §2.1).
-const SRP2_REPORT_URL: &str = "https://srp2.naver.com/api/report";
 /// 데스크톱 크롬 UA — Chrome 없이도 네이버 JSON API가 정상 응답하도록 카페 경로와 동일 UA 재사용.
 const BROWSER_USER_AGENT: &str = crate::naver_cafe::post::client::BROWSER_USER_AGENT;
 
@@ -189,53 +177,6 @@ impl ReportHttp {
         })
     }
 
-    /// 완성된 신고 바디를 `POST /api/report`로 제출한다. `{"success":true}`면 Ok, 아니면 원문 오류.
-    ///
-    /// 와이어샤크식 원문 로그: `send_traced`가 요청 원문(메서드·URL·모든 헤더·쿠키 원문·바디 원문)과
-    /// 응답 라인·헤더를 `target:"packet"`에 남기고(트레이스 ON일 때), 응답 바디 원문은 여기서 남긴다.
-    /// **신고 거부 시** 네이버가 왜 거부했는지 응답 바디 원문을 트레이스가 꺼져 있어도 `warn!`로 항상
-    /// 남긴다(사용자가 실패 사유를 늘 볼 수 있게).
-    pub fn submit_report(&self, body: &Value) -> Result<(), String> {
-        let response = self
-            .client
-            .post(SRP2_REPORT_URL)
-            .header("content-type", "application/json")
-            .header("x-requested-with", "XMLHttpRequest")
-            .header("origin", "https://srp2.naver.com")
-            .header("referer", "https://srp2.naver.com/report")
-            .header("user-agent", BROWSER_USER_AGENT)
-            .header("cookie", self.cookie_header())
-            .body(body.to_string())
-            .send_traced(&self.client)
-            .map_err(|error| {
-                tracing::warn!(target: "report", %error, "[REPORT] report POST 전송 실패 — 원문");
-                format!("report POST 전송 실패: {error}")
-            })?;
-        let status = response.status();
-        let text = response
-            .text()
-            .map_err(|error| format!("report 본문 읽기 실패: {error}"))?;
-        if packet_trace_enabled() {
-            tracing::info!(target: "packet", "← body={text}");
-        }
-        let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-        if parsed.get("success").and_then(Value::as_bool) == Some(true) {
-            tracing::info!(
-                target: "report",
-                status = status.as_u16(),
-                "[REPORT] 신고 제출 성공 — 네이버 원문 success:true"
-            );
-            return Ok(());
-        }
-        // 신고 거부: 네이버 응답 바디 원문을 트레이스 OFF여도 항상 남긴다(거부 사유가 여기 담긴다).
-        tracing::warn!(
-            target: "report",
-            status = status.as_u16(),
-            body = %text,
-            "[REPORT] 신고 거부 — 네이버 응답 원문"
-        );
-        Err(format!("신고 실패(status={status}): {text}"))
-    }
 }
 
 #[cfg(test)]
@@ -260,28 +201,11 @@ mod tests {
     }
 
     #[test]
-    fn build_report_body_matches_measured_packet_shape() {
-        let body = build_report_body(
-            "FIN_001;item;board;425406371",
-            "vAOdyIfnpaqA=",
-            "AA29",
-            "token-xyz",
-        );
-        assert_eq!(body["serviceCode"], "FIN");
-        assert_eq!(body["virtualServiceCode"], "FIN");
-        assert_eq!(body["contentTypeCode"], "AC01");
-        assert_eq!(body["contentId"], "FIN_001;item;board;425406371");
-        assert_eq!(body["contentWriterId"], "");
-        assert_eq!(body["contentWriterIdEncrypted"], "vAOdyIfnpaqA=");
-        assert_eq!(body["reportCountryCode"], "");
-        assert_eq!(body["reportLanguageCode"], "");
-        assert_eq!(body["environment"], "pc");
-        assert_eq!(body["reportReasonCode"], "AA29");
-        assert_eq!(body["addInformation"], json!({}));
-        assert_eq!(body["ncaptchaTokenId"], "token-xyz");
-        assert_eq!(body["reportSystemId"], "");
-        // 실측 바디는 정확히 13개 키를 가진다(누락·초과 방지).
-        assert_eq!(body.as_object().unwrap().len(), 13);
+    fn reason_label_returns_measured_labels_and_empty_for_unknown() {
+        assert_eq!(reason_label("AA29"), "스팸홍보/도배입니다");
+        assert_eq!(reason_label("AA01"), "혐오/차별적/생명경시/욕설 표현입니다");
+        assert_eq!(reason_label("ZZ99"), "");
+        assert_eq!(reason_label(""), "");
     }
 
     #[test]
