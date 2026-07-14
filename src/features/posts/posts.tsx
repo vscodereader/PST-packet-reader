@@ -25,6 +25,7 @@ import { Icon } from "@/shared/ui/icons";
 
 import { LikeModal } from "./like-modal";
 import { PublishModal } from "./publish-modal";
+import { ReportModal } from "./report-modal";
 import { ViewCountModal } from "./view-count-modal";
 import { WriterModal } from "./writer-modal";
 
@@ -49,6 +50,7 @@ export function Posts({ go }: { go: GoFn }) {
   const [likeOpen, setLikeOpen] = useState(false);
   const [dislikeOpen, setDislikeOpen] = useState(false);
   const [viewCountOpen, setViewCountOpen] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
 
   const upsert = (doc: LibraryPost) => {
     void ipc.posts.upsert(doc).then(setPosts);
@@ -147,6 +149,15 @@ export function Posts({ go }: { go: GoFn }) {
             }}
           >
             엑셀 가져오기
+          </Button>
+          <Button
+            size="sm"
+            variant="default"
+            color="red"
+            leftSection={<Icon.alert size={16} />}
+            onClick={() => setReportOpen(true)}
+          >
+            신고하기
           </Button>
           <Button
             size="sm"
@@ -388,6 +399,7 @@ export function Posts({ go }: { go: GoFn }) {
         open={viewCountOpen}
         onClose={() => setViewCountOpen(false)}
       />
+      <ReportModal open={reportOpen} onClose={() => setReportOpen(false)} />
     </Container>
   );
 }
