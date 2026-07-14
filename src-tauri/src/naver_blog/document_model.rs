@@ -246,8 +246,15 @@ pub fn block_to_component(block: &Block) -> Value {
 }
 
 /// text 컴포넌트. 블록 서식을 모든 노드에 적용하고 줄바꿈마다 문단을 만든다.
+///
+/// 실측(cap10 RabbitWrite): text 컴포넌트에는 top-level `align`이 **없고**, 정렬은 각 문단의
+/// `style:{align,@ctype:paragraphStyle}` 로 들어간다. 기본(left)일 때는 문단에 `style` 키 자체가
+/// 없다(에디터가 생략). 예전 코드는 text에 top-level `align`을, 문단에 직접 `align` 문자열을 넣어
+/// SmartEditor 스키마와 어긋났고, 이 때문에 사진/링크/스티커/파일 등 툴바 블록이 섞인 글이
+/// RabbitWrite에서 `not acceptable`로 거부됐다(순수 텍스트 경로 `build_document_model`은 이
+/// 필드가 없어 정상 발행됨).
 fn text_component(b: &TextBlock) -> Value {
-    let style = json!({
+    let node_style = json!({
         "bold": b.bold,
         "italic": b.italic,
         "underline": b.underline,
@@ -258,24 +265,30 @@ fn text_component(b: &TextBlock) -> Value {
         .text
         .split('\n')
         .map(|line| {
-            json!({
+            let mut paragraph = json!({
                 "id": se_id(),
                 "nodes": [ {
                     "id": se_id(),
                     "value": line,
-                    "style": style,
+                    "style": node_style,
                     "@ctype": "textNode"
                 } ],
-                "align": b.align.as_str(),
                 "@ctype": "paragraph"
-            })
+            });
+            // left(기본)이 아닐 때만 문단 정렬 style을 붙인다(실측: left 문단엔 style 키 없음).
+            if b.align != Align::Left {
+                paragraph["style"] = json!({
+                    "align": b.align.as_str(),
+                    "@ctype": "paragraphStyle"
+                });
+            }
+            paragraph
         })
         .collect();
     json!({
         "id": se_id(),
         "layout": "default",
         "value": paragraphs,
-        "align": b.align.as_str(),
         "@ctype": "text"
     })
 }
@@ -435,11 +448,16 @@ mod tests {
         let c = block_to_component(&b);
         assert_eq!(c["@ctype"], "text");
         assert_eq!(c["layout"], "default");
-        assert_eq!(c["align"], "center");
+        // 실측(cap10): text 컴포넌트에 top-level align 키가 없다.
+        assert!(c.get("align").is_none(), "text 컴포넌트에 top-level align이 있으면 안 됨");
         let paras = c["value"].as_array().unwrap();
         assert_eq!(paras.len(), 2);
         assert_eq!(paras[0]["@ctype"], "paragraph");
-        assert_eq!(paras[0]["align"], "center");
+        // 정렬은 문단의 style:{align,@ctype:paragraphStyle}(직접 align 필드 아님).
+        assert!(paras[0].get("align").is_none(), "문단에 직접 align 필드가 있으면 안 됨");
+        assert_eq!(paras[0]["style"]["align"], "center");
+        assert_eq!(paras[0]["style"]["@ctype"], "paragraphStyle");
+        assert_eq!(paras[1]["style"]["align"], "center");
         assert_eq!(paras[0]["nodes"][0]["value"], "첫줄");
         assert_eq!(paras[1]["nodes"][0]["value"], "둘째줄");
         let style = &paras[0]["nodes"][0]["style"];
@@ -452,13 +470,19 @@ mod tests {
     }
 
     #[test]
-    fn text_block_defaults_left_and_no_style() {
+    fn text_block_defaults_left_and_no_paragraph_style() {
         let b = parse(r#"{"type":"text","text":"평문"}"#);
         let c = block_to_component(&b);
-        assert_eq!(c["align"], "left");
+        // 실측(cap10): text에 top-level align 없음, left 문단엔 paragraphStyle 없음.
+        assert!(c.get("align").is_none());
+        assert!(
+            c["value"][0].get("style").is_none(),
+            "left(기본) 문단엔 paragraphStyle이 없어야 함"
+        );
         let style = &c["value"][0]["nodes"][0]["style"];
         assert_eq!(style["bold"], false);
         assert_eq!(style["strikeThrough"], false);
+        assert_eq!(style["@ctype"], "nodeStyle");
     }
 
     #[test]

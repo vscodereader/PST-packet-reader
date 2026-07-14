@@ -18,6 +18,8 @@ use super::error::BlogError;
 const EDITOR_HOST: &str = "https://platform.editor.naver.com";
 /// 글쓰기 폼 옵션(se-authorization 토큰 발급) 호스트.
 const BLOG_HOST: &str = "https://blog.naver.com";
+/// 본문 사진 업로더 호스트(sessionKey가 URL 인증이라 se-authorization 헤더가 없다).
+const UPPHOTO_HOST: &str = "https://blog.upphoto.naver.com";
 /// 사진 업로드 결과가 올라가는 도메인.
 const BLOGFILES_DOMAIN: &str = "https://blogfiles.pstatic.net";
 
@@ -109,6 +111,8 @@ pub struct UploadedImage {
 /// 네이버 블로그 편집기 보조 API HTTP 클라이언트. base_url을 분리 보관해 실서버/wiremock을 함께 쓴다.
 pub struct BlogEditorApiClient {
     base: String,
+    /// 본문 사진 업로더(upphoto) 호스트. 기본 [`UPPHOTO_HOST`], 테스트는 [`Self::with_upphoto_base`]로 주입.
+    upphoto_base: String,
     http: reqwest::Client,
     /// 편집기 인증 세션(se-authorization/se-app-id). 없으면 401이 나므로 [`Self::with_session`]로 실어야 한다.
     session: Option<EditorSession>,
@@ -130,9 +134,16 @@ impl BlogEditorApiClient {
     pub fn with_base_url(base: impl Into<String>) -> Self {
         Self {
             base: base.into(),
+            upphoto_base: UPPHOTO_HOST.to_string(),
             http: crate::naver_cafe::shared_http_client(),
             session: None,
         }
+    }
+
+    /// 본문 사진 업로더(upphoto) base_url을 주입한다(테스트용).
+    pub fn with_upphoto_base(mut self, base: impl Into<String>) -> Self {
+        self.upphoto_base = base.into();
+        self
     }
 
     /// 편집기 인증 세션(se-authorization/se-app-id)을 실어 이후 모든 API 호출에 헤더로 붙인다.
@@ -335,36 +346,45 @@ impl BlogEditorApiClient {
             .ok_or_else(|| BlogError::new(format!("파일 업로드 응답 해석 실패: {}", snippet(&text))))
     }
 
-    /// 로컬 이미지를 세션키로 업로드하고 image 컴포넌트에 필요한 값을 얻는다(사진 블록용).
+    /// 로컬 이미지를 photo-uploader(upphoto)로 올려 image 컴포넌트 값을 얻는다(사진 블록용).
+    ///
+    /// 실측(photo.pcapng, 2026-07-14): 본문 사진은 2단계다.
+    /// 1) [`Self::photo_session_key`]로 sessionKey를 받고(이 메서드 호출 전 수행),
+    /// 2) `POST {upphoto}/{sessionKey}/simpleUpload/0?userId=..&extractExif=true&...`(multipart `image` 파트).
+    ///
+    /// 응답은 **XML**(`<item><url>/..</url><width/>..</item>`)이라 [`parse_uploaded_image`]가 파싱한다.
+    /// 이 호스트는 sessionKey(URL)가 인증이라 se-authorization/se-app-id 헤더를 붙이지 않는다(실측).
+    /// 파일 첨부(`upload_file`, `/v2/upload/file`)와 다른 경로다.
     ///
     /// # 쿠키 보안
     /// `cookie`는 사용자 인증 자격 증명이며 에러/로그에 노출하지 않는다.
     pub async fn upload_photo(
         &self,
         user_id: &str,
+        session_key: &str,
         file_name: &str,
         bytes: Vec<u8>,
         cookie: Option<&str>,
     ) -> Result<UploadedImage, BlogError> {
-        // 실측(2026-07-14): 사진도 파일과 동일한 `/v2/upload/file` 엔드포인트에 `userId`+`file` 파트로
-        // 올린다(예전의 `/photo-uploader/upload?sessionKey=` 는 추측 스텁이라 제거). 사진 응답 스키마는
-        // 아래 원문 로그로 확인해 [`parse_uploaded_image`]와 맞춘다.
-        let url = format!("{}/api/blogpc001/v2/upload/file", self.base);
+        // 쿼리 파라미터 순서·값은 실측 패킷 그대로.
+        let url = format!(
+            "{}/{session_key}/simpleUpload/0?userId={user_id}&extractExif=true&extractAnimatedCnt=false&extractAnimatedInfo=true&autorotate=true&extractDominantColor=false&type=&customQuery=&denyAnimatedImage=false&skipXcamFiltering=false",
+            self.upphoto_base
+        );
         let part = reqwest::multipart::Part::bytes(bytes)
             .file_name(file_name.to_owned())
             .mime_str(mime_from_name(file_name))
             .map_err(|e| BlogError::new(format!("업로드 파트 생성 실패: {e}")))?;
-        let form = reqwest::multipart::Form::new()
-            .text("userId", user_id.to_owned())
-            .part("file", part);
+        // 실측: 단일 파트 name="image".
+        let form = reqwest::multipart::Form::new().part("image", part);
         let mut req = self
             .http
             .post(&url)
             .header("User-Agent", crate::naver_cafe::post::BROWSER_USER_AGENT)
-            .header("Accept", "application/json")
-            .header("Referer", write_form_referer(user_id))
-            .header("sec-fetch-site", "same-site");
-        req = self.apply_session_headers(req);
+            .header("Accept", "*/*")
+            .header("Origin", BLOG_HOST)
+            .header("Referer", write_form_referer(user_id));
+        // upphoto 호스트는 sessionKey(URL)로 인증하므로 se-authorization/se-app-id를 붙이지 않는다.
         if let Some(c) = cookie {
             req = req.header("Cookie", c);
         }
@@ -378,7 +398,7 @@ impl BlogEditorApiClient {
             .text()
             .await
             .map_err(|e| BlogError::new(format!("사진 업로드 응답 읽기 실패: {e}")))?;
-        // 사진 응답은 스키마 확정 전이라 **원문 전부**를 남긴다(형님 지시: 와이어샤크처럼).
+        // 사진 응답(XML) 원문 전부 로그(형님 지시: 와이어샤크처럼).
         tracing::info!(
             "[BLOG] 사진 업로드 응답 — status={} body={}",
             status.as_u16(),
@@ -732,49 +752,46 @@ pub fn parse_uploaded_file(text: &str) -> Option<UploadedFile> {
     })
 }
 
-/// 사진 업로드 응답을 뽑는다(순수 함수). blogfiles.pstatic.net src/path/크기.
+/// 사진 업로드 응답(**XML**)을 뽑아 image 컴포넌트 값을 만든다(순수 함수).
+///
+/// 실측(photo.pcapng): `<item><url>/..PNG/x.png</url><path>..</path><fileName>x.png</fileName>
+/// <width>512</width><height>512</height><fileSize>16953</fileSize>...</item>`. `<url>`은 `/`로 시작하며,
+/// - `src`  = `blogfiles.pstatic.net` + `<url>` + `?type=w1`(실측 image 컴포넌트 src와 일치),
+/// - `path` = `<url>` 그대로(실측 image 컴포넌트 path와 일치),
+/// - `original_width/height` = width/height(원본=표시).
 pub fn parse_uploaded_image(text: &str) -> Option<UploadedImage> {
-    let v: Value = serde_json::from_str(text).ok()?;
-    let obj = v.get("result").unwrap_or(&v);
-    let src = str_field(obj, "url");
-    let src = if src.is_empty() {
-        str_field(obj, "src")
-    } else {
-        src
-    };
-    if src.is_empty() {
-        return None;
-    }
-    let path = obj
-        .get("path")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| path_from_url(&src));
-    let width = u32_field(obj, "width").unwrap_or(0);
-    let height = u32_field(obj, "height").unwrap_or(0);
+    let url = xml_tag(text, "url").filter(|s| !s.is_empty())?;
+    let width = xml_tag(text, "width")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    let height = xml_tag(text, "height")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    let file_size = xml_tag(text, "fileSize")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let file_name = xml_tag(text, "fileName").unwrap_or_default();
     Some(UploadedImage {
-        src,
-        path,
+        src: format!("{BLOGFILES_DOMAIN}{url}?type=w1"),
+        path: url,
         domain: BLOGFILES_DOMAIN.to_owned(),
-        file_size: obj.get("fileSize").and_then(Value::as_u64).unwrap_or(0),
+        file_size,
         width,
         height,
-        original_width: u32_field(obj, "originalWidth").unwrap_or(width),
-        original_height: u32_field(obj, "originalHeight").unwrap_or(height),
-        file_name: str_field(obj, "fileName"),
+        original_width: width,
+        original_height: height,
+        file_name,
     })
 }
 
-/// URL에서 도메인을 제외한 path 부분(쿼리 제거)을 뽑는다(순수 헬퍼).
-fn path_from_url(url: &str) -> String {
-    let no_query = url.split('?').next().unwrap_or(url);
-    match no_query.split_once("//") {
-        Some((_, rest)) => rest
-            .find('/')
-            .map(|i| rest[i..].to_owned())
-            .unwrap_or_default(),
-        None => String::new(),
-    }
+/// XML에서 `<tag>값</tag>`의 첫 값을 뽑는다(순수 헬퍼; 네임스페이스/속성 없는 단순 태그용).
+fn xml_tag(text: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = text.find(&open)? + open.len();
+    let rest = &text[start..];
+    let end = rest.find(&close)?;
+    Some(rest[..end].trim().to_owned())
 }
 
 /// JSON 객체에서 문자열 필드를 안전하게 뽑는다(없으면 "").
@@ -890,22 +907,41 @@ mod tests {
     }
 
     #[test]
-    fn parse_uploaded_image_extracts_and_derives_path() {
-        let img = parse_uploaded_image(
-            r#"{"url":"https://blogfiles.pstatic.net/a/b/x.png?type=w1","fileSize":1000,"width":600,"height":400,"originalWidth":1200,"originalHeight":800,"fileName":"x.png"}"#,
-        )
-        .unwrap();
-        assert_eq!(img.src, "https://blogfiles.pstatic.net/a/b/x.png?type=w1");
-        assert_eq!(img.path, "/a/b/x.png");
+    fn parse_uploaded_image_extracts_from_real_xml() {
+        // 실측(photo.pcapng) XML 샘플 그대로.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<item>
+  <url>/MjAyNjA3MTRfNyAg/MDAx.PCjZ.PNG/unnamed.png</url>
+  <path>/MjAyNjA3MTRfNyAg/MDAx.PCjZ.PNG</path>
+  <fileName>unnamed.png</fileName>
+  <width>512</width>
+  <height>512</height>
+  <fileSize>16953</fileSize>
+  <thumbnail>/MjAyNjA3MTRfNyAg/MDAx.PCjZ.PNG/unnamed.png</thumbnail>
+  <imageType>PNG</imageType>
+  <animatedCnt>1</animatedCnt><animatedLoop>0</animatedLoop>
+</item>"#;
+        let img = parse_uploaded_image(xml).unwrap();
+        // src = blogfiles 도메인 + <url> + ?type=w1 (실측 image 컴포넌트 src와 일치).
+        assert_eq!(
+            img.src,
+            "https://blogfiles.pstatic.net/MjAyNjA3MTRfNyAg/MDAx.PCjZ.PNG/unnamed.png?type=w1"
+        );
+        // path = <url> 그대로 (실측 image 컴포넌트 path와 일치).
+        assert_eq!(img.path, "/MjAyNjA3MTRfNyAg/MDAx.PCjZ.PNG/unnamed.png");
         assert_eq!(img.domain, "https://blogfiles.pstatic.net");
-        assert_eq!(img.width, 600);
-        assert_eq!(img.original_width, 1200);
-        assert_eq!(img.file_name, "x.png");
+        assert_eq!(img.width, 512);
+        assert_eq!(img.height, 512);
+        assert_eq!(img.original_width, 512);
+        assert_eq!(img.original_height, 512);
+        assert_eq!(img.file_size, 16953);
+        assert_eq!(img.file_name, "unnamed.png");
     }
 
     #[test]
-    fn parse_uploaded_image_none_without_src() {
-        assert!(parse_uploaded_image(r#"{"fileSize":1}"#).is_none());
+    fn parse_uploaded_image_none_without_url() {
+        assert!(parse_uploaded_image("<item><width>1</width></item>").is_none());
+        assert!(parse_uploaded_image("not xml").is_none());
     }
 
     #[tokio::test]
@@ -1002,5 +1038,33 @@ mod tests {
         // 세션 헤더가 매칭돼야만 200이 온다(없으면 mock 미스로 실패).
         let m = client.oglink("https://x", Some("NID_SES=abc")).await.unwrap();
         assert_eq!(m.title, "t");
+    }
+
+    #[tokio::test]
+    async fn upload_photo_posts_to_upphoto_and_parses_xml() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        // sessionKey는 URL 경로 세그먼트다: /{sessionKey}/simpleUpload/0.
+        Mock::given(method("POST"))
+            .and(path("/SK123/simpleUpload/0"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "<?xml version=\"1.0\"?><item><url>/AB/CD.PNG/p.png</url><width>512</width><height>512</height><fileSize>16953</fileSize><fileName>p.png</fileName></item>",
+            ))
+            .mount(&server)
+            .await;
+        // upphoto base만 mock으로 주입(editor base는 안 쓴다).
+        let client = BlogEditorApiClient::with_base_url("https://unused").with_upphoto_base(server.uri());
+        let img = client
+            .upload_photo("choisw0404", "SK123", "p.png", vec![1, 2, 3], Some("NID_SES=abc"))
+            .await
+            .unwrap();
+        assert_eq!(
+            img.src,
+            "https://blogfiles.pstatic.net/AB/CD.PNG/p.png?type=w1"
+        );
+        assert_eq!(img.path, "/AB/CD.PNG/p.png");
+        assert_eq!(img.width, 512);
+        assert_eq!(img.file_size, 16953);
     }
 }
