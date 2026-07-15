@@ -417,14 +417,20 @@ async fn issue_command(
         .await;
         return Err(AppError::Conflict(format!("{reason} — 재연결 후 다시 시도")));
     }
-    // online → 명령 push(SSE) + [CMD] 로그.
+    // online → 명령 push(SSE). 그 순간 SSE가 미연결이면 device_push가 버리지 않고 대기열에 쌓아
+    // 두었다가 재연결 시 전달한다(2026-07-15 유실 버그 수정). 로그에 즉시전달/대기열 여부를 남긴다.
     let payload = command_payload(&req, &cid);
-    st.hub.device_push(uid, payload.to_string());
+    let delivered = st.hub.device_push(uid, payload.to_string());
+    let delivery = if delivered {
+        ""
+    } else {
+        " [SSE 미연결 — 대기열 보관, 재연결 시 전달]"
+    };
     st.audit(
         "[CMD]",
         &format!("Admin → {}", device.name),
         &id,
-        &format!("{}({}) (commandId={cid}, operator={})", req.kind, label, op.login_id),
+        &format!("{}({}) (commandId={cid}, operator={}){delivery}", req.kind, label, op.login_id),
         "cmd",
     )
     .await;

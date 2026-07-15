@@ -36,9 +36,6 @@ pub const DEFAULT_PAGE_SIZE: u32 = 15;
 /// 페이지당 15개이므로 최대 약 60개까지 모은다.
 const MAX_LATEST_PAGES: u32 = 4;
 
-/// 전체글(모든 게시판 통합) 메뉴 ID.
-const ALL_MENU_ID: u32 = 0;
-
 /// 2xx 본문을 [`ArticleListResponse`]로 파싱하는 함수(최신글/인기글별로 다름).
 type ParseFn = fn(u16, String) -> Result<ArticleListResponse, ArticleListError>;
 
@@ -46,11 +43,12 @@ type ParseFn = fn(u16, String) -> Result<ArticleListResponse, ArticleListError>;
 // 경로/Referer 헬퍼
 // ---------------------------------------------------------------------------
 
-/// 최신글(boardlist) API 경로(쿼리 포함). `menuId=0`은 전체글.
-fn latest_articles_path(cafe_id: &str, page: u32) -> String {
+/// 최신글(boardlist) API 경로(쿼리 포함). `menu_id=0`은 전체글(모든 게시판 통합),
+/// 그 외는 해당 게시판만.
+fn latest_articles_path(cafe_id: &str, menu_id: u32, page: u32) -> String {
     format!(
         "/cafe-web/cafe-boardlist-api/v1/cafes/{}/menus/{}/articles?page={}&pageSize={}&sortBy=TIME&viewType=L",
-        cafe_id, ALL_MENU_ID, page, DEFAULT_PAGE_SIZE
+        cafe_id, menu_id, page, DEFAULT_PAGE_SIZE
     )
 }
 
@@ -63,11 +61,8 @@ fn weekly_popular_path(cafe_id: &str) -> String {
 }
 
 /// 최신글 조회 시 Referer.
-fn latest_referer(cafe_id: &str) -> String {
-    format!(
-        "https://cafe.naver.com/f-e/cafes/{}/menus/{}",
-        cafe_id, ALL_MENU_ID
-    )
+fn latest_referer(cafe_id: &str, menu_id: u32) -> String {
+    format!("https://cafe.naver.com/f-e/cafes/{}/menus/{}", cafe_id, menu_id)
 }
 
 /// 인기글 조회 시 Referer.
@@ -125,16 +120,17 @@ impl ArticleListClient {
     pub async fn fetch_article_list(
         &self,
         cafe_id: &str,
+        menu_id: u32,
         sort_by: SortBy,
         page: u32,
         cookie_header: Option<&str>,
     ) -> Result<ArticleListResponse, ArticleListError> {
         // 정렬 기준에 따라 경로·Referer·성공 파서가 달라진다. 인기글(주간)은 페이징이
-        // 없어 page를 무시한다.
+        // 없고 카페 단위라 menu_id/page를 무시한다.
         let (path, referer, parse): (String, String, ParseFn) = match sort_by {
             SortBy::Latest => (
-                latest_articles_path(cafe_id, page),
-                latest_referer(cafe_id),
+                latest_articles_path(cafe_id, menu_id, page),
+                latest_referer(cafe_id, menu_id),
                 parse_latest_body,
             ),
             SortBy::Popular => (
@@ -211,13 +207,14 @@ impl ArticleListClient {
     pub async fn fetch_latest_up_to(
         &self,
         cafe_id: &str,
+        menu_id: u32,
         want: usize,
         cookie_header: Option<&str>,
     ) -> Result<Vec<Article>, ArticleListError> {
         let mut articles: Vec<Article> = Vec::new();
         for page in 1..=MAX_LATEST_PAGES {
             let resp = match self
-                .fetch_article_list(cafe_id, SortBy::Latest, page, cookie_header)
+                .fetch_article_list(cafe_id, menu_id, SortBy::Latest, page, cookie_header)
                 .await
             {
                 Ok(resp) => resp,
@@ -299,7 +296,7 @@ mod tests {
 
         let client = ArticleListClient::with_base_url(server.uri());
         let response = client
-            .fetch_article_list(cafe_id(), SortBy::Latest, 1, None)
+            .fetch_article_list(cafe_id(), 0, SortBy::Latest, 1, None)
             .await
             .expect("성공 응답이어야 함");
 
@@ -332,7 +329,7 @@ mod tests {
 
         let client = ArticleListClient::with_base_url(server.uri());
         let articles = client
-            .fetch_latest_up_to(cafe_id(), 20, None)
+            .fetch_latest_up_to(cafe_id(), 0, 20, None)
             .await
             .expect("페이징 조회 성공해야 함");
         assert_eq!(articles.len(), 20, "두 페이지를 합쳐 20개여야 함");
@@ -354,7 +351,7 @@ mod tests {
 
         let client = ArticleListClient::with_base_url(server.uri());
         let articles = client
-            .fetch_latest_up_to(cafe_id(), 20, None)
+            .fetch_latest_up_to(cafe_id(), 0, 20, None)
             .await
             .expect("조회 성공해야 함");
         assert_eq!(articles.len(), 3, "있는 만큼(3개)만 반환되어야 함");
@@ -376,7 +373,7 @@ mod tests {
 
         let client = ArticleListClient::with_base_url(server.uri());
         let response = client
-            .fetch_article_list(cafe_id(), SortBy::Popular, 1, None)
+            .fetch_article_list(cafe_id(), 0, SortBy::Popular, 1, None)
             .await
             .expect("인기글 조회 성공해야 함");
         assert_eq!(response.articles.len(), 2);
@@ -404,7 +401,7 @@ mod tests {
 
         let client = ArticleListClient::with_base_url(server.uri());
         client
-            .fetch_article_list(cafe_id(), SortBy::Latest, 1, Some(fake_cookie))
+            .fetch_article_list(cafe_id(), 0, SortBy::Latest, 1, Some(fake_cookie))
             .await
             .expect("헤더/쿠키 매칭 성공해야 함");
     }
@@ -426,7 +423,7 @@ mod tests {
 
         let client = ArticleListClient::with_base_url(server.uri());
         let err = client
-            .fetch_article_list(cafe_id(), SortBy::Latest, 1, None)
+            .fetch_article_list(cafe_id(), 0, SortBy::Latest, 1, None)
             .await
             .expect_err("500은 Err여야 함");
 
@@ -453,7 +450,7 @@ mod tests {
 
         let client = ArticleListClient::with_base_url(server.uri());
         let err = client
-            .fetch_article_list(cafe_id(), SortBy::Latest, 1, None)
+            .fetch_article_list(cafe_id(), 0, SortBy::Latest, 1, None)
             .await
             .expect_err("200-with-error는 Err여야 함");
 
@@ -477,7 +474,7 @@ mod tests {
 
         let client = ArticleListClient::with_base_url(server.uri());
         let err = client
-            .fetch_article_list(cafe_id(), SortBy::Latest, 1, None)
+            .fetch_article_list(cafe_id(), 0, SortBy::Latest, 1, None)
             .await
             .expect_err("파싱불가는 Err여야 함");
         assert_eq!(err.code, "ARTICLE_LIST_PARSE_ERROR");
@@ -492,7 +489,7 @@ mod tests {
         // 존재하지 않는 포트로 전송 → 연결 오류
         let client = ArticleListClient::with_base_url("http://127.0.0.1:1");
         let err = client
-            .fetch_article_list(cafe_id(), SortBy::Latest, 1, None)
+            .fetch_article_list(cafe_id(), 0, SortBy::Latest, 1, None)
             .await
             .expect_err("전송오류는 Err여야 함");
         assert_eq!(err.code, "ARTICLE_LIST_TRANSPORT_ERROR");

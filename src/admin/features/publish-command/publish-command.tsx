@@ -126,6 +126,11 @@ export function filterAccountsByTarget(
   if (target === "cafe") {
     return rows.filter((r) => r.platform === "naver").map((r) => r.loginId);
   }
+  // 밴드는 카페와 동일: 게시 순간 로그인하는 구조라 계정이 '사용전(new)'이어도 분배되면 보여야
+  // 한다. 그래서 platform==band 전부를 상태 무관하게 노출한다(로그인 성공(active) 대기 불필요).
+  if (target === "band") {
+    return rows.filter((r) => r.platform === "band").map((r) => r.loginId);
+  }
   return rows
     .filter((r) => (r.platform ?? "forum") === target && r.status === "active")
     .map((r) => r.loginId);

@@ -1285,14 +1285,23 @@ async fn collect_comment_targets(
                 // 인기글(주간 단일 API)은 페이징이 없어 상위 N개만 취한다.
                 let fetched = match spec.mode {
                     CommentTarget::Latest => {
-                        fetch_latest_articles_for_account_up_to(&cafe_str, &t.account_id, count)
-                            .await
+                        fetch_latest_articles_for_account_up_to(
+                            &cafe_str,
+                            t.menu_id as u32,
+                            &t.account_id,
+                            count,
+                        )
+                        .await
                     }
-                    _ => {
-                        fetch_article_list_for_account(&cafe_str, SortBy::Popular, 1, &t.account_id)
-                            .await
-                            .map(|resp| resp.articles.into_iter().take(count).collect())
-                    }
+                    _ => fetch_article_list_for_account(
+                        &cafe_str,
+                        t.menu_id as u32,
+                        SortBy::Popular,
+                        1,
+                        &t.account_id,
+                    )
+                    .await
+                    .map(|resp| resp.articles.into_iter().take(count).collect()),
                 };
                 match fetched {
                     Ok(articles) => {

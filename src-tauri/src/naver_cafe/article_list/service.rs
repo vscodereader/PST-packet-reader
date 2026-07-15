@@ -56,6 +56,7 @@ fn resolve_cookie_header(account_id: &str) -> Result<String, ArticleListError> {
 /// 계정 쿠키는 내부에서만 사용되며 반환되는 오류/로그에 절대 노출되지 않는다.
 pub async fn fetch_article_list_for_account(
     cafe_id: &str,
+    menu_id: u32,
     sort_by: SortBy,
     page: u32,
     account_id: &str,
@@ -63,7 +64,7 @@ pub async fn fetch_article_list_for_account(
     let cookie_header = resolve_cookie_header(account_id)?;
     let client = ArticleListClient::new();
     client
-        .fetch_article_list(cafe_id, sort_by, page, Some(cookie_header.as_str()))
+        .fetch_article_list(cafe_id, menu_id, sort_by, page, Some(cookie_header.as_str()))
         .await
 }
 
@@ -74,13 +75,14 @@ pub async fn fetch_article_list_for_account(
 /// 계정 쿠키는 내부에서만 사용되며 반환되는 오류/로그에 절대 노출되지 않는다.
 pub async fn fetch_latest_articles_for_account_up_to(
     cafe_id: &str,
+    menu_id: u32,
     account_id: &str,
     want: usize,
 ) -> Result<Vec<Article>, ArticleListError> {
     let cookie_header = resolve_cookie_header(account_id)?;
     let client = ArticleListClient::new();
     client
-        .fetch_latest_up_to(cafe_id, want, Some(cookie_header.as_str()))
+        .fetch_latest_up_to(cafe_id, menu_id, want, Some(cookie_header.as_str()))
         .await
 }
 
@@ -93,6 +95,7 @@ mod tests {
         // 존재하지 않는 계정 → 쿠키 없음/읽기 실패 → NO_COOKIES (네트워크 미발생).
         let err = fetch_article_list_for_account(
             "no-such-account-xyz",
+            0,
             SortBy::Latest,
             1,
             "no-such-account-xyz",

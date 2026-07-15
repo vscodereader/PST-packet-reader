@@ -1899,16 +1899,21 @@ fn build_cafe_publish_items(
                     }
                 }
                 CommentTarget::Latest | CommentTarget::Popular => {
-                    // 최신/인기는 카페 단위라 같은 카페 중복 제거(게시판 여러 개여도 1번).
+                    // 최신=게시판 단위(링크의 menu_id로 해당 게시판 최신글만), 인기=카페 단위.
+                    // 따라서 최신은 (카페,게시판) 조합으로, 인기는 카페 단위로 중복 제거한다.
                     let mut seen = std::collections::HashSet::new();
                     for b in cafe_boards.iter() {
-                        if !seen.insert(b.cafe_id) {
+                        let menu = match ct_mode {
+                            CommentTarget::Latest => b.menu_id,
+                            _ => 0,
+                        };
+                        if !seen.insert((b.cafe_id, menu)) {
                             continue;
                         }
                         naver.push(cafe_target(
                             &a.login_id,
                             b,
-                            0,
+                            menu,
                             Some(CommentTargetSpec {
                                 mode: ct_mode.clone(),
                                 count: Some(count),
@@ -3237,7 +3242,8 @@ mod tests {
 
     #[test]
     fn build_cafe_publish_items_comment_uses_frozen_latest_target() {
-        // 카페 댓글(글에 동결된 대상=Latest·개수=3): 같은 카페 중복 제거 → cafeId로 최신 N 댓글.
+        // 카페 댓글(글에 동결된 대상=Latest·개수=3): 최신은 게시판 단위 →
+        // 같은 카페라도 게시판(menu_id)이 다르면 각각 대상이 된다.
         let assignments = vec![PublishAssign {
             login_id: "acc_a".into(),
             stocks: vec![],
@@ -3271,11 +3277,17 @@ mod tests {
         );
         assert_eq!(items.len(), 1);
         let n = &items[0].plan.as_ref().unwrap().naver;
-        assert_eq!(n.len(), 1, "같은 카페는 1건으로 합침");
-        let ct = n[0].comment_target.as_ref().unwrap();
-        assert!(matches!(ct.mode, CommentTarget::Latest));
-        assert_eq!(ct.count, Some(3));
-        assert_eq!(ct.cafe_id, Some(100));
+        assert_eq!(n.len(), 2, "게시판이 다르면 최신은 게시판별로 대상 생성");
+        for t in n {
+            let ct = t.comment_target.as_ref().unwrap();
+            assert!(matches!(ct.mode, CommentTarget::Latest));
+            assert_eq!(ct.count, Some(3));
+            assert_eq!(ct.cafe_id, Some(100));
+        }
+        // 대상은 게시판(menu_id) 단위로 최신글을 가져오도록 menu_id가 각각 실려야 한다.
+        let mut menus: Vec<u64> = n.iter().map(|t| t.menu_id).collect();
+        menus.sort_unstable();
+        assert_eq!(menus, vec![5, 6], "각 게시판의 menu_id가 대상에 실려야 함");
         assert_eq!(
             items[0].plan.as_ref().unwrap().comments,
             vec!["댓글1".to_string()]

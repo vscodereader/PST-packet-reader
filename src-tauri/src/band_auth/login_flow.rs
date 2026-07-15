@@ -102,6 +102,12 @@ const CONSENT_DOM_JS: &str = "(()=>{\
         const t=String(el.innerText||el.textContent||el.value||'').replace(/\\s+/g,'');\
         return el.offsetParent!==null&&(t==='동의하기'||t==='동의'||t==='허용하기'||t==='허용');});})()";
 
+// band 자체 비밀번호 화면(`auth.band.us/email_login/password`)의 비밀번호 오류 표시(순수 판정 JS).
+// 패킷 원문(2026-07-15): 비번 틀리면 같은 페이지가 리로드되며 `<p id="error_msg">계정이 없거나
+// 비밀번호가 일치하지 않습니다.</p>`가 보인다. 네이버 폼의 `#err_common`과 별개 셀렉터다.
+const BAND_PW_ERROR_JS: &str = "(()=>{const e=document.querySelector('#error_msg');\
+    return !!(e&&e.offsetParent!==null&&(e.textContent||'').trim().length>0);})()";
+
 // 밴드 2단계 인증/추가 검증 게이트 화면인지 본문 텍스트로 판정한다(순수 함수). band_session 쿠키가
 // 이 화면(`auth.band.us/b/validation_welcome`)에서 이미 발급되지만, 이는 인증 미완료 반쪽 세션이라
 // 게시가 거부된다("session expired"/"not authorized") — 성공으로 보면 안 된다(2026-07-13 로그 확인).
@@ -129,6 +135,11 @@ pub(crate) struct BandPageSignals {
     /// 표준 네이버 로그인 폼(#id/#pw)이 이번 폴링에서 **입력해야 하는** 상태(보이고, 아직 이번
     /// 폼에 제출하지 않았고, 캡차/오류 표시가 없음). 첫 로그인·가입 재로그인 모두 여기로 잡힌다.
     pub naver_form: bool,
+    /// band "본인 확인" 화면(`confirm_user_email_login`): "로그인 하기" 클릭 대상.
+    pub email_confirm: bool,
+    /// band 자체 비밀번호 입력 화면(`email_login/password`): `#pw` 입력 + "확인" 클릭 대상.
+    /// 오류(#error_msg)가 떠 있거나 이번 화면에 이미 제출했으면 false 로 둬 재입력하지 않는다.
+    pub email_password: bool,
     /// OAuth 동의 페이지(`allow_oauth`/`agree_term`).
     pub consent: bool,
     /// 미가입 계정 화면(`/login?...&_ns=false` 또는 "네이버로 밴드 가입" 버튼).
@@ -161,6 +172,8 @@ pub(crate) enum BandSignal {
     Pending,
     Success,
     NaverForm,
+    EmailConfirm,
+    EmailPassword,
     Consent,
     SignupNeeded,
     SignupFinal,
@@ -180,6 +193,8 @@ pub(crate) enum BandSignal {
 enum LoopAction {
     Success,
     TypeLogin,
+    ClickEmailConfirm,
+    TypeBandPassword,
     ClickConsent,
     ClickSignup,
     HandleSignupFinal,
@@ -199,6 +214,10 @@ pub(crate) fn classify(s: &BandPageSignals) -> BandSignal {
         BandSignal::Success
     } else if s.naver_form {
         BandSignal::NaverForm
+    } else if s.email_confirm {
+        BandSignal::EmailConfirm
+    } else if s.email_password {
+        BandSignal::EmailPassword
     } else if s.consent {
         BandSignal::Consent
     } else if s.signup_needed {
@@ -244,6 +263,8 @@ fn decide_loop_step(
     match signal {
         BandSignal::Success => LoopAction::Success,
         BandSignal::NaverForm => LoopAction::TypeLogin,
+        BandSignal::EmailConfirm => LoopAction::ClickEmailConfirm,
+        BandSignal::EmailPassword => LoopAction::TypeBandPassword,
         BandSignal::Consent => LoopAction::ClickConsent,
         BandSignal::SignupNeeded => LoopAction::ClickSignup,
         BandSignal::SignupFinal => LoopAction::HandleSignupFinal,
@@ -315,6 +336,26 @@ pub(crate) fn is_signup_final_url(url: &str) -> bool {
 /// "생년월일"이 함께 있으면 가입 완료 폼으로 본다(패킷 원문 문구, 2026-07-13).
 pub(crate) fn is_signup_final_text(text: &str) -> bool {
     text.contains("가입 마지막 단계") && text.contains("생년월일")
+}
+
+/// 현재 URL이 band "본인 확인" 화면(`confirm_user_email_login`)인지(순수 함수). 네이버 OAuth
+/// 통과 후 band 가 "본인이 맞으신가요? / 당신의 계정이라면 로그인하세요."를 띄우고 "로그인 하기"
+/// (`<a href='/email_login/password'>`)를 누르면 band 자체 비밀번호 입력 화면으로 넘어간다(패킷
+/// 원문 2026-07-15, `auth.band.us`).
+pub(crate) fn is_email_confirm_url(url: &str) -> bool {
+    url.contains("confirm_user_email_login")
+}
+
+/// 본문 텍스트가 band "본인 확인" 화면인지(순수 함수, URL 판정 폴백). 패킷 원문 문구.
+pub(crate) fn is_email_confirm_text(text: &str) -> bool {
+    text.contains("본인이 맞으신가요") && text.contains("로그인")
+}
+
+/// 현재 URL이 band 자체 비밀번호 입력 화면(`email_login/password`)인지(순수 함수). `#pw`에 저장된
+/// 비밀번호를 타이핑하고 "확인"(`#email_password_login_form` submit)을 누른다. 이 화면의 `#pw`는
+/// 네이버 폼 `#id/#pw`와 달리 `#id`가 없어 네이버 폼 감지(`#id`+`#pw`)와 충돌하지 않는다.
+pub(crate) fn is_email_password_url(url: &str) -> bool {
+    url.contains("email_login/password")
 }
 
 /// 현재 URL이 band 측 reCAPTCHA/검증 페이지인지(순수 함수).
@@ -415,6 +456,8 @@ fn run_inner(
     // "가입하기" 클릭 뒤이므로(재로그인), 그 arm 에서만 false 로 되돌려 재입력을 허용한다. 이 플래그로
     // 제출 직후 같은 폼에 이중 제출하는 것을 막는다.
     let mut submitted_for_form = false;
+    // band 자체 비밀번호 화면(#pw)에 이미 입력·제출했는지(제출 직후 recaptcha 처리 중 재입력 방지).
+    let mut band_pw_submitted = false;
     // 본인확인(휴대전화) 번호 입력·확인을 이미 1회 시도했는지(중복 제출 방지).
     let mut phone_attempted = false;
     // 첫 타이핑 직전 1회만 웹 컨텐츠로 창 포커스를 옮긴다(주소창 선택 해제 → 캡차 완화, 네이버 미러).
@@ -429,7 +472,7 @@ fn run_inner(
         // 를 기다린다(사용자 보고: 페이지가 다 로드되기 전에 동작하던 문제 — 매 화면에서 방지).
         wait_for_dom_ready(client);
 
-        let signals = read_signals(client, submitted_for_form)?;
+        let signals = read_signals(client, submitted_for_form, band_pw_submitted)?;
         match decide_loop_step(last_negative, classify(&signals), wait_for_human) {
             LoopAction::Success => {
                 let cookies = collect_band_cookies(client)?;
@@ -465,6 +508,29 @@ fn run_inner(
                 sleep(Duration::from_secs(1));
                 click_login_button(client)?;
                 submitted_for_form = true;
+                last_negative = None;
+            }
+            LoopAction::ClickEmailConfirm => {
+                // "본인이 맞으신가요?" 화면의 "로그인 하기"(a[href='/email_login/password']) 클릭 →
+                // band 자체 비밀번호 입력 화면으로 이동. 다음 폴링에서 EmailPassword 로 재판정된다.
+                let _ = click_email_confirm(client);
+                last_negative = None;
+            }
+            LoopAction::TypeBandPassword => {
+                // band 자체 비밀번호 화면: 하위com 에 저장된 그 계정 비번(pw)을 #pw 에 한 글자씩
+                // 타이핑한다. 실제 keyup 이벤트가 band 의 checkConfirmButton() 을 돌려 "확인" 버튼을
+                // 활성화하고, 이어서 폼 제출(→ band recaptcha·서명 JS)까지 눌러 마무리한다. 비번이
+                // 틀리면 다음 폴링에서 #error_msg → BadCredentials 로 확정된다. (DOM 완료는 루프
+                // 상단 wait_for_dom_ready 가 이미 보장한다.)
+                if !type_into(client, "#pw", pw)? {
+                    return Ok(BandLoginOutcome::Error(
+                        "밴드 비밀번호 자동 입력에 실패했습니다(비밀번호 칸이 비어 로그인을 중단)."
+                            .to_owned(),
+                    ));
+                }
+                sleep(Duration::from_secs(1));
+                click_band_password_submit(client)?;
+                band_pw_submitted = true;
                 last_negative = None;
             }
             LoopAction::ClickConsent => {
@@ -525,6 +591,7 @@ fn run_inner(
 fn read_signals(
     client: &mut CdpClient,
     submitted_for_form: bool,
+    band_pw_submitted: bool,
 ) -> Result<BandPageSignals, AutomationError> {
     let cookies = collect_band_cookies(client)?;
     // band_session 쿠키 존재는 "성공"의 필요조건일 뿐 충분조건이 아니다 — 2단계 인증 게이트
@@ -548,16 +615,28 @@ fn read_signals(
              return ok(document.querySelector('#id'))&&ok(document.querySelector('#pw'));})()",
         )
         .unwrap_or(false);
-    // 비번 오류: #err_common 이 보이고 텍스트를 가짐. 캡차가 떠 있거나 이미 로그인됐으면 오류로
-    // 보지 않는다(네이버 미러).
-    let bad_credentials = !has_session
-        && !captcha
-        && client
-            .evaluate_bool(
-                "(()=>{const e=document.querySelector('#err_common');\
-                 return !!(e&&e.offsetParent!==null&&(e.textContent||'').trim().length>0);})()",
-            )
-            .unwrap_or(false);
+    // band 자체 비밀번호 화면(`email_login/password`)에서 비번 오류(#error_msg)가 떠 있는지. 이건
+    // band 페이지 고유 셀렉터라 has_session 게이트 없이도 오탐이 없다(성공은 band.us 로 이탈해
+    // 이 화면을 벗어남). 오류가 뜨면 재입력하지 않고 비번오류로 확정 → "창 닫고 다음 계정".
+    let band_pw_page = is_email_password_url(&url);
+    let band_pw_error = band_pw_page && client.evaluate_bool(BAND_PW_ERROR_JS).unwrap_or(false);
+
+    // 비번 오류: 네이버 폼 #err_common(보이고 텍스트 있음, 캡차/로그인됨 아님) 또는 band #error_msg.
+    let bad_credentials = band_pw_error
+        || (!has_session
+            && !captcha
+            && client
+                .evaluate_bool(
+                    "(()=>{const e=document.querySelector('#err_common');\
+                     return !!(e&&e.offsetParent!==null&&(e.textContent||'').trim().length>0);})()",
+                )
+                .unwrap_or(false));
+
+    // band "본인 확인"(confirm_user_email_login) 화면: URL 또는 본문 문구.
+    let email_confirm = is_email_confirm_url(&url) || is_email_confirm_text(&body_text);
+    // band 자체 비밀번호 입력 화면: 이 화면이고, 오류가 없고, 아직 이번 화면에 제출하지 않았을 때만
+    // "입력해야 하는" 상태로 본다(오류 뜬 화면·제출 직후 recaptcha 대기 중 재입력 방지).
+    let email_password = band_pw_page && !band_pw_error && !band_pw_submitted;
     // 폼이 보이고, 아직 이번 폼에 제출하지 않았고, 캡차/오류 표시가 없을 때만 "입력해야 하는" 폼으로
     // 본다 — 오류가 뜬 폼(비번오류)이나 캡차가 뜬 폼에 재입력하지 않는다.
     let naver_form = form_visible && !submitted_for_form && !captcha && !bad_credentials && !has_session;
@@ -586,6 +665,8 @@ fn read_signals(
     Ok(BandPageSignals {
         logged_in,
         naver_form,
+        email_confirm,
+        email_password,
         consent,
         signup_needed,
         signup_final,
@@ -777,6 +858,64 @@ fn click_login_button(client: &mut CdpClient) -> Result<(), AutomationError> {
     Ok(())
 }
 
+// band "본인이 맞으신가요?" 화면의 "로그인 하기"를 클릭한다. 이 버튼은
+// `<a href='/email_login/password' class="uBtn -tcType -confirm">로그인 하기</a>`(패킷 원문
+// 2026-07-15)라 href 로 정확히 잡고, 못 잡으면 버튼 텍스트("로그인하기")로 폴백한다. 좌표 마우스
+// 클릭 후 폴백으로 .click(). 클릭하면 band 자체 비밀번호 입력 화면으로 이동한다.
+fn click_email_confirm(client: &mut CdpClient) -> Result<bool, AutomationError> {
+    const CENTER_JS: &str = "(()=>{\
+        let b=document.querySelector(\"a[href*='email_login/password']\");\
+        if(!b){const els=Array.prototype.slice.call(document.querySelectorAll('a, button'));\
+            b=els.find(el=>el.offsetParent!==null&&\
+                String(el.innerText||el.textContent||'').replace(/\\s+/g,'').includes('로그인하기'));}\
+        if(!b)return null;const r=b.getBoundingClientRect();\
+        if(r.width<=0||r.height<=0)return null;return [r.left+r.width/2, r.top+r.height/2];})()";
+    if let Some((x, y)) = parse_xy(&client.evaluate(CENTER_JS)?) {
+        mouse_click(client, x, y)?;
+        return Ok(true);
+    }
+    Ok(client
+        .evaluate_bool(
+            "(()=>{let b=document.querySelector(\"a[href*='email_login/password']\");\
+             if(!b){const els=Array.prototype.slice.call(document.querySelectorAll('a, button'));\
+                b=els.find(el=>el.offsetParent!==null&&\
+                    String(el.innerText||el.textContent||'').replace(/\\s+/g,'').includes('로그인하기'));}\
+             if(b){b.click();return true;}return false;})()",
+        )
+        .unwrap_or(false))
+}
+
+// band 자체 비밀번호 화면의 "확인"(`#email_password_login_form` 의 submit)을 눌러 제출한다. 이 버튼은
+// 처음 disabled 이고 band 의 checkConfirmButton() 이 입력 이벤트에서 활성화한다 — type_into 의 실제
+// keyup 이 이미 활성화하지만, 안전하게 입력 이벤트를 한 번 더 흘리고(disabled 해제) 좌표 마우스
+// 클릭으로 제출한다. 제출은 band 폼 핸들러(recaptcha·서명 JS)를 태운다. 좌표를 못 구하면
+// requestSubmit()/click() 폴백(둘 다 submit 이벤트를 발화해 recaptcha 를 태운다).
+fn click_band_password_submit(client: &mut CdpClient) -> Result<(), AutomationError> {
+    let _ = client.evaluate(
+        "(()=>{const p=document.querySelector('#pw');\
+         if(p){['keyup','input','change'].forEach(t=>p.dispatchEvent(new Event(t,{bubbles:true})));}\
+         const f=document.getElementById('email_password_login_form');\
+         const b=f&&f.querySelector('button[type=submit]');if(b)b.disabled=false;return true;})()",
+    )?;
+    let center = client.evaluate(
+        "(()=>{const f=document.getElementById('email_password_login_form');\
+         const b=f&&f.querySelector('button[type=submit]');if(!b)return null;\
+         const r=b.getBoundingClientRect();if(r.width<=0||r.height<=0)return null;\
+         return [r.left+r.width/2, r.top+r.height/2];})()",
+    )?;
+    if let Some((x, y)) = parse_xy(&center) {
+        mouse_click(client, x, y)?;
+    } else {
+        client.evaluate(
+            "(()=>{const f=document.getElementById('email_password_login_form');if(!f)return false;\
+             const b=f.querySelector('button[type=submit]');\
+             if(f.requestSubmit){f.requestSubmit(b||undefined);}else if(b){b.click();}else{f.submit();}\
+             return true;})()",
+        )?;
+    }
+    Ok(())
+}
+
 // "네이버로 가입하기" 버튼/링크를 좌표 마우스 클릭한다(못 구하면 .click() 폴백). 이 클릭이
 // redirect_external_account_sign_up?type=naver 로 이동시켜 네이버 로그인 폼을 다시 띄운다.
 fn click_signup_button(client: &mut CdpClient) -> Result<bool, AutomationError> {
@@ -826,6 +965,19 @@ fn handle_signup_final(client: &mut CdpClient) -> Result<bool, AutomationError> 
             if(vals.some(v=>ov===v||num(ov)===num(v)||ot.replace(/[^0-9]/g,'')===String(num(v))))\
                 {{setVal(sel,o.value);return true;}}}}return false;}};\
         if(selects.length>=3){{pick(selects[0],[Y,'1990']);pick(selects[1],[M,'1']);pick(selects[2],[D,'1']);}}\
+        /* 실제 band 가입 폼(패킷 2026-07-13): 생년월일=<input type=date id=bday>. band JS의 \
+           getBirthdate()는 #bday 부모에 '-active'(클릭 시 추가)가 있어야만 값을 읽어 hidden \
+           birthdate(YYYYMMDD+)를 채운다. 그래서 값(ISO)+부모 -active+change+hidden 을 함께 세팅한다. */\
+        const bday=document.querySelector('#bday')\
+            ||document.querySelector('input[type=date]');\
+        if(bday){{const iso=Y+'-'+M+'-'+D;\
+            try{{const dsc=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value');\
+                if(dsc&&dsc.set)dsc.set.call(bday,iso);else bday.value=iso;}}catch(e){{bday.value=iso;}}\
+            try{{bday.valueAsDate=new Date(iso+'T00:00:00Z');}}catch(e){{}}\
+            const bp=bday.parentElement;if(bp)bp.classList.add('-active');\
+            bday.dispatchEvent(new Event('input',{{bubbles:true}}));\
+            bday.dispatchEvent(new Event('change',{{bubbles:true}}));\
+            const hb=document.querySelector('input[name=birthdate]');if(hb)setVal(hb,YMD+'+');}}\
         const inputs=Array.prototype.slice.call(document.querySelectorAll('input'))\
             .filter(i=>['text','number','tel',''].indexOf(String(i.type||'').toLowerCase())>=0\
                        &&i.offsetParent!==null&&i.type!=='checkbox'&&i.type!=='radio');\
@@ -833,11 +985,18 @@ fn handle_signup_final(client: &mut CdpClient) -> Result<bool, AutomationError> 
         else if(inputs.length>=3){{setVal(inputs[0],Y);setVal(inputs[1],M);setVal(inputs[2],D);}}\
         else for(const i of inputs){{const h=(i.placeholder||'')+(i.name||'')+(i.id||'');\
             if(/(birth|생년|년|month|month|day|일|월)/i.test(h))setVal(i,YMD);}}\
+        const boxes=Array.prototype.slice.call(document.querySelectorAll('[role=\"checkbox\"]'))\
+            .filter(cb=>cb.id!=='keep');\
+        const chk=cb=>cb.getAttribute('aria-checked')==='true'||cb.checked===true;\
+        const toggle=el=>{{if(!el)return;el.click();\
+            if(!chk(el))el.dispatchEvent(new MouseEvent('click',{{bubbles:true}}));\
+            if(!chk(el))el.dispatchEvent(new KeyboardEvent('keydown',{{key:' ',keyCode:32,bubbles:true}}));}};\
+        let all=document.querySelector('#agree_select');\
+        if(!all)all=boxes.find(cb=>{{const t=String((cb.parentElement||cb).textContent||'').replace(/\\s+/g,'');\
+            return t.indexOf('전체동의')>=0||t.indexOf('모두동의')>=0;}});\
+        if(all&&!chk(all))toggle(all);\
+        for(const cb of boxes){{if(!chk(cb))toggle(cb);}}\
         const cbs=Array.prototype.slice.call(document.querySelectorAll('input[type=checkbox]'));\
-        const all=Array.prototype.slice.call(document.querySelectorAll('label,button,a,span,div'))\
-            .find(e=>{{const t=String(e.textContent||'').replace(/\\s+/g,'');\
-                return t.indexOf('전체동의')>=0||t.indexOf('모두동의')>=0;}});\
-        if(all)all.click();\
         for(const cb of cbs){{if(!cb.checked)cb.click();\
             if(!cb.checked&&cb.closest('label'))cb.closest('label').click();}}\
         const inputDiag=inputs.map(i=>(i.type||'text')+':'+(i.id||i.name||i.placeholder||'?')+'='+String(i.value).slice(0,10));\
@@ -846,7 +1005,11 @@ fn handle_signup_final(client: &mut CdpClient) -> Result<bool, AutomationError> 
         const btns=Array.prototype.slice.call(document.querySelectorAll('button,a,input[type=submit],input[type=button]'))\
             .map(b=>String(b.innerText||b.textContent||b.value||'').replace(/\\s+/g,' ').trim())\
             .filter(t=>t.length>0&&t.length<24);\
-        return JSON.stringify({{url:location.href,inputs:inputDiag,selects:selDiag,cbs:cbDiag,buttons:btns.slice(0,15)}});}})()",
+        const bdayEl=document.querySelector('#bday')||document.querySelector('input[type=date]');\
+        const hbEl=document.querySelector('input[name=birthdate]');\
+        const bdayDiag=bdayEl?(bdayEl.value+'|active:'+(bdayEl.parentElement&&bdayEl.parentElement.classList.contains('-active'))):'none';\
+        const hbDiag=hbEl?hbEl.value:'none';\
+        return JSON.stringify({{url:location.href,bday:bdayDiag,birthdate:hbDiag,inputs:inputDiag,selects:selDiag,cbs:cbDiag,buttons:btns.slice(0,15)}});}})()",
         y = DEFAULT_SIGNUP_BIRTH_YEAR, m = DEFAULT_SIGNUP_BIRTH_MONTH, d = DEFAULT_SIGNUP_BIRTH_DAY
     );
     let diag = client.evaluate_string(&fill_js).unwrap_or_default();
@@ -876,29 +1039,35 @@ fn handle_signup_final(client: &mut CdpClient) -> Result<bool, AutomationError> 
 // OAuth 동의 페이지에서 (1) 전체동의(agree-all) 체크박스를 먼저 체크하고 (2) 동의/확인 버튼을 좌표
 // 마우스 클릭한다(best-effort). 자동 리다이렉트라 눌 게 없으면 no-op(false).
 fn click_oauth_consent(client: &mut CdpClient) -> Result<bool, AutomationError> {
-    // (1) 개인정보 제3자 제공 동의([필수]: 이용자식별자·네이버아이디·이름·이메일·프로필사진 —
-    //     service_scope profile/id·naverid·name·naveremail·profileimage) 전부 체크. 하나만 켜던
-    //     문제로 자동 선택이 안 됐다. 전체동의 요소 + 모든 체크박스 + 라벨(styled 체크박스 대비)을
-    //     눌러 전부 켠다. 동시에 화면 구조(체크박스 상태·버튼 후보·URL)를 진단으로 받아 로그에
-    //     원문을 남긴다 — 그래도 안 켜지면 이 로그가 실제 셀렉터를 드러낸다(형님 "로그에 원문" 원칙).
+    // (1) 동의 체크박스 전부 체크. **실측(패킷 2026-07-15 밴드 다양한 경우)**: 네이버 OAuth 동의
+    //     체크박스는 `<input type=checkbox>`가 아니라 `<div role="checkbox" aria-checked>`(커스텀)다 —
+    //     예전 `input[type=checkbox]` 조회가 0개를 봐 아무것도 못 켜고 "동의하기"가 막혔다(cbCount:0).
+    //     전체동의(#agree_select) 하나만 클릭하면 네이버 JS(agreeAllEventCallbackFunc)가 필수([필수]
+    //     개인정보 제3자 제공, meta-mandatory) 포함 전부 cascade 한다. 로그인 유지(id=keep)는 제외.
+    //     진단으로 각 role=checkbox의 aria-checked 상태를 남겨 안 켜지면 로그가 원문을 드러낸다.
     const CHECK_ALL_JS: &str = "(()=>{\
+        const boxes=Array.prototype.slice.call(document.querySelectorAll('[role=\"checkbox\"]'))\
+            .filter(cb=>cb.id!=='keep');\
+        const chk=cb=>cb.getAttribute('aria-checked')==='true'||cb.checked===true;\
+        const toggle=el=>{if(!el)return;el.click();\
+            if(!chk(el))el.dispatchEvent(new MouseEvent('click',{bubbles:true}));\
+            if(!chk(el))el.dispatchEvent(new KeyboardEvent('keydown',{key:' ',keyCode:32,bubbles:true}));};\
+        let all=document.querySelector('#agree_select');\
+        if(!all)all=boxes.find(cb=>{const t=String((cb.parentElement||cb).textContent||'').replace(/\\s+/g,'');\
+            return t.indexOf('전체동의')>=0||t.indexOf('모두동의')>=0;});\
+        if(all&&!chk(all))toggle(all);\
+        for(const cb of boxes){if(!chk(cb))toggle(cb);}\
         const cbs=Array.prototype.slice.call(document.querySelectorAll('input[type=checkbox]'));\
-        const all=Array.prototype.slice.call(document.querySelectorAll('label,button,a,span,div'))\
-            .find(e=>{const t=String(e.textContent||'').replace(/\\s+/g,'');\
-                return t.indexOf('전체동의')>=0||t.indexOf('모두동의')>=0;});\
-        if(all)all.click();\
-        const before=cbs.map(cb=>cb.checked);\
-        for(const cb of cbs){\
-            if(!cb.checked)cb.click();\
-            if(!cb.checked&&cb.id){const l=document.querySelector('label[for=\"'+cb.id+'\"]');if(l)l.click();}\
+        for(const cb of cbs){if(!cb.checked)cb.click();\
             if(!cb.checked&&cb.closest('label'))cb.closest('label').click();}\
-        const states=cbs.map(cb=>(cb.id||cb.name||'?')+':'+cb.checked);\
+        const states=boxes.map(cb=>(cb.id||(cb.getAttribute('meta-mandatory')==='true'?'[필수]':'?'))\
+            +':'+cb.getAttribute('aria-checked'));\
         const btns=Array.prototype.slice.call(\
             document.querySelectorAll('button,a,input[type=submit],input[type=button]'))\
             .map(b=>String(b.innerText||b.textContent||b.value||'').replace(/\\s+/g,' ').trim())\
             .filter(t=>t.length>0&&t.length<24);\
-        return JSON.stringify({url:location.href,cbCount:cbs.length,before:before,\
-            after:states,allBtn:!!all,buttons:btns.slice(0,15)});})()";
+        return JSON.stringify({url:location.href,roleCbCount:boxes.length,agreeAll:!!all,\
+            after:states,buttons:btns.slice(0,15)});})()";
     let diag = client.evaluate_string(CHECK_ALL_JS).unwrap_or_default();
     tracing::info!("[BAND] OAuth 동의 화면 처리(원문 구조) — {diag}");
 
@@ -906,8 +1075,8 @@ fn click_oauth_consent(client: &mut CdpClient) -> Result<bool, AutomationError> 
     const CENTER_JS: &str = "(()=>{\
         const vis=el=>{if(!el)return false;const r=el.getBoundingClientRect();\
             return r.width>0&&r.height>0&&el.offsetParent!==null&&!el.disabled;};\
-        let el=document.querySelector('#agree_btn')||document.querySelector('#agree')\
-            ||document.querySelector('#btnAgree');\
+        let el=document.querySelector('button.btn.agree')||document.querySelector('#agree_btn')\
+            ||document.querySelector('#agree')||document.querySelector('#btnAgree');\
         if(!vis(el)){el=null;\
             const cs=Array.prototype.slice.call(\
                 document.querySelectorAll('button, a, input[type=submit], input[type=button]'));\
@@ -927,8 +1096,8 @@ fn click_oauth_consent(client: &mut CdpClient) -> Result<bool, AutomationError> 
         .evaluate_bool(
             "(()=>{const vis=el=>{if(!el)return false;const r=el.getBoundingClientRect();\
                 return r.width>0&&r.height>0&&el.offsetParent!==null&&!el.disabled;};\
-             let el=document.querySelector('#agree_btn')||document.querySelector('#agree')\
-                 ||document.querySelector('#btnAgree');\
+             let el=document.querySelector('button.btn.agree')||document.querySelector('#agree_btn')\
+                 ||document.querySelector('#agree')||document.querySelector('#btnAgree');\
              if(!vis(el)){el=null;\
                  const cs=Array.prototype.slice.call(\
                      document.querySelectorAll('button, a, input[type=submit], input[type=button]'));\
@@ -1189,6 +1358,89 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(classify(&s), BandSignal::NaverForm);
+    }
+
+    // --- band 자체 이메일 로그인 화면(본인확인 → 비밀번호 입력) ---
+
+    #[test]
+    fn detects_email_confirm_page_by_url_and_text() {
+        assert!(is_email_confirm_url(
+            "https://auth.band.us/confirm_user_email_login"
+        ));
+        assert!(!is_email_confirm_url(
+            "https://auth.band.us/email_login/password"
+        ));
+        // 패킷 원문 문구(글자 그대로): "본인이 맞으신가요?" + "당신의 계정이라면 로그인하세요."
+        assert!(is_email_confirm_text(
+            "본인이 맞으신가요? 당신의 계정이라면 로그인하세요. 로그인 하기"
+        ));
+        assert!(!is_email_confirm_text("비밀번호 입력"));
+    }
+
+    #[test]
+    fn detects_email_password_page_by_url() {
+        assert!(is_email_password_url(
+            "https://auth.band.us/email_login/password"
+        ));
+        assert!(is_email_password_url(
+            "https://auth.band.us/email_login/password?login_type="
+        ));
+        assert!(!is_email_password_url(
+            "https://auth.band.us/confirm_user_email_login"
+        ));
+    }
+
+    #[test]
+    fn classify_maps_email_confirm_and_password() {
+        assert_eq!(
+            classify(&BandPageSignals {
+                email_confirm: true,
+                ..Default::default()
+            }),
+            BandSignal::EmailConfirm
+        );
+        assert_eq!(
+            classify(&BandPageSignals {
+                email_password: true,
+                ..Default::default()
+            }),
+            BandSignal::EmailPassword
+        );
+    }
+
+    #[test]
+    fn classify_success_beats_email_screens() {
+        let s = BandPageSignals {
+            logged_in: true,
+            email_confirm: true,
+            email_password: true,
+            ..Default::default()
+        };
+        assert_eq!(classify(&s), BandSignal::Success);
+    }
+
+    #[test]
+    fn classify_bad_credentials_when_password_error_gates_email_password() {
+        // 비번 오류 화면: read_signals 가 email_password=false(오류로 게이트), bad_credentials=true 로
+        // 만든다. classify 는 재입력(EmailPassword) 대신 BadCredentials 를 골라야 한다("창 닫고 다음 계정").
+        let s = BandPageSignals {
+            email_password: false,
+            bad_credentials: true,
+            ..Default::default()
+        };
+        assert_eq!(classify(&s), BandSignal::BadCredentials);
+    }
+
+    #[test]
+    fn email_confirm_click_then_password_type_actions() {
+        assert_eq!(
+            decide_loop_step(None, BandSignal::EmailConfirm, false),
+            LoopAction::ClickEmailConfirm
+        );
+        assert_eq!(
+            decide_loop_step(None, BandSignal::EmailPassword, false),
+            LoopAction::TypeBandPassword
+        );
     }
 
     #[test]
