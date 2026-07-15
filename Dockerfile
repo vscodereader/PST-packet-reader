@@ -8,7 +8,8 @@
 #    한 번 빌드하며 rust/node 버전·경로를 실환경에 맞춰야 할 수 있다.
 
 # ── 1) 프론트(Admin dist) 빌드 ──
-FROM node:20-bookworm-slim AS frontend
+# node 22: package.json engines가 node>=22 이고 .npmrc engine-strict=true 라 20이면 pnpm install이 하드 에러.
+FROM node:22-bookworm-slim AS frontend
 WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
 # 의존성 먼저(캐시). 루트 프로젝트의 lockfile 사용.
