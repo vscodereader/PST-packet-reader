@@ -36,6 +36,26 @@ pub(crate) fn clip_graphql_headers(referer: &str) -> Vec<(&'static str, String)>
     ]
 }
 
+/// creatorhub 프로필 **조회(naver-profile)·생성(signup)** 요청 헤더. 이 두 호출은 `clip.naver.com/signup`
+/// 화면에서 일어나므로 Origin=clip.naver.com, Referer=signup(실측 패킷 2026-07-15 `네이버 클립 프로필.pcapng`).
+/// `x-creator-hub-sid: clip` 필수, `Accept: application/json`(v1.0 존재확인의 `*/*`과 다름). POST는
+/// 호출부가 `Content-Type: application/json`을 따로 붙인다.
+pub(crate) fn creatorhub_signup_headers() -> Vec<(&'static str, String)> {
+    vec![
+        ("Accept", "application/json".to_string()),
+        ("x-creator-hub-sid", "clip".to_string()),
+        ("Origin", CLIP_ORIGIN.to_string()),
+        (
+            "Referer",
+            "https://clip.naver.com/signup?version=light".to_string(),
+        ),
+        ("sec-fetch-site", "same-site".to_string()),
+        ("sec-fetch-mode", "cors".to_string()),
+        ("sec-fetch-dest", "empty".to_string()),
+        ("accept-language", ACCEPT_LANGUAGE.to_string()),
+    ]
+}
+
 /// `clip.naver.com/@<handle>` 문서 GET용 위장 헤더(navigation/document).
 pub(crate) fn clip_document_headers() -> Vec<(&'static str, String)> {
     vec![
@@ -98,6 +118,19 @@ mod tests {
         let h = creatorhub_headers();
         assert_eq!(value(&h, "x-creator-hub-sid"), Some("clip"));
         assert_eq!(value(&h, "Origin"), Some("https://m.naver.com"));
+    }
+
+    #[test]
+    fn signup_headers_are_clip_origin_json() {
+        // 실측: 프로필 생성/조회는 clip.naver.com/signup 컨텍스트 → Origin=clip.naver.com, Accept=json.
+        let h = creatorhub_signup_headers();
+        assert_eq!(value(&h, "x-creator-hub-sid"), Some("clip"));
+        assert_eq!(value(&h, "Origin"), Some("https://clip.naver.com"));
+        assert_eq!(value(&h, "Accept"), Some("application/json"));
+        assert_eq!(
+            value(&h, "Referer"),
+            Some("https://clip.naver.com/signup?version=light")
+        );
     }
 
     #[test]
