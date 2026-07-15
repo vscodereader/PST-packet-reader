@@ -1,26 +1,27 @@
 //! 네이버 클립 댓글용 프로필 보장(#클립). 클립은 네이버 로그인만으로는 댓글을 못 달고, 처음에
 //! "프로필 생성"을 한 번 해야 한다(사용자: 별다른 입력 없이 버튼만 누르면 됨). 자동화에서는 게시
-//! 직전에 계정마다 이 단계를 보장한다. (패킷 분석으로 확정 — 재발견하지 말 것):
+//! 직전에 계정마다 이 단계를 보장한다. (패킷 분석으로 확정 2026-07-15 `네이버 클립 프로필.pcapng` — 재발견 말 것):
 //!   1. `GET creatorhub-api/api/v1.0/clip/profiles`(헤더 x-creator-hub-sid: clip) →
 //!      `header.code==0`이면 이미 프로필 있음(스킵), `-2102`면 없음(생성 진행).
-//!   2. 없으면 `POST clip.naver.com/api/graphql`의 `NaverProfile`로 기본 nickname/profileImageUrl을 받고,
-//!   3. `SignUp` mutation으로 프로필을 만든다(성공 = `__typename=="SignUpSucceed"`).
+//!   2. 없으면 `GET creatorhub-api/api/v6.0/clip/profiles/naver-profile`로 기본 nickname/profileImageUrl을 받고,
+//!   3. `POST creatorhub-api/api/v5.0/clip/profiles`(본문 `{clipId,nickname,profileImageUrl}`)로 만든다
+//!      (성공 = `header.code==0`, 본인인증 미완료 = `-7020`).
+//!
+//! ⚠️ 예전엔 `POST clip.naver.com/api/graphql`(NaverProfile/SignUp)을 썼으나 네이버가 그 엔드포인트를
+//!    폐기해 **404**가 난다(실측). 위 creatorhub REST가 현재 유일한 경로다.
 //!
 //! # 쿠키 보안
 //! 쿠키 헤더 값은 인증 자격 증명이다. 이 모듈은 쿠키 값을 로그/에러/Debug에 절대 포함하지 않는다.
 
 use super::error::ClipError;
-use super::headers::{clip_graphql_headers, creatorhub_headers};
+use super::headers::{creatorhub_headers, creatorhub_signup_headers};
 use crate::naver_cafe::post::BROWSER_USER_AGENT;
 
-const CLIP_HOST: &str = "https://clip.naver.com";
 const CREATORHUB_HOST: &str = "https://creatorhub-api.naver.com";
-/// graphql 회원가입 컨텍스트 Referer.
-const SIGNUP_REFERER: &str = "https://clip.naver.com/signup?version=light";
 
-/// 네이버 클립 프로필 보장 클라이언트. base_url을 분리 보관해 실서버/wiremock을 함께 쓴다.
+/// 네이버 클립 프로필 보장 클라이언트. creatorhub base_url을 보관해 실서버/wiremock을 함께 쓴다.
+/// (프로필 조회·생성이 전부 creatorhub REST로 옮겨져 clip.naver.com base는 더는 필요 없다.)
 pub struct ClipProfileClient {
-    clip_base: String,
     creatorhub_base: String,
     http: reqwest::Client,
 }
@@ -28,16 +29,12 @@ pub struct ClipProfileClient {
 impl ClipProfileClient {
     /// 실서버 호스트를 사용하는 클라이언트를 생성한다.
     pub fn new() -> Self {
-        Self::with_base_urls(CLIP_HOST, CREATORHUB_HOST)
+        Self::with_base_url(CREATORHUB_HOST)
     }
 
-    /// 주입된 base_url들을 사용하는 클라이언트를 생성한다(테스트용).
-    pub fn with_base_urls(
-        clip_base: impl Into<String>,
-        creatorhub_base: impl Into<String>,
-    ) -> Self {
+    /// 주입된 creatorhub base_url을 사용하는 클라이언트를 생성한다(테스트용).
+    pub fn with_base_url(creatorhub_base: impl Into<String>) -> Self {
         Self {
-            clip_base: clip_base.into(),
             creatorhub_base: creatorhub_base.into(),
             http: crate::naver_cafe::shared_http_client(),
         }
@@ -97,38 +94,36 @@ impl ClipProfileClient {
         }
     }
 
-    /// `NaverProfile` graphql로 기본 nickname/profileImageUrl을 받는다.
+    /// `GET creatorhub v6.0/clip/profiles/naver-profile`로 기본 nickname/profileImageUrl을 받는다(실측).
+    /// 응답: `{"header":{"code":0},"body":{"nickname":..,"profileImageUrl":..}}`.
     pub async fn fetch_naver_profile(
         &self,
         cookie: Option<&str>,
     ) -> Result<(String, String), ClipError> {
-        const QUERY: &str = "query NaverProfile {\n  naverProfile {\n    nickname\n    profileImageUrl\n    __typename\n  }\n}";
-        let body = serde_json::json!({
-            "operationName": "NaverProfile",
-            "variables": {},
-            "extensions": {"clientLibrary": {"name": "@apollo/client", "version": "4.1.9"}},
-            "query": QUERY,
-        })
-        .to_string();
-        let raw = self.post_graphql(&body, cookie).await?;
+        let url = format!(
+            "{}/api/v6.0/clip/profiles/naver-profile",
+            self.creatorhub_base
+        );
+        let raw = self.get_signup(&url, cookie).await?;
         let json: serde_json::Value = serde_json::from_str(json_slice(&raw)).map_err(|_| {
-            ClipError::new("클립 NaverProfile 응답을 해석하지 못했습니다(형식 변경)")
+            ClipError::new("클립 naver-profile 응답을 해석하지 못했습니다(형식 변경)")
         })?;
-        let np = json.get("data").and_then(|d| d.get("naverProfile"));
-        let nickname = np
-            .and_then(|n| n.get("nickname"))
+        let body = json.get("body");
+        let nickname = body
+            .and_then(|b| b.get("nickname"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_owned();
-        let profile_image_url = np
-            .and_then(|n| n.get("profileImageUrl"))
+        let profile_image_url = body
+            .and_then(|b| b.get("profileImageUrl"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_owned();
         Ok((nickname, profile_image_url))
     }
 
-    /// `SignUp` mutation으로 프로필을 만든다. 성공 = `data.signUp.__typename=="SignUpSucceed"`.
+    /// `POST creatorhub v5.0/clip/profiles`로 프로필을 만든다(실측). 본문 `{clipId,nickname,profileImageUrl}`,
+    /// 성공 = `header.code==0`. 본인인증 미완료 = `-7020`.
     pub async fn sign_up(
         &self,
         clip_id: &str,
@@ -136,20 +131,14 @@ impl ClipProfileClient {
         profile_image_url: &str,
         cookie: Option<&str>,
     ) -> Result<(), ClipError> {
-        const QUERY: &str = "mutation SignUp($input: SignUpInput!) {\n  signUp(input: $input) {\n    __typename\n    ... on SignUpSucceed {\n      user {\n        id\n        clipId\n        profileId\n        __typename\n      }\n      __typename\n    }\n    ... on CommonError {\n      message\n      code\n      __typename\n    }\n  }\n}";
+        let url = format!("{}/api/v5.0/clip/profiles", self.creatorhub_base);
         let body = serde_json::json!({
-            "operationName": "SignUp",
-            "variables": {"input": {
-                "clipId": clip_id,
-                "nickname": nickname,
-                "profileImageUrl": profile_image_url,
-            }},
-            // 실측 브라우저와 동일하게 Apollo clientLibrary 확장을 싣는다(빈 {}와 차이 제거).
-            "extensions": {"clientLibrary": {"name": "@apollo/client", "version": "4.1.9"}},
-            "query": QUERY,
+            "clipId": clip_id,
+            "nickname": nickname,
+            "profileImageUrl": profile_image_url,
         })
         .to_string();
-        let raw = self.post_graphql(&body, cookie).await?;
+        let raw = self.post_signup_json(&url, &body, cookie).await?;
         // 진단: 실패 시 보낸 입력값(clipId/nickname/이미지유무)과 원본 응답을 에러에 남긴다 — 어떤
         // 입력이 -7020을 유발하는지 사후 식별용(쿠키는 없음). nickname은 그대로 노출(자격 증명 아님).
         let input_diag = format!(
@@ -160,62 +149,73 @@ impl ClipProfileClient {
                 "있음"
             }
         );
-        match parse_sign_up(&raw) {
-            SignUpResult::Succeed => Ok(()),
-            // -7020 = 본인인증(실명·연령확인) 미완료 계정(실측 확인). 네이버 정책상 코드로 우회
-            // 불가하므로, 사용자에게 본인인증을 먼저 하라고 명확히 안내한다(입력 문제 아님).
-            SignUpResult::CommonError { code, .. } if code == "-7020" => Err(ClipError::new(
+        match parse_profile_result(&raw) {
+            ProfileResult::Succeed => Ok(()),
+            // -7020 = 본인인증(실명·연령확인) 미완료 계정(실측). 네이버 정책상 코드로 우회 불가하므로,
+            // 사용자에게 본인인증을 먼저 하라고 명확히 안내한다(입력 문제 아님).
+            ProfileResult::IdentityRequired => Err(ClipError::new(
                 "네이버 클립 댓글은 본인인증(실명·연령확인)이 완료된 계정만 가능합니다. 이 계정은 \
                  본인인증이 안 돼 있어요 — 네이버 클립에 직접 로그인해 본인인증을 먼저 완료한 뒤 \
                  다시 시도하세요(code=-7020)."
                     .to_string(),
             )),
-            SignUpResult::CommonError { code, message } => Err(ClipError::new(format!(
+            ProfileResult::Error { code, message } => Err(ClipError::new(format!(
                 "클립 프로필 생성에 실패했습니다(code={code}, {message}). {input_diag} {}",
                 response_diagnostic(&raw)
             ))),
-            SignUpResult::Unknown => Err(ClipError::new(format!(
+            ProfileResult::Unknown => Err(ClipError::new(format!(
                 "클립 프로필 생성 응답을 해석하지 못했습니다(형식 변경). {input_diag} {}",
                 response_diagnostic(&raw)
             ))),
         }
     }
 
-    /// graphql POST 공통(JSON 본문, Referer=signup, 위장 헤더·쿠키·UA).
-    async fn post_graphql(&self, body: &str, cookie: Option<&str>) -> Result<String, ClipError> {
-        let url = format!("{}/api/graphql", self.clip_base);
-        let mut req = self
-            .http
-            .post(&url)
-            .header("User-Agent", BROWSER_USER_AGENT)
-            .header("Content-Type", "application/json");
-        for (name, value) in clip_graphql_headers(SIGNUP_REFERER) {
-            if name == "Content-Type" {
-                continue;
-            }
+    /// creatorhub GET 공통(signup 컨텍스트 헤더·쿠키·UA). 상태코드는 무시하고 본문을 돌려준다
+    /// (creatorhub는 비-2xx에도 `header.code`로 사유를 준다 — 호출부가 판정).
+    async fn get_signup(&self, url: &str, cookie: Option<&str>) -> Result<String, ClipError> {
+        let mut req = self.http.get(url).header("User-Agent", BROWSER_USER_AGENT);
+        for (name, value) in creatorhub_signup_headers() {
             req = req.header(name, value);
         }
         if let Some(c) = cookie {
             req = req.header("Cookie", c);
         }
-        let response = req.body(body.to_owned()).send().await.map_err(|e| {
+        Self::send_text(req).await
+    }
+
+    /// creatorhub POST 공통(JSON 본문, signup 컨텍스트 헤더·쿠키·UA).
+    async fn post_signup_json(
+        &self,
+        url: &str,
+        body: &str,
+        cookie: Option<&str>,
+    ) -> Result<String, ClipError> {
+        let mut req = self
+            .http
+            .post(url)
+            .header("User-Agent", BROWSER_USER_AGENT)
+            .header("Content-Type", "application/json");
+        for (name, value) in creatorhub_signup_headers() {
+            req = req.header(name, value);
+        }
+        if let Some(c) = cookie {
+            req = req.header("Cookie", c);
+        }
+        Self::send_text(req.body(body.to_owned())).await
+    }
+
+    /// 요청을 보내고 본문 텍스트만 받는다. 상태코드는 판정하지 않는다(creatorhub 규약).
+    async fn send_text(req: reqwest::RequestBuilder) -> Result<String, ClipError> {
+        let response = req.send().await.map_err(|e| {
             ClipError::new(crate::transport_error_message!(
                 "HTTP 전송 오류가 발생했습니다",
                 e
             ))
         })?;
-        let status = response.status();
-        let raw = response
+        response
             .text()
             .await
-            .map_err(|e| ClipError::new(format!("응답 본문 읽기 오류: {e}")))?;
-        if !status.is_success() {
-            return Err(ClipError::new(format!(
-                "클립 graphql 요청이 실패했습니다(HTTP status {})",
-                status.as_u16()
-            )));
-        }
-        Ok(raw)
+            .map_err(|e| ClipError::new(format!("응답 본문 읽기 오류: {e}")))
     }
 }
 
@@ -225,36 +225,43 @@ impl Default for ClipProfileClient {
     }
 }
 
-/// SignUp 응답 종류.
+/// 프로필 생성 응답 종류(creatorhub `header.code` 기반).
 #[derive(Debug, PartialEq, Eq)]
-enum SignUpResult {
+enum ProfileResult {
     Succeed,
-    CommonError { code: String, message: String },
+    /// 본인인증(실명·연령) 미완료(code=-7020, 실측). 코드로 우회 불가 — 사용자 안내.
+    IdentityRequired,
+    Error { code: String, message: String },
     Unknown,
 }
 
-/// `data.signUp.__typename`으로 SignUp 결과를 판정한다(순수).
-fn parse_sign_up(body: &str) -> SignUpResult {
+/// creatorhub 프로필 생성 응답을 판정한다(순수). `header.code==0`=성공, `-7020`(또는 메시지에
+/// 본인인증/실명)=본인인증 미완료, 그 외 코드=에러. header가 없으면 Unknown(형식변경/HTML 404 등).
+fn parse_profile_result(body: &str) -> ProfileResult {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(json_slice(body)) else {
-        return SignUpResult::Unknown;
+        return ProfileResult::Unknown;
     };
-    let Some(sign_up) = json.get("data").and_then(|d| d.get("signUp")) else {
-        return SignUpResult::Unknown;
+    let Some(header) = json.get("header") else {
+        return ProfileResult::Unknown;
     };
-    match sign_up.get("__typename").and_then(|v| v.as_str()) {
-        Some("SignUpSucceed") => SignUpResult::Succeed,
-        Some("CommonError") => SignUpResult::CommonError {
-            code: sign_up
-                .get("code")
-                .map(|v| v.to_string())
-                .unwrap_or_default(),
-            message: sign_up
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_owned(),
+    let Some(code) = header.get("code").and_then(|c| c.as_i64()) else {
+        return ProfileResult::Unknown;
+    };
+    let message = header
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    match code {
+        0 => ProfileResult::Succeed,
+        -7020 => ProfileResult::IdentityRequired,
+        _ if message.contains("본인인증") || message.contains("실명") => {
+            ProfileResult::IdentityRequired
+        }
+        other => ProfileResult::Error {
+            code: other.to_string(),
+            message,
         },
-        _ => SignUpResult::Unknown,
     }
 }
 
@@ -323,7 +330,7 @@ fn json_slice(body: &str) -> &str {
 mod tests {
     use super::*;
     use wiremock::{
-        matchers::{body_string_contains, header, method, path},
+        matchers::{header, method, path},
         Mock, MockServer, ResponseTemplate,
     };
 
@@ -341,23 +348,31 @@ mod tests {
     }
 
     #[test]
-    fn parse_sign_up_distinguishes_outcomes() {
+    fn parse_profile_result_distinguishes_outcomes() {
+        // 실측 성공 응답 모양(header.code==0 + body.profileId).
         assert_eq!(
-            parse_sign_up(
-                r#"{"data":{"signUp":{"__typename":"SignUpSucceed","user":{"profileId":"P"}}}}"#
+            parse_profile_result(
+                r#"{"header":{"code":0,"message":""},"body":{"profileId":"P","clipId":"c"}}"#
             ),
-            SignUpResult::Succeed
+            ProfileResult::Succeed
         );
         assert_eq!(
-            parse_sign_up(
-                r#"{"data":{"signUp":{"__typename":"CommonError","code":409,"message":"중복"}}}"#
-            ),
-            SignUpResult::CommonError {
+            parse_profile_result(r#"{"header":{"code":-7020,"message":null}}"#),
+            ProfileResult::IdentityRequired
+        );
+        assert_eq!(
+            parse_profile_result(r#"{"header":{"code":409,"message":"이미 사용중"}}"#),
+            ProfileResult::Error {
                 code: "409".into(),
-                message: "중복".into()
+                message: "이미 사용중".into()
             }
         );
-        assert_eq!(parse_sign_up("garbage"), SignUpResult::Unknown);
+        assert_eq!(parse_profile_result("garbage"), ProfileResult::Unknown);
+        // header 없는 HTML 404 등 → Unknown.
+        assert_eq!(
+            parse_profile_result("<html>404</html>"),
+            ProfileResult::Unknown
+        );
     }
 
     #[test]
@@ -394,14 +409,13 @@ mod tests {
             )
             .mount(&creatorhub)
             .await;
-        // clip_base는 안 쓰이지만 형식상 주입.
-        let client = ClipProfileClient::with_base_urls("http://unused", creatorhub.uri());
+        let client = ClipProfileClient::with_base_url(creatorhub.uri());
         client.ensure_profile(None).await.expect("이미 있으면 스킵");
     }
 
     #[tokio::test]
     async fn ensure_profile_creates_when_missing() {
-        let clip = MockServer::start().await;
+        // 실측 흐름: v1.0 없음(-2102) → v6.0 naver-profile로 닉/이미지 → v5.0 POST로 생성.
         let creatorhub = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v1.0/clip/profiles"))
@@ -411,37 +425,41 @@ mod tests {
             )
             .mount(&creatorhub)
             .await;
-        Mock::given(method("POST"))
-            .and(path("/api/graphql"))
-            .and(body_string_contains("NaverProfile"))
+        Mock::given(method("GET"))
+            .and(path("/api/v6.0/clip/profiles/naver-profile"))
+            .and(header("x-creator-hub-sid", "clip"))
             .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"{"data":{"naverProfile":{"nickname":"닉","profileImageUrl":"http://img"}}}"#,
+                r#"{"header":{"code":0},"body":{"nickname":"닉네임","profileImageUrl":"http://img"}}"#,
             ))
-            .mount(&clip)
+            .mount(&creatorhub)
             .await;
         Mock::given(method("POST"))
-            .and(path("/api/graphql"))
-            .and(body_string_contains("SignUp"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"data":{"signUp":{"__typename":"SignUpSucceed","user":{"id":"U","clipId":"c1","profileId":"P"}}}}"#))
-            .mount(&clip)
+            .and(path("/api/v5.0/clip/profiles"))
+            .and(header("x-creator-hub-sid", "clip"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"header":{"code":0},"body":{"profileId":"P","clipId":"c1"}}"#,
+            ))
+            .mount(&creatorhub)
             .await;
-        let client = ClipProfileClient::with_base_urls(clip.uri(), creatorhub.uri());
+        let client = ClipProfileClient::with_base_url(creatorhub.uri());
         client.ensure_profile(None).await.expect("생성 성공");
     }
 
     #[tokio::test]
-    async fn sign_up_common_error_surfaces_message_and_trace() {
-        let clip = MockServer::start().await;
+    async fn sign_up_error_surfaces_message_and_trace() {
+        let creatorhub = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/graphql"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"data":{"signUp":{"__typename":"CommonError","code":409,"message":"이미 사용중"}}}"#))
-            .mount(&clip)
+            .and(path("/api/v5.0/clip/profiles"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"header":{"code":409,"message":"이미 사용중"}}"#,
+            ))
+            .mount(&creatorhub)
             .await;
-        let client = ClipProfileClient::with_base_urls(clip.uri(), "http://unused");
+        let client = ClipProfileClient::with_base_url(creatorhub.uri());
         let err = client
-            .sign_up("cabc", "닉", "http://img", None)
+            .sign_up("cabc", "닉네임", "http://img", None)
             .await
-            .expect_err("CommonError는 실패");
+            .expect_err("에러 코드는 실패");
         assert!(err.message().contains("이미 사용중"));
         assert!(err.trace().contains("at "));
     }
@@ -449,15 +467,15 @@ mod tests {
     #[tokio::test]
     async fn sign_up_7020_maps_to_identity_verification_message() {
         // -7020 = 본인인증 미완료 → code 대신 본인인증 안내 메시지로 바꾼다.
-        let clip = MockServer::start().await;
+        let creatorhub = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/graphql"))
+            .and(path("/api/v5.0/clip/profiles"))
             .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"{"data":{"signUp":{"__typename":"CommonError","message":null,"code":-7020}}}"#,
+                r#"{"header":{"code":-7020,"message":null}}"#,
             ))
-            .mount(&clip)
+            .mount(&creatorhub)
             .await;
-        let client = ClipProfileClient::with_base_urls(clip.uri(), "http://unused");
+        let client = ClipProfileClient::with_base_url(creatorhub.uri());
         let err = client
             .sign_up("iodsx8sl11", "iodsx8sl11", "http://img", None)
             .await
