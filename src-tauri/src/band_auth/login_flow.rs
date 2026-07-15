@@ -833,11 +833,18 @@ fn handle_signup_final(client: &mut CdpClient) -> Result<bool, AutomationError> 
         else if(inputs.length>=3){{setVal(inputs[0],Y);setVal(inputs[1],M);setVal(inputs[2],D);}}\
         else for(const i of inputs){{const h=(i.placeholder||'')+(i.name||'')+(i.id||'');\
             if(/(birth|생년|년|month|month|day|일|월)/i.test(h))setVal(i,YMD);}}\
+        const boxes=Array.prototype.slice.call(document.querySelectorAll('[role=\"checkbox\"]'))\
+            .filter(cb=>cb.id!=='keep');\
+        const chk=cb=>cb.getAttribute('aria-checked')==='true'||cb.checked===true;\
+        const toggle=el=>{{if(!el)return;el.click();\
+            if(!chk(el))el.dispatchEvent(new MouseEvent('click',{{bubbles:true}}));\
+            if(!chk(el))el.dispatchEvent(new KeyboardEvent('keydown',{{key:' ',keyCode:32,bubbles:true}}));}};\
+        let all=document.querySelector('#agree_select');\
+        if(!all)all=boxes.find(cb=>{{const t=String((cb.parentElement||cb).textContent||'').replace(/\\s+/g,'');\
+            return t.indexOf('전체동의')>=0||t.indexOf('모두동의')>=0;}});\
+        if(all&&!chk(all))toggle(all);\
+        for(const cb of boxes){{if(!chk(cb))toggle(cb);}}\
         const cbs=Array.prototype.slice.call(document.querySelectorAll('input[type=checkbox]'));\
-        const all=Array.prototype.slice.call(document.querySelectorAll('label,button,a,span,div'))\
-            .find(e=>{{const t=String(e.textContent||'').replace(/\\s+/g,'');\
-                return t.indexOf('전체동의')>=0||t.indexOf('모두동의')>=0;}});\
-        if(all)all.click();\
         for(const cb of cbs){{if(!cb.checked)cb.click();\
             if(!cb.checked&&cb.closest('label'))cb.closest('label').click();}}\
         const inputDiag=inputs.map(i=>(i.type||'text')+':'+(i.id||i.name||i.placeholder||'?')+'='+String(i.value).slice(0,10));\
@@ -876,29 +883,35 @@ fn handle_signup_final(client: &mut CdpClient) -> Result<bool, AutomationError> 
 // OAuth 동의 페이지에서 (1) 전체동의(agree-all) 체크박스를 먼저 체크하고 (2) 동의/확인 버튼을 좌표
 // 마우스 클릭한다(best-effort). 자동 리다이렉트라 눌 게 없으면 no-op(false).
 fn click_oauth_consent(client: &mut CdpClient) -> Result<bool, AutomationError> {
-    // (1) 개인정보 제3자 제공 동의([필수]: 이용자식별자·네이버아이디·이름·이메일·프로필사진 —
-    //     service_scope profile/id·naverid·name·naveremail·profileimage) 전부 체크. 하나만 켜던
-    //     문제로 자동 선택이 안 됐다. 전체동의 요소 + 모든 체크박스 + 라벨(styled 체크박스 대비)을
-    //     눌러 전부 켠다. 동시에 화면 구조(체크박스 상태·버튼 후보·URL)를 진단으로 받아 로그에
-    //     원문을 남긴다 — 그래도 안 켜지면 이 로그가 실제 셀렉터를 드러낸다(형님 "로그에 원문" 원칙).
+    // (1) 동의 체크박스 전부 체크. **실측(패킷 2026-07-15 밴드 다양한 경우)**: 네이버 OAuth 동의
+    //     체크박스는 `<input type=checkbox>`가 아니라 `<div role="checkbox" aria-checked>`(커스텀)다 —
+    //     예전 `input[type=checkbox]` 조회가 0개를 봐 아무것도 못 켜고 "동의하기"가 막혔다(cbCount:0).
+    //     전체동의(#agree_select) 하나만 클릭하면 네이버 JS(agreeAllEventCallbackFunc)가 필수([필수]
+    //     개인정보 제3자 제공, meta-mandatory) 포함 전부 cascade 한다. 로그인 유지(id=keep)는 제외.
+    //     진단으로 각 role=checkbox의 aria-checked 상태를 남겨 안 켜지면 로그가 원문을 드러낸다.
     const CHECK_ALL_JS: &str = "(()=>{\
+        const boxes=Array.prototype.slice.call(document.querySelectorAll('[role=\"checkbox\"]'))\
+            .filter(cb=>cb.id!=='keep');\
+        const chk=cb=>cb.getAttribute('aria-checked')==='true'||cb.checked===true;\
+        const toggle=el=>{if(!el)return;el.click();\
+            if(!chk(el))el.dispatchEvent(new MouseEvent('click',{bubbles:true}));\
+            if(!chk(el))el.dispatchEvent(new KeyboardEvent('keydown',{key:' ',keyCode:32,bubbles:true}));};\
+        let all=document.querySelector('#agree_select');\
+        if(!all)all=boxes.find(cb=>{const t=String((cb.parentElement||cb).textContent||'').replace(/\\s+/g,'');\
+            return t.indexOf('전체동의')>=0||t.indexOf('모두동의')>=0;});\
+        if(all&&!chk(all))toggle(all);\
+        for(const cb of boxes){if(!chk(cb))toggle(cb);}\
         const cbs=Array.prototype.slice.call(document.querySelectorAll('input[type=checkbox]'));\
-        const all=Array.prototype.slice.call(document.querySelectorAll('label,button,a,span,div'))\
-            .find(e=>{const t=String(e.textContent||'').replace(/\\s+/g,'');\
-                return t.indexOf('전체동의')>=0||t.indexOf('모두동의')>=0;});\
-        if(all)all.click();\
-        const before=cbs.map(cb=>cb.checked);\
-        for(const cb of cbs){\
-            if(!cb.checked)cb.click();\
-            if(!cb.checked&&cb.id){const l=document.querySelector('label[for=\"'+cb.id+'\"]');if(l)l.click();}\
+        for(const cb of cbs){if(!cb.checked)cb.click();\
             if(!cb.checked&&cb.closest('label'))cb.closest('label').click();}\
-        const states=cbs.map(cb=>(cb.id||cb.name||'?')+':'+cb.checked);\
+        const states=boxes.map(cb=>(cb.id||(cb.getAttribute('meta-mandatory')==='true'?'[필수]':'?'))\
+            +':'+cb.getAttribute('aria-checked'));\
         const btns=Array.prototype.slice.call(\
             document.querySelectorAll('button,a,input[type=submit],input[type=button]'))\
             .map(b=>String(b.innerText||b.textContent||b.value||'').replace(/\\s+/g,' ').trim())\
             .filter(t=>t.length>0&&t.length<24);\
-        return JSON.stringify({url:location.href,cbCount:cbs.length,before:before,\
-            after:states,allBtn:!!all,buttons:btns.slice(0,15)});})()";
+        return JSON.stringify({url:location.href,roleCbCount:boxes.length,agreeAll:!!all,\
+            after:states,buttons:btns.slice(0,15)});})()";
     let diag = client.evaluate_string(CHECK_ALL_JS).unwrap_or_default();
     tracing::info!("[BAND] OAuth 동의 화면 처리(원문 구조) — {diag}");
 
@@ -906,8 +919,8 @@ fn click_oauth_consent(client: &mut CdpClient) -> Result<bool, AutomationError> 
     const CENTER_JS: &str = "(()=>{\
         const vis=el=>{if(!el)return false;const r=el.getBoundingClientRect();\
             return r.width>0&&r.height>0&&el.offsetParent!==null&&!el.disabled;};\
-        let el=document.querySelector('#agree_btn')||document.querySelector('#agree')\
-            ||document.querySelector('#btnAgree');\
+        let el=document.querySelector('button.btn.agree')||document.querySelector('#agree_btn')\
+            ||document.querySelector('#agree')||document.querySelector('#btnAgree');\
         if(!vis(el)){el=null;\
             const cs=Array.prototype.slice.call(\
                 document.querySelectorAll('button, a, input[type=submit], input[type=button]'));\
@@ -927,8 +940,8 @@ fn click_oauth_consent(client: &mut CdpClient) -> Result<bool, AutomationError> 
         .evaluate_bool(
             "(()=>{const vis=el=>{if(!el)return false;const r=el.getBoundingClientRect();\
                 return r.width>0&&r.height>0&&el.offsetParent!==null&&!el.disabled;};\
-             let el=document.querySelector('#agree_btn')||document.querySelector('#agree')\
-                 ||document.querySelector('#btnAgree');\
+             let el=document.querySelector('button.btn.agree')||document.querySelector('#agree_btn')\
+                 ||document.querySelector('#agree')||document.querySelector('#btnAgree');\
              if(!vis(el)){el=null;\
                  const cs=Array.prototype.slice.call(\
                      document.querySelectorAll('button, a, input[type=submit], input[type=button]'));\
