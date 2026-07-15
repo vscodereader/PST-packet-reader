@@ -2,11 +2,20 @@
 //
 // 핵심: 서버가 떠 있지 않은 **오프라인 미리보기**에서도 화면이 깨지지 않게, fetch 실패(연결 불가)는
 // `OfflineError`로 던진다. 각 화면은 이를 잡아 기존 더미 데이터로 폴백한다(UI 무손상).
-// 서버 주소는 `VITE_ADMIN_API`로 주입(기본 http://localhost:8080). **배포 전 결정**(주소/포트/TLS).
+// 서버 주소 결정: `VITE_ADMIN_API`(명시 주입) 우선 → 없으면 dev는 로컬 서버(localhost:8080),
+// 프로덕션 빌드는 **자기를 서빙한 origin**(window.location.origin). 서버(server/)가 Admin 웹을
+// 자기 origin에서 서빙하므로(routes.rs), 배포본은 별도 URL 주입 없이 같은 도메인으로 요청이 가고
+// (CORS 불필요), device-connection 화면에 뜨는 "하위 접속 주소"도 실제 배포 URL로 정확해진다.
+function defaultBase(): string {
+  if (import.meta.env.DEV) return "http://localhost:8080";
+  return typeof window !== "undefined" && window.location.origin
+    ? window.location.origin
+    : "";
+}
 
 const BASE =
   (import.meta.env.VITE_ADMIN_API as string | undefined)?.replace(/\/+$/, "") ??
-  "http://localhost:8080";
+  defaultBase();
 
 const TOKEN_KEY = "pstmacro.admin.token";
 const LOGIN_KEY = "pstmacro.admin.login";
