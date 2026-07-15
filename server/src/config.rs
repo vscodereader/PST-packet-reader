@@ -36,13 +36,28 @@ pub struct Config {
 const DEV_JWT_SECRET: &str = "dev-only-insecure-jwt-secret-change-me";
 const DEV_ENC_KEY: &[u8; 32] = b"pstmacro-dev-only-enc-key-32byte";
 
+/// 바인드 주소를 결정한다(순수). 우선순위: **`PORT`**(Cloud Run이 주입, 그 포트로 listen 필수) >
+/// `PSTMACRO_BIND`(회사 고정 배포) > 기본 `0.0.0.0:8080`. Cloud Run은 PORT 숫자만 주므로 0.0.0.0에 붙인다.
+fn resolve_bind_addr(port: Option<String>, bind: Option<String>) -> String {
+    if let Some(p) = port.map(|p| p.trim().to_owned()).filter(|p| !p.is_empty()) {
+        return format!("0.0.0.0:{p}");
+    }
+    bind.map(|b| b.trim().to_owned())
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| "0.0.0.0:8080".to_owned())
+}
+
 impl Config {
     pub fn from_env() -> Self {
         let jwt_env = env::var("PSTMACRO_JWT_SECRET").ok();
         let jwt_is_default = jwt_env.as_deref().map_or(true, |s| s == DEV_JWT_SECRET);
         let (enc_key, enc_is_default) = load_enc_key();
         Config {
-            bind_addr: env::var("PSTMACRO_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into()),
+            // Cloud Run 호환: PORT 우선(그 포트로 listen 필수), 없으면 PSTMACRO_BIND/기본.
+            bind_addr: resolve_bind_addr(
+                env::var("PORT").ok(),
+                env::var("PSTMACRO_BIND").ok(),
+            ),
             jwt_secret: jwt_env
                 .unwrap_or_else(|| DEV_JWT_SECRET.into())
                 .into_bytes(),
@@ -75,4 +90,33 @@ fn load_enc_key() -> ([u8; 32], bool) {
     }
     // 개발 전용 고정 키. 운영에서는 반드시 환경변수 주입(없으면 기동 시 거부, main.rs).
     (*DEV_ENC_KEY, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_bind_addr;
+
+    #[test]
+    fn port_env_wins_and_binds_all_interfaces() {
+        // Cloud Run: PORT 주입 → 그 포트로 0.0.0.0 바인드(PSTMACRO_BIND 있어도 PORT 우선).
+        assert_eq!(
+            resolve_bind_addr(Some("8080".into()), Some("127.0.0.1:9999".into())),
+            "0.0.0.0:8080"
+        );
+        assert_eq!(
+            resolve_bind_addr(Some(" 3000 ".into()), None),
+            "0.0.0.0:3000"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_bind_then_default() {
+        // PORT 없으면 PSTMACRO_BIND, 그것도 없으면 기본.
+        assert_eq!(
+            resolve_bind_addr(None, Some("0.0.0.0:8081".into())),
+            "0.0.0.0:8081"
+        );
+        assert_eq!(resolve_bind_addr(None, None), "0.0.0.0:8080");
+        assert_eq!(resolve_bind_addr(Some("".into()), Some("".into())), "0.0.0.0:8080");
+    }
 }

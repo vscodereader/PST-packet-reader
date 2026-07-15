@@ -897,6 +897,10 @@ pub(crate) struct CdpClient {
     // 포함하는 URL 의 첫 요청을 잡는다. 신고 제출은 페이지 SDK 가 `POST /api/report` 를 직접 쏘므로,
     // 이 감시자로 요청 바디(진짜 ncaptchaTokenId)·응답을 CDP 이벤트에서 건져 성공을 판정한다. None 이면 미감시.
     net_watch: Option<(String, NetworkCapture)>,
+    // 네이티브 JS 다이얼로그(alert/confirm)를 **뜨는 즉시** 자동 수락할지. 신고 브라우저에서만 켠다
+    // (opt-in). 켜지면 read 루프가 `Page.javascriptDialogOpening` 이벤트를 보는 순간 바로
+    // `Page.handleJavaScriptDialog{accept:true}`를 쏴, 성공 alert가 응답 대기(수 초)를 막지 않게 한다.
+    auto_accept_dialogs: bool,
 }
 
 impl CdpClient {
@@ -912,7 +916,14 @@ impl CdpClient {
             net_recent: Vec::new(),
             page_loads: 0,
             net_watch: None,
+            auto_accept_dialogs: false,
         })
+    }
+
+    /// 네이티브 JS 다이얼로그 자동수락을 켠다(신고 브라우저 전용 opt-in). 켜면 성공 alert가 뜨는 즉시
+    /// read 루프가 수락해, 응답 대기·창 종료·다음 글 진행을 막지 않는다.
+    pub(crate) fn set_auto_accept_dialogs(&mut self, on: bool) {
+        self.auto_accept_dialogs = on;
     }
 
     // Chrome 디버그 포트로 WebSocket을 새로 맺는다(연결·재접속 공용). 대상 탭을 고르고 TCP·핸드셰이크
@@ -997,6 +1008,17 @@ impl CdpClient {
             }
         }
         Ok(())
+    }
+
+    /// 열려 있는 네이티브 JS 다이얼로그(alert/confirm)를 **수락(OK)** 한다. 신고 성공 시 네이버가
+    /// `alert("신고가 성공적으로 접수되었습니다.")`를 띄우는데, 이 모달이 열려 있으면 페이지·창 종료가
+    /// 막혀 단건 신고 후 크롬이 사람이 엔터를 칠 때까지 안 닫힌다(2026-07-14 CDP 로그 근거:
+    /// `Page.javascriptDialogOpening type=alert`). 이 호출로 자동 수락해 크롬이 바로 닫히게 한다.
+    /// 열린 다이얼로그가 없으면 CDP가 에러를 주지만 그건 "닫을 게 없었다"는 정상이라 조용히 false로
+    /// 흘린다(Page 도메인은 `enable_page_only`로 이미 켜져 있어야 이벤트/수락이 동작한다).
+    pub(crate) fn accept_pending_js_dialog(&mut self) -> bool {
+        self.call("Page.handleJavaScriptDialog", json!({ "accept": true }))
+            .is_ok()
     }
 
     /// 신고 토큰 브라우저용: Network 도메인을 켜고 이 계정의 네이버 세션 쿠키를 CDP로 주입한다.
@@ -1116,6 +1138,21 @@ impl CdpClient {
                         // 새 페이지의 window.load 가 실제로 발생 — 카운터로 남겨, 대기 로직이
                         // stale readyState 오판 없이 "진짜 로드 완료"를 판정하게 한다.
                         self.page_loads = self.page_loads.wrapping_add(1);
+                    }
+                    // 신고 브라우저(opt-in): 네이티브 alert/confirm 이 뜨는 **바로 그 이벤트**를 여기서
+                    // 보는 즉시 수락한다. 그래야 "신고가 성공적으로 접수되었습니다" alert 가 응답 대기·창
+                    // 종료·다음 글 진행을 막지 않는다(모달 alert 는 JS 를 얼려 폴링까지 멈추게 한다).
+                    if self.auto_accept_dialogs && method == "Page.javascriptDialogOpening" {
+                        self.next_id += 1;
+                        let accept_id = self.next_id;
+                        let payload = json!({
+                            "id": accept_id,
+                            "method": "Page.handleJavaScriptDialog",
+                            "params": { "accept": true },
+                        });
+                        // fire-and-forget: 응답은 이 루프가 나중에 non-matching id 로 읽고 흘린다.
+                        let _ = self.send_message(Message::Text(payload.to_string()));
+                        tracing::info!(target: "report", "[REPORT-SUBMIT] alert 자동 수락(뜨는 즉시)");
                     }
                     self.record_network_event(method, &value);
                 }

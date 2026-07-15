@@ -213,28 +213,28 @@ pub struct ReportTarget {
 /// profile/users → encryptedUserId 체인을 타며, 같은 by-item 응답에서 title/nickname 도 함께 뽑는다
 /// (표시용이라 없어도 실패시키지 않는다). 순수 파싱은 위 함수들로 분리·테스트되고, 여기서는 네트워크
 /// 왕복만 담당한다.
+/// 종토 글 **단건 조회** API URL(순수 함수, 실측 link.pcapng). 글 번호로 바로 조회하면 응답에
+/// writer(profileId/nickname/encryptedUserId)·title 이 포함된다. viewerProfileId 는 비워도 된다(실측).
+fn build_post_detail_url(post_id: &str) -> String {
+    format!("https://stock.naver.com/api/community/discussion/posts/{post_id}?viewerProfileId=")
+}
+
 pub fn resolve_target(
     http: &ReportHttp,
     link: &DiscussionLink,
 ) -> Result<ReportTarget, ReportError> {
-    // 실측(신고 패킷 + 400 응답 원문 확정): by-item 은 bool 파라미터 isHolderOnly/excludesItemNews/
-    // isItemNewsOnly 를 **필수**로 요구한다(누락 시 400 `{"fieldErrors":{...:["Required"]}}`). 브라우저와
-    // 동일하게 셋 다 false 로 붙인다. isCleanbotPassedOnly=false 는 서버가 그대로 받아들인다(에러 없음).
-    let by_item_url = format!(
-        "https://stock.naver.com/api/community/discussion/posts/by-item\
-?discussionType=domesticStock&itemCode={}\
-&isHolderOnly=false&excludesItemNews=false&isItemNewsOnly=false\
-&isCleanbotPassedOnly=false&pageSize=30",
-        link.item_code
-    );
-    let by_item = http
-        .get_json(&by_item_url)
-        .map_err(|e| ReportError::Resolve(format!("by-item 조회 실패({}): {e}", link.item_code)))?;
+    // 글 번호로 **직접 단건 조회**한다(실측: link.pcapng, 2026-07-15). 예전엔 by-item(최근 N개) 목록을
+    // 훑어 그 안에서 글을 찾았는데, 삼성전자처럼 글이 폭주하는 게시판은 대상 글이 목록 밖으로 밀려
+    // "profileId 못 찾음" 이 났다. 단건 API 는 글 번호로 바로 writer(profileId/nickname)·title 을 주므로
+    // 아무리 오래된 글도 100% 찾는다.
+    let post_url = build_post_detail_url(&link.post_id);
+    let post = http
+        .get_json(&post_url)
+        .map_err(|e| ReportError::Resolve(format!("글 조회 실패(id={}): {e}", link.post_id)))?;
+    // 단건 응답(객체)을 배열로 감싸 기존 순수 추출기(id==post_id 매칭)를 그대로 재사용한다.
+    let by_item = serde_json::json!([post]);
     let profile_id = extract_profile_id(&by_item, &link.post_id).ok_or_else(|| {
-        ReportError::Resolve(format!(
-            "by-item 목록에서 글 id={} 의 profileId를 찾지 못함",
-            link.post_id
-        ))
+        ReportError::Resolve(format!("글 응답에 profileId 없음(id={})", link.post_id))
     })?;
     // 표시 전용(ctitle/cnickname) — best-effort. 없으면 빈 문자열(신고는 계속 진행).
     let title = extract_post_title(&by_item, &link.post_id).unwrap_or_default();
@@ -334,6 +334,39 @@ mod tests {
     fn extracts_profile_id_returns_none_when_absent() {
         let body = json!({ "posts": [ { "id": "1", "writer": { "profileId": "x" } } ] });
         assert_eq!(extract_profile_id(&body, "425406371"), None);
+    }
+
+    #[test]
+    fn build_post_detail_url_targets_single_post_by_id() {
+        // 목록 스캔 대신 글 번호로 직접 조회(실측 link.pcapng).
+        assert_eq!(
+            build_post_detail_url("425499009"),
+            "https://stock.naver.com/api/community/discussion/posts/425499009?viewerProfileId="
+        );
+    }
+
+    #[test]
+    fn single_post_object_wrapped_in_array_resolves_via_extractors() {
+        // 단건 조회 응답(객체)을 [post]로 감싸면 기존 추출기가 그대로 동작한다(실측 스키마).
+        let post = json!({
+            "id": "425499009",
+            "title": "장중에는 모르겠지만",
+            "writer": { "profileId": "28660207663051431", "nickname": "가포선비",
+                        "encryptedUserId": "T4zAmVnGrU1P1FDXbQ89dATsCyW/FaItxC6O6CzsFrI=" }
+        });
+        let wrapped = json!([post]);
+        assert_eq!(
+            extract_profile_id(&wrapped, "425499009"),
+            Some("28660207663051431".to_owned())
+        );
+        assert_eq!(
+            extract_writer_nickname(&wrapped, "425499009"),
+            Some("가포선비".to_owned())
+        );
+        assert_eq!(
+            extract_post_title(&wrapped, "425499009"),
+            Some("장중에는 모르겠지만".to_owned())
+        );
     }
 
     #[test]

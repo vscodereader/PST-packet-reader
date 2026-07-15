@@ -4,8 +4,12 @@ import type { OglinkMeta, PlaceResult, UploadedImage } from "@/shared/ipc";
 
 import {
   createCodeBlock,
+  createFileUploadBlock,
   createImageBlock,
+  createImageUploadBlock,
   createOglinkBlock,
+  createOglinkUrlBlock,
+  stripDataUrlPrefix,
   createPlacesMapBlock,
   createScheduleBlock,
   createStickerBlock,
@@ -91,6 +95,30 @@ describe("blocks model", () => {
     const b = createStickerBlock("motion2d_01", 10);
     expect(b.packCode).toBe("motion2d_01");
     expect(b.seq).toBe(10);
+  });
+
+  it("createImageUploadBlock/createFileUploadBlock carry base64 + fileName (raw, remote)", () => {
+    const img = createImageUploadBlock("AAAA", "a.png");
+    expect(img.type).toBe("imageUpload");
+    expect(img.dataBase64).toBe("AAAA");
+    expect(img.fileName).toBe("a.png");
+    const file = createFileUploadBlock("Qk0=", "b.pdf");
+    expect(file.type).toBe("fileUpload");
+    expect(file.dataBase64).toBe("Qk0=");
+    expect(file.fileName).toBe("b.pdf");
+  });
+
+  it("createOglinkUrlBlock carries only the raw URL (resolved later by sub-agent)", () => {
+    const b = createOglinkUrlBlock("https://naver.com");
+    expect(b.type).toBe("oglinkUrl");
+    expect(b.link).toBe("https://naver.com");
+  });
+
+  it("stripDataUrlPrefix removes the data-URL prefix but leaves pure base64 intact", () => {
+    expect(stripDataUrlPrefix("data:image/png;base64,AAAABBBB")).toBe(
+      "AAAABBBB",
+    );
+    expect(stripDataUrlPrefix("AAAABBBB")).toBe("AAAABBBB"); // 이미 순수면 그대로
   });
 
   it("createPlacesMapBlock builds a single place from search result", () => {
