@@ -111,6 +111,7 @@ describe("publish-command 헬퍼", () => {
       { loginId: "b1", platform: "blog", status: "active" },
       { loginId: "k1", platform: "clip", status: "active" },
       { loginId: "d1", platform: "band", status: "active" },
+      { loginId: "d2", platform: "band", status: "new" }, // 사용전 밴드 — 카페처럼 보여야 함
       { loginId: "old", status: "active" }, // platform 없음 → forum으로 본다
     ];
     it("종토는 platform=forum && active만 (카페·블로그 안 섞임)", () => {
@@ -120,10 +121,12 @@ describe("publish-command 헬퍼", () => {
     it("카페는 platform=naver 전부 (상태 무관 — 게시순간 로그인)", () => {
       expect(filterAccountsByTarget("cafe", rows)).toEqual(["c1", "c2"]);
     });
-    it("블로그/클립/밴드는 자기 platform && active만", () => {
+    it("밴드는 platform=band 전부 (상태 무관 — 카페처럼 게시순간 로그인, 사용전도 노출)", () => {
+      expect(filterAccountsByTarget("band", rows)).toEqual(["d1", "d2"]);
+    });
+    it("블로그/클립은 자기 platform && active만", () => {
       expect(filterAccountsByTarget("blog", rows)).toEqual(["b1"]);
       expect(filterAccountsByTarget("clip", rows)).toEqual(["k1"]);
-      expect(filterAccountsByTarget("band", rows)).toEqual(["d1"]);
     });
     it("rows 없거나 비면 null (호출부 더미 폴백)", () => {
       expect(filterAccountsByTarget("forum", undefined)).toBeNull();
