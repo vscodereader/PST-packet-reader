@@ -1,0 +1,96 @@
+# server(pstmacro-server, Admin 중앙 서버) → GCP Cloud Run 배포.
+# master 브랜치의 서버/프론트/Dockerfile 변경 시 이미지 빌드 → Artifact Registry push → Cloud Run 배포.
+# 인증은 Workload Identity Federation(키리스, GitHub에 SA 키 없음). 초기 셋업: scripts/setup-gcp-cloud-run.sh
+#
+# ⚠️ bambi-app 대비 단순화: pstmacro 서버는 연결 시 스키마를 멱등하게 적용하므로(server/src/repo/postgres.rs)
+#    별도 DB 마이그레이션 스텝이 없다. Cloud SQL만 붙이면 첫 요청에서 테이블이 생성된다.
+name: deploy-server
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "server/**"
+      - "src/**"
+      - "index.html"
+      - "admin.html"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "vite.config.ts"
+      - "Dockerfile"
+      - ".dockerignore"
+      - ".github/workflows/deploy-server.yml"
+  workflow_dispatch: # 수동 배포 버튼
+
+concurrency:
+  group: deploy-server-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: pstmacro-gcp
+  REGION: asia-northeast3
+  REPOSITORY: pstmacro
+  SERVICE: pstmacro-server
+  SQL_INSTANCE: pstmacro-db
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # WIF OIDC 토큰 발급
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure docker for Artifact Registry
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/server:${{ github.sha }}
+            ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/server:latest
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,mode=max,scope=server
+
+      # 서버는 Cloud Run이 주입하는 $PORT로 listen(config.rs가 PORT 우선 처리).
+      # SSE 허브 + 인메모리 상태 + 예약 스케줄러가 인스턴스별이라 min=max=1 로 고정하고
+      # CPU 항상 할당(--no-cpu-throttling). SSE 장수명 연결 위해 --timeout=3600, --session-affinity.
+      # 민감값(DB URL·JWT·ENC 키)은 Secret Manager에서 주입 — GitHub엔 시크릿 없음.
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "$SERVICE" \
+            --image="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/server:${GITHUB_SHA}" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --platform=managed \
+            --allow-unauthenticated \
+            --min-instances=1 \
+            --max-instances=1 \
+            --no-cpu-throttling \
+            --cpu=1 \
+            --memory=512Mi \
+            --timeout=3600 \
+            --session-affinity \
+            --add-cloudsql-instances="${PROJECT_ID}:${REGION}:${SQL_INSTANCE}" \
+            --set-secrets="DATABASE_URL=${SERVICE}-database-url:latest,PSTMACRO_JWT_SECRET=${SERVICE}-jwt-secret:latest,PSTMACRO_ENC_KEY=${SERVICE}-enc-key:latest"
+
+      - name: Show service URL
+        run: |
+          gcloud run services describe "$SERVICE" \
+            --region="$REGION" --project="$PROJECT_ID" \
+            --format='value(status.url)'
