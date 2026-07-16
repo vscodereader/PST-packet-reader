@@ -675,7 +675,7 @@ fn result_dom_gate_open(streak: u32) -> bool {
 // 실제로 붙은 것이다. wtm.pstatic.net=봇탐지 번들, default_ecc=keydown 암호화(eccpw), ncaptcha=캡차.
 const ANTIBOT_READY_JS: &str = "(()=>{try{\
     const r=performance.getEntriesByType('resource');\
-    return r.some(e=>/wtm\\.pstatic\\.net|default_ecc|ncaptcha|nclk\\.naver/i.test(e.name));\
+    return r.some(e=>/wtm\\.pstatic\\.net|default_ecc|ncaptcha|nclk\\.naver|pages\\/login\\.js/i.test(e.name));\
 }catch(e){return false;}})()";
 
 // 페이지가 받은 "완료된 리소스 수"를 센다(사수 의도: 돔이 '전부' 붙었는지 — iframe 몇 개만이
@@ -851,7 +851,11 @@ fn wait_for_login_form(client: &mut CdpClient) -> bool {
     let ready_expr = "(()=>{\
         if(document.readyState!=='complete')return false;\
         const ok=el=>!!(el&&el.offsetParent!==null&&!el.disabled);\
+        /* 로그인 버튼: 구 폼(#log.login·submit)과 신 v4 반응형 폼(#loginBtn_column·#loginBtn_row)을 \
+           모두 인식한다(네이버가 v3/v4 폼을 섞어 서빙 — 2026-07-16 실측). 내부 로그인 방식은 그대로. */\
         const btn=document.querySelector('#log\\\\.login')\
+                  ||document.querySelector('#loginBtn_column')\
+                  ||document.querySelector('#loginBtn_row')\
                   ||document.querySelector('button[type=submit]');\
         if(!(ok(document.querySelector('#id'))\
              &&ok(document.querySelector('#pw'))&&!!btn))return false;\
@@ -1178,19 +1182,24 @@ fn wait_wtmncapt_ready_for_block_wasm(client: &mut CdpClient) {
 // 로그인 버튼을 사람처럼 좌표 클릭한다. 좌표를 못 구하면 .click()으로 폴백(클릭 실패가
 // 로그인 자체를 막지 않도록).
 fn click_login_button(client: &mut CdpClient) -> Result<(), AutomationError> {
-    let center = client.evaluate(
-        "(()=>{const b=document.querySelector('#log\\\\.login')||\
-         document.querySelector('button[type=submit]');if(!b)return null;\
-         const r=b.getBoundingClientRect();if(r.width<=0||r.height<=0)return null;\
-         return [r.left+r.width/2, r.top+r.height/2];})()",
-    )?;
+    // 로그인 버튼 선택: 구 폼(#log.login·submit)과 신 v4 폼(#loginBtn_column·#loginBtn_row) 모두 지원.
+    // 신 폼은 패스키 버튼(#passkeyBtn_*)도 .btn_done 클래스라, **로그인 전용 id만** 후보로 쓰고
+    // 보이는(offsetParent) 것을 우선 골라 패스키 오클릭을 막는다. 내부 제출 방식은 불변.
+    const PICK_BTN_JS: &str = "const cands=['#loginBtn_column','#loginBtn_row','#log\\\\.login','button[type=submit]'];\
+        let b=null;\
+        for(const s of cands){const e=document.querySelector(s);if(e&&e.offsetParent!==null){b=e;break;}}\
+        if(!b){for(const s of cands){const e=document.querySelector(s);if(e){b=e;break;}}}";
+    let center = client.evaluate(&format!(
+        "(()=>{{{PICK_BTN_JS}\
+         if(!b)return null;const r=b.getBoundingClientRect();\
+         if(r.width<=0||r.height<=0)return null;return [r.left+r.width/2, r.top+r.height/2];}})()"
+    ))?;
     if let Some((x, y)) = parse_xy(&center) {
         mouse_click(client, x, y)?;
     } else {
-        client.evaluate(
-            "(()=>{const b=document.querySelector('#log\\\\.login')||\
-             document.querySelector('button[type=submit]');if(b){b.click();return true;}return false;})()",
-        )?;
+        client.evaluate(&format!(
+            "(()=>{{{PICK_BTN_JS}if(b){{b.click();return true;}}return false;}})()"
+        ))?;
     }
     Ok(())
 }
@@ -1605,7 +1614,7 @@ fn manual_login_wait(client: &mut CdpClient) -> Result<LoginOutcome, AutomationE
             );
             return Ok(LoginOutcome::Ok { cookies });
         }
-        if !captcha_logged && visible_exists(client, "#captchaDiv, #captcha, img#captchaimg") {
+        if !captcha_logged && visible_exists(client, "#captchaDiv, #captcha, img#captchaimg, #rcapt, #chptcha") {
             tracing::info!(
                 "[LOGIN] 🧪 수동입력 중에도 캡차 감지 — 입력이 아니라 환경(CDP/플래그)이 원인일 가능성."
             );
@@ -1722,7 +1731,7 @@ fn read_signals(client: &mut CdpClient) -> Result<PageSignals, AutomationError> 
     let cookies = collect_naver_cookies(client)?;
     let logged_in = has_session_cookies(&cookies);
 
-    let captcha = visible_exists(client, "#captchaDiv, #captcha, img#captchaimg");
+    let captcha = visible_exists(client, "#captchaDiv, #captcha, img#captchaimg, #rcapt, #chptcha");
     let otp = visible_exists(client, "#otp, input[name=otp], #cellphoneCertify");
     let current_url = client.current_url().unwrap_or_default();
     // 낯선 기기 추가 인증 페이지(기기 등록 확인). 성공 후의 "등록안함" 다이얼로그와 달리
