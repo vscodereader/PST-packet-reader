@@ -14,7 +14,7 @@ import {
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { IconTrash } from "@tabler/icons-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 
 import { ACTIVE_PLATFORMS } from "@/shared/data/config";
 
@@ -48,6 +48,18 @@ const PLATFORM_OPTS = ACTIVE_PLATFORMS.map((p) => ({
   value: p.id,
   label: p.name,
 }));
+
+// 하위 COM별 구분 색(선택 순서대로 배정) — 표에서 어느 컴퓨터 계정인지 색·구분선으로 가른다.
+const DEVICE_COLORS = [
+  "orange",
+  "teal",
+  "grape",
+  "blue",
+  "pink",
+  "cyan",
+  "lime",
+  "indigo",
+] as const;
 
 /** 상태가 사람이 되돌릴 수 있는 값(active/waiting/onHold)인지 — 드롭다운 노출 판정(§5). */
 export function isReversibleStatus(status: string): boolean {
@@ -150,6 +162,12 @@ export function AccountState() {
 
   const deviceName = (id: string) =>
     devices.find((d) => d.id === id)?.name ?? id;
+
+  // 선택 순서대로 색을 배정(하위별 고정). 표의 그룹 헤더·테두리·배지에 같은 색을 쓴다.
+  const colorForDevice = (id: string) => {
+    const i = selectedIds.indexOf(id);
+    return DEVICE_COLORS[(i < 0 ? 0 : i) % DEVICE_COLORS.length]!;
+  };
 
   // online 하위 로드(서버 연결 시 실데이터, 오프라인이면 더미 유지).
   useEffect(() => {
@@ -467,74 +485,107 @@ export function AccountState() {
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
-                {rows.map((r) => (
-                  <Table.Tr key={`${r.deviceId}::${r.loginId}`}>
-                    <Table.Td>
-                      <Badge variant="light" color="grape" radius="sm">
-                        {r.deviceName}
-                      </Badge>
-                    </Table.Td>
-                    <Table.Td>{maskId(r.loginId)}</Table.Td>
-                    <Table.Td>
-                      <Select
-                        size="xs"
-                        data={PLATFORM_OPTS}
-                        value={r.platform}
-                        allowDeselect={false}
-                        comboboxProps={{ withinPortal: true }}
-                        aria-label={`${maskId(r.loginId)} 플랫폼`}
-                        onChange={(v) =>
-                          v && editRow(r.deviceId, r.loginId, { platform: v })
-                        }
-                      />
-                    </Table.Td>
-                    <Table.Td>
-                      {isReversibleStatus(r.status) ? (
-                        <Select
-                          size="xs"
-                          data={STATUS_OPTS}
-                          value={r.status}
-                          allowDeselect={false}
-                          comboboxProps={{ withinPortal: true }}
-                          aria-label={`${maskId(r.loginId)} 상태`}
-                          onChange={(v) =>
-                            v && editRow(r.deviceId, r.loginId, { status: v })
-                          }
-                        />
-                      ) : (
-                        // 워커 판정값(차단 등)은 읽기 전용 배지(§5).
-                        <Badge variant="light" color="gray" radius="sm">
-                          {statusLabel(r.status)}
-                        </Badge>
-                      )}
-                    </Table.Td>
-                    <Table.Td>
-                      <ActionIcon
-                        variant="subtle"
-                        color="red"
-                        title="계정 삭제"
-                        aria-label={`${maskId(r.loginId)} 삭제`}
-                        onClick={() =>
-                          setDeleteTarget({
-                            deviceId: r.deviceId,
-                            loginId: r.loginId,
-                          })
-                        }
+                {selectedIds.map((did) => {
+                  const color = colorForDevice(did);
+                  const devRows = rows.filter((r) => r.deviceId === did);
+                  return (
+                    <Fragment key={did}>
+                      {/* 그룹 구분 헤더 — 여기부터 이 하위 COM의 계정(색·상단선으로 구분). */}
+                      <Table.Tr
+                        style={{
+                          backgroundColor: `var(--mantine-color-${color}-light)`,
+                          borderTop: `2px solid var(--mantine-color-${color}-filled)`,
+                        }}
                       >
-                        <IconTrash size={18} />
-                      </ActionIcon>
-                    </Table.Td>
-                  </Table.Tr>
-                ))}
-                {selectedIds.length > 0 && rows.length === 0 && (
-                  <Table.Tr>
-                    <Table.Td colSpan={5}>
-                      <Text c="dimmed" ta="center" py="md">
-                        선택한 하위에 분배된 계정이 없습니다.
-                      </Text>
-                    </Table.Td>
-                  </Table.Tr>
-                )}
+                        <Table.Td colSpan={5}>
+                          <Group gap="xs">
+                            <Badge color={color} variant="filled" radius="sm">
+                              {deviceName(did)}
+                            </Badge>
+                            <Text size="xs" c="dimmed">
+                              계정 {devRows.length}개
+                            </Text>
+                          </Group>
+                        </Table.Td>
+                      </Table.Tr>
+                      {devRows.map((r) => (
+                        <Table.Tr
+                          key={`${r.deviceId}::${r.loginId}`}
+                          style={{
+                            borderLeft: `3px solid var(--mantine-color-${color}-filled)`,
+                          }}
+                        >
+                          <Table.Td>
+                            <Badge variant="light" color={color} radius="sm">
+                              {r.deviceName}
+                            </Badge>
+                          </Table.Td>
+                          <Table.Td>{maskId(r.loginId)}</Table.Td>
+                          <Table.Td>
+                            <Select
+                              size="xs"
+                              data={PLATFORM_OPTS}
+                              value={r.platform}
+                              allowDeselect={false}
+                              comboboxProps={{ withinPortal: true }}
+                              aria-label={`${maskId(r.loginId)} 플랫폼`}
+                              onChange={(v) =>
+                                v &&
+                                editRow(r.deviceId, r.loginId, { platform: v })
+                              }
+                            />
+                          </Table.Td>
+                          <Table.Td>
+                            {isReversibleStatus(r.status) ? (
+                              <Select
+                                size="xs"
+                                data={STATUS_OPTS}
+                                value={r.status}
+                                allowDeselect={false}
+                                comboboxProps={{ withinPortal: true }}
+                                aria-label={`${maskId(r.loginId)} 상태`}
+                                onChange={(v) =>
+                                  v &&
+                                  editRow(r.deviceId, r.loginId, { status: v })
+                                }
+                              />
+                            ) : (
+                              // 워커 판정값(차단 등)은 읽기 전용 배지(§5).
+                              <Badge variant="light" color="gray" radius="sm">
+                                {statusLabel(r.status)}
+                              </Badge>
+                            )}
+                          </Table.Td>
+                          <Table.Td>
+                            <ActionIcon
+                              variant="subtle"
+                              color="red"
+                              title="계정 삭제"
+                              aria-label={`${maskId(r.loginId)} 삭제`}
+                              onClick={() =>
+                                setDeleteTarget({
+                                  deviceId: r.deviceId,
+                                  loginId: r.loginId,
+                                })
+                              }
+                            >
+                              <IconTrash size={18} />
+                            </ActionIcon>
+                          </Table.Td>
+                        </Table.Tr>
+                      ))}
+                      {devRows.length === 0 && (
+                        <Table.Tr>
+                          <Table.Td colSpan={5}>
+                            <Text c="dimmed" size="sm" pl="md" py="xs">
+                              이 하위에 분배된 계정이 없습니다.
+                            </Text>
+                          </Table.Td>
+                        </Table.Tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
                 {selectedIds.length === 0 && (
                   <Table.Tr>
                     <Table.Td colSpan={5}>
