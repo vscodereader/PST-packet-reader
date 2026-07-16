@@ -62,22 +62,37 @@ pub async fn register(
         .map_err(|e| format!("등록 응답 파싱 실패: {e}"))
 }
 
-/// 하트비트 + 현재 IP/상태 보고(§4-1).
+/// 하트비트 + 현재 IP/상태 보고(§4-1). 응답의 `commands`(SSE 미연결 동안 쌓인 대기 명령)를 파싱해
+/// 돌려준다(2026-07-16 하트비트 pull). 없으면 빈 Vec. 서버가 옛 버전이라 `commands`가 없어도 안전
+/// (빈 Vec). 상태 보고 실패는 기존과 동일하게 Err.
 pub async fn heartbeat(
     client: &reqwest::Client,
     base: &str,
     token: &str,
     ip: Option<&str>,
     state: &str,
-) -> Result<(), String> {
-    post_authed(
-        client,
-        base,
-        token,
-        "/agent/heartbeat",
-        &HeartbeatReq { ip, state },
-    )
-    .await
+) -> Result<Vec<serde_json::Value>, String> {
+    let resp = client
+        .post(join(base, "/agent/heartbeat"))
+        .bearer_auth(token)
+        .json(&HeartbeatReq { ip, state })
+        .send()
+        .await
+        .map_err(|e| format!("요청 실패(/agent/heartbeat): {e}"))?;
+    if !resp.status().is_success() {
+        return Err(server_error(resp).await);
+    }
+    // 응답 본문 파싱 실패는 치명적이지 않다(상태 보고는 이미 성공) → 명령 없음으로 처리.
+    let body = resp
+        .json::<serde_json::Value>()
+        .await
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let commands = body
+        .get("commands")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    Ok(commands)
 }
 
 /// 상태 전이 보고(ROTATING 등, §4). IP는 heartbeat로 보낸다.

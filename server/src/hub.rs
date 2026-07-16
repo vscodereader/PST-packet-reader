@@ -85,6 +85,15 @@ impl Hub {
         }
         delivered
     }
+
+    /// 대상 기기의 대기 명령(pending)을 꺼내 비운다(하트비트 pull 경로용, 2026-07-16). SSE가 IP 회전으로
+    /// 계속 끊겨 device_subscribe flush가 못 도는 기기(모바일 CGNAT)를 위해, 하트비트 응답에 실어 확실히
+    /// 전달한다. device_subscribe(SSE flush)와 **같은 pending 뮤텍스**를 공유하므로, 큐에 쌓인 명령은
+    /// 둘 중 먼저 꺼낸 경로로만 전달된다(이중 전달 없음). 에이전트는 commandId 중복까지 무시해 안전하다.
+    pub fn drain_pending(&self, id: Uuid) -> Vec<String> {
+        let mut p = self.pending.lock().unwrap();
+        p.remove(&id).unwrap_or_default()
+    }
 }
 
 #[cfg(test)]

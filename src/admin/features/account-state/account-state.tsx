@@ -5,6 +5,7 @@ import {
   Button,
   Group,
   Modal,
+  MultiSelect,
   Paper,
   ScrollArea,
   Select,
@@ -13,7 +14,7 @@ import {
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { IconTrash } from "@tabler/icons-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ACTIVE_PLATFORMS } from "@/shared/data/config";
 
@@ -117,19 +118,38 @@ const INITIAL_ROWS: Record<string, AccountRow[]> = {
   d3: [{ loginId: "clip_creator", platform: "clip", status: "active" }],
 };
 
+interface DisplayRow extends AccountRow {
+  deviceId: string;
+  deviceName: string;
+}
+
 export function AccountState() {
   const [devices, setDevices] = useState<OnlineDevice[]>(INITIAL_DEVICES);
-  const [deviceId, setDeviceId] = useState<string | null>(null);
-  // 폴링본(하위가 보고한 원래 값). 저장 diff의 기준.
-  const [original, setOriginal] = useState<AccountRow[]>([]);
-  // 사용자 편집 오버라이드(loginId → 바꾼 platform/status). 폴링이 original을 갱신해도 미저장 편집은 유지.
+  // 여러 하위 COM 동시 선택(2026-07-16). 선택한 모든 하위의 계정을 한 표에 함께 보여주고, 저장 시
+  // 하위별로 각자의 변경만 따로 명령을 보낸다(B를 바꿨는데 A로 명령이 가는 일 없음).
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  // 폴링본(하위별 원래 값, deviceId → rows). 저장 diff의 기준.
+  const [original, setOriginal] = useState<Record<string, AccountRow[]>>({});
+  // 편집 오버라이드(하위별·계정별: deviceId → loginId → 바꾼 platform/status). loginId가 하위 간
+  // 겹쳐도 섞이지 않게 deviceId로 먼저 나눈다.
   const [edits, setEdits] = useState<
-    Record<string, { platform?: string; status?: string }>
+    Record<string, Record<string, { platform?: string; status?: string }>>
   >({});
   const [saving, setSaving] = useState(false);
-  // 삭제 확인 대상(휴지통 클릭한 loginId) — null이면 확인 창 닫힘. 삭제 중이면 버튼 잠금.
-  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  // 삭제 확인 대상(어느 하위의 어느 계정인지) — null이면 확인 창 닫힘.
+  const [deleteTarget, setDeleteTarget] = useState<{
+    deviceId: string;
+    loginId: string;
+  } | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // 삭제 진행 중인 계정(`deviceId::loginId`). 낙관적 삭제 후에도 하위가 아직 그 계정을 인벤토리에
+  // 보고하면(삭제 미처리), 폴링이 되살리는 것을 막기 위해 이 목록의 계정을 폴링 결과에서 걸러낸다.
+  // 하위가 실제로 반영해 더 이상 보고하지 않으면 목록에서 해제한다(재등장 종료). state가 아니라 ref로
+  // 두어 폴링 인터벌을 재구독시키지 않는다.
+  const pendingDeletesRef = useRef<Set<string>>(new Set());
+
+  const deviceName = (id: string) =>
+    devices.find((d) => d.id === id)?.name ?? id;
 
   // online 하위 로드(서버 연결 시 실데이터, 오프라인이면 더미 유지).
   useEffect(() => {
@@ -147,29 +167,52 @@ export function AccountState() {
       });
   }, []);
 
-  // 선택한 하위의 accountRows 4초 폴링(§3 읽기 — 신규 배선 0, 인벤토리 재사용). 하위에서 상태를
-  // 바꾸면 다음 보고(≤4초)에 여기 표가 갱신된다(양방향). 오프라인/미보고면 더미로 폴백.
+  // 선택한 **모든** 하위의 accountRows 4초 폴링. 각 하위를 따로 조회해 original[deviceId]에 담는다.
+  // 하위에서 상태를 바꾸면 다음 보고(≤4초)에 그 하위 행만 갱신된다(양방향). 오프라인/미보고면 더미 폴백.
   useEffect(() => {
-    if (deviceId === null) return;
+    // 선택이 비면 폴링만 멈춘다. original 정리는 MultiSelect onChange가 이미 처리한다(effect 안에서
+    // 동기 setState를 하지 않아 불필요한 연쇄 렌더를 피한다).
+    if (selectedIds.length === 0) return;
     let cancelled = false;
     const load = () => {
-      api.devices
-        .inventory(deviceId)
-        .then((inv) => {
-          if (cancelled) return;
-          setOriginal(
-            (inv.accountRows ?? []).map((a) => ({
+      selectedIds.forEach((did) => {
+        api.devices
+          .inventory(did)
+          .then((inv) => {
+            if (cancelled) return;
+            const raw = (inv.accountRows ?? []).map((a) => ({
               loginId: a.loginId,
               platform: a.platform ?? "forum",
               status: a.status ?? "new",
-            })),
-          );
-        })
-        .catch(() => {
-          if (cancelled) return;
-          // 오프라인 미리보기: 더미 행으로 폴백(선택 하위 기준).
-          setOriginal(INITIAL_ROWS[deviceId] ?? []);
-        });
+            }));
+            // 삭제 진행 중이던 계정이 이제 인벤토리에 없으면(하위가 삭제 반영) pending에서 해제한다.
+            const prefix = `${did}::`;
+            const rawLogins = new Set(raw.map((r) => r.loginId));
+            for (const key of [...pendingDeletesRef.current]) {
+              if (
+                key.startsWith(prefix) &&
+                !rawLogins.has(key.slice(prefix.length))
+              )
+                pendingDeletesRef.current.delete(key);
+            }
+            // 아직 삭제 미반영이라 하위가 보고하는 계정은 화면에서 걸러 되살아나지 않게 한다.
+            setOriginal((prev) => ({
+              ...prev,
+              [did]: raw.filter(
+                (r) => !pendingDeletesRef.current.has(`${did}::${r.loginId}`),
+              ),
+            }));
+          })
+          .catch(() => {
+            if (cancelled) return;
+            setOriginal((prev) => ({
+              ...prev,
+              [did]: (INITIAL_ROWS[did] ?? []).filter(
+                (r) => !pendingDeletesRef.current.has(`${did}::${r.loginId}`),
+              ),
+            }));
+          });
+      });
     };
     load();
     const id = window.setInterval(load, 4000);
@@ -177,66 +220,112 @@ export function AccountState() {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [deviceId]);
+  }, [selectedIds]);
 
-  // 표시값 = 편집 오버라이드가 있으면 그 값, 없으면 폴링본.
-  const rows: AccountRow[] = useMemo(
+  // 표시 행 = 선택한 모든 하위의 행을 이어붙이고, 하위·계정별 편집 오버라이드를 적용한다.
+  const rows: DisplayRow[] = useMemo(
     () =>
-      original.map((r) => ({
+      selectedIds.flatMap((did) =>
+        (original[did] ?? []).map((r) => ({
+          deviceId: did,
+          deviceName: deviceName(did),
+          loginId: r.loginId,
+          platform: edits[did]?.[r.loginId]?.platform ?? r.platform,
+          status: edits[did]?.[r.loginId]?.status ?? r.status,
+        })),
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedIds, original, edits, devices],
+  );
+
+  // 하위별 변경 목록(저장 시 각자 따로 보낼 것). diffAccountRows를 하위별로 돌린다.
+  const pendingByDevice: Record<string, MetaUpdate[]> = useMemo(() => {
+    const out: Record<string, MetaUpdate[]> = {};
+    for (const did of selectedIds) {
+      const orig = original[did] ?? [];
+      const edited = orig.map((r) => ({
         loginId: r.loginId,
-        platform: edits[r.loginId]?.platform ?? r.platform,
-        status: edits[r.loginId]?.status ?? r.status,
-      })),
-    [original, edits],
+        platform: edits[did]?.[r.loginId]?.platform ?? r.platform,
+        status: edits[did]?.[r.loginId]?.status ?? r.status,
+      }));
+      const diff = diffAccountRows(orig, edited);
+      if (diff.length > 0) out[did] = diff;
+    }
+    return out;
+  }, [selectedIds, original, edits]);
+
+  const pendingCount = useMemo(
+    () => Object.values(pendingByDevice).reduce((s, arr) => s + arr.length, 0),
+    [pendingByDevice],
   );
 
-  const pending = useMemo(
-    () => diffAccountRows(original, rows),
-    [original, rows],
-  );
-
-  const editRow = (loginId: string, patch: { platform?: string; status?: string }) =>
+  const editRow = (
+    deviceId: string,
+    loginId: string,
+    patch: { platform?: string; status?: string },
+  ) =>
     setEdits((prev) => ({
       ...prev,
-      [loginId]: { ...prev[loginId], ...patch },
+      [deviceId]: {
+        ...prev[deviceId],
+        [loginId]: { ...prev[deviceId]?.[loginId], ...patch },
+      },
     }));
 
   const save = async () => {
-    if (deviceId === null || pending.length === 0) return;
+    const entries = Object.entries(pendingByDevice);
+    if (entries.length === 0) return;
     setSaving(true);
-    try {
-      const r = await api.accounts.updateMeta(deviceId, pending);
+    let ok = 0;
+    let offline = false;
+    const errs: string[] = [];
+    // 하위별로 **각자 따로** 전송 — B의 변경이 A로 가지 않는다(하위별 독립 명령).
+    for (const [did, updates] of entries) {
+      try {
+        await api.accounts.updateMeta(did, updates);
+        ok += updates.length;
+      } catch (e) {
+        if (isOffline(e)) offline = true;
+        else
+          errs.push(
+            `${deviceName(did)}: ${e instanceof Error ? e.message : "실패"}`,
+          );
+      }
+    }
+    if (offline) {
+      // 오프라인 미리보기: 편집을 로컬 확정(선택 하위별로 original에 반영).
+      setOriginal((prev) => {
+        const next = { ...prev };
+        for (const did of selectedIds) {
+          next[did] = (prev[did] ?? []).map((r) => ({
+            loginId: r.loginId,
+            platform: edits[did]?.[r.loginId]?.platform ?? r.platform,
+            status: edits[did]?.[r.loginId]?.status ?? r.status,
+          }));
+        }
+        return next;
+      });
+      setEdits({});
       notifications.show({
-        message: `계정 ${pending.length}건 변경을 하위에 전송했어요 (commandId=${r.commandId})`,
+        message: `계정 변경(미리보기 — 서버 미연결)`,
+        color: "gray",
+      });
+    } else if (errs.length > 0) {
+      notifications.show({ message: errs.join(" / "), color: "red" });
+    } else {
+      setEdits({});
+      notifications.show({
+        message: `계정 ${ok}건 변경을 ${entries.length}대에 각각 전송했어요`,
         color: "green",
       });
-      // 저장 완료 → 편집 오버라이드 비우고 폴링 갱신본이 최종값이 되게 한다.
-      setEdits({});
-    } catch (e) {
-      if (isOffline(e)) {
-        // 오프라인 미리보기: 로컬에서 편집을 확정(original에 반영)해 시연.
-        setOriginal(rows);
-        setEdits({});
-        notifications.show({
-          message: `계정 ${pending.length}건 변경(미리보기 — 서버 미연결)`,
-          color: "gray",
-        });
-      } else {
-        notifications.show({
-          message: e instanceof Error ? e.message : "변경 실패",
-          color: "red",
-        });
-      }
-    } finally {
-      setSaving(false);
     }
+    setSaving(false);
   };
 
-  // 계정 삭제(휴지통) — Admin과 하위 PC 양쪽에서 지운다. 성공하면 표시 목록에서 그 행을 즉시 제거
-  // (낙관적 삭제)하고, ≤4초 뒤 하위 재보고로도 사라진다. 오프라인 미리보기는 로컬에서만 제거해 시연.
+  // 계정 삭제(휴지통) — 그 계정이 속한 하위 1대에만 삭제 명령. 성공하면 그 행을 즉시 제거(낙관적).
   const confirmDelete = async () => {
-    if (deviceId === null || deleteTarget === null) return;
-    const loginId = deleteTarget;
+    if (deleteTarget === null) return;
+    const { deviceId, loginId } = deleteTarget;
     setDeleting(true);
     try {
       const r = await api.accounts.delete(deviceId, [loginId]);
@@ -244,11 +333,10 @@ export function AccountState() {
         message: `계정 ${maskId(loginId)}을(를) Admin·하위에서 삭제했어요 (commandId=${r.commandId})`,
         color: "green",
       });
-      removeRowLocally(loginId);
+      removeRowLocally(deviceId, loginId);
     } catch (e) {
       if (isOffline(e)) {
-        // 오프라인 미리보기: 로컬에서만 제거해 시연(서버 미연결).
-        removeRowLocally(loginId);
+        removeRowLocally(deviceId, loginId);
         notifications.show({
           message: `계정 ${maskId(loginId)} 삭제(미리보기 — 서버 미연결)`,
           color: "gray",
@@ -265,13 +353,18 @@ export function AccountState() {
     }
   };
 
-  // 표시 목록에서 그 loginId를 제거 — 폴링본(original)과 미저장 편집(edits) 양쪽에서 뺀다.
-  const removeRowLocally = (loginId: string) => {
-    setOriginal((prev) => prev.filter((r) => r.loginId !== loginId));
+  // 표시 목록에서 그 하위의 그 loginId를 제거 — 폴링본·편집 양쪽에서 뺀다. 아울러 삭제 진행 목록에
+  // 넣어, 하위가 삭제를 반영하기 전 폴링이 이 계정을 되살리는 것을 막는다.
+  const removeRowLocally = (deviceId: string, loginId: string) => {
+    pendingDeletesRef.current.add(`${deviceId}::${loginId}`);
+    setOriginal((prev) => ({
+      ...prev,
+      [deviceId]: (prev[deviceId] ?? []).filter((r) => r.loginId !== loginId),
+    }));
     setEdits((prev) => {
-      const next = { ...prev };
-      delete next[loginId];
-      return next;
+      const dev = { ...prev[deviceId] };
+      delete dev[loginId];
+      return { ...prev, [deviceId]: dev };
     });
   };
 
@@ -292,18 +385,28 @@ export function AccountState() {
               계정 상태 관리
             </Text>
             <Text size="xs" c="dimmed">
-              하위를 고르면 그 하위의 계정 상태·플랫폼을 원격으로 바꿉니다
+              하위를 여러 대 고르면 각 하위의 계정이 함께 표시되고, 저장은
+              하위별로 따로 적용됩니다
             </Text>
           </Group>
-          <Select
-            w={220}
+          <MultiSelect
+            w={320}
             placeholder="하위 COM 선택"
             data={devices.map((d) => ({ value: d.id, label: d.name }))}
-            value={deviceId}
-            onChange={(v) => {
-              setDeviceId(v);
-              setEdits({});
-              setOriginal([]);
+            value={selectedIds}
+            onChange={(vals) => {
+              setSelectedIds(vals);
+              // 선택 해제된 하위의 폴링본·편집을 정리(남은 것만 유지).
+              setEdits((prev) => {
+                const next: typeof prev = {};
+                for (const id of vals) if (prev[id]) next[id] = prev[id]!;
+                return next;
+              });
+              setOriginal((prev) => {
+                const next: typeof prev = {};
+                for (const id of vals) if (prev[id]) next[id] = prev[id]!;
+                return next;
+              });
             }}
             comboboxProps={{ withinPortal: true }}
             aria-label="하위 COM 선택"
@@ -330,15 +433,20 @@ export function AccountState() {
             <Badge variant="light" color="gray" radius="sm">
               총 {rows.length}개
             </Badge>
-            {pending.length > 0 && (
+            {selectedIds.length > 0 && (
+              <Badge variant="light" color="gray" radius="sm">
+                하위 {selectedIds.length}대
+              </Badge>
+            )}
+            {pendingCount > 0 && (
               <Badge variant="light" color="blue" radius="sm">
-                {pending.length}개 변경
+                {pendingCount}개 변경
               </Badge>
             )}
           </Group>
           <Button
             color="blue"
-            disabled={deviceId === null || pending.length === 0 || saving}
+            disabled={pendingCount === 0 || saving}
             loading={saving}
             onClick={() => void save()}
           >
@@ -351,6 +459,7 @@ export function AccountState() {
             <Table highlightOnHover stickyHeader verticalSpacing="xs">
               <Table.Thead>
                 <Table.Tr>
+                  <Table.Th w={160}>하위(컴퓨터)</Table.Th>
                   <Table.Th>계정</Table.Th>
                   <Table.Th w={200}>플랫폼</Table.Th>
                   <Table.Th w={200}>상태</Table.Th>
@@ -359,7 +468,12 @@ export function AccountState() {
               </Table.Thead>
               <Table.Tbody>
                 {rows.map((r) => (
-                  <Table.Tr key={r.loginId}>
+                  <Table.Tr key={`${r.deviceId}::${r.loginId}`}>
+                    <Table.Td>
+                      <Badge variant="light" color="grape" radius="sm">
+                        {r.deviceName}
+                      </Badge>
+                    </Table.Td>
                     <Table.Td>{maskId(r.loginId)}</Table.Td>
                     <Table.Td>
                       <Select
@@ -370,7 +484,7 @@ export function AccountState() {
                         comboboxProps={{ withinPortal: true }}
                         aria-label={`${maskId(r.loginId)} 플랫폼`}
                         onChange={(v) =>
-                          v && editRow(r.loginId, { platform: v })
+                          v && editRow(r.deviceId, r.loginId, { platform: v })
                         }
                       />
                     </Table.Td>
@@ -383,7 +497,9 @@ export function AccountState() {
                           allowDeselect={false}
                           comboboxProps={{ withinPortal: true }}
                           aria-label={`${maskId(r.loginId)} 상태`}
-                          onChange={(v) => v && editRow(r.loginId, { status: v })}
+                          onChange={(v) =>
+                            v && editRow(r.deviceId, r.loginId, { status: v })
+                          }
                         />
                       ) : (
                         // 워커 판정값(차단 등)은 읽기 전용 배지(§5).
@@ -398,27 +514,32 @@ export function AccountState() {
                         color="red"
                         title="계정 삭제"
                         aria-label={`${maskId(r.loginId)} 삭제`}
-                        onClick={() => setDeleteTarget(r.loginId)}
+                        onClick={() =>
+                          setDeleteTarget({
+                            deviceId: r.deviceId,
+                            loginId: r.loginId,
+                          })
+                        }
                       >
                         <IconTrash size={18} />
                       </ActionIcon>
                     </Table.Td>
                   </Table.Tr>
                 ))}
-                {deviceId !== null && rows.length === 0 && (
+                {selectedIds.length > 0 && rows.length === 0 && (
                   <Table.Tr>
-                    <Table.Td colSpan={4}>
+                    <Table.Td colSpan={5}>
                       <Text c="dimmed" ta="center" py="md">
-                        이 하위에 분배된 계정이 없습니다.
+                        선택한 하위에 분배된 계정이 없습니다.
                       </Text>
                     </Table.Td>
                   </Table.Tr>
                 )}
-                {deviceId === null && (
+                {selectedIds.length === 0 && (
                   <Table.Tr>
-                    <Table.Td colSpan={4}>
+                    <Table.Td colSpan={5}>
                       <Text c="dimmed" ta="center" py="md">
-                        위에서 하위 COM을 선택하세요.
+                        위에서 하위 COM을 선택하세요(여러 대 선택 가능).
                       </Text>
                     </Table.Td>
                   </Table.Tr>
@@ -429,8 +550,8 @@ export function AccountState() {
         </Box>
 
         <Text size="xs" c="dimmed" mt="sm">
-          상태 선택지 = 활성·대기·보류(사람이 되돌릴 수 있는 값). 차단 등 워커 판정값은 읽기 전용 ·
-          하위에서 바꾸면 ≤4초 뒤 여기에도 반영(양방향).
+          상태 선택지 = 활성·대기·보류(사람이 되돌릴 수 있는 값). 차단 등 워커
+          판정값은 읽기 전용 · 하위에서 바꾸면 ≤4초 뒤 여기에도 반영(양방향).
         </Text>
       </Paper>
 
@@ -441,8 +562,8 @@ export function AccountState() {
         centered
       >
         <Text size="sm">
-          {deleteTarget !== null ? maskId(deleteTarget) : ""} 계정을 Admin과 하위
-          PC에서 삭제합니다. 되돌릴 수 없습니다.
+          {deleteTarget !== null ? maskId(deleteTarget.loginId) : ""} 계정을
+          Admin과 하위 PC에서 삭제합니다. 되돌릴 수 없습니다.
         </Text>
         <Group justify="flex-end" mt="lg">
           <Button

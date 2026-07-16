@@ -125,7 +125,7 @@ struct BlogWriteTarget {
 
 /// 닉네임 잔여 횟수 조회 페이로드(15-기타명령 §3). Admin이 닉네임 랜덤 체크박스를 켤 때, 선택한
 /// 종토 계정들의 loginId를 실어 보낸다. 하위가 각 계정의 `forum_nickname_remaining`을 조회해 회신.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone)]
 #[serde(rename_all = "camelCase")]
 struct NicknameQueryCmd {
     #[serde(default)]
@@ -456,12 +456,14 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
     let _ = STATE_TX.set(tx);
 
     let cmd_app = app.clone();
+    let hb_app = app.clone();
+    let sr_app = app.clone();
     let post_app = app.clone();
     let inv_app = app.clone();
     let qs_app = app.clone();
     tauri::async_runtime::spawn(async move { command_loop(cmd_app).await });
-    tauri::async_runtime::spawn(async move { heartbeat_loop().await });
-    tauri::async_runtime::spawn(async move { state_report_loop(rx).await });
+    tauri::async_runtime::spawn(async move { heartbeat_loop(hb_app).await });
+    tauri::async_runtime::spawn(async move { state_report_loop(sr_app, rx).await });
     tauri::async_runtime::spawn(async move { post_report_loop(post_app).await });
     tauri::async_runtime::spawn(async move { log_forward_loop().await });
     tauri::async_runtime::spawn(async move { inventory_report_loop(inv_app).await });
@@ -674,7 +676,10 @@ async fn command_loop<R: Runtime>(app: AppHandle<R>) {
             Err(e) => tracing::warn!("[AGENT] 연결 실패: {e}"),
         }
         tokio::time::sleep(Duration::from_secs(backoff)).await;
-        backoff = (backoff * 2).min(30);
+        // IP 회전(모바일 CGNAT)으로 SSE가 자주 끊기는 기기를 위해 재연결 상한을 5초로 낮춘다(2026-07-16).
+        // 명령 지연을 줄인다(하트비트 pull이 백업이지만, SSE가 빨리 붙으면 더 빠르다). 상한만 조정 —
+        // 정상 기기 동작 불변.
+        backoff = (backoff * 2).min(5);
     }
 }
 
@@ -694,61 +699,98 @@ async fn drain_events<R: Runtime>(
         let Ok(cmd) = serde_json::from_str::<Command>(data) else {
             continue;
         };
-        let cid = cmd
-            .command_id
-            .clone()
-            .unwrap_or_else(|| format!("c-{}", now_ms()));
-        // 동기 디스패치(기존 스토어/큐 호출) → 즉시 응답.
-        let (level, msg, followup) = dispatch(app, &cmd);
-        let _ = net::post_result(
-            client,
-            &cfg.server_url,
-            &cfg.device_token,
-            &cid,
-            level,
-            &msg,
-        )
-        .await;
-        // 로그인이 걸렸으면 끝날 때까지 지켜보고 §10-4 결과를 같은 commandId로 보고(백그라운드).
-        if let Some(f) = followup {
-            let (app2, client2, cfg2, cid2) =
-                (app.clone(), client.clone(), cfg.clone(), cid.clone());
+        process_command(app, client, cfg, &cmd).await;
+    }
+}
+
+/// 이미 처리한 commandId인지 확인하고, 처음이면 기록한다(true=처음 처리, false=중복→스킵). SSE와
+/// 하트비트 pull 양쪽에서 같은 명령이 와도 **한 번만** 실행되게 하는 안전장치(2026-07-16). 최근
+/// 512개만 유지(오래된 것부터 밀어냄) — 무한 증가 방지.
+fn mark_command_seen(cid: &str) -> bool {
+    use std::collections::{HashSet, VecDeque};
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<(HashSet<String>, VecDeque<String>)>> = OnceLock::new();
+    let m = SEEN.get_or_init(|| Mutex::new((HashSet::new(), VecDeque::new())));
+    let mut g = m.lock().unwrap();
+    if g.0.contains(cid) {
+        return false;
+    }
+    g.0.insert(cid.to_string());
+    g.1.push_back(cid.to_string());
+    if g.1.len() > 512 {
+        if let Some(old) = g.1.pop_front() {
+            g.0.remove(&old);
+        }
+    }
+    true
+}
+
+/// 서버 명령 하나를 처리한다(SSE·하트비트 pull 공용). 기존 SSE 처리 본문을 그대로 함수로 뽑은 것 —
+/// 동작 불변. 맨 앞 commandId 중복 검사만 추가해, 두 경로로 중복 전달돼도 한 번만 실행한다.
+async fn process_command<R: Runtime>(
+    app: &AppHandle<R>,
+    client: &reqwest::Client,
+    cfg: &AgentConfig,
+    cmd: &Command,
+) {
+    let cid = cmd
+        .command_id
+        .clone()
+        .unwrap_or_else(|| format!("c-{}", now_ms()));
+    // 이미 처리한 명령이면(다른 경로로 먼저 옴) 재실행하지 않는다 — 이중 등록/이중 로그인 방지.
+    if !mark_command_seen(&cid) {
+        return;
+    }
+    // 동기 디스패치(기존 스토어/큐 호출) → 즉시 응답.
+    let (level, msg, followup) = dispatch(app, cmd);
+    let _ = net::post_result(
+        client,
+        &cfg.server_url,
+        &cfg.device_token,
+        &cid,
+        level,
+        &msg,
+    )
+    .await;
+    // 로그인이 걸렸으면 끝날 때까지 지켜보고 §10-4 결과를 같은 commandId로 보고(백그라운드).
+    if let Some(f) = followup {
+        let (app2, client2, cfg2, cid2) =
+            (app.clone(), client.clone(), cfg.clone(), cid.clone());
+        tauri::async_runtime::spawn(async move {
+            report_login_results(app2, client2, cfg2, cid2, f).await;
+        });
+    }
+    // 닉네임 잔여 조회(15-기타명령 §3·§6-2 실시간): 계정별 `forum_nickname_remaining`을
+    // 블로킹으로 조회해 서버로 회신한다(dispatch는 즉시 ack만, 실제 조회는 여기 백그라운드).
+    if cmd.kind == "query_nickname_remaining" {
+        if let Some(q) = cmd.nickname_query.clone() {
+            let (client2, cfg2) = (client.clone(), cfg.clone());
             tauri::async_runtime::spawn(async move {
-                report_login_results(app2, client2, cfg2, cid2, f).await;
+                report_nickname_remaining(client2, cfg2, q.login_ids).await;
             });
         }
-        // 닉네임 잔여 조회(15-기타명령 §3·§6-2 실시간): 계정별 `forum_nickname_remaining`을
-        // 블로킹으로 조회해 서버로 회신한다(dispatch는 즉시 ack만, 실제 조회는 여기 백그라운드).
-        if cmd.kind == "query_nickname_remaining" {
-            if let Some(q) = cmd.nickname_query {
-                let (client2, cfg2) = (client.clone(), cfg.clone());
-                tauri::async_runtime::spawn(async move {
-                    report_nickname_remaining(client2, cfg2, q.login_ids).await;
-                });
-            }
-        }
-        // 기타 명령(15-기타명령 §2) 실제 실행 — 데스크톱 즉시 실행 엔진을 그대로 호출하고 결과를
-        // 서버로 회신(post-report에 종류 태그). 브라우저·ADB 블로킹이라 백그라운드로 돌린다.
-        if matches!(
-            cmd.kind.as_str(),
-            "like_posts" | "dislike_posts" | "boost_view" | "rotate_ip"
-        ) {
+    }
+    // 기타 명령(15-기타명령 §2) 실제 실행 — 데스크톱 즉시 실행 엔진을 그대로 호출하고 결과를
+    // 서버로 회신(post-report에 종류 태그). 브라우저·ADB 블로킹이라 백그라운드로 돌린다.
+    if matches!(
+        cmd.kind.as_str(),
+        "like_posts" | "dislike_posts" | "boost_view" | "rotate_ip"
+    ) {
+        let (app2, client2, cfg2) = (app.clone(), client.clone(), cfg.clone());
+        let kind = cmd.kind.clone();
+        let etc = cmd.etc.clone().unwrap_or_default();
+        tauri::async_runtime::spawn(async move {
+            run_etc_command(app2, client2, cfg2, kind, etc).await;
+        });
+    }
+    // 블로그 새 글 발행(16-블로그새글) 실제 실행 — 계정 쿠키로 RabbitWrite를 호출하고 결과를
+    // post-report로 회신한다. HTTP 블로킹이라 백그라운드로 돌린다(엔진 무손상, ADD ONLY).
+    if cmd.kind == "publish_blog_write" {
+        if let Some(bw) = cmd.blog_write.clone() {
             let (app2, client2, cfg2) = (app.clone(), client.clone(), cfg.clone());
-            let kind = cmd.kind.clone();
-            let etc = cmd.etc.clone().unwrap_or_default();
             tauri::async_runtime::spawn(async move {
-                run_etc_command(app2, client2, cfg2, kind, etc).await;
+                run_blog_write_command(app2, client2, cfg2, bw).await;
             });
-        }
-        // 블로그 새 글 발행(16-블로그새글) 실제 실행 — 계정 쿠키로 RabbitWrite를 호출하고 결과를
-        // post-report로 회신한다. HTTP 블로킹이라 백그라운드로 돌린다(엔진 무손상, ADD ONLY).
-        if cmd.kind == "publish_blog_write" {
-            if let Some(bw) = cmd.blog_write.clone() {
-                let (app2, client2, cfg2) = (app.clone(), client.clone(), cfg.clone());
-                tauri::async_runtime::spawn(async move {
-                    run_blog_write_command(app2, client2, cfg2, bw).await;
-                });
-            }
         }
     }
 }
@@ -2837,7 +2879,7 @@ async fn post_report_loop<R: Runtime>(app: AppHandle<R>) {
 
 // ───────────────────────── 하트비트 + 상태 보고 루프 ─────────────────────────
 
-async fn heartbeat_loop() {
+async fn heartbeat_loop<R: Runtime>(app: AppHandle<R>) {
     let client = reqwest::Client::new();
     loop {
         if let Some(cfg) = config::load() {
@@ -2847,33 +2889,60 @@ async fn heartbeat_loop() {
             } else {
                 Some(ip.as_str())
             };
-            let _ = net::heartbeat(
+            // 하트비트 응답에 실려온 대기 명령(SSE 미연결 보완, 2026-07-16)을 SSE와 동일하게 처리한다.
+            // commandId 중복은 process_command가 무시하므로 SSE와 겹쳐도 안전.
+            if let Ok(cmds) = net::heartbeat(
                 &client,
                 &cfg.server_url,
                 &cfg.device_token,
                 ip_opt,
                 "online",
             )
-            .await;
+            .await
+            {
+                dispatch_pulled_commands(&app, &client, &cfg, cmds).await;
+            }
         }
         tokio::time::sleep(Duration::from_secs(30)).await;
     }
 }
 
+/// 하트비트 응답으로 끌어온(pull) 명령 목록을 SSE와 동일한 경로(process_command)로 처리한다.
+/// 서버가 옛 버전이거나 대기 명령이 없으면 빈 목록이라 아무 일도 안 한다(무해).
+async fn dispatch_pulled_commands<R: Runtime>(
+    app: &AppHandle<R>,
+    client: &reqwest::Client,
+    cfg: &AgentConfig,
+    cmds: Vec<serde_json::Value>,
+) {
+    for v in cmds {
+        if let Ok(cmd) = serde_json::from_value::<Command>(v) {
+            process_command(app, client, cfg, &cmd).await;
+        }
+    }
+}
+
 /// adb.rs가 보낸 상태신호를 서버로 전달(§4). rotating=상태 전이, online=하트비트(바뀐 IP).
-async fn state_report_loop(mut rx: mpsc::UnboundedReceiver<(String, Option<String>)>) {
+async fn state_report_loop<R: Runtime>(
+    app: AppHandle<R>,
+    mut rx: mpsc::UnboundedReceiver<(String, Option<String>)>,
+) {
     let client = reqwest::Client::new();
     while let Some((state, ip)) = rx.recv().await {
         let Some(cfg) = config::load() else { continue };
         if state == "online" {
-            let _ = net::heartbeat(
+            // 이 하트비트로도 서버가 pending을 drain하므로, 끌어온 명령을 반드시 처리해야 유실이 없다.
+            if let Ok(cmds) = net::heartbeat(
                 &client,
                 &cfg.server_url,
                 &cfg.device_token,
                 ip.as_deref(),
                 "online",
             )
-            .await;
+            .await
+            {
+                dispatch_pulled_commands(&app, &client, &cfg, cmds).await;
+            }
         } else {
             let _ = net::post_state(&client, &cfg.server_url, &cfg.device_token, &state).await;
         }

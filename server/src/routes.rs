@@ -1343,7 +1343,27 @@ async fn agent_heartbeat(
         "info",
     )
     .await;
-    Ok(Json(serde_json::json!({ "ok": true })))
+    // 하트비트 pull(2026-07-16): SSE가 IP 회전으로 못 붙는 기기(모바일 CGNAT)를 위해, SSE 미연결
+    // 동안 쌓인 대기 명령을 하트비트 응답에 실어 확실히 전달한다. 기존 SSE 경로는 그대로 두고 추가만
+    // 한다 — device_subscribe(SSE flush)와 같은 pending 큐를 공유해 이중 전달이 없고, 에이전트가
+    // commandId 중복까지 무시한다. commands 필드가 있으면 에이전트가 SSE와 동일하게 처리한다.
+    let commands: Vec<serde_json::Value> = st
+        .hub
+        .drain_pending(device.id)
+        .into_iter()
+        .filter_map(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .collect();
+    if !commands.is_empty() {
+        st.audit(
+            "[CMD]",
+            &format!("서버 → {}", device.name),
+            &device.id.to_string(),
+            &format!("하트비트 pull로 대기 명령 {}건 전달(SSE 미연결 보완)", commands.len()),
+            "cmd",
+        )
+        .await;
+    }
+    Ok(Json(serde_json::json!({ "ok": true, "commands": commands })))
 }
 
 async fn agent_state(

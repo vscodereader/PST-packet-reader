@@ -1,9 +1,7 @@
 import {
   AppShell,
-  Badge,
   Box,
   Group,
-  Select,
   Text,
   ThemeIcon,
   UnstyledButton,
@@ -30,7 +28,7 @@ import {
 } from "./features/publish-command/scheduled-posts";
 import { ResultReport } from "./features/result-report/result-report";
 import { StopCommand } from "./features/stop-command/stop-command";
-import { AUTH_SCREENS, PREVIEW_SCREENS, type Screen } from "./screens";
+import { AUTH_SCREENS, type Screen } from "./screens";
 
 interface NavEntry {
   id: Screen;
@@ -89,46 +87,6 @@ function NavButton({
   );
 }
 
-// 미리보기 화면 선택기 — 실제 앱엔 없고, 인증 없이 아무 화면이나 띄워보기 위한 것.
-function PreviewSwitcher({
-  screen,
-  setScreen,
-}: {
-  screen: Screen;
-  setScreen: (s: Screen) => void;
-}) {
-  const data = [
-    {
-      group: "인증(로그인 전)",
-      items: PREVIEW_SCREENS.filter((s) => s.group === "인증(로그인 전)").map(
-        (s) => ({ value: s.value, label: s.label }),
-      ),
-    },
-    {
-      group: "앱(로그인 후)",
-      items: PREVIEW_SCREENS.filter((s) => s.group === "앱(로그인 후)").map(
-        (s) => ({ value: s.value, label: s.label }),
-      ),
-    },
-  ];
-  return (
-    <Group gap="xs" wrap="nowrap">
-      <Badge color="orange" variant="light" radius="sm" size="sm">
-        미리보기
-      </Badge>
-      <Select
-        size="xs"
-        w={200}
-        value={screen}
-        onChange={(v) => v && setScreen(v as Screen)}
-        data={data}
-        comboboxProps={{ withinPortal: true }}
-        aria-label="미리보기 화면 선택"
-      />
-    </Group>
-  );
-}
-
 function AppScreen({
   screen,
   go,
@@ -154,9 +112,7 @@ function AppScreen({
     case "stop-command":
       return <StopCommand />;
     case "scheduled-posts":
-      return (
-        <ScheduledPosts items={scheduled} onRemove={onRemoveScheduled} />
-      );
+      return <ScheduledPosts items={scheduled} onRemove={onRemoveScheduled} />;
     case "etc-command":
       return <EtcCommand />;
     case "report":
@@ -236,13 +192,10 @@ export function AdminApp() {
     }
   };
 
-  // 로그인 전(인증) 화면: 사이드바 없이 전체화면 + 우상단에 미리보기 선택기만.
+  // 로그인 전(인증) 화면: 사이드바 없이 전체화면.
   if (AUTH_SCREENS.includes(screen)) {
     return (
       <Box style={{ position: "relative" }}>
-        <Box style={{ position: "fixed", top: 12, right: 16, zIndex: 200 }}>
-          <PreviewSwitcher screen={screen} setScreen={setScreen} />
-        </Box>
         {screen === "login" && <Login go={go} onLogin={handleLogin} />}
         {screen === "signup" && <Signup go={go} />}
         {screen === "force-pw" && (
@@ -268,7 +221,6 @@ export function AdminApp() {
           <Text fw={700} c="dimmed" size="sm">
             PLTMacro Admin
           </Text>
-          <PreviewSwitcher screen={screen} setScreen={setScreen} />
         </Group>
       </AppShell.Header>
 
