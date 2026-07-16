@@ -49,20 +49,9 @@ const DEFAULT_SIGNUP_BIRTH_DAY: &str = "01";
 // 폼 준비/결과 DOM 이 흔들리지 않고 자리잡았다고 볼 연속 확인 횟수(네이버 미러). 상위 문서가
 // complete 된 뒤에도 캡차/안티봇 iframe·스크립트가 뒤늦게 로드되며 DOM 이 잠깐 출렁이므로,
 // 그 과도기에 타이핑/클릭하지 않도록 연속 N회 안정될 때만 진행한다.
-const FORM_READY_STABLE_POLLS: u32 = 3;
-
-// 안티봇/keydown 암호화 스크립트가 실제 로드(주입)됐는지 본다(네이버 미러). performance resource
-// 타이밍은 리소스가 "다운로드 완료"됐을 때만 엔트리가 생기므로, 이 패턴이 잡히면 스크립트가
-// 실제로 붙은 것이다(wtm=봇탐지, default_ecc=keydown 암호화, ncaptcha=캡차).
-const ANTIBOT_READY_JS: &str = "(()=>{try{\
-    const r=performance.getEntriesByType('resource');\
-    return r.some(e=>/wtm\\.pstatic\\.net|default_ecc|ncaptcha|nclk\\.naver/i.test(e.name));\
-}catch(e){return false;}})()";
-
-// 페이지가 받은 "완료된 리소스 수"(네이버 미러). 폴링 간에 이 수가 더 안 늘면 = 그 사이 새로
-// 끝난(=로딩 중이던) 리소스가 없다 = 로딩이 정착했다는 뜻.
-const RESOURCE_COUNT_JS: &str =
-    "(()=>{try{return performance.getEntriesByType('resource').length;}catch(e){return -1;}})()";
+// (로그인 폼 게이트/안티봇/리소스정착 판정은 네이버 auth::login_flow::wait_for_login_form을 그대로
+//  재사용한다 — 밴드 중복 상수/헬퍼는 2026-07-16 제거. FORM_READY_STABLE_POLLS·ANTIBOT_READY_JS·
+//  RESOURCE_COUNT_JS는 그 함수 안으로 이동됨.)
 
 // 상위 문서 + 모든 iframe 이 complete 인지 본다(네이버 ALL_DOCS_COMPLETE_JS 미러). 교차 출처
 // iframe 은 contentDocument 를 읽을 수 없어 통과(true)로 둔다(보안상 검사 불가).
@@ -707,95 +696,12 @@ fn wait_for_dom_ready(client: &mut CdpClient) -> bool {
     }
 }
 
-// 네이버 로그인 폼이 "완전히" 로딩될 때까지 기다린다(네이버 wait_for_login_form 미러): 상위 문서
-// complete + #id/#pw 보임·입력가능 + 로그인 버튼 + 모든 iframe complete + 리소스 로딩 정착 + 안티봇
-// 스크립트 로드 + keydown 암호화 후킹 설치, 넷 다 만족하고 연속 안정일 때만 타이핑한다. 준비 안 된
-// 폼에 타이핑해 캡차를 유발하지 않는 것이 우선. Chrome 이 사라지면(연속 CDP 실패) 중단한다.
+// 네이버 로그인 폼(밴드도 네이버 OAuth 로그인 폼을 그대로 받는다)이 완전히 로딩될 때까지 기다린다.
+// **단일 소스 재사용(2026-07-16)**: 예전엔 밴드가 네이버 게이트를 복사했다가 네이버 v3→v4 폼 변경 때
+// 밴드만 안 고쳐져 로그인 폼에서 무한 대기하는 사고가 났다(실기기 로그). 이제 네이버 구현을 직접
+// 재사용해, 네이버 로그인 폼이 또 바뀌어도 한 곳(auth::login_flow)만 고치면 밴드도 같이 반영된다.
 fn wait_for_login_form(client: &mut CdpClient) -> bool {
-    tracing::info!("[BAND] 로그인 폼 로딩 대기 중...");
-    const MAX_CONN_FAIL: u32 = 50; // ~5초 연속 CDP 실패 = Chrome 사라짐
-    let mut conn_fail = 0u32;
-    let ready_expr = "(()=>{\
-        if(document.readyState!=='complete')return false;\
-        const ok=el=>!!(el&&el.offsetParent!==null&&!el.disabled);\
-        const btn=document.querySelector('#log\\\\.login')\
-                  ||document.querySelector('button[type=submit]');\
-        if(!(ok(document.querySelector('#id'))\
-             &&ok(document.querySelector('#pw'))&&!!btn))return false;\
-        const frames=Array.prototype.slice.call(document.querySelectorAll('iframe'));\
-        return frames.every(f=>{\
-            try{const d=f.contentDocument;return !d||d.readyState==='complete';}\
-            catch(e){return true;}\
-        });\
-    })()";
-    let mut streak = 0u32;
-    let mut antibot_seen = false;
-    let mut prev_res_count: Option<i64> = None;
-    loop {
-        let form_ready = match client.evaluate_bool(ready_expr) {
-            Ok(r) => {
-                conn_fail = 0;
-                r
-            }
-            Err(_) => {
-                conn_fail += 1;
-                if conn_fail >= MAX_CONN_FAIL {
-                    tracing::info!("[BAND] ✗ Chrome 연결이 끊겨 로그인 폼 대기를 중단");
-                    return false;
-                }
-                sleep(Duration::from_millis(100));
-                continue;
-            }
-        };
-        if !antibot_seen {
-            antibot_seen = client.evaluate_bool(ANTIBOT_READY_JS).unwrap_or(false);
-        }
-        let res_count = client
-            .evaluate(RESOURCE_COUNT_JS)
-            .ok()
-            .and_then(|v| v.as_i64())
-            .unwrap_or(-1);
-        let resources_settled = res_count >= 0 && prev_res_count == Some(res_count);
-        prev_res_count = Some(res_count);
-        let keydown_hook_ready = form_ready
-            && resources_settled
-            && antibot_seen
-            && (client.expr_has_listener("document.querySelector('#pw')", "keydown")
-                || client.expr_has_listener("document.querySelector('#id')", "keydown"));
-        let gate = login_form_gate_open(
-            form_ready,
-            resources_settled,
-            antibot_seen,
-            keydown_hook_ready,
-        );
-        streak = next_ready_streak(streak, gate);
-        if streak >= FORM_READY_STABLE_POLLS {
-            tracing::info!("[BAND] ✓ 로그인 폼 완전 로딩 확인(입력 준비 완료)");
-            return true;
-        }
-        sleep(Duration::from_millis(100));
-    }
-}
-
-/// "폼 준비" 신호의 연속 안정 횟수를 갱신한다(순수 함수, 네이버 미러). 준비됐으면 누적, 한 번이라도
-/// 흔들리면 0으로 리셋한다.
-fn next_ready_streak(streak: u32, ready_now: bool) -> u32 {
-    if ready_now {
-        streak.saturating_add(1)
-    } else {
-        0
-    }
-}
-
-/// 로그인 폼 진행 게이트(순수 함수, 네이버 미러). 폼 준비 + 리소스 정착 + 안티봇 스크립트 로드 +
-/// keydown 후킹 설치, 넷 **모두** 만족해야 진행한다.
-fn login_form_gate_open(
-    form_ready: bool,
-    resources_settled: bool,
-    antibot_ready: bool,
-    keydown_hook_ready: bool,
-) -> bool {
-    form_ready && resources_settled && antibot_ready && keydown_hook_ready
+    crate::auth::login_flow::wait_for_login_form(client)
 }
 
 // 브라우저(창) 포커스를 omnibox(주소창)에서 웹 컨텐츠로 옮긴다(네이버 focus_web_contents 미러).
@@ -841,21 +747,8 @@ fn force_page_foreground(client: &mut CdpClient) {
 // 네이버 로그인 버튼을 사람처럼 좌표 마우스 클릭한다(네이버 click_login_button 미러). id 값에 점이
 // 있어 CSS 이스케이프(#log\.login)가 필요하며, 좌표를 못 구하면 .click()으로 폴백한다.
 fn click_login_button(client: &mut CdpClient) -> Result<(), AutomationError> {
-    let center = client.evaluate(
-        "(()=>{const b=document.querySelector('#log\\\\.login')||\
-         document.querySelector('button[type=submit]');if(!b)return null;\
-         const r=b.getBoundingClientRect();if(r.width<=0||r.height<=0)return null;\
-         return [r.left+r.width/2, r.top+r.height/2];})()",
-    )?;
-    if let Some((x, y)) = parse_xy(&center) {
-        mouse_click(client, x, y)?;
-    } else {
-        client.evaluate(
-            "(()=>{const b=document.querySelector('#log\\\\.login')||\
-             document.querySelector('button[type=submit]');if(b){b.click();return true;}return false;})()",
-        )?;
-    }
-    Ok(())
+    // 단일 소스 재사용(2026-07-16): 네이버 로그인 버튼 클릭 구현을 그대로 쓴다(구/신 v4 폼 모두 지원).
+    crate::auth::login_flow::click_login_button(client)
 }
 
 // band "본인이 맞으신가요?" 화면의 "로그인 하기"를 클릭한다. 이 버튼은
@@ -1075,7 +968,7 @@ fn click_oauth_consent(client: &mut CdpClient) -> Result<bool, AutomationError> 
     const CENTER_JS: &str = "(()=>{\
         const vis=el=>{if(!el)return false;const r=el.getBoundingClientRect();\
             return r.width>0&&r.height>0&&el.offsetParent!==null&&!el.disabled;};\
-        let el=document.querySelector('button.btn.agree')||document.querySelector('#agree_btn')\
+        let el=document.querySelector('button.agree')||document.querySelector('#agree_btn')\
             ||document.querySelector('#agree')||document.querySelector('#btnAgree');\
         if(!vis(el)){el=null;\
             const cs=Array.prototype.slice.call(\
@@ -1096,7 +989,7 @@ fn click_oauth_consent(client: &mut CdpClient) -> Result<bool, AutomationError> 
         .evaluate_bool(
             "(()=>{const vis=el=>{if(!el)return false;const r=el.getBoundingClientRect();\
                 return r.width>0&&r.height>0&&el.offsetParent!==null&&!el.disabled;};\
-             let el=document.querySelector('button.btn.agree')||document.querySelector('#agree_btn')\
+             let el=document.querySelector('button.agree')||document.querySelector('#agree_btn')\
                  ||document.querySelector('#agree')||document.querySelector('#btnAgree');\
              if(!vis(el)){el=null;\
                  const cs=Array.prototype.slice.call(\
@@ -1106,7 +999,11 @@ fn click_oauth_consent(client: &mut CdpClient) -> Result<bool, AutomationError> 
                      if(vis(c)&&!t.includes('전체')&&(t==='동의하기'||t==='동의'||t==='허용하기'||t==='허용'||t==='확인'||t==='계속')){el=c;break;}}\
                  if(!vis(el)){for(const c of cs){const t=norm(c);\
                      if(vis(c)&&!t.includes('전체')&&(t.indexOf('동의')>=0||t.indexOf('허용')>=0||t.indexOf('계속')>=0||t.indexOf('확인')>=0)){el=c;break;}}}}\
-             if(vis(el)){el.click();return true;}return false;})()",
+             if(vis(el)){el.click();return true;}\
+             /* 버튼을 못 찾으면 네이버 OAuth 동의 폼을 직접 제출한다(oauth_consent.js가 button.agree \
+                클릭 시 하는 것과 동일: form[name=oauthagreeFrm].submit → POST allow_oauth). 실측 2026-07-16. */\
+             const f=document.querySelector('form[name=oauthagreeFrm]');\
+             if(f){f.submit();return true;}return false;})()",
         )
         .unwrap_or(false))
 }
@@ -1834,29 +1731,5 @@ mod tests {
         assert!(!has_band_session_cookies(&[]));
     }
 
-    // --- 폼 게이트(순수 함수) ---
-
-    #[test]
-    fn form_gate_requires_all_four_conditions() {
-        assert!(login_form_gate_open(true, true, true, true));
-        assert!(!login_form_gate_open(false, true, true, true));
-        assert!(!login_form_gate_open(true, false, true, true));
-        assert!(!login_form_gate_open(true, true, false, true));
-        assert!(!login_form_gate_open(true, true, true, false));
-    }
-
-    #[test]
-    fn ready_streak_accumulates_and_resets_on_flap() {
-        let mut s = 0;
-        s = next_ready_streak(s, true);
-        assert_eq!(s, 1);
-        s = next_ready_streak(s, true);
-        assert_eq!(s, 2);
-        s = next_ready_streak(s, false);
-        assert_eq!(s, 0);
-        s = next_ready_streak(s, true);
-        s = next_ready_streak(s, true);
-        s = next_ready_streak(s, true);
-        assert!(s >= FORM_READY_STABLE_POLLS);
-    }
+    // (로그인 폼 게이트 순수함수 테스트는 네이버 auth::login_flow로 이동 — 밴드는 그 구현을 재사용.)
 }
