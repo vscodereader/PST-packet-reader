@@ -26,7 +26,10 @@ import { api, isOffline } from "../../api";
 
 // 플랫폼 종류(종토/카페/블로그/클립/밴드) — 데스크톱 pstmacro의 PLATFORMS 그대로 재사용(요구서).
 // 카페(naver)로 분배한 계정은 하위가 로그인하지 않고 등록만 한다(카페는 게시 순간 로그인).
-const PLATFORM_OPTS = ACTIVE_PLATFORMS.map((p) => ({ value: p.id, label: p.name }));
+const PLATFORM_OPTS = ACTIVE_PLATFORMS.map((p) => ({
+  value: p.id,
+  label: p.name,
+}));
 const DEFAULT_PLATFORM = "forum";
 /** 플랫폼 id → 짧은 라벨(배지용). 미상이면 그대로. */
 function platformLabel(id: string): string {
@@ -144,7 +147,12 @@ export function AccountDistribute() {
     draftSeq += 1;
     setDrafts((prev) => [
       ...prev,
-      { key: `draft-${draftSeq}`, platform: DEFAULT_PLATFORM, loginId: "", pw: "" },
+      {
+        key: `draft-${draftSeq}`,
+        platform: DEFAULT_PLATFORM,
+        loginId: "",
+        pw: "",
+      },
     ]);
   };
 
@@ -208,7 +216,11 @@ export function AccountDistribute() {
         : new Set(onlineDevices.map((d) => d.id)),
     );
 
-  const canDistribute = selAcc.size >= 1 && selDev.size >= 1;
+  // "분배하기" = 선택한 **1대에만** 전부 넣는다(2026-07-16). 고장/먹통 컴퓨터에 몫이 흘러가
+  // 유실되는 것을 막으려면, 믿는 1대만 골라 전부 준다. 여러 대 균등분할은 "나눠서 분배하기"로 분리.
+  const canDistribute = selAcc.size >= 1 && selDev.size === 1;
+  // "나눠서 분배하기" = 선택한 여러 대에 계정 수를 대수로 균등 분할(기존 동작). 2대 이상일 때만.
+  const canSplitDistribute = selAcc.size >= 1 && selDev.size >= 2;
 
   const distribute = async () => {
     const selectedAccountIds = accounts
@@ -494,14 +506,25 @@ export function AccountDistribute() {
               </Badge>
             )}
           </Group>
-          <Button
-            color="blue"
-            disabled={!canDistribute}
-            leftSection={<Icon.send size={16} />}
-            onClick={() => void distribute()}
-          >
-            분배하기
-          </Button>
+          <Group gap="xs">
+            <Button
+              color="blue"
+              disabled={!canDistribute}
+              leftSection={<Icon.send size={16} />}
+              onClick={() => void distribute()}
+            >
+              분배하기
+            </Button>
+            <Button
+              color="teal"
+              variant="light"
+              disabled={!canSplitDistribute}
+              leftSection={<Icon.send size={16} />}
+              onClick={() => void distribute()}
+            >
+              나눠서 분배하기
+            </Button>
+          </Group>
         </Group>
 
         <Box style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
