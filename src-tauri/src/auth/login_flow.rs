@@ -837,7 +837,7 @@ fn login_form_gate_open(
 // 키 입력 암호화/봇탐지 스크립트가 덜 자리잡아 캡차가 유발된다. 게다가 한 번 true가 떠도
 // 곧바로 진행하지 않고 연속 `FORM_READY_STABLE_POLLS`회 안정될 때만 빠져나가, "맨 마지막"
 // 문서까지 자리잡은 것을 확인한다. 진행 상황을 stderr로 출력한다.
-fn wait_for_login_form(client: &mut CdpClient) -> bool {
+pub(crate) fn wait_for_login_form(client: &mut CdpClient) -> bool {
     tracing::info!("[LOGIN] 로그인 폼 로딩 대기 중...");
     // 고정 대기가 아니라 폼 DOM(#id/#pw + 로그인 버튼 + 모든 iframe)이 자리잡는 즉시 진행한다.
     // 사수 지시: DOM이 끝까지 로드될 때까지 **시간 초과로 취소하지 않고 계속 기다린다**. 준비 안
@@ -1181,7 +1181,7 @@ fn wait_wtmncapt_ready_for_block_wasm(client: &mut CdpClient) {
 
 // 로그인 버튼을 사람처럼 좌표 클릭한다. 좌표를 못 구하면 .click()으로 폴백(클릭 실패가
 // 로그인 자체를 막지 않도록).
-fn click_login_button(client: &mut CdpClient) -> Result<(), AutomationError> {
+pub(crate) fn click_login_button(client: &mut CdpClient) -> Result<(), AutomationError> {
     // 로그인 버튼 선택: 구 폼(#log.login·submit)과 신 v4 폼(#loginBtn_column·#loginBtn_row) 모두 지원.
     // 신 폼은 패스키 버튼(#passkeyBtn_*)도 .btn_done 클래스라, **로그인 전용 id만** 후보로 쓰고
     // 보이는(offsetParent) 것을 우선 골라 패스키 오클릭을 막는다. 내부 제출 방식은 불변.
