@@ -9,8 +9,8 @@ use uuid::Uuid;
 use super::Repository;
 use crate::error::{AppError, AppResult};
 use crate::model::{
-    AuditEntry, Device, DeviceCode, DeviceState, LoginBatchDto, LoginCumulativeDto, LoginReport,
-    Operator, PostItemDto, PostReport, Role, StagedAccount,
+    AuditEntry, Device, DeviceCode, DeviceRegistration, DeviceState, LoginBatchDto,
+    LoginCumulativeDto, LoginReport, Operator, PostItemDto, PostReport, Role, StagedAccount,
 };
 
 /// 스키마(멱등). `server/migrations/0001_init.sql`과 동일 내용.
@@ -78,6 +78,16 @@ CREATE TABLE IF NOT EXISTS login_reports (
 -- 기존 DB 업그레이드(멱등): 등록 건수 컬럼 추가(§10-1 등록 확인).
 ALTER TABLE login_reports ADD COLUMN IF NOT EXISTS registered INT NOT NULL DEFAULT 0;
 ALTER TABLE login_reports ADD COLUMN IF NOT EXISTS registered_visible INT NOT NULL DEFAULT 0;
+-- 등록 이력(#444): register마다 append하는 읽기전용 로그. machine_id로 하위com 묶고 등록일순 표시.
+CREATE TABLE IF NOT EXISTS device_registrations (
+  id UUID PRIMARY KEY,
+  machine_id TEXT,
+  device_id UUID NOT NULL,
+  name TEXT NOT NULL,
+  registered_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS device_registrations_machine_idx ON device_registrations (machine_id);
+CREATE INDEX IF NOT EXISTS device_registrations_at_idx ON device_registrations (registered_at);
 "#;
 
 pub struct PostgresRepo {
@@ -283,6 +293,36 @@ impl Repository for PostgresRepo {
             .await
             .map_err(db_err)?;
         Ok(())
+    }
+    async fn add_device_registration(&self, reg: DeviceRegistration) -> AppResult<()> {
+        sqlx::query(
+            "INSERT INTO device_registrations (id,machine_id,device_id,name,registered_at) VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(reg.id)
+        .bind(&reg.machine_id)
+        .bind(reg.device_id)
+        .bind(&reg.name)
+        .bind(reg.registered_at)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+    async fn list_device_registrations(&self) -> AppResult<Vec<DeviceRegistration>> {
+        let rows = sqlx::query("SELECT * FROM device_registrations ORDER BY registered_at")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| DeviceRegistration {
+                id: r.get("id"),
+                machine_id: r.get("machine_id"),
+                device_id: r.get("device_id"),
+                name: r.get("name"),
+                registered_at: r.get("registered_at"),
+            })
+            .collect())
     }
     async fn delete_device(&self, id: Uuid) -> AppResult<bool> {
         let r = sqlx::query("DELETE FROM devices WHERE id=$1")

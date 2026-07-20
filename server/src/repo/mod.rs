@@ -7,7 +7,8 @@ use uuid::Uuid;
 
 use crate::error::AppResult;
 use crate::model::{
-    AuditEntry, Device, DeviceCode, DeviceState, LoginReport, Operator, PostReport, StagedAccount,
+    AuditEntry, Device, DeviceCode, DeviceRegistration, DeviceState, LoginReport, Operator,
+    PostReport, StagedAccount,
 };
 
 pub mod memory;
@@ -42,6 +43,10 @@ pub trait Repository: Send + Sync {
     async fn delete_device(&self, id: Uuid) -> AppResult<bool>;
     /// 기기 이름 갱신(재등록 시 최신 컴퓨터 이름 반영, §E).
     async fn set_device_name(&self, id: Uuid, name: &str) -> AppResult<()>;
+    /// 등록 이력 1건 append(#444). register마다 누적(읽기전용 로그).
+    async fn add_device_registration(&self, reg: DeviceRegistration) -> AppResult<()>;
+    /// 등록 이력 전체(#444). Admin이 machine_id로 하위com을 묶어 등록일순으로 표시.
+    async fn list_device_registrations(&self) -> AppResult<Vec<DeviceRegistration>>;
     async fn touch_device(
         &self,
         id: Uuid,

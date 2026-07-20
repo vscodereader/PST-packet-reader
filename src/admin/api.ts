@@ -108,6 +108,13 @@ export interface DeviceDto {
   lastSeen: string;
   state: DeviceState;
 }
+// 등록 이력(#444) — 통신로그가 하위com(기기)별 등록 이름을 날짜순으로 보여준다.
+export interface DeviceRegistrationDto {
+  machineId: string | null;
+  deviceId: string;
+  name: string;
+  registeredAt: string;
+}
 export interface DeviceCodeResp {
   code: string;
   serverUrl: string | null;
@@ -342,6 +349,10 @@ export const api = {
     },
     list(): Promise<DeviceDto[]> {
       return request("GET", "/devices");
+    },
+    // 등록 이력(#444) — 하위com별 등록 이름·등록시각.
+    registrations(): Promise<DeviceRegistrationDto[]> {
+      return request("GET", "/admin/device-registrations");
     },
     remove(id: string): Promise<unknown> {
       return request("DELETE", `/devices/${encodeURIComponent(id)}`);

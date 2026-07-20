@@ -9,8 +9,8 @@ use uuid::Uuid;
 use super::Repository;
 use crate::error::AppResult;
 use crate::model::{
-    AuditEntry, Device, DeviceCode, DeviceState, LoginReport, Operator, PostReport, Role,
-    StagedAccount,
+    AuditEntry, Device, DeviceCode, DeviceRegistration, DeviceState, LoginReport, Operator,
+    PostReport, Role, StagedAccount,
 };
 
 /// 게시 결과 보고 누적 상한(감사로그처럼 무한 증가 방지).
@@ -25,6 +25,7 @@ struct Inner {
     audit: Vec<AuditEntry>,
     post_reports: Vec<PostReport>,
     login_reports: HashMap<Uuid, LoginReport>, // device_id당 최신 1건
+    device_registrations: Vec<DeviceRegistration>, // 등록 이력(#444)
 }
 
 #[derive(Default)]
@@ -112,6 +113,15 @@ impl Repository for MemoryRepo {
             d.name = name.to_string();
         }
         Ok(())
+    }
+    async fn add_device_registration(&self, reg: DeviceRegistration) -> AppResult<()> {
+        self.inner.lock().unwrap().device_registrations.push(reg);
+        Ok(())
+    }
+    async fn list_device_registrations(&self) -> AppResult<Vec<DeviceRegistration>> {
+        let mut v = self.inner.lock().unwrap().device_registrations.clone();
+        v.sort_by_key(|r| r.registered_at);
+        Ok(v)
     }
     async fn touch_device(
         &self,

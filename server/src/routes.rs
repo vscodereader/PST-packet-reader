@@ -53,6 +53,7 @@ pub fn build_router(state: AppState) -> Router {
         // ── 기기(§6) ──
         .route("/admin/device-codes", post(issue_device_code))
         .route("/devices", get(list_devices))
+        .route("/admin/device-registrations", get(device_registrations))
         .route("/devices/:id", delete(delete_device))
         .route("/devices/:id/commands", post(issue_command))
         .route("/admin/publish", post(issue_publish))
@@ -319,6 +320,25 @@ async fn list_devices(
     let devices = st.repo.list_devices().await?;
     Ok(Json(
         devices.iter().map(|d| to_device_dto(d, st.cfg.heartbeat_timeout_secs)).collect(),
+    ))
+}
+
+/// 등록 이력(#444) — Admin 통신로그가 machine_id로 하위com을 묶고 등록일순 이름을 표시.
+async fn device_registrations(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<Vec<DeviceRegistrationDto>>> {
+    st.auth_operator(&headers).await?;
+    let regs = st.repo.list_device_registrations().await?;
+    Ok(Json(
+        regs.into_iter()
+            .map(|r| DeviceRegistrationDto {
+                machine_id: r.machine_id,
+                device_id: r.device_id.to_string(),
+                name: r.name,
+                registered_at: r.registered_at.to_rfc3339(),
+            })
+            .collect(),
     ))
 }
 
@@ -1314,6 +1334,16 @@ async fn register_device(
                 "ok",
             )
             .await;
+            // 등록 이력 append(#444) — 재등록도 이력 1건으로 남긴다(이름·날짜).
+            st.repo
+                .add_device_registration(DeviceRegistration {
+                    id: Uuid::new_v4(),
+                    machine_id: Some(mid.to_string()),
+                    device_id: existing.id,
+                    name: name.clone(),
+                    registered_at: Utc::now(),
+                })
+                .await?;
             return Ok(Json(RegisterResp {
                 device_id: existing.id.to_string(),
                 device_token: token,
@@ -1338,6 +1368,16 @@ async fn register_device(
     let token = jwt::issue_device(&st.cfg.jwt_secret, &id.to_string()).map_err(AppError::Internal)?;
     st.audit("[REGISTER]", &format!("{name} → 서버"), &id.to_string(), &format!("기기코드 {} 등록 성공 → 기기토큰 발급 ✅", req.code), "ok").await;
     st.audit("[SSE]", &format!("{name} → 서버"), &id.to_string(), &format!("스트림 연결 준비(device_id={id})"), "info").await;
+    // 등록 이력 append(#444).
+    st.repo
+        .add_device_registration(DeviceRegistration {
+            id: Uuid::new_v4(),
+            machine_id: machine_id.map(str::to_string),
+            device_id: id,
+            name: name.clone(),
+            registered_at: Utc::now(),
+        })
+        .await?;
     Ok(Json(RegisterResp { device_id: id.to_string(), device_token: token }))
 }
 
@@ -2123,6 +2163,43 @@ mod tests {
             .unwrap();
         }
         assert_eq!(repo.list_devices().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn register_appends_history_even_on_reuse() {
+        // #444: 같은 machine_id로 2번 등록 → live device는 1개지만 등록 이력은 2건(이름·등록일 보존).
+        let (st, repo, _secret) = test_state();
+        issue_code(&st, "h1").await;
+        issue_code(&st, "h2").await;
+        let _ = register_device(
+            State(st.clone()),
+            Json(RegisterReq {
+                code: "h1".into(),
+                name: Some("PC-옛이름".into()),
+                machine_id: Some("MID-H".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        let _ = register_device(
+            State(st.clone()),
+            Json(RegisterReq {
+                code: "h2".into(),
+                name: Some("PC-새이름".into()),
+                machine_id: Some("MID-H".into()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(repo.list_devices().await.unwrap().len(), 1, "live device는 1개");
+        let regs = repo.list_device_registrations().await.unwrap();
+        assert_eq!(regs.len(), 2, "등록 이력은 2건(재등록도 남김)");
+        // registered_at 오름차순 정렬(오래된 것이 먼저).
+        assert_eq!(regs[0].name, "PC-옛이름");
+        assert_eq!(regs[1].name, "PC-새이름");
+        assert!(regs.iter().all(|r| r.machine_id.as_deref() == Some("MID-H")));
+        assert_eq!(regs[0].device_id, regs[1].device_id, "같은 device_id로 매핑");
     }
 
     #[tokio::test]

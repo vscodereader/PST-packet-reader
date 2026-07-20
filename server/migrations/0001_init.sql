@@ -76,3 +76,16 @@ CREATE TABLE IF NOT EXISTS login_reports (
   registered         INT NOT NULL DEFAULT 0,
   registered_visible INT NOT NULL DEFAULT 0
 );
+
+-- 등록 이력(#444). register_device마다 append하는 읽기전용 로그. machine_id로 하위com(물리 컴퓨터)
+-- 묶고, 그 안의 등록 이름을 registered_at 순으로 통신로그 목록2에 보여준다. live devices(upsert로
+-- 기기 1개)와 별개.
+CREATE TABLE IF NOT EXISTS device_registrations (
+  id            UUID PRIMARY KEY,
+  machine_id    TEXT,                                  -- 기기 고유값(#441). NULL이면 개별 하위com
+  device_id     UUID NOT NULL,                         -- upsert 후 매핑된 live device
+  name          TEXT NOT NULL,                         -- 그 등록의 컴퓨터 이름
+  registered_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS device_registrations_machine_idx ON device_registrations (machine_id);
+CREATE INDEX IF NOT EXISTS device_registrations_at_idx ON device_registrations (registered_at);
