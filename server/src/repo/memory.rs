@@ -236,7 +236,14 @@ impl Repository for MemoryRepo {
         Ok(())
     }
     async fn list_post_reports(&self) -> AppResult<Vec<PostReport>> {
-        let mut v = self.inner.lock().unwrap().post_reports.clone();
+        let g = self.inner.lock().unwrap();
+        // 삭제된 기기(devices에 없는 device_id)의 리포트는 숨긴다(postgres와 동일 규칙).
+        let mut v: Vec<PostReport> = g
+            .post_reports
+            .iter()
+            .filter(|r| g.devices.contains_key(&r.device_id))
+            .cloned()
+            .collect();
         // 최신(received_at) 먼저.
         v.sort_by_key(|r| std::cmp::Reverse(r.received_at));
         Ok(v)
@@ -252,12 +259,12 @@ impl Repository for MemoryRepo {
         Ok(())
     }
     async fn list_login_reports(&self) -> AppResult<Vec<LoginReport>> {
-        let mut v: Vec<LoginReport> = self
-            .inner
-            .lock()
-            .unwrap()
+        let g = self.inner.lock().unwrap();
+        // 삭제된 기기의 로그인 리포트도 숨긴다(위 post_reports와 동일 규칙).
+        let mut v: Vec<LoginReport> = g
             .login_reports
             .values()
+            .filter(|r| g.devices.contains_key(&r.device_id))
             .cloned()
             .collect();
         v.sort_by_key(|r| std::cmp::Reverse(r.received_at));
@@ -270,7 +277,19 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
-    use crate::model::PostItemDto;
+    use crate::model::{Device, DeviceState, PostItemDto};
+
+    /// live device 1건(리포트가 화면에 보이려면 그 device_id가 devices에 있어야 한다).
+    fn device(id: Uuid) -> Device {
+        Device {
+            id,
+            name: "하위-001".into(),
+            ip: None,
+            state: DeviceState::Online,
+            last_seen: Utc.timestamp_opt(0, 0).unwrap(),
+            machine_id: None,
+        }
+    }
 
     fn report(device: Uuid, batch: &str, title: &str, secs: i64) -> PostReport {
         PostReport {
@@ -297,6 +316,7 @@ mod tests {
     async fn post_report_dedup_by_device_and_batch() {
         let repo = MemoryRepo::new();
         let dev = Uuid::new_v4();
+        repo.create_device(device(dev)).await.unwrap();
         // 같은 (device, batch)를 두 번 보고 → 1건만, 마지막 내용으로 갱신.
         repo.add_post_report(report(dev, "lb-q-1", "첫 제목", 10))
             .await
@@ -313,6 +333,7 @@ mod tests {
     async fn post_report_lists_newest_first() {
         let repo = MemoryRepo::new();
         let dev = Uuid::new_v4();
+        repo.create_device(device(dev)).await.unwrap();
         repo.add_post_report(report(dev, "lb-q-1", "오래된", 10))
             .await
             .unwrap();
@@ -341,6 +362,7 @@ mod tests {
     async fn login_report_keeps_latest_per_device() {
         let repo = MemoryRepo::new();
         let dev = Uuid::new_v4();
+        repo.create_device(device(dev)).await.unwrap();
         // 같은 device를 두 번 보고 → 1건만, 최신(나중) 배치로 덮어씀.
         repo.add_login_report(login_report(dev, 1, 10))
             .await
@@ -351,5 +373,36 @@ mod tests {
         let all = repo.list_login_reports().await.unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].batch.success, 5);
+    }
+
+    // #446 후속 B: 기기를 삭제(create_device 안 함 = devices에 없음)해도 리포트 기록은 남지만,
+    // 결과보고 조회는 현존 기기만 보여준다 — 삭제된 기기의 고아 리포트는 숨긴다.
+    #[tokio::test]
+    async fn reports_of_deleted_device_are_hidden() {
+        let repo = MemoryRepo::new();
+        let live = Uuid::new_v4();
+        let gone = Uuid::new_v4(); // devices에 없음(삭제된 기기)
+        repo.create_device(device(live)).await.unwrap();
+
+        repo.add_post_report(report(live, "b1", "살아있는 게시", 10))
+            .await
+            .unwrap();
+        repo.add_post_report(report(gone, "b2", "삭제기기 게시", 20))
+            .await
+            .unwrap();
+        repo.add_login_report(login_report(live, 3, 10))
+            .await
+            .unwrap();
+        repo.add_login_report(login_report(gone, 9, 20))
+            .await
+            .unwrap();
+
+        let posts = repo.list_post_reports().await.unwrap();
+        assert_eq!(posts.len(), 1, "삭제기기 게시 리포트는 숨겨야 한다");
+        assert_eq!(posts[0].title, "살아있는 게시");
+
+        let logins = repo.list_login_reports().await.unwrap();
+        assert_eq!(logins.len(), 1, "삭제기기 로그인 리포트는 숨겨야 한다");
+        assert_eq!(logins[0].device_id, live);
     }
 }

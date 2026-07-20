@@ -532,7 +532,13 @@ impl Repository for PostgresRepo {
         Ok(())
     }
     async fn list_post_reports(&self) -> AppResult<Vec<PostReport>> {
-        let rows = sqlx::query("SELECT * FROM post_reports ORDER BY received_at DESC")
+        // 삭제된 기기(devices에 없는 device_id)의 리포트는 숨긴다 — 결과보고는 기록을 지우지 않지만
+        // 화면엔 현존 기기만 보인다(#446 후속 B: delete_device는 리포트를 cascade하지 않아 고아 리포트가
+        // 남던 것을 조회 단계에서 거른다. 기록 자체는 보존).
+        let rows = sqlx::query(
+            "SELECT * FROM post_reports WHERE device_id IN (SELECT id FROM devices) \
+             ORDER BY received_at DESC",
+        )
             .fetch_all(&self.pool)
             .await
             .map_err(db_err)?;
@@ -584,7 +590,11 @@ impl Repository for PostgresRepo {
         Ok(())
     }
     async fn list_login_reports(&self) -> AppResult<Vec<LoginReport>> {
-        let rows = sqlx::query("SELECT * FROM login_reports ORDER BY received_at DESC")
+        // 삭제된 기기의 로그인 리포트도 화면에서 숨긴다(위 post_reports와 동일 규칙).
+        let rows = sqlx::query(
+            "SELECT * FROM login_reports WHERE device_id IN (SELECT id FROM devices) \
+             ORDER BY received_at DESC",
+        )
             .fetch_all(&self.pool)
             .await
             .map_err(db_err)?;
