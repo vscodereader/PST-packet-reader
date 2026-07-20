@@ -256,6 +256,28 @@ pub(crate) fn block_wasm_enabled() -> bool {
     block_wasm_from_value(std::env::var("PSTMACRO_BLOCK_WASM").ok().as_deref())
 }
 
+/// ncaptcha wasm 엔진만 CDP Fetch 로 막는 실험 스위치의 활성 여부를 값에서 판정(순수함수, 테스트용).
+/// `block_wasm_from_value`(기본 ON)와 달리 **옵트인**(기본 OFF) — 명시 truthy(`1`/`on`/`true`/`yes`,
+/// 대소문자·공백 무시)일 때만 ON. `login_netlog_enabled` 와 같은 옵트인 규약이다.
+fn block_wasm_fetch_from_value(value: Option<&str>) -> bool {
+    matches!(
+        value,
+        Some(v) if matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "on" | "true" | "yes"
+        )
+    )
+}
+
+/// ncpt wasm 엔진만 CDP `Fetch` 도메인으로 차단하는 실험(옵트인, 기본 OFF). `PSTMACRO_BLOCK_WASM`
+/// (wtm DNS 차단)이 걸렸을 때 폴백으로 뜨는 `ncpt.naver.com/static/*.wasm` 만 `Fetch.failRequest`
+/// 로 죽이고, `/v2/tokens`·SDK 로더는 통과시킨다. `--host-resolver-rules` 는 호스트 단위라 wasm 한
+/// URL 만 못 막으므로 CDP Fetch 를 쓴다. ⚠️ Fetch 도메인은 봇탐지 표면을 늘릴 수 있어(A/B 대조용)
+/// 켜려면 `PSTMACRO_BLOCK_WASM_FETCH=1`(또는 `on`/`true`/`yes`). 미설정/falsy 면 오늘과 완전 동일.
+pub(crate) fn block_wasm_fetch_enabled() -> bool {
+    block_wasm_fetch_from_value(std::env::var("PSTMACRO_BLOCK_WASM_FETCH").ok().as_deref())
+}
+
 /// 시스템 Chrome을 띄운다(게시·밴드 공용 — UA 오버라이드 없이 **네이티브 UA 유지**).
 pub(crate) fn launch(headless: bool) -> Result<ChromeHandle, OrchestratorError> {
     launch_inner(headless, None)
@@ -513,5 +535,25 @@ chrome.exe --user-data-dir=C:\\Users\\me\\AppData\\Chrome\\Default";
         assert!(!block_wasm_from_value(Some("off")));
         assert!(!block_wasm_from_value(Some("no")));
         assert!(!block_wasm_from_value(Some("  FALSE  ")));
+    }
+
+    #[test]
+    fn block_wasm_fetch_defaults_off_and_opts_in_only_on_truthy() {
+        // 옵트인: 미설정(None) = 기본 OFF — 켜지 않으면 오늘 동작과 완전 동일해야 한다.
+        assert!(!block_wasm_fetch_from_value(None));
+        // 명시 truthy 만 ON(대소문자·공백 무시).
+        assert!(block_wasm_fetch_from_value(Some("1")));
+        assert!(block_wasm_fetch_from_value(Some("on")));
+        assert!(block_wasm_fetch_from_value(Some("true")));
+        assert!(block_wasm_fetch_from_value(Some("yes")));
+        assert!(block_wasm_fetch_from_value(Some("  ON  ")));
+        assert!(block_wasm_fetch_from_value(Some("TRUE")));
+        // 그 외(빈 문자열·falsy·임의값)는 OFF.
+        assert!(!block_wasm_fetch_from_value(Some("")));
+        assert!(!block_wasm_fetch_from_value(Some("0")));
+        assert!(!block_wasm_fetch_from_value(Some("off")));
+        assert!(!block_wasm_fetch_from_value(Some("false")));
+        assert!(!block_wasm_fetch_from_value(Some("no")));
+        assert!(!block_wasm_fetch_from_value(Some("maybe")));
     }
 }

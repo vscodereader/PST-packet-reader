@@ -901,6 +901,33 @@ pub(crate) struct CdpClient {
     // (opt-in). 켜지면 read 루프가 `Page.javascriptDialogOpening` 이벤트를 보는 순간 바로
     // `Page.handleJavaScriptDialog{accept:true}`를 쏴, 성공 alert가 응답 대기(수 초)를 막지 않게 한다.
     auto_accept_dialogs: bool,
+    // 실험(opt-in, 기본 OFF): 켜지면 read 루프가 `Fetch.requestPaused` 이벤트를 보는 순간
+    // ncpt wasm 엔진 요청만 `Fetch.failRequest`(BlockedByClient)로 죽이고, `/v2/tokens`·나머지는
+    // `Fetch.continueRequest`로 통과시킨다. `Fetch.enable`(login_flow)로 두 패턴만 가로채므로
+    // wasm·token 요청만 pause 된다. 로그인 브라우저에서만 `set_fetch_wasm_block(true)`로 켠다.
+    fetch_wasm_block: bool,
+}
+
+/// `Fetch.requestPaused` 로 멈춘 요청 URL 을 어떻게 처리할지 분류한다(순수함수, 테스트용).
+/// - `.wasm` 포함 → 차단(ncpt 엔진). `/v2/tokens` 포함 → 관측만 하고 통과. 그 외 → 그대로 통과.
+#[derive(Debug, PartialEq, Eq)]
+enum FetchPausedAction {
+    /// ncpt wasm 엔진 — `Fetch.failRequest`(BlockedByClient)로 차단.
+    Block,
+    /// 토큰 요청 — 바디(비었는지)를 로그로 관측하고 `Fetch.continueRequest`로 통과.
+    ObserveToken,
+    /// 나머지 — 그대로 `Fetch.continueRequest`로 통과(멈춘 요청을 절대 미해결로 두지 않는다).
+    PassThrough,
+}
+
+fn fetch_wasm_action(url: &str) -> FetchPausedAction {
+    if url.contains(".wasm") {
+        FetchPausedAction::Block
+    } else if url.contains("/v2/tokens") {
+        FetchPausedAction::ObserveToken
+    } else {
+        FetchPausedAction::PassThrough
+    }
 }
 
 impl CdpClient {
@@ -917,6 +944,7 @@ impl CdpClient {
             page_loads: 0,
             net_watch: None,
             auto_accept_dialogs: false,
+            fetch_wasm_block: false,
         })
     }
 
@@ -924,6 +952,13 @@ impl CdpClient {
     /// read 루프가 수락해, 응답 대기·창 종료·다음 글 진행을 막지 않는다.
     pub(crate) fn set_auto_accept_dialogs(&mut self, on: bool) {
         self.auto_accept_dialogs = on;
+    }
+
+    /// ncpt wasm 엔진만 CDP Fetch 로 차단하는 실험을 켠다(로그인 브라우저 전용 opt-in, 기본 OFF).
+    /// 켜기 전 login_flow 가 `Fetch.enable`(wasm·token 패턴)을 호출해야 read 루프가 그 두 요청의
+    /// `Fetch.requestPaused` 이벤트를 받는다.
+    pub(crate) fn set_fetch_wasm_block(&mut self, on: bool) {
+        self.fetch_wasm_block = on;
     }
 
     // Chrome 디버그 포트로 WebSocket을 새로 맺는다(연결·재접속 공용). 대상 탭을 고르고 TCP·핸드셰이크
@@ -1153,6 +1188,70 @@ impl CdpClient {
                         // fire-and-forget: 응답은 이 루프가 나중에 non-matching id 로 읽고 흘린다.
                         let _ = self.send_message(Message::Text(payload.to_string()));
                         tracing::info!(target: "report", "[REPORT-SUBMIT] alert 자동 수락(뜨는 즉시)");
+                    }
+                    // 실험(opt-in): ncpt wasm 엔진 요청만 CDP Fetch 로 막고 나머지는 통과시킨다.
+                    // dialog 핸들러와 같은 fire-and-forget(새 next_id 로 명령 프레임만 쏘고 응답은 이
+                    // 루프가 나중에 non-matching id 로 흘림). self.call() 재귀는 read 루프를 교착시키므로 금지.
+                    if self.fetch_wasm_block && method == "Fetch.requestPaused" {
+                        let params = value.get("params");
+                        let request_id = params
+                            .and_then(|p| p.get("requestId"))
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        let url = params
+                            .and_then(|p| p.pointer("/request/url"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned();
+                        if let Some(rid) = request_id {
+                            match fetch_wasm_action(&url) {
+                                FetchPausedAction::Block => {
+                                    self.next_id += 1;
+                                    let fail_id = self.next_id;
+                                    let payload = json!({
+                                        "id": fail_id,
+                                        "method": "Fetch.failRequest",
+                                        "params": { "requestId": rid, "errorReason": "BlockedByClient" },
+                                    });
+                                    let _ = self.send_message(Message::Text(payload.to_string()));
+                                    tracing::warn!("🚫 [BLOCK_WASM_FETCH] wasm 엔진 차단: {url}");
+                                }
+                                FetchPausedAction::ObserveToken => {
+                                    let req_method = params
+                                        .and_then(|p| p.pointer("/request/method"))
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("?");
+                                    let post_data = params
+                                        .and_then(|p| p.pointer("/request/postData"))
+                                        .and_then(Value::as_str);
+                                    let len = post_data.map(str::len).unwrap_or(0);
+                                    let head: String =
+                                        post_data.unwrap_or("").chars().take(200).collect();
+                                    // len=0(또는 postData 부재)면 토큰 재료가 **비어 있음** = 핵심 관측치.
+                                    tracing::warn!(
+                                        "📊 [BLOCK_WASM_FETCH] 토큰 요청 감지: method={req_method} postData_len={len} head={head}"
+                                    );
+                                    self.next_id += 1;
+                                    let cont_id = self.next_id;
+                                    let payload = json!({
+                                        "id": cont_id,
+                                        "method": "Fetch.continueRequest",
+                                        "params": { "requestId": rid },
+                                    });
+                                    let _ = self.send_message(Message::Text(payload.to_string()));
+                                }
+                                FetchPausedAction::PassThrough => {
+                                    self.next_id += 1;
+                                    let cont_id = self.next_id;
+                                    let payload = json!({
+                                        "id": cont_id,
+                                        "method": "Fetch.continueRequest",
+                                        "params": { "requestId": rid },
+                                    });
+                                    let _ = self.send_message(Message::Text(payload.to_string()));
+                                }
+                            }
+                        }
                     }
                     self.record_network_event(method, &value);
                 }
@@ -1587,6 +1686,30 @@ impl CdpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fetch_wasm_action_classifies_paused_url() {
+        // wasm 엔진 → 차단.
+        assert_eq!(
+            fetch_wasm_action("https://ncpt.naver.com/static/js/353dfc.wasm"),
+            FetchPausedAction::Block
+        );
+        // 토큰 요청 → 관측만 하고 통과.
+        assert_eq!(
+            fetch_wasm_action("https://ncpt.naver.com/v2/tokens"),
+            FetchPausedAction::ObserveToken
+        );
+        assert_eq!(
+            fetch_wasm_action("https://ncpt.naver.com/v2/tokens?foo=bar"),
+            FetchPausedAction::ObserveToken
+        );
+        // 그 외 → 그대로 통과(SDK 로더 등).
+        assert_eq!(
+            fetch_wasm_action("https://ncpt.naver.com/static/js/loader.js"),
+            FetchPausedAction::PassThrough
+        );
+        assert_eq!(fetch_wasm_action(""), FetchPausedAction::PassThrough);
+    }
 
     #[test]
     fn post_id_from_url_extracts_id_from_post_url() {

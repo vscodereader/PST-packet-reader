@@ -322,6 +322,30 @@ fn run_inner(
         );
     }
 
+    // [실험 옵트인, 기본 OFF] PSTMACRO_BLOCK_WASM_FETCH: ncpt wasm 엔진만 CDP Fetch 로 막고
+    // /v2/tokens·SDK 로더는 통과시켜, wasm 이 사라졌을 때 (1)캡차가 뜨는지 (2)Fetch 가로채기 자체가
+    // 탐지되는지(A/B) (3)토큰 요청 바디가 비는지를 관측한다. 두 패턴만 가로채므로 wasm·token 만 pause
+    // 된다. Fetch.enable 실패는 실험 실패일 뿐 로그인은 진행해야 하므로 비치명적(netlog 블록과 동일).
+    if super::chrome::block_wasm_fetch_enabled() {
+        match client.call(
+            "Fetch.enable",
+            json!({
+                "patterns": [
+                    { "urlPattern": "*ncpt.naver.com/static/*.wasm" },
+                    { "urlPattern": "*ncpt.naver.com/v2/tokens*" }
+                ]
+            }),
+        ) {
+            Ok(_) => client.set_fetch_wasm_block(true),
+            Err(error) => tracing::warn!(
+                "[BLOCK_WASM_FETCH] Fetch.enable 실패 — 실험 없이 계속(기존 동작): {error}"
+            ),
+        }
+        tracing::warn!(
+            "[BLOCK_WASM_FETCH] 실험 ON — ncpt wasm 엔진만 CDP Fetch 차단(토큰·SDK는 통과). 봇탐지 표면 증가 가능(A/B용)."
+        );
+    }
+
     client.navigate(LOGIN_URL)?;
     // navigate가 readyState까지 기다려도, 로그인 폼이 렌더되고 네이버의 keydown 암호화
     // 핸들러가 붙기 전에 타이핑하면 글자가 필드에 들어가지 않는다. 폼이 준비될 때까지 기다린다.
