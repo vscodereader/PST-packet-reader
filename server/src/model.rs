@@ -40,6 +40,9 @@ pub struct Device {
     pub ip: Option<String>,
     pub state: DeviceState,
     pub last_seen: DateTime<Utc>,
+    /// 기기 고유값(Windows MachineGuid 등, §E). 재설치·재등록해도 같은 PC면 동일 → 같은 기기로 인식.
+    /// nullable: 옛 앱/옛 row는 None(기존처럼 신규 생성 폴백).
+    pub machine_id: Option<String>,
 }
 
 /// 하위 인벤토리(글목록·성공계정) — 하위가 주기적으로 보고. Admin 게시명령 화면이 실데이터로 렌더한다.
@@ -285,6 +288,8 @@ pub struct DeviceCodeResp {
 pub struct RegisterReq {
     pub code: String,
     pub name: Option<String>,
+    /// 기기 고유값(§E). 있으면 서버가 같은 machine_id 기기를 재사용(upsert). 옛 앱은 미전송(None).
+    pub machine_id: Option<String>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

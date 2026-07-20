@@ -36,8 +36,12 @@ pub trait Repository: Send + Sync {
     // ── 기기(§4·§6) ──
     async fn create_device(&self, device: Device) -> AppResult<()>;
     async fn find_device(&self, id: Uuid) -> AppResult<Option<Device>>;
+    /// machine_id(기기 고유값, §E)로 기기 조회 — 재설치·재등록에도 같은 기기 인식용. 없으면 None.
+    async fn find_device_by_machine_id(&self, machine_id: &str) -> AppResult<Option<Device>>;
     async fn list_devices(&self) -> AppResult<Vec<Device>>;
     async fn delete_device(&self, id: Uuid) -> AppResult<bool>;
+    /// 기기 이름 갱신(재등록 시 최신 컴퓨터 이름 반영, §E).
+    async fn set_device_name(&self, id: Uuid, name: &str) -> AppResult<()>;
     async fn touch_device(
         &self,
         id: Uuid,
