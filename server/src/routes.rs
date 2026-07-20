@@ -874,6 +874,9 @@ struct ForumStocksQuery {
     market: Option<String>,
     #[serde(default)]
     page: Option<u32>,
+    /// 검색어(있으면 카테고리 목록 대신 검색 경로). 하위 `fetch_search_page` 이식 프록시(§18-8-1).
+    #[serde(default)]
+    q: Option<String>,
 }
 
 /// Admin 게시명령 화면 종목 미리보기 — 서버가 네이버 공개 front-api(무쿠키)를 프록시해 실제 종목
@@ -885,16 +888,25 @@ async fn forum_stocks(
     Query(q): Query<ForumStocksQuery>,
 ) -> AppResult<Json<serde_json::Value>> {
     let op = st.auth_operator(&headers).await?;
-    let category = crate::naver_stocks::Category::parse(&q.category)
-        .ok_or_else(|| AppError::BadRequest(format!("알 수 없는 카테고리: {}", q.category)))?;
-    let exchange = crate::naver_stocks::Exchange::parse(q.exchange.as_deref().unwrap_or("krx"))
-        .ok_or_else(|| AppError::BadRequest("거래소는 krx/nxt".into()))?;
-    let market = crate::naver_stocks::Market::parse(q.market.as_deref().unwrap_or("all"))
-        .ok_or_else(|| AppError::BadRequest("시장은 all/kospi/kosdaq".into()))?;
     let page = q.page.unwrap_or(1).max(1);
+    let search_query = q.q.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
     let client = crate::naver_stocks::NaverStockClient::new();
-    let (result, raws) = client.list(category, exchange, market, page).await;
+    // 검색어가 있으면 검색 경로(§18-8-1: fetch_search_page 이식), 없으면 기존 카테고리 목록.
+    let (result, raws) = match search_query {
+        Some(query) => client.search(query, page).await,
+        None => {
+            let category = crate::naver_stocks::Category::parse(&q.category).ok_or_else(|| {
+                AppError::BadRequest(format!("알 수 없는 카테고리: {}", q.category))
+            })?;
+            let exchange =
+                crate::naver_stocks::Exchange::parse(q.exchange.as_deref().unwrap_or("krx"))
+                    .ok_or_else(|| AppError::BadRequest("거래소는 krx/nxt".into()))?;
+            let market = crate::naver_stocks::Market::parse(q.market.as_deref().unwrap_or("all"))
+                .ok_or_else(|| AppError::BadRequest("시장은 all/kospi/kosdaq".into()))?;
+            client.list(category, exchange, market, page).await
+        }
+    };
 
     // ★ 통신로그: 요청 파라미터 + 네이버 원문 응답 전체(각 호출별 URL·status·body 통째로).
     //   성공·실패 관계없이 **자르지 않고** 남긴다(사용자 지시: 종목 가져올 때도 원문 전부).
@@ -903,13 +915,16 @@ async fn forum_stocks(
         .map(|r| format!("GET {} → {}\n{}", r.url, r.status, r.body))
         .collect::<Vec<_>>()
         .join("\n---\n");
-    let params = format!(
-        "category={} exchange={} market={} page={page} operator={}",
-        q.category,
-        q.exchange.as_deref().unwrap_or("krx"),
-        q.market.as_deref().unwrap_or("all"),
-        op.login_id,
-    );
+    let params = match search_query {
+        Some(query) => format!("q={query} page={page} operator={}", op.login_id),
+        None => format!(
+            "category={} exchange={} market={} page={page} operator={}",
+            q.category,
+            q.exchange.as_deref().unwrap_or("krx"),
+            q.market.as_deref().unwrap_or("all"),
+            op.login_id,
+        ),
+    };
 
     match result {
         Ok(pageres) => {

@@ -41,6 +41,7 @@ import {
   pickStocks,
   type SelectableStock,
 } from "./stock-select";
+import { StockSelectModal } from "./stock-select-modal";
 
 // 게시 명령(설계서 07). **종토만 확정** — 카페/블로그/밴드는 버튼만(추후). UI 먼저 완성 단계라,
 // 서버에 아직 없는 데이터(하위 글목록·성공계정·종목 미리보기, §8 신규 데이터흐름)는 Admin 다른
@@ -833,17 +834,29 @@ export function ForumConfig({
     };
   }, [cfg.category, effectiveMarket]);
   const n = typeof cfg.count === "number" ? cfg.count : 0;
-  const { picked, error } = useMemo(() => pickStocks(pool, n), [pool, n]);
+  const { picked: autoPicked, error } = useMemo(
+    () => pickStocks(pool, n),
+    [pool, n],
+  );
+
+  // 종목 선택 방식(§18) — 자동(불꽃 우선 N개)/수동(모달로 직접 선택). 기본=자동(기존 동작 보존).
+  const [pickMode, setPickMode] = useState<"auto" | "manual">("auto");
+  const [manualStocks, setManualStocks] = useState<
+    { code: string; name: string }[]
+  >([]);
+  const [stockModalOpen, setStockModalOpen] = useState(false);
+  // 분기점은 여기 하나뿐 — 자동이면 pickStocks 산출, 수동이면 모달로 고른 목록. 이후(배정·전송·
+  // 예약·나눠서)는 전부 공통·불변(§18-2).
+  const picked: { code: string; name: string }[] =
+    pickMode === "manual" ? manualStocks : autoPicked;
 
   // 계정 = 상위(PublishCommand)가 넘긴 이 하위의 성공(Active) 계정(실데이터/더미 폴백).
 
-  // 게시 실행 조건. 즉시/예약(각 계정 전체 종목)은 글·종목수·계정만 있으면 됨. 나눠서(균등분배)는
-  // 데스크톱과 동일: 계정 2개↑ + 종목 2개↑ + 종목수 ≥ 계정수(#267-5).
+  // 게시 실행 조건. 즉시/예약(각 계정 전체 종목)은 글·종목·계정만 있으면 됨. 나눠서(균등분배)는
+  // 데스크톱과 동일: 계정 2개↑ + 종목 2개↑ + 종목수 ≥ 계정수(#267-5). 자동/수동 공통으로
+  // picked.length 기준(§18-7: 자동은 N>0이면 picked>0이라 동치, 수동은 고른 개수).
   const allValid =
-    postTitle != null &&
-    typeof cfg.count === "number" &&
-    cfg.count > 0 &&
-    cfg.accounts.length > 0;
+    postTitle != null && picked.length > 0 && cfg.accounts.length > 0;
   const canDistribute =
     allValid &&
     cfg.accounts.length >= 2 &&
@@ -997,80 +1010,152 @@ export function ForumConfig({
 
   return (
     <Box>
-      {/* 카테고리 6버튼 */}
+      {/* 종목 선택 방식 토글(§18) — 카테고리 블록 바로 위, 기본=자동(기존 동작 보존). */}
       <Text size="xs" c="dimmed" mb={4}>
-        카테고리
+        종목
       </Text>
       <Group gap={6} mb="sm">
-        {CATEGORIES.map((c) => (
-          <Button
-            key={c.key}
-            size="xs"
-            variant={cfg.category === c.key ? "filled" : "default"}
-            onClick={() => onPatch({ category: c.key })}
-          >
-            {c.label}
-          </Button>
-        ))}
-      </Group>
-
-      {/* 시장 3버튼(토론이면 전체 고정) */}
-      <Text size="xs" c="dimmed" mb={4}>
-        시장 {marketDisabled && "(토론은 전체 고정)"}
-      </Text>
-      <Group gap={6} mb="sm">
-        {MARKETS.map((m) => (
-          <Button
-            key={m.key}
-            size="xs"
-            variant={effectiveMarket === m.key ? "filled" : "default"}
-            disabled={marketDisabled && m.key !== "all"}
-            onClick={() => onPatch({ market: m.key })}
-          >
-            {m.label}
-          </Button>
-        ))}
-      </Group>
-
-      {/* 종목 수 N + 미리보기 */}
-      <Group align="flex-end" gap="sm" mb="xs">
-        <NumberInput
+        <Button
           size="xs"
-          label="종목 수"
-          placeholder="N"
-          min={1}
-          w={120}
-          value={cfg.count}
-          onChange={(v) => onPatch({ count: typeof v === "number" ? v : "" })}
-        />
-        {error && (
-          <Text size="xs" c="red" fw={600}>
-            {error}
-          </Text>
-        )}
+          variant={pickMode === "auto" ? "filled" : "default"}
+          onClick={() => setPickMode("auto")}
+        >
+          종목 자동선택
+        </Button>
+        <Button
+          size="xs"
+          variant={pickMode === "manual" ? "filled" : "default"}
+          onClick={() => setPickMode("manual")}
+        >
+          종목 수동선택
+        </Button>
       </Group>
-      <ScrollArea.Autosize mah={140} mb="sm">
-        <Group gap={6}>
-          {picked.length === 0 ? (
-            <Text size="xs" c="dimmed">
-              종목 수를 입력하면 불꽃🔥 우선으로 자동
-              선택됩니다(삼성전자·하이닉스 제외).
-            </Text>
-          ) : (
-            picked.map((s) => (
-              <Badge
-                key={s.code}
-                variant="light"
-                color={s.isHotDiscussion ? "orange" : "gray"}
-                radius="sm"
+
+      {/* 자동선택 — 카테고리/시장/종목수 + 불꽃 우선 자동 채움 미리보기(기존 그대로). */}
+      {pickMode === "auto" && (
+        <>
+          {/* 카테고리 6버튼 */}
+          <Text size="xs" c="dimmed" mb={4}>
+            카테고리
+          </Text>
+          <Group gap={6} mb="sm">
+            {CATEGORIES.map((c) => (
+              <Button
+                key={c.key}
+                size="xs"
+                variant={cfg.category === c.key ? "filled" : "default"}
+                onClick={() => onPatch({ category: c.key })}
               >
-                {s.isHotDiscussion ? "🔥 " : ""}
-                {s.name}
-              </Badge>
-            ))
-          )}
-        </Group>
-      </ScrollArea.Autosize>
+                {c.label}
+              </Button>
+            ))}
+          </Group>
+
+          {/* 시장 3버튼(토론이면 전체 고정) */}
+          <Text size="xs" c="dimmed" mb={4}>
+            시장 {marketDisabled && "(토론은 전체 고정)"}
+          </Text>
+          <Group gap={6} mb="sm">
+            {MARKETS.map((m) => (
+              <Button
+                key={m.key}
+                size="xs"
+                variant={effectiveMarket === m.key ? "filled" : "default"}
+                disabled={marketDisabled && m.key !== "all"}
+                onClick={() => onPatch({ market: m.key })}
+              >
+                {m.label}
+              </Button>
+            ))}
+          </Group>
+
+          {/* 종목 수 N + 미리보기 */}
+          <Group align="flex-end" gap="sm" mb="xs">
+            <NumberInput
+              size="xs"
+              label="종목 수"
+              placeholder="N"
+              min={1}
+              w={120}
+              value={cfg.count}
+              onChange={(v) =>
+                onPatch({ count: typeof v === "number" ? v : "" })
+              }
+            />
+            {error && (
+              <Text size="xs" c="red" fw={600}>
+                {error}
+              </Text>
+            )}
+          </Group>
+          <ScrollArea.Autosize mah={140} mb="sm">
+            <Group gap={6}>
+              {autoPicked.length === 0 ? (
+                <Text size="xs" c="dimmed">
+                  종목 수를 입력하면 불꽃🔥 우선으로 자동
+                  선택됩니다(삼성전자·하이닉스 제외).
+                </Text>
+              ) : (
+                autoPicked.map((s) => (
+                  <Badge
+                    key={s.code}
+                    variant="light"
+                    color={s.isHotDiscussion ? "orange" : "gray"}
+                    radius="sm"
+                  >
+                    {s.isHotDiscussion ? "🔥 " : ""}
+                    {s.name}
+                  </Badge>
+                ))
+              )}
+            </Group>
+          </ScrollArea.Autosize>
+        </>
+      )}
+
+      {/* 수동선택 — 종목 선택 버튼 + 고른 종목 배지(§18). 카테고리/시장/종목수는 숨김. */}
+      {pickMode === "manual" && (
+        <>
+          <Group gap="sm" mb="xs">
+            <Button
+              size="xs"
+              variant="light"
+              leftSection={<Icon.search size={14} />}
+              onClick={() => setStockModalOpen(true)}
+            >
+              종목 선택
+            </Button>
+            <Text size="xs" c="dimmed">
+              {manualStocks.length}개 선택됨
+            </Text>
+          </Group>
+          <ScrollArea.Autosize mah={140} mb="sm">
+            <Group gap={6}>
+              {manualStocks.length === 0 ? (
+                <Text size="xs" c="dimmed">
+                  “종목 선택”을 눌러 게시할 종목을 직접 고르세요.
+                </Text>
+              ) : (
+                manualStocks.map((s) => (
+                  <Badge key={s.code} variant="light" color="blue" radius="sm">
+                    {s.name}
+                  </Badge>
+                ))
+              )}
+            </Group>
+          </ScrollArea.Autosize>
+          <StockSelectModal
+            open={stockModalOpen}
+            deviceId={device.id}
+            preselected={manualStocks.map((s) => s.code)}
+            onClose={() => setStockModalOpen(false)}
+            onConfirm={(stocks) => {
+              setManualStocks(stocks);
+              setStockModalOpen(false);
+            }}
+          />
+        </>
+      )}
 
       {/* 게시 후 내용변경(15-기타명령 §4) — 종목토론방(글쓰기) 전용. 종목 수와 계정 사이 위치.
           체크하면 새 제목/내용/지연(초)을 입력한다. 게시 성공 후 지연 뒤 그 글을 새 내용으로 edit한다
@@ -1153,8 +1238,8 @@ export function ForumConfig({
         })}
       </Group>
 
-      {/* 제외 안내 */}
-      {pool.some((s) => isExcludedByName(s.name)) && (
+      {/* 제외 안내 — 자동선택 전용(후보 pool이 있을 때만 의미 있음, §18-4). */}
+      {pickMode === "auto" && pool.some((s) => isExcludedByName(s.name)) && (
         <Text size="xs" c="dimmed" mt="sm">
           제외: 이름에 “삼성전자”·“하이닉스” 포함 종목은 후보에서 자동
           제외됩니다.
