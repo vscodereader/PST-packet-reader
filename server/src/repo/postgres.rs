@@ -28,8 +28,11 @@ CREATE TABLE IF NOT EXISTS devices (
   name TEXT NOT NULL,
   ip TEXT,
   state TEXT NOT NULL,
-  last_seen TIMESTAMPTZ NOT NULL
+  last_seen TIMESTAMPTZ NOT NULL,
+  machine_id TEXT
 );
+-- §E 하위 기기 안정 식별: 기존 DB 업그레이드(멱등). 재설치·재등록에도 같은 기기 인식.
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS machine_id TEXT;
 CREATE TABLE IF NOT EXISTS device_codes (
   code TEXT PRIMARY KEY,
   created_at TIMESTAMPTZ NOT NULL,
@@ -112,6 +115,18 @@ fn state_from(s: &str) -> DeviceState {
 
 fn db_err(e: sqlx::Error) -> AppError {
     AppError::Internal(format!("DB 오류: {e}"))
+}
+
+/// devices row → Device(machine_id 포함, §E). find/find_by_machine_id/list 공통.
+fn device_from_row(r: sqlx::postgres::PgRow) -> Device {
+    Device {
+        id: r.get("id"),
+        name: r.get("name"),
+        ip: r.get("ip"),
+        state: state_from(r.get::<String, _>("state").as_str()),
+        last_seen: r.get("last_seen"),
+        machine_id: r.get("machine_id"),
+    }
 }
 
 impl PostgresRepo {
@@ -223,15 +238,18 @@ impl Repository for PostgresRepo {
     }
 
     async fn create_device(&self, d: Device) -> AppResult<()> {
-        sqlx::query("INSERT INTO devices (id,name,ip,state,last_seen) VALUES ($1,$2,$3,$4,$5)")
-            .bind(d.id)
-            .bind(&d.name)
-            .bind(&d.ip)
-            .bind(state_str(d.state))
-            .bind(d.last_seen)
-            .execute(&self.pool)
-            .await
-            .map_err(db_err)?;
+        sqlx::query(
+            "INSERT INTO devices (id,name,ip,state,last_seen,machine_id) VALUES ($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(d.id)
+        .bind(&d.name)
+        .bind(&d.ip)
+        .bind(state_str(d.state))
+        .bind(d.last_seen)
+        .bind(&d.machine_id)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
         Ok(())
     }
     async fn find_device(&self, id: Uuid) -> AppResult<Option<Device>> {
@@ -240,29 +258,31 @@ impl Repository for PostgresRepo {
             .fetch_optional(&self.pool)
             .await
             .map_err(db_err)?;
-        Ok(row.map(|r| Device {
-            id: r.get("id"),
-            name: r.get("name"),
-            ip: r.get("ip"),
-            state: state_from(r.get::<String, _>("state").as_str()),
-            last_seen: r.get("last_seen"),
-        }))
+        Ok(row.map(device_from_row))
+    }
+    async fn find_device_by_machine_id(&self, machine_id: &str) -> AppResult<Option<Device>> {
+        let row = sqlx::query("SELECT * FROM devices WHERE machine_id=$1")
+            .bind(machine_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(row.map(device_from_row))
     }
     async fn list_devices(&self) -> AppResult<Vec<Device>> {
         let rows = sqlx::query("SELECT * FROM devices ORDER BY name")
             .fetch_all(&self.pool)
             .await
             .map_err(db_err)?;
-        Ok(rows
-            .into_iter()
-            .map(|r| Device {
-                id: r.get("id"),
-                name: r.get("name"),
-                ip: r.get("ip"),
-                state: state_from(r.get::<String, _>("state").as_str()),
-                last_seen: r.get("last_seen"),
-            })
-            .collect())
+        Ok(rows.into_iter().map(device_from_row).collect())
+    }
+    async fn set_device_name(&self, id: Uuid, name: &str) -> AppResult<()> {
+        sqlx::query("UPDATE devices SET name=$1 WHERE id=$2")
+            .bind(name)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
     }
     async fn delete_device(&self, id: Uuid) -> AppResult<bool> {
         let r = sqlx::query("DELETE FROM devices WHERE id=$1")

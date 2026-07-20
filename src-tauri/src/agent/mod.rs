@@ -2951,18 +2951,96 @@ async fn state_report_loop<R: Runtime>(
 
 // ===================== Tauri 명령(하위 등록 화면 §6-2) =====================
 
+/// §E 하위 기기 안정 식별 — 같은 PC를 같은 기기로 인식시키기 위한 식별자.
+/// 기존 로그인/게시 흐름과 무관하게 등록 시점에만 읽어 서버로 보낸다(네이버·밴드엔 미주입, 봇탐지 무영향).
+mod machine_ident {
+    /// 컴퓨터 이름(Windows `COMPUTERNAME` → `HOSTNAME` → `hostname` 명령 폴백). 못 구하면 None.
+    pub fn computer_name() -> Option<String> {
+        for key in ["COMPUTERNAME", "HOSTNAME"] {
+            if let Ok(v) = std::env::var(key) {
+                let v = v.trim().to_string();
+                if !v.is_empty() {
+                    return Some(v);
+                }
+            }
+        }
+        if let Ok(out) = std::process::Command::new("hostname").output() {
+            if out.status.success() {
+                let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !v.is_empty() {
+                    return Some(v);
+                }
+            }
+        }
+        None
+    }
+
+    /// 기기 고유 ID — OS 설치 단위로 고정이라 **앱 재설치와 무관**. Windows=레지스트리 MachineGuid,
+    /// 그 외(개발/서버)=/etc/machine-id. 못 구하면 None(서버가 기존처럼 신규 생성 폴백).
+    #[cfg(windows)]
+    pub fn machine_guid() -> Option<String> {
+        // 32비트 프로세스여도 실제 값을 읽도록 /reg:64 강제.
+        let out = std::process::Command::new("reg")
+            .args([
+                "query",
+                r"HKLM\SOFTWARE\Microsoft\Cryptography",
+                "/v",
+                "MachineGuid",
+                "/reg:64",
+            ])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            if line.contains("MachineGuid") {
+                if let Some(tok) = line.split_whitespace().last() {
+                    let tok = tok.trim();
+                    if !tok.is_empty() {
+                        return Some(tok.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[cfg(not(windows))]
+    pub fn machine_guid() -> Option<String> {
+        std::fs::read_to_string("/etc/machine-id")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+}
+
 #[tauri::command]
 pub async fn agent_register(server_url: String, code: String) -> Result<AgentStatus, String> {
     let base = server_url.trim().trim_end_matches('/').to_string();
     if base.is_empty() || code.trim().is_empty() {
         return Err("서버 주소와 기기코드를 입력하세요".into());
     }
+    // §E: 컴퓨터 이름 + machine_id(기기 고유값)를 함께 등록 → 재설치·재등록에도 같은 기기로 인식.
+    let name = machine_ident::computer_name();
+    let machine_id = machine_ident::machine_guid();
     let client = reqwest::Client::new();
-    let resp = net::register(&client, &base, code.trim(), None).await?;
-    let device_name = format!(
-        "하위-{}",
-        resp.device_id.chars().take(4).collect::<String>()
-    );
+    let resp = net::register(
+        &client,
+        &base,
+        code.trim(),
+        name.as_deref(),
+        machine_id.as_deref(),
+    )
+    .await?;
+    // 표시 이름: 보낸 컴퓨터 이름 우선. 못 구했으면 서버 생성 규칙과 동일한 하위-XXXX로 폴백.
+    let device_name = name.unwrap_or_else(|| {
+        format!(
+            "하위-{}",
+            resp.device_id.chars().take(4).collect::<String>()
+        )
+    });
     config::save(&AgentConfig {
         server_url: base.clone(),
         device_token: resp.device_token,

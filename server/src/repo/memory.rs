@@ -91,11 +91,27 @@ impl Repository for MemoryRepo {
     async fn find_device(&self, id: Uuid) -> AppResult<Option<Device>> {
         Ok(self.inner.lock().unwrap().devices.get(&id).cloned())
     }
+    async fn find_device_by_machine_id(&self, machine_id: &str) -> AppResult<Option<Device>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .devices
+            .values()
+            .find(|d| d.machine_id.as_deref() == Some(machine_id))
+            .cloned())
+    }
     async fn list_devices(&self) -> AppResult<Vec<Device>> {
         Ok(self.inner.lock().unwrap().devices.values().cloned().collect())
     }
     async fn delete_device(&self, id: Uuid) -> AppResult<bool> {
         Ok(self.inner.lock().unwrap().devices.remove(&id).is_some())
+    }
+    async fn set_device_name(&self, id: Uuid, name: &str) -> AppResult<()> {
+        if let Some(d) = self.inner.lock().unwrap().devices.get_mut(&id) {
+            d.name = name.to_string();
+        }
+        Ok(())
     }
     async fn touch_device(
         &self,

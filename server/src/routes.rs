@@ -1293,8 +1293,38 @@ async fn register_device(
     if !ok {
         return Err(AppError::BadRequest("유효하지 않거나 만료된 기기코드입니다".into()));
     }
+    // 요청 이름/기기고유값 정규화(공백·빈문자 → None).
+    let req_name = req.name.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let machine_id = req.machine_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+    // C(§E) 안정 식별: machine_id로 같은 기기를 찾으면 **새 row를 만들지 않고** 같은 device_id를
+    // 재사용한다(이름/last_seen 갱신·토큰 재발급). 재설치·재등록해도 기기 1개로 유지.
+    if let Some(mid) = machine_id {
+        if let Some(existing) = st.repo.find_device_by_machine_id(mid).await? {
+            let name = req_name.map(str::to_string).unwrap_or_else(|| existing.name.clone());
+            st.repo.set_device_name(existing.id, &name).await?;
+            st.repo.touch_device(existing.id, None, DeviceState::Online, Utc::now()).await?;
+            let token = jwt::issue_device(&st.cfg.jwt_secret, &existing.id.to_string())
+                .map_err(AppError::Internal)?;
+            st.audit(
+                "[REGISTER]",
+                &format!("{name} → 서버"),
+                &existing.id.to_string(),
+                &format!("기기코드 {} 재등록(같은 기기 machine_id={mid}) → 같은 device_id 재사용·토큰 재발급 ✅", req.code),
+                "ok",
+            )
+            .await;
+            return Ok(Json(RegisterResp {
+                device_id: existing.id.to_string(),
+                device_token: token,
+            }));
+        }
+    }
+
     let id = Uuid::new_v4();
-    let name = req.name.unwrap_or_else(|| format!("하위-{}", &id.to_string()[..4]));
+    let name = req_name
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("하위-{}", &id.to_string()[..4]));
     st.repo
         .create_device(Device {
             id,
@@ -1302,6 +1332,7 @@ async fn register_device(
             ip: None,
             state: DeviceState::Online,
             last_seen: Utc::now(),
+            machine_id: machine_id.map(str::to_string),
         })
         .await?;
     let token = jwt::issue_device(&st.cfg.jwt_secret, &id.to_string()).map_err(AppError::Internal)?;
@@ -1994,6 +2025,106 @@ mod tests {
         h
     }
 
+    // ── /device/register 안정 식별(§E) ──
+    use crate::model::{DeviceCode, RegisterReq};
+
+    async fn issue_code(st: &AppState, code: &str) {
+        st.repo
+            .create_device_code(DeviceCode {
+                code: code.into(),
+                created_at: Utc::now(),
+                used: false,
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn register_same_machine_id_reuses_device() {
+        // 같은 machine_id로 두 번 등록 → 같은 device_id 재사용, 기기 row는 1개, 이름은 최신으로 갱신.
+        let (st, repo, _secret) = test_state();
+        issue_code(&st, "code-a").await;
+        issue_code(&st, "code-b").await;
+
+        let r1 = register_device(
+            State(st.clone()),
+            Json(RegisterReq {
+                code: "code-a".into(),
+                name: Some("PC-사무실".into()),
+                machine_id: Some("MID-1111".into()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let r2 = register_device(
+            State(st.clone()),
+            Json(RegisterReq {
+                code: "code-b".into(),
+                name: Some("PC-사무실-개명".into()),
+                machine_id: Some("MID-1111".into()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(r1.device_id, r2.device_id, "같은 machine_id면 같은 device_id");
+        let devs = repo.list_devices().await.unwrap();
+        assert_eq!(devs.len(), 1, "새 row가 생기지 않아야 한다");
+        assert_eq!(devs[0].name, "PC-사무실-개명", "이름은 최신 등록으로 갱신");
+    }
+
+    #[tokio::test]
+    async fn register_different_machine_id_creates_new_device() {
+        // 다른 machine_id(다른 PC) → 서로 다른 기기.
+        let (st, repo, _secret) = test_state();
+        issue_code(&st, "c1").await;
+        issue_code(&st, "c2").await;
+        let _ = register_device(
+            State(st.clone()),
+            Json(RegisterReq {
+                code: "c1".into(),
+                name: Some("PC-A".into()),
+                machine_id: Some("MID-A".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        let _ = register_device(
+            State(st.clone()),
+            Json(RegisterReq {
+                code: "c2".into(),
+                name: Some("PC-B".into()),
+                machine_id: Some("MID-B".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(repo.list_devices().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn register_without_machine_id_falls_back_to_new_row() {
+        // machine_id 없는 옛 앱 → 기존처럼 매번 신규 생성(폴백, 하위호환).
+        let (st, repo, _secret) = test_state();
+        issue_code(&st, "x1").await;
+        issue_code(&st, "x2").await;
+        for code in ["x1", "x2"] {
+            let _ = register_device(
+                State(st.clone()),
+                Json(RegisterReq {
+                    code: code.into(),
+                    name: None,
+                    machine_id: None,
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(repo.list_devices().await.unwrap().len(), 2);
+    }
+
     #[tokio::test]
     async fn delete_account_issues_command_and_removes_staged() {
         let (st, repo, secret) = test_state();
@@ -2019,6 +2150,7 @@ mod tests {
             ip: None,
             state: DeviceState::Online,
             last_seen: Utc::now(),
+            machine_id: None,
         })
         .await
         .unwrap();
