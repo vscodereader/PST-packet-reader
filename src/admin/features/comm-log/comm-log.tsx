@@ -19,6 +19,7 @@ import {
   computerOptions,
   dateLabel,
   datesForDevice,
+  deviceLabel,
   deviceOptions,
   filterLines,
   formatTs,
@@ -246,6 +247,8 @@ export function CommLog() {
   const [sel3, setSel3] = useState<string | null>(null);
   // 서버 감사로그(§7) 로드. 연결 시 실데이터, 오프라인 미리보기면 더미 유지. 3초 폴링.
   const [allLines, setAllLines] = useState<LogLine[]>(LOG_LINES);
+  // 기기 레지스트리(device_id → 컴퓨터 이름). 통신로그 device는 UUID라 실제 이름 표시용(#441).
+  const [devNames, setDevNames] = useState<Record<string, string>>({});
   const viewportRef = useRef<HTMLDivElement>(null);
   const restoredRef = useRef(false);
 
@@ -294,18 +297,41 @@ export function CommLog() {
     return () => window.clearInterval(id);
   }, []);
 
+  // 기기 레지스트리 로드(id→이름) — device_id(UUID)를 실제 컴퓨터 이름으로 표시하기 위함(#441).
+  // 오프라인이면 빈 맵 유지(deviceLabel이 원문/축약으로 폴백).
+  useEffect(() => {
+    const load = () => {
+      api.devices
+        .list()
+        .then((ds) => {
+          const m: Record<string, string> = {};
+          for (const d of ds) m[d.id] = d.name;
+          setDevNames(m);
+        })
+        .catch(() => {
+          /* 오프라인 → 빈 맵 유지 */
+        });
+    };
+    load();
+    const id = window.setInterval(load, 5000);
+    return () => window.clearInterval(id);
+  }, []);
+
   // 목록1: Admin(전체) + 실제 하위들(시스템 제외).
   const scopeDevices = useMemo(() => deviceOptions(allLines), [allLines]);
-  // 목록2 옵션 — sel1에 따라 컴퓨터 목록(Admin) 또는 날짜 목록(하위COM).
+  // 목록2 옵션 — sel1에 따라 컴퓨터 목록(Admin) 또는 날짜 목록(하위COM). 컴퓨터는 실제 이름 표시.
   const sel2Data = useMemo(() => {
     if (sel1 === ADMIN_SCOPE) {
-      return computerOptions(allLines).map((d) => ({ value: d, label: d }));
+      return computerOptions(allLines).map((d) => ({
+        value: d,
+        label: deviceLabel(d, devNames),
+      }));
     }
     return datesForDevice(allLines, sel1).map((k) => ({
       value: k,
       label: dateLabel(k),
     }));
-  }, [sel1, allLines]);
+  }, [sel1, allLines, devNames]);
   // 목록3 옵션 — Admin & sel2=하위COM 일 때만 의미가 있는 날짜 목록.
   const date3Enabled = isDate3Enabled(sel1, sel2);
   const sel3Data = useMemo(
@@ -388,7 +414,10 @@ export function CommLog() {
             onChange={onSel1}
             data={[
               { value: ADMIN_SCOPE, label: "Admin(전체)" },
-              ...scopeDevices.map((d) => ({ value: d, label: d })),
+              ...scopeDevices.map((d) => ({
+                value: d,
+                label: deviceLabel(d, devNames),
+              })),
             ]}
             comboboxProps={{ withinPortal: true }}
             aria-label="컴퓨터 필터"

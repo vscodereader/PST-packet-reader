@@ -71,6 +71,23 @@ export function dateLabel(key: string): string {
   return `${Number(m[2])}/${Number(m[3])}`;
 }
 
+/**
+ * 컴퓨터 값(감사로그 device = device_id UUID)을 화면용 라벨로 바꾼다(#441 기기 안정 식별 반영).
+ * - 시스템 로그 → "시스템"
+ * - `/devices` 레지스트리에 있으면 → 실제 컴퓨터 이름(COMPUTERNAME)
+ * - 없는데 UUID면 → 앞 8자리(삭제된 기기·옛 로그)
+ * - 그 외(더미 등) → 원문
+ */
+export function deviceLabel(
+  value: string,
+  names: Record<string, string>,
+): string {
+  if (value === SYSTEM_DEVICE) return SYSTEM_DEVICE;
+  const n = names[value];
+  if (n && n.trim()) return n.trim();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(value) ? value.slice(0, 8) : value;
+}
+
 /** 목록1(컴퓨터)용 — 시스템을 제외한 실제 하위 목록(등장 순서 유지). */
 export function deviceOptions(lines: readonly LogRow[]): string[] {
   const seen = new Set<string>();

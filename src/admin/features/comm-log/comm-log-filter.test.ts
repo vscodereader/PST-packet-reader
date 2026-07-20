@@ -5,6 +5,7 @@ import {
   SYSTEM_DEVICE,
   computerOptions,
   dateLabel,
+  deviceLabel,
   datesForDevice,
   deviceOptions,
   filterLines,
@@ -63,6 +64,29 @@ describe("dateLabel", () => {
 
   it("형식이 안 맞으면 원문을 반환한다", () => {
     expect(dateLabel("weird")).toBe("weird");
+  });
+});
+
+describe("deviceLabel", () => {
+  const names = { "550e8400-e29b-41d4-a716-446655440000": "PC-사무실" };
+  it("시스템은 그대로 '시스템'", () => {
+    expect(deviceLabel(SYSTEM_DEVICE, names)).toBe(SYSTEM_DEVICE);
+  });
+  it("레지스트리에 있으면 실제 컴퓨터 이름", () => {
+    expect(deviceLabel("550e8400-e29b-41d4-a716-446655440000", names)).toBe(
+      "PC-사무실",
+    );
+  });
+  it("없는 UUID는 앞 8자리", () => {
+    expect(deviceLabel("abcdef12-3456-7890-aaaa-bbbbbbbbbbbb", {})).toBe(
+      "abcdef12",
+    );
+  });
+  it("UUID가 아니면(더미 등) 원문", () => {
+    expect(deviceLabel("하위-001", {})).toBe("하위-001");
+  });
+  it("이름이 공백뿐이면 폴백", () => {
+    expect(deviceLabel("하위-002", { "하위-002": "   " })).toBe("하위-002");
   });
 });
 
