@@ -144,10 +144,8 @@ describe("isDate3Enabled", () => {
 });
 
 describe("filterLines", () => {
-  it("Admin + 선택없음 = 전체", () => {
-    expect(filterLines(rows, ADMIN_SCOPE, null, null)).toHaveLength(
-      rows.length,
-    );
+  it("Admin + 선택없음 = 아무것도(초기 빈 화면)", () => {
+    expect(filterLines(rows, ADMIN_SCOPE, null, null)).toHaveLength(0);
   });
 
   it("Admin + 시스템 = 시스템 로그만(날짜 무관)", () => {
