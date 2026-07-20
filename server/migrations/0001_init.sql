@@ -12,12 +12,15 @@ CREATE TABLE IF NOT EXISTS operators (
 );
 
 CREATE TABLE IF NOT EXISTS devices (
-  id        UUID PRIMARY KEY,
-  name      TEXT NOT NULL,
-  ip        TEXT,
-  state     TEXT NOT NULL,                            -- online | rotating | reconnecting | offline (§4)
-  last_seen TIMESTAMPTZ NOT NULL
+  id         UUID PRIMARY KEY,
+  name       TEXT NOT NULL,
+  ip         TEXT,
+  state      TEXT NOT NULL,                           -- online | rotating | reconnecting | offline (§4)
+  last_seen  TIMESTAMPTZ NOT NULL,
+  machine_id TEXT                                     -- 기기 고유값(Windows MachineGuid 등, §E). 재설치·재등록에도 같은 PC=같은 기기
 );
+-- 기존 DB 업그레이드(멱등): 하위 기기 안정 식별(§E).
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS machine_id TEXT;
 
 CREATE TABLE IF NOT EXISTS device_codes (
   code       TEXT PRIMARY KEY,                        -- 1회용·10분(§6)

@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 struct RegisterReq<'a> {
     code: &'a str,
     name: Option<&'a str>,
+    /// 기기 고유값(§E). 서버가 같은 machine_id 기기를 재사용(upsert)해 재설치·재등록에도 기기 1개 유지.
+    machine_id: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -47,10 +49,11 @@ pub async fn register(
     base: &str,
     code: &str,
     name: Option<&str>,
+    machine_id: Option<&str>,
 ) -> Result<RegisterResp, String> {
     let resp = client
         .post(join(base, "/device/register"))
-        .json(&RegisterReq { code, name })
+        .json(&RegisterReq { code, name, machine_id })
         .send()
         .await
         .map_err(|e| format!("등록 요청 실패: {e}"))?;
