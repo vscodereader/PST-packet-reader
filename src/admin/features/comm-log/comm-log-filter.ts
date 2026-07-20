@@ -1,27 +1,32 @@
-// 통신 로그 일자별 필터 — 순수 로직(테스트 대상).
+// 통신 로그 기기 2단 필터 — 순수 로직(테스트 대상). #444
 //
-// 화면(comm-log.tsx)은 이 헬퍼들만 조합해 3단 종속 드롭다운을 그린다.
-//   목록1(컴퓨터): Admin(전체) · 하위COM들
-//   목록2:
-//     - 목록1 = 특정 하위COM → 그 COM이 기록을 가진 "날짜" 목록(없는 날짜는 안 나옴)
-//     - 목록1 = Admin        → "시스템 · 하위COM들"(컴퓨터 목록)
-//   목록3(평소 비활성): 목록1=Admin & 목록2=하위COM 일 때만 활성 → 그 COM의 "날짜" 목록
+// 화면(comm-log.tsx)의 목록형 3단:
+//   목록1(컴퓨터): Admin(전체) · 시스템(있으면) · 하위com1..N (각 = 로그의 device_id)
+//   목록2(등록 이력): 목록1 = 하위comN 일 때 → 그 기기가 등록/재등록한 이름들(등록일 오름차순, 정보 표시)
+//   목록3(날짜): 그 컴퓨터의 로그 날짜(KST, 최신순)
 //
-// 서버 감사로그의 ts는 UTC ISO(Utc::now().to_rfc3339())로 내려온다. 날짜 추출·표시는
-// 모두 KST(UTC+9)로 변환한다 — 서버의 결과보고 일자집계(state.rs, KST 버킷)와 같은 기준이라
-// 자정 근처 로그가 엉뚱한 날짜로 새지 않는다. 오프라인 미리보기용 더미(ts에 'T' 없음,
-// 이미 표시형 문자열)는 변환하지 않고 그대로 쓴다.
+// 서버 감사로그의 device = device_id(UUID). #441 기기 안정 식별로 같은 PC는 같은 device_id를
+// 유지하므로, 등록 이력을 device_id로 묶으면 "그 컴퓨터가 거쳐온 이름들"이 된다.
+//
+// 날짜/시각은 모두 KST(UTC+9)로 변환한다(서버 ts는 UTC ISO). 더미(공백 형식)는 원문 유지.
 
-/** 목록1의 "Admin(전체)" 옵션 값. 실제 하위 이름과 충돌하지 않도록 센티넬을 쓴다. */
+/** 목록1의 "Admin(전체)" 옵션 값. 실제 device_id와 충돌하지 않도록 센티넬. */
 export const ADMIN_SCOPE = "__admin__";
 
-/** 서버 감사로그에서 device가 빈 값("")인 시스템 로그의 표시 이름(comm-log.tsx와 동일). */
+/** device가 빈 값("")인 시스템 로그의 표시 이름(comm-log.tsx와 동일). */
 export const SYSTEM_DEVICE = "시스템";
 
 /** 필터가 필요로 하는 로그 한 줄의 최소 형태. 실제 LogLine은 이 슈퍼셋이라 그대로 넘길 수 있다. */
 export interface LogRow {
   ts: string;
   device: string;
+}
+
+/** 등록 이력 1건(device_id로 그 컴퓨터에 귀속). */
+export interface DeviceReg {
+  deviceId: string;
+  name: string;
+  registeredAt: string; // UTC ISO
 }
 
 const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
@@ -71,24 +76,23 @@ export function dateLabel(key: string): string {
   return `${Number(m[2])}/${Number(m[3])}`;
 }
 
-/**
- * 컴퓨터 값(감사로그 device = device_id UUID)을 화면용 라벨로 바꾼다(#441 기기 안정 식별 반영).
- * - 시스템 로그 → "시스템"
- * - `/devices` 레지스트리에 있으면 → 실제 컴퓨터 이름(COMPUTERNAME)
- * - 없는데 UUID면 → 앞 8자리(삭제된 기기·옛 로그)
- * - 그 외(더미 등) → 원문
- */
-export function deviceLabel(
-  value: string,
-  names: Record<string, string>,
-): string {
-  if (value === SYSTEM_DEVICE) return SYSTEM_DEVICE;
-  const n = names[value];
-  if (n && n.trim()) return n.trim();
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(value) ? value.slice(0, 8) : value;
+/** 등록시각 → "M/D HH:mm"(KST). 목록2 라벨용. */
+export function regTimeLabel(iso: string): string {
+  if (isIso(iso)) {
+    const k = toKst(iso);
+    if (k) {
+      return `${k.getUTCMonth() + 1}/${k.getUTCDate()} ${pad2(k.getUTCHours())}:${pad2(k.getUTCMinutes())}`;
+    }
+  }
+  return iso.slice(5, 16);
 }
 
-/** 목록1(컴퓨터)용 — 시스템을 제외한 실제 하위 목록(등장 순서 유지). */
+/** 목록2 항목 라벨 — "이름 · M/D HH:mm". */
+export function regOptionLabel(reg: DeviceReg): string {
+  return `${reg.name} · ${regTimeLabel(reg.registeredAt)}`;
+}
+
+/** 목록1(컴퓨터)용 — 시스템을 제외한 실제 하위(device_id) 목록(등장 순서 유지). */
 export function deviceOptions(lines: readonly LogRow[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -99,13 +103,6 @@ export function deviceOptions(lines: readonly LogRow[]): string[] {
     out.push(l.device);
   }
   return out;
-}
-
-/** 목록2(Admin 선택 시)용 — [시스템(있으면 맨 앞), ...하위들]. */
-export function computerOptions(lines: readonly LogRow[]): string[] {
-  const devices = deviceOptions(lines);
-  const hasSystem = lines.some((l) => l.device === SYSTEM_DEVICE);
-  return hasSystem ? [SYSTEM_DEVICE, ...devices] : devices;
 }
 
 /** 특정 컴퓨터가 기록을 가진 날짜 키 목록(최신순). 기록 없는 날짜는 포함되지 않는다. */
@@ -120,37 +117,67 @@ export function datesForDevice(
   return Array.from(keys).sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
 }
 
-/** 목록3(마지막 날짜 드롭다운)이 활성화되는 조건: 목록1=Admin & 목록2=하위COM. */
-export function isDate3Enabled(sel1: string, sel2: string | null): boolean {
-  return sel1 === ADMIN_SCOPE && !!sel2 && sel2 !== SYSTEM_DEVICE;
+/** 그 기기(device_id)의 등록 이력 — 등록시각 오름차순(오래된 위 → 최근 아래). */
+export function registrationsForDevice(
+  regs: readonly DeviceReg[],
+  deviceId: string,
+): DeviceReg[] {
+  return regs
+    .filter((r) => r.deviceId === deviceId)
+    .sort((a, b) =>
+      a.registeredAt < b.registeredAt
+        ? -1
+        : a.registeredAt > b.registeredAt
+          ? 1
+          : 0,
+    );
 }
 
 /**
- * 3단 선택값으로 로그를 거른다.
- * - sel1 = ADMIN_SCOPE:
- *     sel2 없음        → **아무것도**(초기 상태 — 대량 로그를 한꺼번에 렌더하지 않아 페이지가 즉시 뜬다)
- *     sel2 = 시스템     → 시스템 로그만(날짜 필터 없음)
- *     sel2 = 하위COM    → 그 COM 로그, sel3(날짜) 있으면 그 날짜만
- * - sel1 = 하위COM:
- *     sel2(날짜) 없음   → 그 COM 전체
- *     sel2 = 날짜       → 그 COM의 그 날짜만
+ * 하위com 정렬 순서(device_id 배열): 등록이 이른 기기가 앞(하위com1),
+ * 등록 이력이 없는 기기는 로그 등장 순으로 뒤에. 하위com 번호의 기준.
+ */
+export function comOrder(
+  logDevices: readonly string[],
+  regs: readonly DeviceReg[],
+): string[] {
+  const earliest = new Map<string, string>();
+  for (const r of regs) {
+    const cur = earliest.get(r.deviceId);
+    if (cur === undefined || r.registeredAt < cur) {
+      earliest.set(r.deviceId, r.registeredAt);
+    }
+  }
+  const withReg = logDevices.filter((d) => earliest.has(d));
+  const without = logDevices.filter((d) => !earliest.has(d));
+  withReg.sort((a, b) => {
+    const ea = earliest.get(a) ?? "";
+    const eb = earliest.get(b) ?? "";
+    return ea < eb ? -1 : ea > eb ? 1 : 0;
+  });
+  return [...withReg, ...without];
+}
+
+/** 하위com 라벨: 순서 배열에서의 위치+1(예: 하위com1). 배열에 없으면 원문. */
+export function comLabel(deviceId: string, order: readonly string[]): string {
+  const i = order.indexOf(deviceId);
+  return i >= 0 ? `하위com${i + 1}` : deviceId;
+}
+
+/**
+ * 로그를 컴퓨터·날짜로 거른다.
+ * - computer = ADMIN_SCOPE → 아무것도(초기 빈 화면. 대량 로그 즉시 렌더 방지)
+ * - computer = 시스템        → 시스템 로그(device 미지정)
+ * - computer = device_id     → 그 컴퓨터 로그
+ * - date 있으면 그 날짜(KST)만.
  */
 export function filterLines<T extends LogRow>(
   lines: readonly T[],
-  sel1: string,
-  sel2: string | null,
-  sel3: string | null,
+  computer: string,
+  date: string | null,
 ): T[] {
-  if (sel1 === ADMIN_SCOPE) {
-    if (!sel2) return []; // 초기: 컴퓨터를 고르기 전엔 아무것도 안 보인다.
-    if (sel2 === SYSTEM_DEVICE) {
-      return lines.filter((l) => l.device === SYSTEM_DEVICE);
-    }
-    const dev = lines.filter((l) => l.device === sel2);
-    if (!sel3) return dev;
-    return dev.filter((l) => logDateKey(l.ts) === sel3);
-  }
-  const dev = lines.filter((l) => l.device === sel1);
-  if (!sel2) return dev;
-  return dev.filter((l) => logDateKey(l.ts) === sel2);
+  if (computer === ADMIN_SCOPE) return [];
+  const dev = lines.filter((l) => l.device === computer);
+  if (!date) return dev;
+  return dev.filter((l) => logDateKey(l.ts) === date);
 }

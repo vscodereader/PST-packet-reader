@@ -45,6 +45,17 @@ pub struct Device {
     pub machine_id: Option<String>,
 }
 
+/// 등록 이력 1건(#444). register_device마다 append하는 읽기전용 로그. live device(upsert로 합쳐짐)와
+/// 달리 재등록 이력을 그대로 보존해, 통신로그 목록2가 "하위com이 등록한 여러 이름을 날짜순"으로 보여준다.
+#[derive(Debug, Clone)]
+pub struct DeviceRegistration {
+    pub id: Uuid,
+    pub machine_id: Option<String>,
+    pub device_id: Uuid,
+    pub name: String,
+    pub registered_at: DateTime<Utc>,
+}
+
 /// 하위 인벤토리(글목록·성공계정) — 하위가 주기적으로 보고. Admin 게시명령 화면이 실데이터로 렌더한다.
 /// serde(camelCase)로 하위 보고 body와 Admin 응답 DTO를 겸한다(07-게시명령 3단계).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,6 +307,15 @@ pub struct RegisterReq {
 pub struct RegisterResp {
     pub device_id: String,
     pub device_token: String,
+}
+/// 등록 이력 응답 DTO(#444). Admin 통신로그가 machine_id로 하위com을 묶고 등록일순으로 이름을 표시.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceRegistrationDto {
+    pub machine_id: Option<String>,
+    pub device_id: String,
+    pub name: String,
+    pub registered_at: String,
 }
 
 // 계정

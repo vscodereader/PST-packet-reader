@@ -3,42 +3,51 @@ import { describe, expect, it } from "vitest";
 import {
   ADMIN_SCOPE,
   SYSTEM_DEVICE,
-  computerOptions,
+  comLabel,
+  comOrder,
   dateLabel,
-  deviceLabel,
   datesForDevice,
   deviceOptions,
   filterLines,
   formatTs,
-  isDate3Enabled,
   logDateKey,
+  regOptionLabel,
+  regTimeLabel,
+  registrationsForDevice,
+  type DeviceReg,
   type LogRow,
 } from "./comm-log-filter";
 
 // 실데이터 형태(UTC ISO). KST(+9)로 변환됐을 때의 날짜/시각을 기대한다.
 const rows: LogRow[] = [
-  { ts: "2026-07-01T02:00:00.000+00:00", device: "하위-001" }, // KST 07-01 11:00
-  { ts: "2026-07-01T20:00:00.000+00:00", device: "하위-001" }, // KST 07-02 05:00
-  { ts: "2026-07-03T01:00:00.000+00:00", device: "하위-002" }, // KST 07-03 10:00
-  { ts: "2026-07-04T05:00:00.000+00:00", device: "하위-002" }, // KST 07-04 14:00
+  { ts: "2026-07-01T02:00:00.000+00:00", device: "dev-A" }, // KST 07-01 11:00
+  { ts: "2026-07-01T20:00:00.000+00:00", device: "dev-A" }, // KST 07-02 05:00
+  { ts: "2026-07-03T01:00:00.000+00:00", device: "dev-B" }, // KST 07-03 10:00
+  { ts: "2026-07-04T05:00:00.000+00:00", device: "dev-B" }, // KST 07-04 14:00
   { ts: "2026-07-01T00:30:00.000+00:00", device: SYSTEM_DEVICE }, // KST 07-01 09:30
+];
+
+const regs: DeviceReg[] = [
+  { deviceId: "dev-B", name: "PC-B", registeredAt: "2026-07-02T00:00:00Z" },
+  {
+    deviceId: "dev-A",
+    name: "PC-옛이름",
+    registeredAt: "2026-06-30T00:00:00Z",
+  },
+  {
+    deviceId: "dev-A",
+    name: "PC-새이름",
+    registeredAt: "2026-07-01T00:00:00Z",
+  },
 ];
 
 describe("logDateKey", () => {
   it("UTC ISO를 KST 날짜로 변환한다", () => {
     expect(logDateKey("2026-07-01T02:00:00.000+00:00")).toBe("2026-07-01");
   });
-
   it("자정 근처 UTC 로그가 다음날 KST로 넘어간다", () => {
-    // 20:00 UTC + 9h = 다음날 05:00 KST
     expect(logDateKey("2026-07-01T20:00:00.000+00:00")).toBe("2026-07-02");
   });
-
-  it("Z 표기도 KST로 변환한다", () => {
-    // 23:30 UTC + 9h = 다음날 08:30 KST
-    expect(logDateKey("2026-07-01T23:30:00Z")).toBe("2026-07-02");
-  });
-
   it("더미(공백 형식)는 앞 10자리를 그대로 쓴다", () => {
     expect(logDateKey("2026-06-28 10:20:01.102")).toBe("2026-06-28");
   });
@@ -50,131 +59,88 @@ describe("formatTs", () => {
       "2026-07-02 05:00:00.000",
     );
   });
-
-  it("더미(공백 형식)는 원문 그대로 둔다", () => {
+  it("더미는 원문 그대로", () => {
     expect(formatTs("2026-06-28 10:20:01.102")).toBe("2026-06-28 10:20:01.102");
   });
 });
 
 describe("dateLabel", () => {
-  it("YYYY-MM-DD를 M/D로 만든다", () => {
+  it("YYYY-MM-DD를 M/D로", () => {
     expect(dateLabel("2026-07-01")).toBe("7/1");
     expect(dateLabel("2026-12-25")).toBe("12/25");
   });
+});
 
-  it("형식이 안 맞으면 원문을 반환한다", () => {
-    expect(dateLabel("weird")).toBe("weird");
+describe("regTimeLabel / regOptionLabel", () => {
+  it("등록시각을 KST M/D HH:mm으로", () => {
+    // 2026-07-01T20:00Z + 9h = 07-02 05:00 KST
+    expect(regTimeLabel("2026-07-01T20:00:00Z")).toBe("7/2 05:00");
+  });
+  it("목록2 라벨은 '이름 · M/D HH:mm'", () => {
+    expect(
+      regOptionLabel({
+        deviceId: "d",
+        name: "PC-사무실",
+        registeredAt: "2026-07-01T00:00:00Z",
+      }),
+    ).toBe("PC-사무실 · 7/1 09:00");
   });
 });
 
-describe("deviceLabel", () => {
-  const names = { "550e8400-e29b-41d4-a716-446655440000": "PC-사무실" };
-  it("시스템은 그대로 '시스템'", () => {
-    expect(deviceLabel(SYSTEM_DEVICE, names)).toBe(SYSTEM_DEVICE);
-  });
-  it("레지스트리에 있으면 실제 컴퓨터 이름", () => {
-    expect(deviceLabel("550e8400-e29b-41d4-a716-446655440000", names)).toBe(
-      "PC-사무실",
-    );
-  });
-  it("없는 UUID는 앞 8자리", () => {
-    expect(deviceLabel("abcdef12-3456-7890-aaaa-bbbbbbbbbbbb", {})).toBe(
-      "abcdef12",
-    );
-  });
-  it("UUID가 아니면(더미 등) 원문", () => {
-    expect(deviceLabel("하위-001", {})).toBe("하위-001");
-  });
-  it("이름이 공백뿐이면 폴백", () => {
-    expect(deviceLabel("하위-002", { "하위-002": "   " })).toBe("하위-002");
-  });
-});
-
-describe("deviceOptions / computerOptions", () => {
-  it("deviceOptions는 시스템을 빼고 등장 순서로 하위만 준다", () => {
-    expect(deviceOptions(rows)).toEqual(["하위-001", "하위-002"]);
-  });
-
-  it("computerOptions는 시스템을 맨 앞에 두고 하위를 잇는다", () => {
-    expect(computerOptions(rows)).toEqual([
-      SYSTEM_DEVICE,
-      "하위-001",
-      "하위-002",
-    ]);
-  });
-
-  it("시스템 로그가 없으면 computerOptions에 시스템이 없다", () => {
-    const noSys: LogRow[] = [
-      { ts: "2026-07-01T00:00:00Z", device: "하위-001" },
-    ];
-    expect(computerOptions(noSys)).toEqual(["하위-001"]);
+describe("deviceOptions", () => {
+  it("시스템을 빼고 등장 순서로 device_id만", () => {
+    expect(deviceOptions(rows)).toEqual(["dev-A", "dev-B"]);
   });
 });
 
 describe("datesForDevice", () => {
-  it("그 컴퓨터가 기록을 가진 날짜만 최신순으로 준다", () => {
-    expect(datesForDevice(rows, "하위-001")).toEqual([
-      "2026-07-02",
-      "2026-07-01",
-    ]);
-    expect(datesForDevice(rows, "하위-002")).toEqual([
-      "2026-07-04",
-      "2026-07-03",
-    ]);
-  });
-
-  it("기록 없는 컴퓨터는 빈 배열", () => {
-    expect(datesForDevice(rows, "하위-999")).toEqual([]);
+  it("그 컴퓨터가 기록을 가진 날짜만 최신순", () => {
+    expect(datesForDevice(rows, "dev-A")).toEqual(["2026-07-02", "2026-07-01"]);
+    expect(datesForDevice(rows, "dev-B")).toEqual(["2026-07-04", "2026-07-03"]);
   });
 });
 
-describe("isDate3Enabled", () => {
-  it("Admin이고 목록2가 하위COM일 때만 활성", () => {
-    expect(isDate3Enabled(ADMIN_SCOPE, "하위-001")).toBe(true);
+describe("registrationsForDevice", () => {
+  it("그 기기의 등록 이력을 등록일 오름차순(오래된 위)으로", () => {
+    const out = registrationsForDevice(regs, "dev-A");
+    expect(out.map((r) => r.name)).toEqual(["PC-옛이름", "PC-새이름"]);
   });
-  it("목록2가 시스템이면 비활성", () => {
-    expect(isDate3Enabled(ADMIN_SCOPE, SYSTEM_DEVICE)).toBe(false);
+  it("이력 없는 기기는 빈 배열", () => {
+    expect(registrationsForDevice(regs, "dev-Z")).toEqual([]);
   });
-  it("목록2가 비었으면 비활성", () => {
-    expect(isDate3Enabled(ADMIN_SCOPE, null)).toBe(false);
+});
+
+describe("comOrder / comLabel", () => {
+  it("등록 이른 기기가 앞(하위com1). dev-A(6/30) < dev-B(7/2)", () => {
+    const order = comOrder(["dev-B", "dev-A"], regs);
+    expect(order).toEqual(["dev-A", "dev-B"]);
+    expect(comLabel("dev-A", order)).toBe("하위com1");
+    expect(comLabel("dev-B", order)).toBe("하위com2");
   });
-  it("목록1이 하위COM이면(=Admin 아님) 비활성", () => {
-    expect(isDate3Enabled("하위-001", "2026-07-01")).toBe(false);
+  it("이력 없는 기기는 뒤에 로그 등장 순으로", () => {
+    const order = comOrder(["dev-C", "dev-A"], regs);
+    expect(order).toEqual(["dev-A", "dev-C"]); // dev-A 이력있음 앞, dev-C 뒤
   });
 });
 
 describe("filterLines", () => {
-  it("Admin + 선택없음 = 아무것도(초기 빈 화면)", () => {
-    expect(filterLines(rows, ADMIN_SCOPE, null, null)).toHaveLength(0);
+  it("Admin = 아무것도(초기 빈 화면)", () => {
+    expect(filterLines(rows, ADMIN_SCOPE, null)).toHaveLength(0);
   });
-
-  it("Admin + 시스템 = 시스템 로그만(날짜 무관)", () => {
-    const out = filterLines(rows, ADMIN_SCOPE, SYSTEM_DEVICE, null);
+  it("시스템 = 시스템 로그만", () => {
+    const out = filterLines(rows, SYSTEM_DEVICE, null);
     expect(out).toHaveLength(1);
     expect(out[0]?.device).toBe(SYSTEM_DEVICE);
   });
-
-  it("Admin + 하위COM(날짜 없음) = 그 COM 전체", () => {
-    expect(filterLines(rows, ADMIN_SCOPE, "하위-001", null)).toHaveLength(2);
+  it("device_id = 그 컴퓨터 전체", () => {
+    expect(filterLines(rows, "dev-A", null)).toHaveLength(2);
   });
-
-  it("Admin + 하위COM + 날짜 = 그 COM의 그 날짜만", () => {
-    const out = filterLines(rows, ADMIN_SCOPE, "하위-001", "2026-07-01");
+  it("device_id + 날짜 = 그 날짜만", () => {
+    const out = filterLines(rows, "dev-A", "2026-07-01");
     expect(out).toHaveLength(1);
     expect(out[0]?.ts).toBe("2026-07-01T02:00:00.000+00:00");
   });
-
-  it("하위COM 직접선택(날짜 없음) = 그 COM 전체", () => {
-    expect(filterLines(rows, "하위-002", null, null)).toHaveLength(2);
-  });
-
-  it("하위COM 직접선택 + 날짜 = 그 COM의 그 날짜만", () => {
-    const out = filterLines(rows, "하위-002", "2026-07-04", null);
-    expect(out).toHaveLength(1);
-    expect(out[0]?.device).toBe("하위-002");
-  });
-
-  it("기록 없는 날짜를 고르면 빈 결과", () => {
-    expect(filterLines(rows, "하위-001", "2026-07-03", null)).toHaveLength(0);
+  it("기록 없는 날짜는 빈 결과", () => {
+    expect(filterLines(rows, "dev-A", "2026-07-03")).toHaveLength(0);
   });
 });

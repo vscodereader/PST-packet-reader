@@ -16,14 +16,17 @@ import { api } from "../../api";
 
 import {
   ADMIN_SCOPE,
-  computerOptions,
+  SYSTEM_DEVICE,
+  comLabel,
+  comOrder,
   dateLabel,
   datesForDevice,
-  deviceLabel,
   deviceOptions,
   filterLines,
   formatTs,
-  isDate3Enabled,
+  regOptionLabel,
+  registrationsForDevice,
+  type DeviceReg,
 } from "./comm-log-filter";
 
 // 통신로그 스크롤 위치를 화면 전환(언마운트) 후에도 기억한다. 다른 페이지 갔다 와도 맨 위로
@@ -238,17 +241,17 @@ const LEVEL_COLOR: Record<Level, string> = {
 const LEVELS: Level[] = ["cmd", "ok", "fail", "info", "warn"];
 
 export function CommLog() {
-  // 3단 종속 필터 — 목록1(컴퓨터) → 목록2 → 목록3.
-  //  · sel1: "Admin(전체)"(ADMIN_SCOPE) 또는 특정 하위COM
-  //  · sel2: sel1=Admin이면 컴퓨터(시스템/하위COM), sel1=하위COM이면 날짜
-  //  · sel3: sel1=Admin & sel2=하위COM 일 때만 활성 — 날짜
-  const [sel1, setSel1] = useState<string>(ADMIN_SCOPE);
-  const [sel2, setSel2] = useState<string | null>(null);
-  const [sel3, setSel3] = useState<string | null>(null);
+  // 기기 2단 필터(#444) — 목록1(컴퓨터) → 목록2(등록 이력) → 목록3(날짜).
+  //  · comp: "Admin(전체)"(ADMIN_SCOPE) / 시스템 / 하위comN(=device_id)
+  //  · reg : 목록1=하위comN 일 때 그 기기의 등록 이름 이력(정보 표시용, 필터엔 영향 없음)
+  //  · date: 그 컴퓨터의 로그 날짜
+  const [comp, setComp] = useState<string>(ADMIN_SCOPE);
+  const [reg, setReg] = useState<string | null>(null);
+  const [date, setDate] = useState<string | null>(null);
   // 서버 감사로그(§7) 로드. 연결 시 실데이터, 오프라인 미리보기면 더미 유지. 3초 폴링.
   const [allLines, setAllLines] = useState<LogLine[]>(LOG_LINES);
-  // 기기 레지스트리(device_id → 컴퓨터 이름). 통신로그 device는 UUID라 실제 이름 표시용(#441).
-  const [devNames, setDevNames] = useState<Record<string, string>>({});
+  // 등록 이력(#444) — 하위com별 등록 이름·등록시각. 오프라인이면 빈 배열(각 기기 개별).
+  const [regs, setRegs] = useState<DeviceReg[]>([]);
   const viewportRef = useRef<HTMLDivElement>(null);
   const restoredRef = useRef(false);
 
@@ -297,19 +300,22 @@ export function CommLog() {
     return () => window.clearInterval(id);
   }, []);
 
-  // 기기 레지스트리 로드(id→이름) — device_id(UUID)를 실제 컴퓨터 이름으로 표시하기 위함(#441).
-  // 오프라인이면 빈 맵 유지(deviceLabel이 원문/축약으로 폴백).
+  // 등록 이력 로드(#444) — 하위com별 등록 이름·시각. 오프라인이면 빈 배열(각 기기 개별로 뜸).
   useEffect(() => {
     const load = () => {
       api.devices
-        .list()
-        .then((ds) => {
-          const m: Record<string, string> = {};
-          for (const d of ds) m[d.id] = d.name;
-          setDevNames(m);
-        })
+        .registrations()
+        .then((rs) =>
+          setRegs(
+            rs.map((r) => ({
+              deviceId: r.deviceId,
+              name: r.name,
+              registeredAt: r.registeredAt,
+            })),
+          ),
+        )
         .catch(() => {
-          /* 오프라인 → 빈 맵 유지 */
+          /* 오프라인 → 빈 배열 유지 */
         });
     };
     load();
@@ -317,48 +323,57 @@ export function CommLog() {
     return () => window.clearInterval(id);
   }, []);
 
-  // 목록1: Admin(전체) + 실제 하위들(시스템 제외).
-  const scopeDevices = useMemo(() => deviceOptions(allLines), [allLines]);
-  // 목록2 옵션 — sel1에 따라 컴퓨터 목록(Admin) 또는 날짜 목록(하위COM). 컴퓨터는 실제 이름 표시.
-  const sel2Data = useMemo(() => {
-    if (sel1 === ADMIN_SCOPE) {
-      return computerOptions(allLines).map((d) => ({
-        value: d,
-        label: deviceLabel(d, devNames),
-      }));
-    }
-    return datesForDevice(allLines, sel1).map((k) => ({
-      value: k,
-      label: dateLabel(k),
-    }));
-  }, [sel1, allLines, devNames]);
-  // 목록3 옵션 — Admin & sel2=하위COM 일 때만 의미가 있는 날짜 목록.
-  const date3Enabled = isDate3Enabled(sel1, sel2);
-  const sel3Data = useMemo(
+  // 목록1(컴퓨터): Admin(전체) + 시스템(있으면) + 하위comN(로그의 device_id, 등록 이른 순으로 번호).
+  const logDevices = useMemo(() => deviceOptions(allLines), [allLines]);
+  const order = useMemo(() => comOrder(logDevices, regs), [logDevices, regs]);
+  const hasSystem = useMemo(
+    () => allLines.some((l) => l.device === SYSTEM_DEVICE),
+    [allLines],
+  );
+  const compData = useMemo(
+    () => [
+      { value: ADMIN_SCOPE, label: "Admin(전체)" },
+      ...(hasSystem ? [{ value: SYSTEM_DEVICE, label: "시스템" }] : []),
+      ...order.map((d) => ({ value: d, label: comLabel(d, order) })),
+    ],
+    [hasSystem, order],
+  );
+
+  // 목록2(등록 이력) — 목록1이 하위comN(=device_id)일 때 그 기기의 등록 이름들(등록일 오름차순).
+  const isDeviceComp = comp !== ADMIN_SCOPE && comp !== SYSTEM_DEVICE;
+  const regData = useMemo(
     () =>
-      date3Enabled && sel2
-        ? datesForDevice(allLines, sel2).map((k) => ({
-            value: k,
-            label: dateLabel(k),
+      isDeviceComp
+        ? registrationsForDevice(regs, comp).map((r, i) => ({
+            value: String(i),
+            label: regOptionLabel(r),
           }))
         : [],
-    [date3Enabled, sel2, allLines],
+    [isDeviceComp, regs, comp],
+  );
+
+  // 목록3(날짜) — 특정 컴퓨터(하위comN·시스템) 선택 시 그 로그 날짜.
+  const dateData = useMemo(
+    () =>
+      comp === ADMIN_SCOPE
+        ? []
+        : datesForDevice(allLines, comp).map((k) => ({
+            value: k,
+            label: dateLabel(k),
+          })),
+    [comp, allLines],
   );
 
   const lines = useMemo(
-    () => filterLines(allLines, sel1, sel2, sel3),
-    [allLines, sel1, sel2, sel3],
+    () => filterLines(allLines, comp, date),
+    [allLines, comp, date],
   );
 
-  // 목록1 바뀌면 하위 선택 초기화, 목록2 바뀌면 목록3 초기화(종속 드롭다운).
-  const onSel1 = (v: string | null) => {
-    setSel1(v ?? ADMIN_SCOPE);
-    setSel2(null);
-    setSel3(null);
-  };
-  const onSel2 = (v: string | null) => {
-    setSel2(v);
-    setSel3(null);
+  // 목록1 바뀌면 등록·날짜 초기화(종속 드롭다운).
+  const onComp = (v: string | null) => {
+    setComp(v ?? ADMIN_SCOPE);
+    setReg(null);
+    setDate(null);
   };
 
   const toText = (rows: LogLine[]) =>
@@ -406,46 +421,41 @@ export function CommLog() {
           </Text>
         </Group>
         <Group gap="xs">
-          {/* 목록1 — 컴퓨터: Admin(전체) / 하위COM들 */}
+          {/* 목록1 — 컴퓨터: Admin(전체) / 시스템 / 하위comN */}
           <Select
             size="sm"
             w={150}
-            value={sel1}
-            onChange={onSel1}
-            data={[
-              { value: ADMIN_SCOPE, label: "Admin(전체)" },
-              ...scopeDevices.map((d) => ({
-                value: d,
-                label: deviceLabel(d, devNames),
-              })),
-            ]}
+            value={comp}
+            onChange={onComp}
+            data={compData}
             comboboxProps={{ withinPortal: true }}
             aria-label="컴퓨터 필터"
           />
-          {/* 목록2 — Admin이면 컴퓨터(시스템/하위), 하위COM이면 날짜 */}
+          {/* 목록2 — 등록 이력: 그 하위com이 등록/재등록한 이름들(등록일 오름차순) */}
           <Select
             size="sm"
-            w={140}
-            value={sel2}
-            onChange={onSel2}
-            data={sel2Data}
+            w={190}
+            value={reg}
+            onChange={setReg}
+            data={regData}
             clearable
-            placeholder={sel1 === ADMIN_SCOPE ? "컴퓨터" : "날짜"}
+            disabled={!isDeviceComp || regData.length === 0}
+            placeholder="등록 이력"
             comboboxProps={{ withinPortal: true }}
-            aria-label={sel1 === ADMIN_SCOPE ? "컴퓨터 선택" : "날짜 선택"}
+            aria-label="등록 이력"
           />
-          {/* 목록3 — Admin & 하위COM 선택 시에만 활성(날짜) */}
+          {/* 목록3 — 날짜: 그 컴퓨터의 로그 날짜 */}
           <Select
             size="sm"
             w={120}
-            value={sel3}
-            onChange={setSel3}
-            data={sel3Data}
+            value={date}
+            onChange={setDate}
+            data={dateData}
             clearable
-            disabled={!date3Enabled}
+            disabled={comp === ADMIN_SCOPE}
             placeholder="날짜"
             comboboxProps={{ withinPortal: true }}
-            aria-label="날짜 선택(Admin)"
+            aria-label="날짜 선택"
           />
           <Button leftSection={<Icon.download size={16} />} onClick={exportTxt}>
             내보내기
@@ -505,8 +515,8 @@ export function CommLog() {
             ))}
             {lines.length === 0 && (
               <Text c="dimmed">
-                {sel1 === ADMIN_SCOPE && !sel2
-                  ? "위에서 컴퓨터(또는 날짜)를 선택하면 통신 로그가 표시됩니다."
+                {comp === ADMIN_SCOPE
+                  ? "위에서 컴퓨터(하위com)를 선택하면 통신 로그가 표시됩니다."
                   : "선택한 조건의 통신 로그가 없습니다."}
               </Text>
             )}
