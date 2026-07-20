@@ -12,6 +12,9 @@ use serde_json::Value;
 
 const HOST: &str = "https://m.stock.naver.com";
 const PAGE_SIZE: u32 = 50;
+// 검색(`/front-api/search`) 페이지 크기·대상 — 하위 forum_stocks client.rs와 동일 값.
+const SEARCH_SIZE: u32 = 20;
+const SEARCH_TARGET: &str = "stock,index,marketindicator,coin,ipo,fund";
 
 // ── 프론트에서 문자열로 오는 카테고리/거래소/시장(하위 ForumStock* enum과 1:1) ──
 
@@ -271,6 +274,31 @@ impl NaverStockClient {
         Ok(result)
     }
 
+    /// 검색어 포함 **국내 종목** 한 페이지. `list`과 대칭 — fetch_hot_codes → fetch_search_page(🔥
+    /// 병합 포함) → #267-7 숨김. 반환도 `list`과 동일((Result, 네이버 원문 전체)). **실패해도 그때
+    /// 까지의 원문을 반드시 함께 돌려준다**(통신로그에 성공·실패 모두 원문 전체를 남김).
+    pub async fn search(
+        &self,
+        query: &str,
+        page: u32,
+    ) -> (Result<ForumStockPage, String>, Vec<RawCall>) {
+        let mut raws = Vec::new();
+        let result = self.search_inner(query, page, &mut raws).await;
+        (result, raws)
+    }
+
+    async fn search_inner(
+        &self,
+        query: &str,
+        page: u32,
+        raws: &mut Vec<RawCall>,
+    ) -> Result<ForumStockPage, String> {
+        let hot = self.fetch_hot_codes(raws).await;
+        let mut result = self.fetch_search_page(query, page, &hot, raws).await?;
+        drop_hidden_stocks(&mut result);
+        Ok(result)
+    }
+
     async fn fetch_category_page(
         &self,
         category: Category,
@@ -314,6 +342,56 @@ impl NaverStockClient {
             }
         }
         let has_next = (page * PAGE_SIZE) < total_count;
+        Ok(ForumStockPage {
+            stocks,
+            total_count,
+            page,
+            has_next,
+        })
+    }
+
+    /// 검색어 포함 **국내 종목**(nationCode=KOR & category=stock)만 한 페이지 조회. 하위
+    /// forum_stocks client.rs 이식. 🔥는 인자로 받은 활발 종목 집합으로 채운다. 가격은 검색
+    /// 응답에 없어 빈 값. 필터: nationCode=="KOR" && category=="stock" 아니면 제외, looks_like_code
+    /// 아니면 제외(해외·펀드/ETF·지수 등 걸러짐).
+    async fn fetch_search_page(
+        &self,
+        query: &str,
+        page: u32,
+        hot: &HashSet<String>,
+        raws: &mut Vec<RawCall>,
+    ) -> Result<ForumStockPage, String> {
+        let encoded = urlencoding::encode(query);
+        let q = format!(
+            "/front-api/search?q={encoded}&size={SEARCH_SIZE}&target={SEARCH_TARGET}&page={page}"
+        );
+        let value = self.get_json(&q, raws).await?;
+        let result = &value["result"];
+        let total_count = result["totalCount"].as_u64().unwrap_or(0) as u32;
+        let mut stocks = Vec::new();
+        if let Some(items) = result["items"].as_array() {
+            for it in items {
+                let nation = it["nationCode"].as_str().unwrap_or("");
+                let category = it["category"].as_str().unwrap_or("");
+                if nation != "KOR" || category != "stock" {
+                    continue;
+                }
+                let code = it["code"].as_str().unwrap_or("").to_string();
+                if !looks_like_code(&code) {
+                    continue;
+                }
+                stocks.push(ForumStock {
+                    name: it["name"].as_str().unwrap_or(&code).to_string(),
+                    exchange: it["typeName"].as_str().unwrap_or("").to_string(),
+                    price: String::new(),
+                    change_rate: String::new(),
+                    change_type: "even".to_string(),
+                    is_hot_discussion: hot.contains(&code),
+                    code,
+                });
+            }
+        }
+        let has_next = (page * SEARCH_SIZE) < total_count;
         Ok(ForumStockPage {
             stocks,
             total_count,
@@ -632,6 +710,74 @@ mod tests {
         assert!(page.has_next);
         // 랭킹 + 메타 두 호출 원문 캡처.
         assert_eq!(raws.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn search_keeps_only_domestic_stocks_merges_hot_and_hides_leverage() {
+        let server = MockServer::start().await;
+        // 🔥 집합: 069500만 활발.
+        Mock::given(method("GET"))
+            .and(path("/front-api/discussion/rankings/itemCodes"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"result":{"itemCodes":["069500"]}}"#),
+            )
+            .mount(&server)
+            .await;
+        // 검색 결과: 해외(KO)·지수(KOSPI)·레버리지(0193T0) 섞임. KOR&stock&looks_like_code만 통과,
+        // 그중 레버리지는 #267-7 숨김.
+        Mock::given(method("GET"))
+            .and(path("/front-api/search"))
+            .and(query_param("q", "ko"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"result":{"totalCount":1161,"items":[
+                  {"code":"KO","name":"코카콜라","category":"stock","nationCode":"USA","typeName":"뉴욕 거래소"},
+                  {"code":"069500","name":"KODEX 200","category":"stock","nationCode":"KOR","typeName":"코스피"},
+                  {"code":"0193T0","name":"KODEX SK하이닉스단일종목레버리지","category":"stock","nationCode":"KOR","typeName":"코스피"},
+                  {"code":"KOSPI","name":"코스피지수","category":"index","nationCode":"KOR","typeName":"지수"}
+                ]}}"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let client = NaverStockClient::with_base_url(server.uri());
+        let (result, raws) = client.search("ko", 1).await;
+        let page = result.unwrap();
+
+        let codes: Vec<&str> = page.stocks.iter().map(|s| s.code.as_str()).collect();
+        assert_eq!(codes, vec!["069500"]); // 국내 주식만, 레버리지 숨김 후 1종목.
+        assert!(!codes.contains(&"KO")); // 해외 제외.
+        assert!(!codes.contains(&"KOSPI")); // 지수 제외(category!=stock).
+        // 🔥 병합: 069500이 활발 집합에 있으므로 표시.
+        assert!(page.stocks[0].is_hot_discussion);
+        assert_eq!(page.total_count, 1161);
+        assert!(page.has_next); // 20 < 1161.
+        // 원문 캡처: hot + search 두 호출이 통째로 담긴다.
+        assert_eq!(raws.len(), 2);
+        assert!(raws.iter().any(|r| r.body.contains("KODEX 200")));
+    }
+
+    #[tokio::test]
+    async fn search_propagates_upstream_http_error_but_still_captures_raw() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/front-api/discussion/rankings/itemCodes"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"result":{"itemCodes":[]}}"#))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/front-api/search"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("upstream down"))
+            .mount(&server)
+            .await;
+
+        let client = NaverStockClient::with_base_url(server.uri());
+        let (result, raws) = client.search("ko", 1).await;
+        assert!(result.unwrap_err().contains("503"));
+        // hot(200) + search(503) 원문 모두 캡처.
+        assert_eq!(raws.len(), 2);
+        assert!(raws.iter().any(|r| r.status == 503 && r.body == "upstream down"));
     }
 
     #[tokio::test]

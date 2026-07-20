@@ -458,12 +458,18 @@ export const api = {
       exchange?: string;
       market?: string;
       page?: number;
+      q?: string; // 검색어(있으면 서버가 검색 경로 — §18-8-1 fetch_search_page 프록시).
     }): Promise<ForumStockPageDto> {
       const qs = new URLSearchParams({ category: req.category });
       if (req.exchange != null) qs.set("exchange", req.exchange);
       if (req.market != null) qs.set("market", req.market);
       if (req.page != null) qs.set("page", String(req.page));
+      if (req.q != null && req.q !== "") qs.set("q", req.q);
       return request("GET", `/admin/forum-stocks?${qs.toString()}`);
+    },
+    // 검색 편의 래퍼(수동 종목 선택 모달용) — 카테고리는 서버가 검색 시 무시하나 필수 필드라 기본값.
+    search(query: string, page: number): Promise<ForumStockPageDto> {
+      return this.list({ category: "tradingValue", q: query, page });
     },
   },
   publish: {
