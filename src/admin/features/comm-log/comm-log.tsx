@@ -504,7 +504,11 @@ export function CommLog() {
               </Box>
             ))}
             {lines.length === 0 && (
-              <Text c="dimmed">선택한 조건의 통신 로그가 없습니다.</Text>
+              <Text c="dimmed">
+                {sel1 === ADMIN_SCOPE && !sel2
+                  ? "위에서 컴퓨터(또는 날짜)를 선택하면 통신 로그가 표시됩니다."
+                  : "선택한 조건의 통신 로그가 없습니다."}
+              </Text>
             )}
           </Box>
         </ScrollArea>

@@ -128,7 +128,7 @@ export function isDate3Enabled(sel1: string, sel2: string | null): boolean {
 /**
  * 3단 선택값으로 로그를 거른다.
  * - sel1 = ADMIN_SCOPE:
- *     sel2 없음        → 전체
+ *     sel2 없음        → **아무것도**(초기 상태 — 대량 로그를 한꺼번에 렌더하지 않아 페이지가 즉시 뜬다)
  *     sel2 = 시스템     → 시스템 로그만(날짜 필터 없음)
  *     sel2 = 하위COM    → 그 COM 로그, sel3(날짜) 있으면 그 날짜만
  * - sel1 = 하위COM:
@@ -142,7 +142,7 @@ export function filterLines<T extends LogRow>(
   sel3: string | null,
 ): T[] {
   if (sel1 === ADMIN_SCOPE) {
-    if (!sel2) return [...lines];
+    if (!sel2) return []; // 초기: 컴퓨터를 고르기 전엔 아무것도 안 보인다.
     if (sel2 === SYSTEM_DEVICE) {
       return lines.filter((l) => l.device === SYSTEM_DEVICE);
     }
