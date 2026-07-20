@@ -14,6 +14,18 @@ import { Icon } from "@/shared/ui/icons";
 
 import { api } from "../../api";
 
+import {
+  ADMIN_SCOPE,
+  computerOptions,
+  dateLabel,
+  datesForDevice,
+  deviceLabel,
+  deviceOptions,
+  filterLines,
+  formatTs,
+  isDate3Enabled,
+} from "./comm-log-filter";
+
 // 통신로그 스크롤 위치를 화면 전환(언마운트) 후에도 기억한다. 다른 페이지 갔다 와도 맨 위로
 // 튕기지 않고 마지막으로 읽던 위치에서 이어 읽게 한다(모듈 변수라 세션 동안 유지).
 let savedScrollTop = 0;
@@ -226,9 +238,17 @@ const LEVEL_COLOR: Record<Level, string> = {
 const LEVELS: Level[] = ["cmd", "ok", "fail", "info", "warn"];
 
 export function CommLog() {
-  const [device, setDevice] = useState<string>("all");
+  // 3단 종속 필터 — 목록1(컴퓨터) → 목록2 → 목록3.
+  //  · sel1: "Admin(전체)"(ADMIN_SCOPE) 또는 특정 하위COM
+  //  · sel2: sel1=Admin이면 컴퓨터(시스템/하위COM), sel1=하위COM이면 날짜
+  //  · sel3: sel1=Admin & sel2=하위COM 일 때만 활성 — 날짜
+  const [sel1, setSel1] = useState<string>(ADMIN_SCOPE);
+  const [sel2, setSel2] = useState<string | null>(null);
+  const [sel3, setSel3] = useState<string | null>(null);
   // 서버 감사로그(§7) 로드. 연결 시 실데이터, 오프라인 미리보기면 더미 유지. 3초 폴링.
   const [allLines, setAllLines] = useState<LogLine[]>(LOG_LINES);
+  // 기기 레지스트리(device_id → 컴퓨터 이름). 통신로그 device는 UUID라 실제 이름 표시용(#441).
+  const [devNames, setDevNames] = useState<Record<string, string>>({});
   const viewportRef = useRef<HTMLDivElement>(null);
   const restoredRef = useRef(false);
 
@@ -277,19 +297,76 @@ export function CommLog() {
     return () => window.clearInterval(id);
   }, []);
 
-  const devices = useMemo(
-    () => Array.from(new Set(allLines.map((l) => l.device))),
-    [allLines],
+  // 기기 레지스트리 로드(id→이름) — device_id(UUID)를 실제 컴퓨터 이름으로 표시하기 위함(#441).
+  // 오프라인이면 빈 맵 유지(deviceLabel이 원문/축약으로 폴백).
+  useEffect(() => {
+    const load = () => {
+      api.devices
+        .list()
+        .then((ds) => {
+          const m: Record<string, string> = {};
+          for (const d of ds) m[d.id] = d.name;
+          setDevNames(m);
+        })
+        .catch(() => {
+          /* 오프라인 → 빈 맵 유지 */
+        });
+    };
+    load();
+    const id = window.setInterval(load, 5000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  // 목록1: Admin(전체) + 실제 하위들(시스템 제외).
+  const scopeDevices = useMemo(() => deviceOptions(allLines), [allLines]);
+  // 목록2 옵션 — sel1에 따라 컴퓨터 목록(Admin) 또는 날짜 목록(하위COM). 컴퓨터는 실제 이름 표시.
+  const sel2Data = useMemo(() => {
+    if (sel1 === ADMIN_SCOPE) {
+      return computerOptions(allLines).map((d) => ({
+        value: d,
+        label: deviceLabel(d, devNames),
+      }));
+    }
+    return datesForDevice(allLines, sel1).map((k) => ({
+      value: k,
+      label: dateLabel(k),
+    }));
+  }, [sel1, allLines, devNames]);
+  // 목록3 옵션 — Admin & sel2=하위COM 일 때만 의미가 있는 날짜 목록.
+  const date3Enabled = isDate3Enabled(sel1, sel2);
+  const sel3Data = useMemo(
+    () =>
+      date3Enabled && sel2
+        ? datesForDevice(allLines, sel2).map((k) => ({
+            value: k,
+            label: dateLabel(k),
+          }))
+        : [],
+    [date3Enabled, sel2, allLines],
   );
 
   const lines = useMemo(
-    () => allLines.filter((l) => device === "all" || l.device === device),
-    [device, allLines],
+    () => filterLines(allLines, sel1, sel2, sel3),
+    [allLines, sel1, sel2, sel3],
   );
+
+  // 목록1 바뀌면 하위 선택 초기화, 목록2 바뀌면 목록3 초기화(종속 드롭다운).
+  const onSel1 = (v: string | null) => {
+    setSel1(v ?? ADMIN_SCOPE);
+    setSel2(null);
+    setSel3(null);
+  };
+  const onSel2 = (v: string | null) => {
+    setSel2(v);
+    setSel3(null);
+  };
 
   const toText = (rows: LogLine[]) =>
     rows
-      .map((l) => `${l.ts}  ${l.tag.padEnd(11)} ${l.dir.padEnd(18)} ${l.msg}`)
+      .map(
+        (l) =>
+          `${formatTs(l.ts)}  ${l.tag.padEnd(11)} ${l.dir.padEnd(18)} ${l.msg}`,
+      )
       .join("\n");
 
   const exportTxt = () => {
@@ -329,17 +406,46 @@ export function CommLog() {
           </Text>
         </Group>
         <Group gap="xs">
+          {/* 목록1 — 컴퓨터: Admin(전체) / 하위COM들 */}
           <Select
             size="sm"
             w={150}
-            value={device}
-            onChange={(v) => setDevice(v ?? "all")}
+            value={sel1}
+            onChange={onSel1}
             data={[
-              { value: "all", label: "전체 컴퓨터" },
-              ...devices.map((d) => ({ value: d, label: d })),
+              { value: ADMIN_SCOPE, label: "Admin(전체)" },
+              ...scopeDevices.map((d) => ({
+                value: d,
+                label: deviceLabel(d, devNames),
+              })),
             ]}
             comboboxProps={{ withinPortal: true }}
             aria-label="컴퓨터 필터"
+          />
+          {/* 목록2 — Admin이면 컴퓨터(시스템/하위), 하위COM이면 날짜 */}
+          <Select
+            size="sm"
+            w={140}
+            value={sel2}
+            onChange={onSel2}
+            data={sel2Data}
+            clearable
+            placeholder={sel1 === ADMIN_SCOPE ? "컴퓨터" : "날짜"}
+            comboboxProps={{ withinPortal: true }}
+            aria-label={sel1 === ADMIN_SCOPE ? "컴퓨터 선택" : "날짜 선택"}
+          />
+          {/* 목록3 — Admin & 하위COM 선택 시에만 활성(날짜) */}
+          <Select
+            size="sm"
+            w={120}
+            value={sel3}
+            onChange={setSel3}
+            data={sel3Data}
+            clearable
+            disabled={!date3Enabled}
+            placeholder="날짜"
+            comboboxProps={{ withinPortal: true }}
+            aria-label="날짜 선택(Admin)"
           />
           <Button leftSection={<Icon.download size={16} />} onClick={exportTxt}>
             내보내기
@@ -364,7 +470,10 @@ export function CommLog() {
           type="always"
           scrollbarSize={12}
           p="md"
-          classNames={{ scrollbar: "commlog-scrollbar", thumb: "commlog-thumb" }}
+          classNames={{
+            scrollbar: "commlog-scrollbar",
+            thumb: "commlog-thumb",
+          }}
           viewportRef={viewportRef}
           onScrollPositionChange={({ y }) => {
             savedScrollTop = y;
@@ -381,7 +490,7 @@ export function CommLog() {
             {lines.map((l, i) => (
               <Box key={i} style={{ color: "var(--mantine-color-gray-3)" }}>
                 <Text span c="dimmed" inherit>
-                  {l.ts}
+                  {formatTs(l.ts)}
                 </Text>
                 {"  "}
                 <Text span inherit style={{ color: LEVEL_COLOR[l.level] }}>
@@ -395,7 +504,7 @@ export function CommLog() {
               </Box>
             ))}
             {lines.length === 0 && (
-              <Text c="dimmed">선택한 컴퓨터의 통신 로그가 없습니다.</Text>
+              <Text c="dimmed">선택한 조건의 통신 로그가 없습니다.</Text>
             )}
           </Box>
         </ScrollArea>
