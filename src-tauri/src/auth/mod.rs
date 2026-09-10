@@ -134,22 +134,10 @@ pub(crate) async fn manual_add_account() -> Result<Option<ManualAddResult>, Orch
     let paths = paths_for_root(app_data_root()?);
     ensure_runtime_dirs(&paths)?;
 
-    // ADB가 연결돼 있으면 수동추가 로그인창을 띄우기 **전에 IP를 한 번 회전**한다(사용자 요청).
-    // 일반 로그인(§79)과 동일한 '있으면 회전, 없으면 현재 IP로 진행' 규칙을 그대로 재사용한다 —
-    // 폰이 안 붙어 있으면 IP 회전만 건너뛰고 기존과 똑같이 그대로 창을 띄운다(그 이후는 전부 동일).
-    if probe_adb_connection().await.is_ok() {
-        toggle_airplane_mode().await?;
-        tracing::info!(
-            "[수동추가] IP 변경 확인 — {}초 안정화 대기 후 로그인창 실행",
-            config::ADB_SETTLE_AFTER_ROTATE_SECS
-        );
-        tokio::time::sleep(std::time::Duration::from_secs(
-            config::ADB_SETTLE_AFTER_ROTATE_SECS,
-        ))
-        .await;
-    } else {
-        tracing::info!("[수동추가] ADB 디바이스 없음 — IP 회전 생략, 현재 IP로 진행");
-    }
+    // [임시 빌드 — 특정 사용자 배포용] ADB 연결 여부와 무관하게 IP 회전을 건너뛰고 바로
+    // 로그인창을 띄운다. 원본은 ADB가 붙어 있으면 toggle_airplane_mode로 IP를 한 번 회전했음.
+    // 이 변경은 빌드 후 git으로 원상복구 예정(커밋하지 말 것).
+    tracing::info!("[수동추가] (임시 빌드) IP 회전 비활성화 — 현재 IP로 바로 로그인창 실행");
 
     tauri::async_runtime::spawn_blocking(move || login::manual_add(&paths))
         .await

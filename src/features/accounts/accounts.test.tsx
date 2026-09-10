@@ -461,10 +461,9 @@ describe("Accounts", () => {
     ).toBeInTheDocument();
   });
 
-  // 선택 로그인은 종토방(forum)·네이버블로그(blog) 전용(#228 + 블로그 추가). 둘 다 네이버 쿠키
-  // 기반이라 naver 로그인으로 묶는다. 카페·밴드는 게시 직전 백엔드가 로그인을 원자 처리하므로
-  // 제외 — 선택 계정이 전부 forum/blog일 때만 버튼 노출(블로그 단위 검증은 login-queue.test.ts).
-  describe("선택 로그인 (종토방·블로그 전용, #228)", () => {
+  // 종토방·블로그·클립은 네이버 로그인, 밴드는 BAND 이메일 로그인을 선택 로그인 큐로 실행한다.
+  // 카페는 게시 직전 백엔드가 로그인을 원자 처리하므로 제외한다.
+  describe("선택 로그인 (네이버 쿠키 플랫폼 + BAND 이메일)", () => {
     // loginId 텍스트로 해당 행을 찾아 체크박스를 토글한다(인덱스 의존 회피).
     const toggleRow = async (loginId: string) => {
       const row = screen.getByText(loginId).closest("tr")!;
@@ -509,21 +508,16 @@ describe("Accounts", () => {
       ).toBeInTheDocument();
     });
 
-    it("종토방이 아닌 계정(밴드·네이버)이 섞이면 버튼이 숨겨진다", async () => {
+    it("밴드는 종토방과 함께 선택할 수 있고 네이버 카페가 섞이면 버튼이 숨겨진다", async () => {
       await renderAccounts();
       await toggleRow("invest_king7"); // forum → 노출
       expect(
         screen.getByRole("button", { name: /선택 로그인/ }),
       ).toBeInTheDocument();
 
-      await toggleRow("value_invest"); // + 밴드 → 숨김
+      await toggleRow("value_invest"); // + 밴드 이메일 로그인 → 계속 노출
       expect(
-        screen.queryByRole("button", { name: /선택 로그인/ }),
-      ).not.toBeInTheDocument();
-
-      await toggleRow("value_invest"); // 밴드 해제 → 다시 노출
-      expect(
-        screen.getByRole("button", { name: /선택 로그인/ }),
+        screen.getByRole("button", { name: /선택 로그인 \(2\)/ }),
       ).toBeInTheDocument();
 
       await toggleRow("money_lab"); // + 네이버 → 숨김
@@ -577,6 +571,51 @@ describe("Accounts", () => {
       expect(
         vi.mocked(ipcBackend).mock.calls.some((c) => c[0] === "list_accounts"),
       ).toBe(true);
+    });
+
+    it("밴드 이메일과 비밀번호를 기존 저장·로그인 큐에 전달한다", async () => {
+      await renderAccounts();
+      vi.mocked(ipcBackend).mockClear();
+
+      await toggleRow("value_invest");
+      await userEvent.click(
+        screen.getByRole("button", { name: /선택 로그인 \(1\)/ }),
+      );
+
+      await waitFor(() => {
+        const saveCall = vi
+          .mocked(ipcBackend)
+          .mock.calls.find((c) => c[0] === "save_accounts");
+        expect(saveCall).toBeTruthy();
+        expect(saveCall![1]).toEqual({
+          accounts: [
+            {
+              id: "value_invest",
+              password: "band!value7",
+              label: "value_invest",
+            },
+          ],
+        });
+
+        const queueCall = vi
+          .mocked(ipcBackend)
+          .mock.calls.find((c) => c[0] === "add_queue_now");
+        expect(queueCall).toBeTruthy();
+        const item = (
+          queueCall![1] as {
+            item: { plan?: { login?: unknown[] } };
+          }
+        ).item;
+        expect(item.plan?.login).toEqual([
+          {
+            accountId: "value_invest",
+            platform: "band",
+            headless: false,
+            useAdb: true,
+            force: true,
+          },
+        ]);
+      });
     });
 
     it("로그인이 실패해도 배치는 완료되고 계정 목록을 재동기화한다", async () => {

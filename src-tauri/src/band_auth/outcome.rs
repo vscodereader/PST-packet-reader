@@ -17,7 +17,7 @@ pub(crate) fn resolve_band_failure(
     match outcome {
         BandLoginOutcome::BadCredentials => LoginResolution::failure(
             AccountStatus::BadCredentials,
-            "네이버 아이디 또는 비밀번호가 올바르지 않습니다.",
+            "BAND 이메일 또는 비밀번호가 올바르지 않습니다.",
         ),
         BandLoginOutcome::Blocked => LoginResolution::failure(
             AccountStatus::Blocked,
@@ -46,7 +46,7 @@ mod tests {
         let r = resolve_band_failure(&BandLoginOutcome::BadCredentials, None);
         assert_eq!(r.status, AccountStatus::BadCredentials);
         assert!(!r.succeeded);
-        assert!(!r.message.is_empty());
+        assert_eq!(r.message, "BAND 이메일 또는 비밀번호가 올바르지 않습니다.");
     }
 
     #[test]

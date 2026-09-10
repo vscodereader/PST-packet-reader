@@ -3,13 +3,17 @@ import type { QueueNowItem } from "@/shared/bindings/QueueNowItem";
 import type { Account, PlatformId } from "@/shared/data/types";
 
 /**
- * "선택 로그인" 버튼을 쓸 수 있는 플랫폼인지(순수 함수). 종목토론방(forum)과 네이버블로그(blog)는
- * 명시적 선택 로그인으로 쿠키를 미리 확보해 쓴다 — 둘 다 네이버 쿠키 기반이라 `buildLoginNowItem`이
- * 동일하게 naver 로그인으로 묶는다. 카페(naver)·밴드(band)는 게시 직전 백엔드가
- * [회전→로그인→게시]를 원자 처리하므로 별도 선택 로그인이 불필요하다(#228, 블로그 추가).
+ * "선택 로그인" 버튼을 쓸 수 있는 플랫폼인지(순수 함수). 종목토론방·블로그·클립은 네이버
+ * 쿠키를 미리 확보하고, 밴드는 BAND 이메일 로그인을 통해 band 쿠키를 미리 확보한다.
+ * 카페(naver)만 게시 직전 백엔드가 [회전→로그인→게시]를 원자 처리하므로 제외한다.
  */
 export function isSelectiveLoginPlatform(platform: PlatformId): boolean {
-  return platform === "forum" || platform === "blog" || platform === "clip";
+  return (
+    platform === "forum" ||
+    platform === "blog" ||
+    platform === "clip" ||
+    platform === "band"
+  );
 }
 
 /**

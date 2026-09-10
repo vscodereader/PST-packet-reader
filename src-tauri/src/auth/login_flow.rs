@@ -1359,6 +1359,16 @@ fn login_throttle_ms() -> u64 {
     parse_throttle_ms(std::env::var("PSTMACRO_LOGIN_THROTTLE_MS").ok().as_deref())
 }
 
+fn type_key_delay(attempt: usize, throttle: u64, delayed_retries: bool) -> Option<Duration> {
+    if attempt == 0 {
+        (throttle > 0).then(|| Duration::from_millis(throttle))
+    } else if delayed_retries {
+        Some(Duration::from_millis(throttle.max(35)))
+    } else {
+        None
+    }
+}
+
 /// 스로틀이 켜져 있으면 그만큼 추가로 멈춘다(필드 사이 사람 같은 텀 강화). 꺼져 있으면 no-op.
 fn throttle_pause() {
     let t = login_throttle_ms();
@@ -1393,6 +1403,26 @@ fn type_into(
     selector: &str,
     text: &str,
 ) -> Result<Option<String>, AutomationError> {
+    type_into_with_throttle(client, selector, text, login_throttle_ms(), true)
+}
+
+/// 네이버 로그인과 동일한 포커스·키 매핑·재시도 입력 경로를 사용하되 첫 시도의 글자별 지연은
+/// 강제로 0으로 둔다. BAND처럼 자체 DOM 게이트를 통과한 폼이 즉시 채워져야 하는 호출부용이다.
+pub(crate) fn type_into_immediate(
+    client: &mut CdpClient,
+    selector: &str,
+    text: &str,
+) -> Result<Option<String>, AutomationError> {
+    type_into_with_throttle(client, selector, text, 0, false)
+}
+
+fn type_into_with_throttle(
+    client: &mut CdpClient,
+    selector: &str,
+    text: &str,
+    throttle: u64,
+    delayed_retries: bool,
+) -> Result<Option<String>, AutomationError> {
     let expected = text.chars().count();
     // 실패 시 진단에 쓸 마지막 시도의 관측값(포커스 경로·입력된 글자 수).
     let mut focused_via_mouse = false;
@@ -1407,7 +1437,6 @@ fn type_into(
     force_page_foreground(client);
 
     // 입력 스로틀(기본 0=꺼짐). 켜져 있으면 첫 시도부터 글자당 지연을 줘 사람처럼 천천히 친다.
-    let throttle = login_throttle_ms();
     if throttle > 0 {
         tracing::info!(
             selector,
@@ -1437,12 +1466,8 @@ fn type_into(
         // 첫 시도는 글자 사이 지연 없이 빠르게 친다(#267: 타이핑 리듬 지문 제거). 재시도부터는
         // 글자마다 작은 지연을 줘, 0지연 연타로 마지막 글자들이 입력칸에 덜 반영되던 경우를 복구한다.
         // 스로틀이 켜져 있으면 첫 시도부터 그 값(재시도는 최소 35ms 보장)으로 지연을 준다.
-        let per_key_delay = if attempt == 0 {
-            (throttle > 0).then(|| Duration::from_millis(throttle))
-        } else {
-            Some(Duration::from_millis(throttle.max(35)))
-        };
-        // 기존 값 비우기(재시도 시 중복 입력 방지). 셀렉터는 고정 안전 문자열(#id/#pw).
+        let per_key_delay = type_key_delay(attempt, throttle, delayed_retries);
+        // 기존 값 비우기(재시도 시 중복 입력 방지). 셀렉터는 호출부가 정한 내부 고정 문자열이다.
         let clear = format!(
             "(()=>{{const el=document.querySelector('{selector}');\
              if(el){{el.value='';return true;}}return false;}})()"
@@ -1931,6 +1956,14 @@ mod tests {
         assert_eq!(parse_throttle_ms(Some("  80 ")), 80);
         assert_eq!(parse_throttle_ms(Some("500")), 500);
         assert_eq!(parse_throttle_ms(Some("9999")), 500);
+    }
+
+    #[test]
+    fn immediate_input_has_no_per_key_delay_even_on_retry() {
+        for attempt in 0..3 {
+            assert_eq!(type_key_delay(attempt, 0, false), None);
+        }
+        assert_eq!(type_key_delay(1, 0, true), Some(Duration::from_millis(35)));
     }
 
     #[test]

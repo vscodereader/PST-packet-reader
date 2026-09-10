@@ -1,28 +1,30 @@
-//! band.us "네이버로 로그인/가입"(OAuth2) CDP 시퀀스. 네이버 `auth/login_flow.rs` 의 메커니즘을
+//! band.us 이메일 로그인 CDP 시퀀스. 네이버 `auth/login_flow.rs` 의 메커니즘을
 //! **그대로 미러**한다: 페이지에서 API(fetch)를 호출하지 않고(봇탐지 표면↑) DOM 을 몰아 —
-//! 아이디/비밀번호를 실제 키 이벤트(`Input.dispatchKeyEvent`)로 입력하고, 버튼은 좌표 마우스
+//! 이메일/비밀번호를 실제 키 이벤트(`Input.dispatchKeyEvent`)로 입력하고, 버튼은 좌표 마우스
 //! 클릭(진짜 mouse 이벤트, JS `.click()` 아님)으로 누르며, `document.readyState==='complete'` 를
 //! 기다린 뒤 쿠키 + 현재 URL + DOM 텍스트로 페이지 상태를 분류한다.
 //!
-//! 진입 URL `redirect_external_account_login?type=naver` 로 이동하면 band 가 **표준 네이버 로그인
-//! 폼**(`#id`/`#pw`, default_ecc.js — 일반 네이버 로그인과 동일)으로 리다이렉트한다. 네이버 인증
-//! 뒤에는 (a) 새 기기 등록 페이지("등록 안함"), (b) OAuth 동의(`allow_oauth`) 페이지가 나올 수 있고,
-//! band 가 세션을 세우면 `.band.us` 에 `band_session` 쿠키가 발급된다(로그인 성공의 최종 신호).
-//! 미가입 계정이면 `auth.band.us/login?...&_ns=false` 로 떨어져 "네이버로 가입하기"를 눌러야 하고,
-//! 그러면 네이버 로그인 폼이 **다시** 떠 재로그인 → `continue_external_account_sign_up` → 가입 완료
-//! → `band_session` 순으로 진행된다. 각 화면은 아래 반응형 루프가 매 폴링마다 재판정해 처리한다.
+//! `www.band.us`에서 시작해 소개 화면의 로그인 버튼과 로그인 방법 화면의 이메일 버튼을 실제로
+//! 눌러 `email_login?keep_login=false`에 진입한다. 이후 이메일 폼(`#email_login_form`,
+//! `#input_email`)을 제출하면 비밀번호 폼(`/email_login/password`,
+//! `#email_password_login_form`, `#pw`)으로 이동한다. 각 화면은 전체 DOM + iframe 완료와 정확한
+//! 폼 준비를 별도로 기다린 뒤 입력·제출한다. band 가 세션을 세우면 `.band.us`에
+//! `band_session` 쿠키가 발급되고 실제 `www.band.us` 홈에 착지한 때만 성공으로 확정한다.
 
 use std::thread::sleep;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use crate::auth::login_flow::type_into_immediate as type_into_naver;
 use crate::naver_automation::{AutomationError, CdpClient};
 
-// band "네이버로 로그인" 진입점. 이 URL로 이동하면 band가 네이버 OAuth authorize 로
-// 리다이렉트해 표준 네이버 로그인 폼(#id/#pw)을 띄운다.
-const OAUTH_ENTRY_URL: &str =
-    "https://auth.band.us/redirect_external_account_login?type=naver&keep_login=false&rcv=none";
+// 정상 수동 로그인 패킷(2026-07-31)과 같은 진입점/버튼. BBC(device_id)는 코드에서 만들거나
+// 재사용하지 않는다. 계정별 새 Chrome 세션이 이 정상 페이지 흐름의 band 스크립트를 실행하면서
+// 각자 발급받게 한다.
+const BAND_HOME_ENTRY_URL: &str = "https://www.band.us/";
+const BAND_INTRO_LOGIN_SELECTOR: &str = "a.login._loginLink";
+const BAND_EMAIL_METHOD_SELECTOR: &str = "a.buttonRound.-email[data-login-method='email']";
 const HEADLESS_TIMEOUT: Duration = Duration::from_secs(40);
 const HEADED_TIMEOUT: Duration = Duration::from_secs(180);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -36,7 +38,12 @@ const STEALTH_INIT_JS: &str = "(()=>{try{\
     try{Object.defineProperty(Navigator.prototype,'languages',\
         {get:()=>['ko-KR','ko','en-US','en'],configurable:true,enumerable:true});}catch(e){}})();";
 
-// band-OAuth 페이지에 뜨는 표준 네이버 로그인 폼 셀렉터(일반 네이버 로그인과 동일).
+// 직접 이메일 로그인 폼(패킷/HTML 원문 2026-07-31).
+const BAND_EMAIL_FORM_SELECTOR: &str = "#email_login_form";
+const BAND_EMAIL_SELECTOR: &str = "#input_email";
+const BAND_PASSWORD_FORM_SELECTOR: &str = "#email_password_login_form";
+
+// 예기치 않은 레거시 네이버 OAuth 착지의 기존 방어적 처리용 셀렉터.
 const NAVER_ID_SELECTOR: &str = "#id";
 const NAVER_PW_SELECTOR: &str = "#pw";
 
@@ -106,7 +113,9 @@ pub(crate) fn is_two_factor_text(text: &str) -> bool {
 
 /// 로그인 결과.
 pub(crate) enum BandLoginOutcome {
-    Ok { cookies: Vec<Value> },
+    Ok {
+        cookies: Vec<Value>,
+    },
     BadCredentials,
     Blocked,
     /// 본인확인(휴대전화) 화면이 떴는데 계정 ID가 휴대전화 형식이 아니라 자동으로 풀 수 없어
@@ -121,6 +130,9 @@ pub(crate) enum BandLoginOutcome {
 pub(crate) struct BandPageSignals {
     /// band 세션 쿠키(`band_session`) 발급 = 로그인 성공.
     pub logged_in: bool,
+    /// band 이메일 입력 화면(`/email_login`, `#input_email`). 비밀번호 단계와 구분하며, 아직
+    /// 이번 폼을 제출하지 않았고 오류/캡차가 없을 때만 true다.
+    pub email_form: bool,
     /// 표준 네이버 로그인 폼(#id/#pw)이 이번 폴링에서 **입력해야 하는** 상태(보이고, 아직 이번
     /// 폼에 제출하지 않았고, 캡차/오류 표시가 없음). 첫 로그인·가입 재로그인 모두 여기로 잡힌다.
     pub naver_form: bool,
@@ -160,6 +172,7 @@ pub(crate) struct BandPageSignals {
 pub(crate) enum BandSignal {
     Pending,
     Success,
+    EmailForm,
     NaverForm,
     EmailConfirm,
     EmailPassword,
@@ -181,6 +194,7 @@ pub(crate) enum BandSignal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoopAction {
     Success,
+    TypeBandEmail,
     TypeLogin,
     ClickEmailConfirm,
     TypeBandPassword,
@@ -201,6 +215,8 @@ enum LoopAction {
 pub(crate) fn classify(s: &BandPageSignals) -> BandSignal {
     if s.logged_in {
         BandSignal::Success
+    } else if s.email_form {
+        BandSignal::EmailForm
     } else if s.naver_form {
         BandSignal::NaverForm
     } else if s.email_confirm {
@@ -251,6 +267,7 @@ fn decide_loop_step(
 ) -> LoopAction {
     match signal {
         BandSignal::Success => LoopAction::Success,
+        BandSignal::EmailForm => LoopAction::TypeBandEmail,
         BandSignal::NaverForm => LoopAction::TypeLogin,
         BandSignal::EmailConfirm => LoopAction::ClickEmailConfirm,
         BandSignal::EmailPassword => LoopAction::TypeBandPassword,
@@ -260,10 +277,9 @@ fn decide_loop_step(
         BandSignal::Device => LoopAction::HandleDevice,
         BandSignal::PhoneVerify => LoopAction::HandlePhoneVerify,
         // 사람이 즉석에서 풀 수 없는 종료 상태 — headed 여도 즉시 실패(Blocked 매핑).
-        BandSignal::Otp
-        | BandSignal::LongDormant
-        | BandSignal::Protected
-        | BandSignal::Locked => LoopAction::ConfirmedBlocked,
+        BandSignal::Otp | BandSignal::LongDormant | BandSignal::Protected | BandSignal::Locked => {
+            LoopAction::ConfirmedBlocked
+        }
         // 캡차/차단: headed 는 사람 대기, headless 는 2회 연속 확정.
         BandSignal::Captcha | BandSignal::Blocked => {
             if wait_for_human {
@@ -290,9 +306,9 @@ pub(crate) fn credentials_present(id: &str, pw: &str) -> bool {
     !id.trim().is_empty() && !pw.is_empty()
 }
 
-/// band-OAuth 진입 URL(순수 함수).
-pub(crate) fn oauth_entry_url() -> &'static str {
-    OAUTH_ENTRY_URL
+/// 정상 band 로그인 진입 URL(순수 함수). 이메일 로그인 주소로 직행하지 않는다.
+pub(crate) fn normal_login_entry_url() -> &'static str {
+    BAND_HOME_ENTRY_URL
 }
 
 /// 현재 URL이 네이버 OAuth 동의 페이지(`allow_oauth`/`agree_term`)인지(순수 함수).
@@ -338,6 +354,12 @@ pub(crate) fn is_email_confirm_url(url: &str) -> bool {
 /// 본문 텍스트가 band "본인 확인" 화면인지(순수 함수, URL 판정 폴백). 패킷 원문 문구.
 pub(crate) fn is_email_confirm_text(text: &str) -> bool {
     text.contains("본인이 맞으신가요") && text.contains("로그인")
+}
+
+/// 현재 URL이 band 이메일 입력 첫 화면인지 판정한다. `/email_login/password`도 접두사가
+/// 같으므로 명시적으로 제외한다.
+pub(crate) fn is_email_login_url(url: &str) -> bool {
+    url.contains("auth.band.us/email_login") && !is_email_password_url(url)
 }
 
 /// 현재 URL이 band 자체 비밀번호 입력 화면(`email_login/password`)인지(순수 함수). `#pw`에 저장된
@@ -412,6 +434,59 @@ pub(crate) fn run(
     }
 }
 
+// 정상 수동 로그인 패킷의 입구를 그대로 밟는다:
+// www.band.us → 소개 화면 로그인 → auth.band.us 로그인 방법 → 이메일 로그인.
+// 프론트엔드는 이 흐름에 관여하지 않으며, 계정별로 만들어진 현재 CDP 세션 안에서만 수행한다.
+fn enter_email_login_via_normal_path(
+    client: &mut CdpClient,
+) -> Result<Option<String>, AutomationError> {
+    client.navigate(normal_login_entry_url())?;
+
+    // www.band.us 첫 응답 뒤 /about/kr/intro로 전환될 수 있으므로 URL을 강제로 건너뛰지 않고,
+    // 소개 화면의 실제 로그인 버튼과 모든 문서가 안정적으로 준비될 때까지 기다린다.
+    if !wait_for_visible_selector(client, BAND_INTRO_LOGIN_SELECTOR, Duration::from_secs(20)) {
+        let url = client.current_url().unwrap_or_default();
+        return Ok(Some(format!(
+            "BAND 소개 화면의 로그인 버튼이 DOM 로딩 후에도 준비되지 않았습니다. 마지막 페이지: {url}"
+        )));
+    }
+    // 페이지 진입 텔레메트리/BBC 초기화가 같은 이벤트 루프에서 마무리될 시간을 준 뒤 실제
+    // 좌표 마우스 이벤트로 누른다.
+    sleep(Duration::from_secs(1));
+    if !click_visible_selector(client, BAND_INTRO_LOGIN_SELECTOR)? {
+        let url = client.current_url().unwrap_or_default();
+        return Ok(Some(format!(
+            "BAND 소개 화면의 로그인 버튼을 누르지 못했습니다. 마지막 페이지: {url}"
+        )));
+    }
+
+    // 로그인 방법 페이지가 완전히 로드되고 이메일 선택 버튼이 안정된 뒤에만 다음 클릭을 한다.
+    if !wait_for_visible_selector(client, BAND_EMAIL_METHOD_SELECTOR, Duration::from_secs(20)) {
+        let url = client.current_url().unwrap_or_default();
+        return Ok(Some(format!(
+            "BAND 로그인 방법 화면의 이메일 로그인 버튼이 DOM 로딩 후에도 준비되지 않았습니다. 마지막 페이지: {url}"
+        )));
+    }
+    sleep(Duration::from_secs(1));
+    if !click_visible_selector(client, BAND_EMAIL_METHOD_SELECTOR)? {
+        let url = client.current_url().unwrap_or_default();
+        return Ok(Some(format!(
+            "BAND 로그인 방법 화면의 이메일 로그인 버튼을 누르지 못했습니다. 마지막 페이지: {url}"
+        )));
+    }
+
+    // 버튼 클릭으로 이동한 이메일 화면도 전체 DOM과 정확한 폼이 안정될 때까지 기다린다.
+    // 성공 뒤 기존 반응형 루프가 동일 게이트를 다시 확인하고 기존 입력/제출/쿠키 저장을 재사용한다.
+    if !wait_for_band_form(client, BAND_EMAIL_FORM_SELECTOR, BAND_EMAIL_SELECTOR) {
+        let url = client.current_url().unwrap_or_default();
+        return Ok(Some(format!(
+            "BAND 이메일 로그인 화면이 정상 버튼 경로 뒤에도 준비되지 않았습니다. 마지막 페이지: {url}"
+        )));
+    }
+
+    Ok(None)
+}
+
 fn run_inner(
     client: &mut CdpClient,
     id: &str,
@@ -431,8 +506,12 @@ fn run_inner(
         json!({ "source": STEALTH_INIT_JS }),
     );
 
-    // band-OAuth 진입 → 표준 네이버 로그인 폼으로 리다이렉트. 이후 판정/동작은 반응형 루프가 맡는다.
-    client.navigate(oauth_entry_url())?;
+    // 정상 수동 경로와 동일하게 band 홈 → 소개 화면 로그인 → 로그인 방법 화면의 이메일 버튼을
+    // 실제 좌표 마우스로 누른다. 이 과정에서 band 자체 스크립트가 새 세션의 BBC/device_id와
+    // 텔레메트리 문맥을 만들게 하며, 값을 코드에서 고정·복사하지 않는다.
+    if let Some(message) = enter_email_login_via_normal_path(client)? {
+        return Ok(BandLoginOutcome::Error(message));
+    }
 
     let timeout = if wait_for_human {
         HEADED_TIMEOUT
@@ -441,6 +520,9 @@ fn run_inner(
     };
     let deadline = Instant::now() + timeout;
     let mut last_negative: Option<BandSignal> = None;
+    // 이메일 첫 화면에 이미 입력·제출했는지. POST 직후 같은 DOM이 잠깐 남아 있을 때 이중
+    // 제출하는 것을 막는다.
+    let mut email_submitted = false;
     // 현재 표시된 네이버 폼에 이미 입력·제출했는지. 첫 로그인 후 다시 폼이 뜨는 경우는 오직
     // "가입하기" 클릭 뒤이므로(재로그인), 그 arm 에서만 false 로 되돌려 재입력을 허용한다. 이 플래그로
     // 제출 직후 같은 폼에 이중 제출하는 것을 막는다.
@@ -458,14 +540,48 @@ fn run_inner(
         let _ = client.click_device_dontsave_if_present(Duration::from_millis(300));
 
         // 새로 이동한 페이지를 읽거나 동작하기 전에 DOM 로딩 완료(readyState=complete + 모든 iframe)
-        // 를 기다린다(사용자 보고: 페이지가 다 로드되기 전에 동작하던 문제 — 매 화면에서 방지).
-        wait_for_dom_ready(client);
+        // 를 반드시 확인한다. 예전처럼 결과를 무시하고 입력을 진행하지 않는다.
+        if !wait_for_dom_ready(client) {
+            let url = client.current_url().unwrap_or_default();
+            return Ok(BandLoginOutcome::Error(format!(
+                "BAND 로그인 페이지 DOM 로딩이 완료되지 않았습니다. 마지막 페이지: {url}"
+            )));
+        }
 
-        let signals = read_signals(client, submitted_for_form, band_pw_submitted)?;
+        let signals = read_signals(
+            client,
+            email_submitted,
+            submitted_for_form,
+            band_pw_submitted,
+        )?;
         match decide_loop_step(last_negative, classify(&signals), wait_for_human) {
             LoopAction::Success => {
                 let cookies = collect_band_cookies(client)?;
                 return Ok(BandLoginOutcome::Ok { cookies });
+            }
+            LoopAction::TypeBandEmail => {
+                // 첫 이메일 화면은 자체 DOM 게이트를 한 번 더 통과해야 한다. 폼·입력·submit
+                // 버튼이 안정적으로 준비되기 전에는 계정관리의 이메일을 입력하지 않는다.
+                if !wait_for_band_form(client, BAND_EMAIL_FORM_SELECTOR, BAND_EMAIL_SELECTOR) {
+                    let url = client.current_url().unwrap_or_default();
+                    return Ok(BandLoginOutcome::Error(format!(
+                        "BAND 이메일 로그인 폼(#email_login_form/#input_email)이 준비되지 않았습니다. 마지막 페이지: {url}"
+                    )));
+                }
+                if !focused_once {
+                    focus_web_contents(client);
+                    focused_once = true;
+                }
+                if !type_into(client, BAND_EMAIL_SELECTOR, id)? {
+                    return Ok(BandLoginOutcome::Error(
+                        "BAND 이메일 자동 입력에 실패했습니다(이메일 칸이 비어 로그인을 중단)."
+                            .to_owned(),
+                    ));
+                }
+                sleep(Duration::from_secs(1));
+                click_band_form_submit(client, BAND_EMAIL_FORM_SELECTOR, BAND_EMAIL_SELECTOR)?;
+                email_submitted = true;
+                last_negative = None;
             }
             LoopAction::TypeLogin => {
                 // 타이핑 전에 폼이 "완전히" 준비될 때까지 기다린다(readyState + #id/#pw 입력가능 +
@@ -511,6 +627,12 @@ fn run_inner(
                 // 활성화하고, 이어서 폼 제출(→ band recaptcha·서명 JS)까지 눌러 마무리한다. 비번이
                 // 틀리면 다음 폴링에서 #error_msg → BadCredentials 로 확정된다. (DOM 완료는 루프
                 // 상단 wait_for_dom_ready 가 이미 보장한다.)
+                if !wait_for_band_form(client, BAND_PASSWORD_FORM_SELECTOR, "#pw") {
+                    let url = client.current_url().unwrap_or_default();
+                    return Ok(BandLoginOutcome::Error(format!(
+                        "BAND 비밀번호 로그인 폼(#email_password_login_form/#pw)이 준비되지 않았습니다. 마지막 페이지: {url}"
+                    )));
+                }
                 if !type_into(client, "#pw", pw)? {
                     return Ok(BandLoginOutcome::Error(
                         "밴드 비밀번호 자동 입력에 실패했습니다(비밀번호 칸이 비어 로그인을 중단)."
@@ -579,6 +701,7 @@ fn run_inner(
 // 현재 페이지에서 로그인 진행/결과 신호를 읽는다.
 fn read_signals(
     client: &mut CdpClient,
+    email_submitted: bool,
     submitted_for_form: bool,
     band_pw_submitted: bool,
 ) -> Result<BandPageSignals, AutomationError> {
@@ -604,14 +727,15 @@ fn read_signals(
              return ok(document.querySelector('#id'))&&ok(document.querySelector('#pw'));})()",
         )
         .unwrap_or(false);
-    // band 자체 비밀번호 화면(`email_login/password`)에서 비번 오류(#error_msg)가 떠 있는지. 이건
-    // band 페이지 고유 셀렉터라 has_session 게이트 없이도 오탐이 없다(성공은 band.us 로 이탈해
-    // 이 화면을 벗어남). 오류가 뜨면 재입력하지 않고 비번오류로 확정 → "창 닫고 다음 계정".
+    // band 이메일/비밀번호 화면에서 오류(#error_msg)가 떠 있는지. band 페이지 고유 셀렉터라
+    // has_session 게이트 없이도 오탐이 없다. 오류가 뜨면 재입력하지 않고 BadCredentials로 확정한다.
+    let band_email_page = is_email_login_url(&url);
     let band_pw_page = is_email_password_url(&url);
-    let band_pw_error = band_pw_page && client.evaluate_bool(BAND_PW_ERROR_JS).unwrap_or(false);
+    let band_form_error = (band_email_page || band_pw_page)
+        && client.evaluate_bool(BAND_PW_ERROR_JS).unwrap_or(false);
 
     // 비번 오류: 네이버 폼 #err_common(보이고 텍스트 있음, 캡차/로그인됨 아님) 또는 band #error_msg.
-    let bad_credentials = band_pw_error
+    let bad_credentials = band_form_error
         || (!has_session
             && !captcha
             && client
@@ -621,18 +745,35 @@ fn read_signals(
                 )
                 .unwrap_or(false));
 
-    // band "본인 확인"(confirm_user_email_login) 화면: URL 또는 본문 문구.
+    // band 이메일 첫 화면: 정확한 URL + 폼/입력이 보이고, 아직 제출하지 않았고,
+    // 오류/캡차가 없을 때만 입력 액션으로 분류한다.
+    let email_form_visible = client
+        .evaluate_bool(
+            "(()=>{const f=document.querySelector('#email_login_form');\
+             const e=document.querySelector('#input_email');\
+             const b=f&&f.querySelector('button[type=submit]');\
+             return !!(f&&f.offsetParent!==null&&e&&e.offsetParent!==null&&!e.disabled&&!e.readOnly\
+                 &&b&&b.offsetParent!==null);})()",
+        )
+        .unwrap_or(false);
+    let email_form =
+        band_email_page && email_form_visible && !email_submitted && !band_form_error && !captcha;
+
+    // band "본인 확인"(confirm_user_email_login) 화면: URL 또는 본문 문구. 직접 이메일
+    // 로그인에서는 정상적으로 거치지 않지만 기존 후속 방어 로직은 유지한다.
     let email_confirm = is_email_confirm_url(&url) || is_email_confirm_text(&body_text);
     // band 자체 비밀번호 입력 화면: 이 화면이고, 오류가 없고, 아직 이번 화면에 제출하지 않았을 때만
     // "입력해야 하는" 상태로 본다(오류 뜬 화면·제출 직후 recaptcha 대기 중 재입력 방지).
-    let email_password = band_pw_page && !band_pw_error && !band_pw_submitted;
+    let email_password = band_pw_page && !band_form_error && !band_pw_submitted;
     // 폼이 보이고, 아직 이번 폼에 제출하지 않았고, 캡차/오류 표시가 없을 때만 "입력해야 하는" 폼으로
     // 본다 — 오류가 뜬 폼(비번오류)이나 캡차가 뜬 폼에 재입력하지 않는다.
-    let naver_form = form_visible && !submitted_for_form && !captcha && !bad_credentials && !has_session;
+    let naver_form =
+        form_visible && !submitted_for_form && !captcha && !bad_credentials && !has_session;
 
     // 동의 화면 감지: URL(allow_oauth/agree_term) 또는 화면 DOM(동의하기 버튼 + 개인정보 제3자 제공).
     // 실제 동의 화면 URL 은 oauth2.0/authorize 라 URL 만으론 못 잡아 DOM 감지가 주력이다(2026-07-13).
-    let consent = is_oauth_consent_url(&url) || client.evaluate_bool(CONSENT_DOM_JS).unwrap_or(false);
+    let consent =
+        is_oauth_consent_url(&url) || client.evaluate_bool(CONSENT_DOM_JS).unwrap_or(false);
     let signup_needed =
         is_signup_needed_url(&url) || client.evaluate_bool(SIGNUP_BUTTON_JS).unwrap_or(false);
     // 가입 마지막 단계: URL(external_account_sign_up) 또는 본문("가입 마지막 단계"+"생년월일").
@@ -653,6 +794,7 @@ fn read_signals(
 
     Ok(BandPageSignals {
         logged_in,
+        email_form,
         naver_form,
         email_confirm,
         email_password,
@@ -681,6 +823,60 @@ fn visible_exists(client: &mut CdpClient, selector: &str) -> bool {
     client.evaluate_bool(&expr).unwrap_or(false)
 }
 
+// 상위 문서와 읽을 수 있는 iframe이 모두 complete이고, 지정 요소가 화면에 보이는 상태가 연속
+// 3회 유지될 때까지 기다린다. 정상 진입의 두 버튼 모두 DOM 완료 전에 절대 누르지 않는다.
+fn wait_for_visible_selector(client: &mut CdpClient, selector: &str, timeout: Duration) -> bool {
+    let selector = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".to_owned());
+    let probe = format!(
+        "(()=>{{\
+            if(!({ALL_DOCS_COMPLETE_JS}))return false;\
+            const e=document.querySelector({selector});\
+            if(!e||e.offsetParent===null)return false;\
+            const r=e.getBoundingClientRect();\
+            return r.width>0&&r.height>0&&!e.disabled;\
+        }})()"
+    );
+    let deadline = Instant::now() + timeout;
+    let mut stable_polls = 0u8;
+    loop {
+        if client.evaluate_bool(&probe).unwrap_or(false) {
+            stable_polls += 1;
+            if stable_polls >= 3 {
+                return true;
+            }
+        } else {
+            stable_polls = 0;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        sleep(Duration::from_millis(100));
+    }
+}
+
+// 화면에 보이는 정확한 셀렉터의 중앙을 CDP 실제 마우스 이벤트로 누른다. 좌표 계산이 불가능한
+// 예외적인 경우에만 페이지 고유 click 핸들러를 보존하는 JS click으로 폴백한다.
+fn click_visible_selector(client: &mut CdpClient, selector: &str) -> Result<bool, AutomationError> {
+    let selector = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".to_owned());
+    let center = client.evaluate(&format!(
+        "(()=>{{const e=document.querySelector({selector});\
+         if(!e||e.offsetParent===null)return null;\
+         const r=e.getBoundingClientRect();if(r.width<=0||r.height<=0)return null;\
+         return [r.left+r.width/2,r.top+r.height/2];}})()"
+    ))?;
+    if let Some((x, y)) = parse_xy(&center) {
+        mouse_click(client, x, y)?;
+        return Ok(true);
+    }
+
+    Ok(client
+        .evaluate_bool(&format!(
+            "(()=>{{const e=document.querySelector({selector});\
+             if(!e||e.offsetParent===null)return false;e.click();return true;}})()"
+        ))
+        .unwrap_or(false))
+}
+
 // 새로 이동한 페이지가 로딩 완료(readyState=complete + 모든 iframe complete)될 때까지 기다린다
 // (네이버 ALL_DOCS_COMPLETE_JS 미러). 상한(10초) 안에 완료를 못 봐도 진행한다(무한 wedge 방지).
 fn wait_for_dom_ready(client: &mut CdpClient) -> bool {
@@ -688,6 +884,41 @@ fn wait_for_dom_ready(client: &mut CdpClient) -> bool {
     loop {
         if client.evaluate_bool(ALL_DOCS_COMPLETE_JS).unwrap_or(false) {
             return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        sleep(Duration::from_millis(100));
+    }
+}
+
+// BAND 이메일/비밀번호 각 화면의 전체 DOM과 정확한 폼 구조가 안정적으로 준비될 때까지
+// 기다린다. submit 버튼은 입력 전 disabled가 정상이라 존재·표시만 확인하고, 실제 키 이벤트가
+// 페이지 JS를 거쳐 활성화하도록 기존 제출 헬퍼에 맡긴다.
+fn wait_for_band_form(client: &mut CdpClient, form_selector: &str, input_selector: &str) -> bool {
+    let form = serde_json::to_string(form_selector).unwrap_or_else(|_| "\"\"".to_owned());
+    let input = serde_json::to_string(input_selector).unwrap_or_else(|_| "\"\"".to_owned());
+    let probe = format!(
+        "(()=>{{\
+            if(!({ALL_DOCS_COMPLETE_JS}))return false;\
+            const f=document.querySelector({form});\
+            const i=document.querySelector({input});\
+            const b=f&&f.querySelector('button[type=submit]');\
+            const visible=e=>!!(e&&e.offsetParent!==null&&e.getBoundingClientRect().width>0\
+                &&e.getBoundingClientRect().height>0);\
+            return visible(f)&&visible(i)&&!i.disabled&&!i.readOnly&&visible(b);\
+        }})()"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut stable_polls = 0u8;
+    loop {
+        if client.evaluate_bool(&probe).unwrap_or(false) {
+            stable_polls += 1;
+            if stable_polls >= 3 {
+                return true;
+            }
+        } else {
+            stable_polls = 0;
         }
         if Instant::now() >= deadline {
             return false;
@@ -730,20 +961,6 @@ fn neutral_body_point(client: &mut CdpClient) -> Result<Option<(f64, f64)>, Auto
     Ok(parse_xy(&client.evaluate(JS)?))
 }
 
-// 페이지를 강제로 전경·포커스로 만든다(네이버 force_page_foreground 미러). 창이 가려져
-// visibilityState=hidden 이면 합성 키 이벤트가 렌더러로 전달되지 않아 타이핑이 0자가 된다.
-fn force_page_foreground(client: &mut CdpClient) {
-    if let Err(error) = client.call("Page.bringToFront", json!({})) {
-        tracing::debug!(error = %error, "[BAND] Page.bringToFront 실패(무시하고 진행)");
-    }
-    if let Err(error) = client.call(
-        "Emulation.setFocusEmulationEnabled",
-        json!({ "enabled": true }),
-    ) {
-        tracing::debug!(error = %error, "[BAND] setFocusEmulationEnabled 실패(무시하고 진행)");
-    }
-}
-
 // 네이버 로그인 버튼을 사람처럼 좌표 마우스 클릭한다(네이버 click_login_button 미러). id 값에 점이
 // 있어 CSS 이스케이프(#log\.login)가 필요하며, 좌표를 못 구하면 .click()으로 폴백한다.
 fn click_login_button(client: &mut CdpClient) -> Result<(), AutomationError> {
@@ -784,27 +1001,39 @@ fn click_email_confirm(client: &mut CdpClient) -> Result<bool, AutomationError> 
 // 클릭으로 제출한다. 제출은 band 폼 핸들러(recaptcha·서명 JS)를 태운다. 좌표를 못 구하면
 // requestSubmit()/click() 폴백(둘 다 submit 이벤트를 발화해 recaptcha 를 태운다).
 fn click_band_password_submit(client: &mut CdpClient) -> Result<(), AutomationError> {
-    let _ = client.evaluate(
-        "(()=>{const p=document.querySelector('#pw');\
-         if(p){['keyup','input','change'].forEach(t=>p.dispatchEvent(new Event(t,{bubbles:true})));}\
-         const f=document.getElementById('email_password_login_form');\
-         const b=f&&f.querySelector('button[type=submit]');if(b)b.disabled=false;return true;})()",
-    )?;
-    let center = client.evaluate(
-        "(()=>{const f=document.getElementById('email_password_login_form');\
+    click_band_form_submit(client, BAND_PASSWORD_FORM_SELECTOR, "#pw")
+}
+
+// BAND 이메일/비밀번호 폼은 동일한 submit 구조와 입력 이벤트 활성화 방식을 쓴다. 기존
+// 비밀번호 제출 구현을 공통화해 두 단계 모두 페이지 자체 서명/reCAPTCHA submit 핸들러를 탄다.
+fn click_band_form_submit(
+    client: &mut CdpClient,
+    form_selector: &str,
+    input_selector: &str,
+) -> Result<(), AutomationError> {
+    let form = serde_json::to_string(form_selector).unwrap_or_else(|_| "\"\"".to_owned());
+    let input = serde_json::to_string(input_selector).unwrap_or_else(|_| "\"\"".to_owned());
+    let _ = client.evaluate(&format!(
+        "(()=>{{const p=document.querySelector({input});\
+         if(p){{['keyup','input','change'].forEach(t=>p.dispatchEvent(new Event(t,{{bubbles:true}})));}}\
+         const f=document.querySelector({form});\
+         const b=f&&f.querySelector('button[type=submit]');if(b)b.disabled=false;return true;}})()"
+    ))?;
+    let center = client.evaluate(&format!(
+        "(()=>{{const f=document.querySelector({form});\
          const b=f&&f.querySelector('button[type=submit]');if(!b)return null;\
          const r=b.getBoundingClientRect();if(r.width<=0||r.height<=0)return null;\
-         return [r.left+r.width/2, r.top+r.height/2];})()",
-    )?;
+         return [r.left+r.width/2, r.top+r.height/2];}})()"
+    ))?;
     if let Some((x, y)) = parse_xy(&center) {
         mouse_click(client, x, y)?;
     } else {
-        client.evaluate(
-            "(()=>{const f=document.getElementById('email_password_login_form');if(!f)return false;\
+        client.evaluate(&format!(
+            "(()=>{{const f=document.querySelector({form});if(!f)return false;\
              const b=f.querySelector('button[type=submit]');\
-             if(f.requestSubmit){f.requestSubmit(b||undefined);}else if(b){b.click();}else{f.submit();}\
-             return true;})()",
-        )?;
+             if(f.requestSubmit){{f.requestSubmit(b||undefined);}}else if(b){{b.click();}}else{{f.submit();}}\
+             return true;}})()"
+        ))?;
     }
     Ok(())
 }
@@ -1008,112 +1237,10 @@ fn click_oauth_consent(client: &mut CdpClient) -> Result<bool, AutomationError> 
         .unwrap_or(false))
 }
 
-// 한 글자에 대응하는 US 키보드 물리키 정보(네이버 미러).
-struct KeyInfo {
-    code: String,
-    vk: u32,
-    shift: bool,
-}
-
-// 문자를 US 키보드 배열의 (code, windowsVirtualKeyCode, Shift 필요 여부)로 매핑한다(순수 함수).
-fn key_info(ch: char) -> KeyInfo {
-    if ch.is_ascii_alphabetic() {
-        let upper = ch.to_ascii_uppercase();
-        return KeyInfo {
-            code: format!("Key{upper}"),
-            vk: upper as u32,
-            shift: ch.is_ascii_uppercase(),
-        };
-    }
-    if ch.is_ascii_digit() {
-        return KeyInfo {
-            code: format!("Digit{ch}"),
-            vk: ch as u32,
-            shift: false,
-        };
-    }
-    let (code, vk, shift): (&str, u32, bool) = match ch {
-        ')' => ("Digit0", 0x30, true),
-        '!' => ("Digit1", 0x31, true),
-        '@' => ("Digit2", 0x32, true),
-        '#' => ("Digit3", 0x33, true),
-        '$' => ("Digit4", 0x34, true),
-        '%' => ("Digit5", 0x35, true),
-        '^' => ("Digit6", 0x36, true),
-        '&' => ("Digit7", 0x37, true),
-        '*' => ("Digit8", 0x38, true),
-        '(' => ("Digit9", 0x39, true),
-        ' ' => ("Space", 0x20, false),
-        '-' => ("Minus", 0xBD, false),
-        '_' => ("Minus", 0xBD, true),
-        '=' => ("Equal", 0xBB, false),
-        '+' => ("Equal", 0xBB, true),
-        '[' => ("BracketLeft", 0xDB, false),
-        '{' => ("BracketLeft", 0xDB, true),
-        ']' => ("BracketRight", 0xDD, false),
-        '}' => ("BracketRight", 0xDD, true),
-        '\\' => ("Backslash", 0xDC, false),
-        '|' => ("Backslash", 0xDC, true),
-        ';' => ("Semicolon", 0xBA, false),
-        ':' => ("Semicolon", 0xBA, true),
-        '\'' => ("Quote", 0xDE, false),
-        '"' => ("Quote", 0xDE, true),
-        ',' => ("Comma", 0xBC, false),
-        '<' => ("Comma", 0xBC, true),
-        '.' => ("Period", 0xBE, false),
-        '>' => ("Period", 0xBE, true),
-        '/' => ("Slash", 0xBF, false),
-        '?' => ("Slash", 0xBF, true),
-        '`' => ("Backquote", 0xC0, false),
-        '~' => ("Backquote", 0xC0, true),
-        _ => ("", 0, false),
-    };
-    KeyInfo {
-        code: code.to_owned(),
-        vk,
-        shift,
-    }
-}
-
-// 글자 사이 사람 같은 타이핑 지연 범위(ms).
-const TYPE_DELAY_MIN_MS: u64 = 60;
-const TYPE_DELAY_MAX_MS: u64 = 180;
-
-// 시드+인덱스로 [MIN, MAX] 범위의 타이핑 지연(ms)을 정하는 순수 함수(splitmix64 혼합).
-fn type_delay_ms(seed: u64, index: usize) -> u64 {
-    let mut x = seed ^ (index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    x ^= x >> 31;
-    TYPE_DELAY_MIN_MS + (x % (TYPE_DELAY_MAX_MS - TYPE_DELAY_MIN_MS + 1))
-}
-
-// 타이핑 지연 시드(타이핑 호출마다 한 번 — 실행마다 패턴이 달라지게).
-fn jitter_seed() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
-}
-
 // evaluate가 돌려준 `[x, y]`(returnByValue) 배열을 좌표로 파싱한다(없으면 None).
 fn parse_xy(value: &Value) -> Option<(f64, f64)> {
     let arr = value.as_array()?;
     Some((arr.first()?.as_f64()?, arr.get(1)?.as_f64()?))
-}
-
-// 셀렉터 요소의 뷰포트 중심 좌표(CSS px)를 구한다. 없거나 크기 0이면 None.
-fn element_center(
-    client: &mut CdpClient,
-    selector: &str,
-) -> Result<Option<(f64, f64)>, AutomationError> {
-    let expr = format!(
-        "(()=>{{const e=document.querySelector('{selector}');\
-         if(!e)return null;const r=e.getBoundingClientRect();\
-         if(r.width<=0||r.height<=0)return null;\
-         return [r.left+r.width/2, r.top+r.height/2];}})()"
-    );
-    Ok(parse_xy(&client.evaluate(&expr)?))
 }
 
 // (x,y)로 마우스를 옮겨 좌클릭한다 — 진짜 mouse 이벤트로 행동 기반 봇탐지를 완화한다.
@@ -1133,81 +1260,11 @@ fn mouse_click(client: &mut CdpClient, x: f64, y: f64) -> Result<(), AutomationE
     Ok(())
 }
 
-// 셀렉터를 마우스로 클릭(=포커스). 좌표를 못 구하면 false(호출부가 JS focus로 폴백).
-fn mouse_click_selector(client: &mut CdpClient, selector: &str) -> Result<bool, AutomationError> {
-    if let Some((x, y)) = element_center(client, selector)? {
-        mouse_click(client, x, y)?;
-        return Ok(true);
-    }
-    Ok(false)
-}
-
-// 선택자를 마우스로 클릭해 포커스한 뒤 한 글자씩 실제 키 이벤트로 입력한다(키 후킹 암호화 대응,
-// 네이버 type_into 미러). 입력 후 필드 값 길이를 확인해 비어 있으면 최대 3회 재시도한다.
+// 종목토론방 네이버 로그인과 완전히 같은 입력 함수를 재사용한다. 첫 시도는 글자 사이 지연이
+// 0이므로 DOM 게이트가 열린 직후 ID/PW가 즉시 채워진다. 네이버 쪽 함수가 진단 문자열을
+// 돌려주면 입력 실패, None이면 성공이다.
 fn type_into(client: &mut CdpClient, selector: &str, text: &str) -> Result<bool, AutomationError> {
-    let expected = text.chars().count();
-    let seed = jitter_seed();
-
-    // 창이 가려져 visibilityState=hidden 이면 합성 키가 렌더러로 전달되지 않으므로 전경으로 가져온다.
-    force_page_foreground(client);
-
-    for _ in 0..3 {
-        let clear = format!(
-            "(()=>{{const el=document.querySelector('{selector}');\
-             if(el){{el.value='';return true;}}return false;}})()"
-        );
-        client.evaluate(&clear)?;
-        if !mouse_click_selector(client, selector)? {
-            let focus = format!(
-                "(()=>{{const el=document.querySelector('{selector}');\
-                 if(el){{el.focus();return true;}}return false;}})()"
-            );
-            client.evaluate(&focus)?;
-        }
-
-        for (i, ch) in text.chars().enumerate() {
-            let s = ch.to_string();
-            let k = key_info(ch);
-            let modifiers = if k.shift { 8 } else { 0 };
-            client.call(
-                "Input.dispatchKeyEvent",
-                json!({
-                    "type": "keyDown",
-                    "text": s,
-                    "key": s,
-                    "code": k.code,
-                    "windowsVirtualKeyCode": k.vk,
-                    "nativeVirtualKeyCode": k.vk,
-                    "modifiers": modifiers,
-                }),
-            )?;
-            client.call(
-                "Input.dispatchKeyEvent",
-                json!({
-                    "type": "keyUp",
-                    "key": s,
-                    "code": k.code,
-                    "windowsVirtualKeyCode": k.vk,
-                    "nativeVirtualKeyCode": k.vk,
-                    "modifiers": modifiers,
-                }),
-            )?;
-            sleep(Duration::from_millis(type_delay_ms(seed, i)));
-        }
-
-        let got = client
-            .evaluate(&format!(
-                "(()=>{{const el=document.querySelector('{selector}');\
-                 return el&&el.value?el.value.length:0;}})()"
-            ))?
-            .as_u64()
-            .unwrap_or(0) as usize;
-        if got >= expected {
-            return Ok(true);
-        }
-        sleep(Duration::from_millis(500));
-    }
-    Ok(false)
+    Ok(type_into_naver(client, selector, text)?.is_none())
 }
 
 // Network.getAllCookies로 band.us 쿠키를 수거한다. getAllCookies는 경로(Path) 제한과 무관하게
@@ -1285,6 +1342,30 @@ mod tests {
         assert!(!is_email_password_url(
             "https://auth.band.us/confirm_user_email_login"
         ));
+    }
+
+    #[test]
+    fn detects_direct_email_login_page_without_matching_password_step() {
+        assert!(is_email_login_url(
+            "https://auth.band.us/email_login?keep_login=false"
+        ));
+        assert!(is_email_login_url("https://auth.band.us/email_login"));
+        assert!(!is_email_login_url(
+            "https://auth.band.us/email_login/password?login_type="
+        ));
+    }
+
+    #[test]
+    fn classify_email_form_starts_with_email_typing() {
+        let signals = BandPageSignals {
+            email_form: true,
+            ..Default::default()
+        };
+        assert_eq!(classify(&signals), BandSignal::EmailForm);
+        assert_eq!(
+            decide_loop_step(None, BandSignal::EmailForm, false),
+            LoopAction::TypeBandEmail
+        );
     }
 
     #[test]
@@ -1424,13 +1505,19 @@ mod tests {
 
     #[test]
     fn detects_signup_final_step() {
-        assert!(is_signup_final_url("https://auth.band.us/external_account_sign_up"));
-        assert!(is_signup_final_url("https://auth.band.us/continue_external_account_sign_up"));
+        assert!(is_signup_final_url(
+            "https://auth.band.us/external_account_sign_up"
+        ));
+        assert!(is_signup_final_url(
+            "https://auth.band.us/continue_external_account_sign_up"
+        ));
         assert!(!is_signup_final_url("https://auth.band.us/login?_ns=false"));
         assert!(is_signup_final_text(
             "BAND 가입 마지막 단계입니다. 생년월일 전체동의 (선택 항목 포함) 이용약관 동의 (필수)"
         ));
-        assert!(!is_signup_final_text("BAND 로그인 이메일로 로그인 휴대폰 번호로 로그인"));
+        assert!(!is_signup_final_text(
+            "BAND 로그인 이메일로 로그인 휴대폰 번호로 로그인"
+        ));
         // classify: 가입 마지막 단계는 고유 액션 신호로 잡힌다.
         assert_eq!(
             classify(&BandPageSignals {
@@ -1555,10 +1642,19 @@ mod tests {
     // --- URL / 텍스트 분류(순수 함수) ---
 
     #[test]
-    fn oauth_entry_url_targets_naver_external_login() {
-        let url = oauth_entry_url();
-        assert!(url.contains("auth.band.us/redirect_external_account_login"));
-        assert!(url.contains("type=naver"));
+    fn login_entry_url_targets_band_home_instead_of_direct_email_login() {
+        let url = normal_login_entry_url();
+        assert_eq!(url, "https://www.band.us/");
+        assert!(!url.contains("auth.band.us/email_login"));
+    }
+
+    #[test]
+    fn normal_entry_uses_exact_intro_and_email_method_buttons() {
+        assert_eq!(BAND_INTRO_LOGIN_SELECTOR, "a.login._loginLink");
+        assert_eq!(
+            BAND_EMAIL_METHOD_SELECTOR,
+            "a.buttonRound.-email[data-login-method='email']"
+        );
     }
 
     #[test]
@@ -1614,7 +1710,9 @@ mod tests {
         assert!(is_inactive_user_url(
             "https://auth.band.us/b/inactive_user?redirect_url=https%3A%2F%2Fwww.band.us"
         ));
-        assert!(!is_inactive_user_url("https://auth.band.us/b/validation_welcome"));
+        assert!(!is_inactive_user_url(
+            "https://auth.band.us/b/validation_welcome"
+        ));
     }
 
     #[test]
@@ -1624,11 +1722,15 @@ mod tests {
         assert!(is_logged_in_band_url("https://band.us/band/103043410"));
         assert!(is_logged_in_band_url("https://www.band.us/feed"));
         // 인터스티셜(2단계 인증/캡차/가입중)과 네이버 로그인은 성공 아님 — band_session 있어도 반쪽.
-        assert!(!is_logged_in_band_url("https://auth.band.us/b/validation_welcome"));
+        assert!(!is_logged_in_band_url(
+            "https://auth.band.us/b/validation_welcome"
+        ));
         assert!(!is_logged_in_band_url(
             "https://auth.band.us/b/validation/recaptcha?next_url=https%3A%2F%2Fband.us"
         ));
-        assert!(!is_logged_in_band_url("https://auth.band.us/continue_external_account_sign_up"));
+        assert!(!is_logged_in_band_url(
+            "https://auth.band.us/continue_external_account_sign_up"
+        ));
         assert!(!is_logged_in_band_url(
             "https://nid.naver.com/oauth2.0/authorize?redirect_uri=https%3A%2F%2Fauth.band.us"
         ));
@@ -1665,54 +1767,7 @@ mod tests {
         assert!(!id_is_phone_format("myid@naver.com"));
     }
 
-    // --- key_info / type_delay / parse_xy / cookies ---
-
-    #[test]
-    fn key_info_lowercase_letter_has_keycode_without_shift() {
-        let k = key_info('a');
-        assert_eq!(k.code, "KeyA");
-        assert_eq!(k.vk, 0x41);
-        assert!(!k.shift);
-    }
-
-    #[test]
-    fn key_info_uppercase_letter_sends_shift() {
-        let k = key_info('A');
-        assert_eq!(k.code, "KeyA");
-        assert_eq!(k.vk, 0x41);
-        assert!(k.shift);
-    }
-
-    #[test]
-    fn key_info_shifted_symbol_maps_to_base_digit_with_shift() {
-        let bang = key_info('!');
-        assert_eq!(bang.code, "Digit1");
-        assert_eq!(bang.vk, 0x31);
-        assert!(bang.shift);
-    }
-
-    #[test]
-    fn key_info_unknown_char_is_best_effort_zero() {
-        let k = key_info('가');
-        assert_eq!(k.vk, 0);
-        assert_eq!(k.code, "");
-        assert!(!k.shift);
-    }
-
-    #[test]
-    fn type_delay_always_within_human_range() {
-        for seed in [0u64, 1, 42, 9_999, u64::MAX] {
-            for index in 0..64 {
-                let d = type_delay_ms(seed, index);
-                assert!((TYPE_DELAY_MIN_MS..=TYPE_DELAY_MAX_MS).contains(&d));
-            }
-        }
-    }
-
-    #[test]
-    fn type_delay_is_deterministic_for_same_input() {
-        assert_eq!(type_delay_ms(123, 4), type_delay_ms(123, 4));
-    }
+    // --- parse_xy / cookies ---
 
     #[test]
     fn parse_xy_reads_coordinate_array() {

@@ -203,9 +203,10 @@ async fn band_publish_inner(
 
 /// 밴드의 기존 글(최신글/인기글) 상위 N개를 조회해 댓글을 단다(댓글 전용 모드).
 ///
-/// 흐름: 링크 → `band_no` → 쿠키/서명키 → 대상 글(post_no) 상위 N개 조회(sort) →
-/// 댓글 풀을 글 수만큼 분배(글마다 1개) → 각 글에 `create_comment`(best-effort). 카페
-/// comment-only(latest/popular)를 밴드에 미러한 것으로, 새 글은 만들지 않는다.
+/// 흐름: 링크 → `band_no` → 쿠키/서명키 → 가입(`join_band`, best-effort) → 대상 글(post_no)
+/// 상위 N개 조회(sort) → 댓글 풀을 글 수만큼 분배(글마다 1개) → 각 글에
+/// `create_comment`(best-effort). 카페 comment-only(latest/popular)를 밴드에 미러한 것으로,
+/// 가입에 필요한 API만 먼저 호출하고 새 글은 만들지 않는다.
 pub async fn band_comment(
     account_id: &str,
     band_link: &str,
@@ -290,6 +291,11 @@ async fn band_comment_inner(
     tracing::info!("[BAND] 댓글 전용 시작 — 계정 {account_id}, band_no {band_no}, sort {sort:?}");
     let key = client.fetch_secret_key(&cookie_header).await?;
 
+    // 글쓰기 경로와 동일한 가입 API를 댓글 전용에서도 먼저 호출한다. 미가입 계정은 여기서 해당
+    // 밴드에 가입한 뒤 피드 조회·댓글 작성으로 진행한다. 이미 가입된 밴드가 오류를 돌려줘도 댓글은
+    // 계속 시도해야 하므로 기존 글쓰기와 같은 best-effort 계약을 유지한다.
+    join_band_for_comment(&client, account_id, &band_no, &key, &cookie_header).await;
+
     // 대상 글(post_no) 상위 N개 조회. 최신글은 limit=N 단일 호출, 인기글은 offset 누적.
     let n = count.max(1);
     let post_nos = match sort {
@@ -351,7 +357,8 @@ async fn band_comment_inner(
 /// "특정 게시글" 댓글: 밴드 글 URL(`band.us/band/{band_no}/post/{post_no}`)의 그 글 하나에
 /// 댓글을 단다. 피드(최신/인기) 조회 없이 URL의 `post_no`에 바로 `create_comment`로 달아,
 /// 카페·종목토론방 url 댓글을 밴드에 미러한다. 목록 댓글과 같은 분배·베스트에포트 규칙을
-/// 단일 대상에 적용한다(필요한 band_no·post_no가 URL에 다 있어 추가 패킷이 필요 없다).
+/// 단일 대상에 적용한다. 댓글 전에 글쓰기와 동일한 `join_band`를 best-effort로 호출하되 새 글은
+/// 만들지 않는다.
 pub async fn band_comment_on_post(
     account_id: &str,
     post_url: &str,
@@ -408,6 +415,10 @@ async fn band_comment_on_post_inner(
     );
     let key = client.fetch_secret_key(&cookie_header).await?;
 
+    // 최신/인기글 댓글 전용과 동일하게, 특정 게시글 댓글도 가입을 먼저 보장한다. 이미 가입된
+    // 밴드의 가입 오류는 무시하고 아래 기존 댓글 작성은 그대로 진행한다.
+    join_band_for_comment(&client, account_id, &band_no, &key, &cookie_header).await;
+
     // 단일 대상(그 글 하나)에 댓글 풀에서 1개를 분배해 단다(목록 댓글과 같은 규칙).
     let mut rng = mulberry32(seed_from_clock());
     let contents = distribute_comments(1, comments, &mut rng);
@@ -445,6 +456,26 @@ async fn band_comment_on_post_inner(
         commented_count: 1,
         band_name,
     })
+}
+
+/// 댓글 전용 경로가 글쓰기의 가입 단계를 그대로 재사용하는 공통 헬퍼. 가입은 멱등에 가깝지만
+/// 이미 가입된 밴드가 오류를 반환할 수 있으므로 실패를 댓글 실패로 확대하지 않는다. 실제 댓글 API의
+/// 성공/실패는 각 호출부가 기존 계약대로 별도로 판정한다.
+async fn join_band_for_comment(
+    client: &BandHttpClient,
+    account_id: &str,
+    band_no: &str,
+    key: &getkey::BandAuthKey,
+    cookie_header: &str,
+) {
+    match client.join_band(band_no, key, cookie_header).await {
+        Ok(()) => tracing::info!(
+            "[BAND] 댓글 전용 가입 API 완료 — 계정 {account_id}, band_no {band_no}"
+        ),
+        Err(error) => tracing::info!(
+            "[BAND] 댓글 전용 가입 API 결과 무시(이미 가입 포함) — 계정 {account_id}, band_no {band_no} ({error})"
+        ),
+    }
 }
 
 /// 링크(band_no)로 밴드 이름을 조회한다(게시 전 저장 시점에 실제 밴드명 확인용).

@@ -91,12 +91,13 @@ describe("buildLoginNowItem", () => {
 });
 
 describe("isSelectiveLoginPlatform", () => {
-  it("종토방·블로그만 선택 로그인을 허용하고 카페·밴드는 막는다", () => {
-    // 종토방(forum)과 네이버블로그(blog)는 명시적 선택 로그인을 쓴다.
+  it("종토방·블로그·클립·밴드는 선택 로그인을 허용하고 카페만 막는다", () => {
+    // 네이버 쿠키 플랫폼과 BAND 이메일 로그인은 명시적 선택 로그인을 쓴다.
     expect(isSelectiveLoginPlatform("forum")).toBe(true);
     expect(isSelectiveLoginPlatform("blog")).toBe(true);
-    // 카페(naver)·밴드(band)는 게시 직전 백엔드가 로그인을 원자 처리하므로 선택 로그인 제외.
+    expect(isSelectiveLoginPlatform("clip")).toBe(true);
+    expect(isSelectiveLoginPlatform("band")).toBe(true);
+    // 카페(naver)는 게시 직전 백엔드가 로그인을 원자 처리하므로 선택 로그인 제외.
     expect(isSelectiveLoginPlatform("naver")).toBe(false);
-    expect(isSelectiveLoginPlatform("band")).toBe(false);
   });
 });
