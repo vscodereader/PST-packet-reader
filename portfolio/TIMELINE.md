@@ -1,0 +1,228 @@
+# 본인 PR 작성 월별 이력
+
+## 2026-05
+
+- 2026-05-28 · [네이버 증권 토론 자동화 패킷 기반 batch UI 추가](prs/45.md) · CLOSED · vscodereader
+
+## 2026-06
+
+- 2026-06-01 · [feat(forum): port naver discussion packet posting engine to master](prs/60.md) · MERGED · vscodereader
+- 2026-06-01 · [feat(auth): switch login to Rust CDP, remove Playwright sidecar](prs/62.md) · MERGED · vscodereader
+- 2026-06-02 · [test(auth): make chrome_path fallback assertion host-independent](prs/69.md) · CLOSED · vscodereader
+- 2026-06-04 · [chore: dev config — ignore personal notes, align toolchain pins](prs/78.md) · MERGED · vscodereader
+- 2026-06-04 · [test: add regression suite for #60 review fixes](prs/81.md) · CLOSED · vscodereader
+- 2026-06-04 · [test(auth): cover login signal confirmation (2-poll latch guard)](prs/82.md) · MERGED · vscodereader
+- 2026-06-04 · [fix(accounts): make empty password cell clickable with placeholder](prs/83.md) · MERGED · vscodereader
+- 2026-06-04 · [fix(auth): pace login typing (2s/1s) and log airplane toggle](prs/84.md) · MERGED · vscodereader
+- 2026-06-04 · [fix(auth): incognito login, 1s airplane toggle, log IP before/after](prs/85.md) · MERGED · vscodereader
+- 2026-06-04 · [fix(auth): pace login 2s/2s/2s and send Shift with uppercase keys](prs/87.md) · MERGED · vscodereader
+- 2026-06-04 · [fix(forum): auto-launch debug Chrome for posting (no manual 9222)](prs/88.md) · MERGED · vscodereader
+- 2026-06-04 · [feat(auth): log Chrome lifecycle and settle after IP rotation](prs/90.md) · MERGED · vscodereader
+- 2026-06-04 · [fix(ui): refresh sidebar badge counts on navigation](prs/93.md) · MERGED · vscodereader
+- 2026-06-04 · [fix(auth): wait for full login-form load before typing, with logs](prs/95.md) · MERGED · vscodereader
+- 2026-06-04 · [fix(auth): CDP 로그인 봇탐지(ncaptcha) 통과 — 실제 키 이벤트 + 스텔스 보강](prs/102.md) · MERGED · vscodereader
+- 2026-06-04 · [docs(adr): CDP 스텔스 보강 설계 (ADR-0010)](prs/106.md) · CLOSED · vscodereader
+- 2026-06-05 · [fix(auth): IP 로테이션 비행기모드 토글 복구 — raw-USB→표준 adb CLI (Zadig 불필요)](prs/107.md) · MERGED · vscodereader
+- 2026-06-05 · [docs(auth): useAdb 플래그 주석 — IP 로테이션 켜려면 true로](prs/108.md) · MERGED · vscodereader
+- 2026-06-05 · [docs(adr): ADR-0010 CDP 스텔스 보강 기록 (Accepted)](prs/109.md) · MERGED · vscodereader
+- 2026-06-05 · [chore(logging): 상태 로그를 파일·콘솔에도 남기기 (eprintln→tracing)](prs/111.md) · MERGED · vscodereader
+- 2026-06-05 · [feat(notifications): 알림 원문 보기 + 글관리 배지 draft 제외](prs/114.md) · MERGED · vscodereader
+- 2026-06-05 · [feat(forum): 종목 선택 라이브 네이버 검색 연결 + 크롤 알림 제거](prs/119.md) · MERGED · vscodereader
+- 2026-06-05 · [fix(ui): 벨 알림 빨간 점 읽음 추적으로 정상화](prs/121.md) · MERGED · vscodereader
+- 2026-06-08 · [feat(logging): 로그 pstmacro.log 일원화 + 가독성·상세화](prs/129.md) · MERGED · vscodereader
+- 2026-06-08 · [feat: 네이버 밴드(band.us) 이메일 로그인 (CDP 스텔스, 네이버 미러링)](prs/140.md) · MERGED · vscodereader
+- 2026-06-08 · [feat: 네이버 밴드(band.us) 가입·글쓰기·댓글 (순수 HTTP, md 서명 역공학)](prs/151.md) · CLOSED · vscodereader
+- 2026-06-09 · [feat(forum): 종목 선택 화면 네이버 모바일 재디자인](prs/159.md) · MERGED · vscodereader
+- 2026-06-09 · [fix(notifications): build_publish_batch clippy too_many_arguments 정리](prs/160.md) · CLOSED · vscodereader
+- 2026-06-09 · [fix(posts): 게시 계정 선택 체크박스 직접 클릭이 선택에 반영되도록](prs/167.md) · MERGED · vscodereader
+- 2026-06-09 · [feat(logging): 로그 파일을 지우거나 비워도 이후 작업이 자동 재기록(self-healing)](prs/168.md) · MERGED · vscodereader
+- 2026-06-09 · [fix(posts): 종목 선택 체크박스 직접 클릭이 즉시 반영되도록](prs/170.md) · MERGED · vscodereader
+- 2026-06-09 · [fix(adb): 윈도우에서 adb 실행 시 콘솔 창 깜빡임 제거(CREATE_NO_WINDOW)](prs/171.md) · MERGED · vscodereader
+- 2026-06-09 · [feat: 네이버 밴드(band.us) 가입·글쓰기·댓글 + 결과로그·알림기록 (순수 HTTP, md 서명 역공학)](prs/174.md) · MERGED · vscodereader
+- 2026-06-12 · [feat(stocks): 종목 선택에 전체/코스피/코스닥 시장 구분 탭 추가](prs/201.md) · MERGED · vscodereader
+- 2026-06-12 · [fix(forum): 글쓰기 form/add 429 재시도로 다종목 게시 일부 실패 해결](prs/204.md) · MERGED · vscodereader
+- 2026-06-12 · [refactor(forum): 글/글+댓글 매크로 공통 셋업 단일화](prs/206.md) · MERGED · vscodereader
+- 2026-06-15 · [fix(publish): 본문 링크가 게시 시 사라지는 문제 수정 (붙여넣기·서식링크)](prs/209.md) · MERGED · vscodereader
+- 2026-06-15 · [fix(publish): 즉시 게시 완료 문구를 큐 등록 안내로 수정](prs/211.md) · MERGED · vscodereader
+- 2026-06-15 · [feat(publish): 게시 시 변수 토큰(#{종목명}/#{종목코드}/#{링크}) 실제 치환](prs/214.md) · MERGED · vscodereader
+- 2026-06-16 · [fix(forum): 글쓰기 전 프로필 셋업 + 신규 계정 프로필 POST 생성으로 form 404 해결](prs/216.md) · MERGED · vscodereader
+- 2026-06-16 · [feat(forum): 종목별 게시 내용(제목/본문/댓글/링크)을 완료 로그에 확인](prs/218.md) · MERGED · vscodereader
+- 2026-06-16 · [feat(band): 밴드 게시 내용·글 링크를 완료 로그에 노출](prs/221.md) · CLOSED · vscodereader
+- 2026-06-16 · [fix(band): 밴드 완료 로그 '게시 내용'에 제목·본문·댓글 채우기](prs/224.md) · MERGED · vscodereader
+- 2026-06-17 · [feat(queue): 게시 큐 자동 우선순위 — 로그인 1순위·종목토론방 2순위 재정렬 (1차)](prs/231.md) · MERGED · vscodereader
+- 2026-06-17 · [feat(queue): 실행 중 카페/밴드 작업 우선순위 선점 중지·재개 (2차)](prs/233.md) · MERGED · vscodereader
+- 2026-06-17 · [fix(queue): 종토방 큐 실행 재로그인 제거 + 게시 진행률 분모 버그 수정](prs/234.md) · MERGED · vscodereader
+- 2026-06-17 · [fix(naver): 본문·댓글 줄바꿈 유실 — 여러 줄이 한 줄로 붙어 게시되던 문제](prs/235.md) · MERGED · vscodereader
+- 2026-06-17 · [fix(notifications): 올라간 글 '열기' 버튼 대신 링크 주소를 그대로 노출](prs/236.md) · MERGED · vscodereader
+- 2026-06-17 · [feat(queue): 종목토론방 게시 계정별 병렬 처리 (카페·밴드 무손상)](prs/238.md) · MERGED · vscodereader
+- 2026-06-17 · [fix(build): fresh 윈도우 빌드 시 pstmacro.pdb 리소스 누락 빌드 실패 수정](prs/239.md) · MERGED · vscodereader
+- 2026-06-17 · [feat(queue): 종목토론방 아이템 동시 실행 (워커 다중 처리, 카페·밴드 무손상)](prs/241.md) · MERGED · vscodereader
+- 2026-06-18 · [fix(accounts): '선택 로그인 (N)' 카운트 정확화](prs/242.md) · MERGED · vscodereader
+- 2026-06-18 · [feat(accounts): 로그인 없이 IP만 회전하는 'IP 변경' 버튼](prs/248.md) · MERGED · vscodereader
+- 2026-06-18 · [fix(adb): 비행기모드 토글 상태확인·대기 3초 + IP 변경 결과 토스트·알림 표시](prs/251.md) · MERGED · vscodereader
+- 2026-06-22 · [feat(forum): 종목토론방 '특정 게시글' 댓글을 종목선택 없이 글 URL에 직접 단다](prs/255.md) · MERGED · vscodereader
+- 2026-06-22 · [fix(forum): 특정 게시글 댓글 성공 시 '게시내용'에 단 글의 링크도 표시](prs/256.md) · MERGED · vscodereader
+- 2026-06-22 · [feat(band): 밴드 '특정 게시글' 댓글을 글 URL의 그 게시물에 직접 단다](prs/258.md) · MERGED · vscodereader
+- 2026-06-22 · [feat(posts): 특정 게시글 댓글에 대상 링크 여러 개(댓글 갯수) 추가](prs/260.md) · MERGED · vscodereader
+- 2026-06-23 · [feat(cafe): 여러 게시판 글을 4초 간격으로 모두 게시](prs/262.md) · MERGED · vscodereader
+- 2026-06-23 · [fix(cafe): 여러 게시판 글 간격을 4초에서 11초로 조정](prs/263.md) · MERGED · vscodereader
+- 2026-06-23 · [fix(cafe): 여러 게시판 글 사이 간격 기능 제거](prs/264.md) · MERGED · vscodereader
+- 2026-06-24 · [feat: 원격제어 준비 전 14건 기능/버그 수정 묶음](prs/268.md) · MERGED · vscodereader
+- 2026-06-24 · [docs(auth): 로그인 추가 인증 즉시 실패 안내 문구 정리](prs/269.md) · MERGED · vscodereader
+- 2026-06-24 · [fix(posts): 줄바꿈·대기상태·알림·로그인 후속 수정 (#267)](prs/270.md) · MERGED · vscodereader
+- 2026-06-24 · [fix(auth): 로그인 캡차 회귀 — IP 회전 후 연결 안정화 대기 복구(1→3초)](prs/272.md) · MERGED · vscodereader
+- 2026-06-24 · [chore: .husky/_ 추적 해제 (clone 시 훅 깨짐 수정)](prs/273.md) · MERGED · vscodereader
+- 2026-06-24 · [feat(blog): 네이버블로그 플랫폼 추가 — 댓글 게시(로그인·카페 흐름 재사용)](prs/274.md) · MERGED · vscodereader
+- 2026-06-24 · [fix(auth): 로그인 대기를 ADB 확인·DOM 기반으로 단축 (사수 지시)](prs/275.md) · MERGED · vscodereader
+- 2026-06-24 · [fix(adb): 비행기모드 ON 3초 hold 복원 — IP 미변경 회귀 수정](prs/276.md) · MERGED · vscodereader
+- 2026-06-24 · [fix(adb): 비행기모드 토글 맥락별 분기 — 버튼 3초·로그인 ADB확인 즉시](prs/277.md) · MERGED · vscodereader
+- 2026-06-24 · [fix(adb): 로그인 IP 회전을 실제 상태 기반으로 (끊김·IP변경 확인)](prs/278.md) · MERGED · vscodereader
+- 2026-06-24 · [feat(blog): '최신 N개 글에 댓글' 모드 + 글 부족 시 즉시 취소](prs/280.md) · MERGED · vscodereader
+- 2026-06-24 · [fix(blog): 글 목록 응답의 무효 escape(\') 정리 후 파싱](prs/281.md) · MERGED · vscodereader
+- 2026-06-24 · [refactor(posts): '나눠서 즉시 게시'를 계정 1개당 큐 1개로 분리](prs/283.md) · MERGED · vscodereader
+- 2026-06-24 · [feat(queue): 동시 작업 수 무제한화 + 최대 작동가능 작업 수 설정](prs/285.md) · MERGED · vscodereader
+- 2026-06-24 · [feat: 원격제어 준비 전 후속 수정 6건 (큐 가시성·도중차단·로그인 DOM·게시모달·캡차 보류)](prs/289.md) · MERGED · vscodereader
+- 2026-06-24 · [fix(posts): publish-modal NUL 바이트 손상 복구 (#289 회귀)](prs/290.md) · MERGED · vscodereader
+- 2026-06-25 · [fix(auth): 로그인 결과 폴링도 DOM 전부 로드 후 판정 (사수 지시)](prs/291.md) · MERGED · vscodereader
+- 2026-06-25 · [fix(posts): 차단·대기초과 계정도 게시 계정 목록에서 숨김 (대기와 동일)](prs/292.md) · MERGED · vscodereader
+- 2026-06-25 · [feat(accounts): 네이버블로그도 선택 로그인 지원 (종토방 흐름 재사용)](prs/293.md) · MERGED · vscodereader
+- 2026-06-25 · [fix: 로그인 '돔 전부 로드' 엄격 게이트 + 게시큐 결과카드 제거(알림에서 확인)](prs/294.md) · MERGED · vscodereader
+- 2026-06-25 · [chore(queue): 게시큐 완료/결과 카드 렌더 코드 완전 제거](prs/295.md) · MERGED · vscodereader
+- 2026-06-25 · [fix(auth): 캡차 첫=즉시 보류 / 보류 재로그인=직접입력(120초), 비번·차단 즉시](prs/296.md) · MERGED · vscodereader
+- 2026-06-25 · [docs(auth): decide_loop_step 주석 갱신(옛 latch 설명 제거)](prs/297.md) · MERGED · vscodereader
+- 2026-06-25 · [fix(auth): 비밀번호 자동입력 검증 race — 긴 비번이 '빈 칸'으로 오판되던 문제](prs/298.md) · MERGED · vscodereader
+- 2026-06-25 · [fix(auth): 로그인 폼 DOM 시간초과 없이 끝까지 대기 + 0.18초 검증대기 제거 (사수 지시)](prs/299.md) · MERGED · vscodereader
+- 2026-06-25 · [fix(blog): groupId 파싱 견고화 — 댓글 게시 실패 완화](prs/300.md) · MERGED · vscodereader
+- 2026-06-25 · [feat(blog): 게시 UI를 카페처럼 '링크 1개'로 — 특정글/최신N개 토글·갯수 제거](prs/301.md) · MERGED · vscodereader
+- 2026-06-25 · [feat(auth): 로그인 본인확인(휴대전화 번호) 화면 자동 처리 + 보류 전환](prs/302.md) · MERGED · vscodereader
+- 2026-06-25 · [fix(posts): 블로그 게시 화면에서 고정된 '최신 3개' 갯수/모드 문구 제거](prs/303.md) · MERGED · vscodereader
+- 2026-06-25 · [fix(auth): 로그인 폼 자동입력 실패에 백트레이스·원인 진단 배선](prs/304.md) · MERGED · vscodereader
+- 2026-06-25 · [fix(auth): 로그인 실패 trace 누락 마저 배선(밴드 graceful Error + 쿠키무효)](prs/305.md) · MERGED · vscodereader
+- 2026-06-25 · [fix(net): 전송(reqwest) 오류에 진짜 원인 + 백트레이스 노출](prs/306.md) · MERGED · vscodereader
+- 2026-06-25 · [fix(auth): 로그인 폼 게이트에 keydown 후킹 실제 설치 확인 추가(조건 ④)](prs/307.md) · MERGED · vscodereader
+- 2026-06-25 · [fix(auth): 결과 폴링 게이트도 리소스 정착까지 대칭 강화](prs/308.md) · MERGED · vscodereader
+- 2026-06-25 · [fix(auth): keydown 후킹 게이트(④)를 관측 전용으로 강등](prs/309.md) · MERGED · vscodereader
+- 2026-06-25 · [fix(auth): keydown 후킹을 게이트 조건 ④로 승격 (관측→하드 게이트)](prs/310.md) · MERGED · vscodereader
+- 2026-06-25 · [fix(blog): 댓글 groupId를 blogNo에서 추출 — 댓글 미등록 근본 원인 해결](prs/311.md) · MERGED · vscodereader
+- 2026-06-26 · [fix(blog): 글 조회·댓글 요청에 브라우저 위장 헤더 추가 — 봇차단으로 댓글 안 달리던 문제 해결](prs/312.md) · MERGED · vscodereader
+- 2026-06-26 · [fix(blog): 댓글 등록 실패 시 네이버 응답 code·message 노출](prs/313.md) · MERGED · vscodereader
+- 2026-06-26 · [chore(queue): 되돌린 'Done 카드' 기능의 죽은 코드 제거](prs/314.md) · MERGED · vscodereader
+- 2026-06-26 · [fix(blog): 자세히보기 사유 노출 + 댓글 3초 간격 + 블로그 전용 로고](prs/315.md) · MERGED · vscodereader
+- 2026-06-26 · [fix(blog): 댓글 도배방지 텀 3초 → 10초](prs/316.md) · MERGED · vscodereader
+- 2026-06-26 · [fix(adb): IP 변경 버튼을 실제 IP 변경 확인까지 대기로 통일(고정 3초 제거)](prs/317.md) · MERGED · vscodereader
+- 2026-06-26 · [feat(clip): 네이버 클립 댓글 게시 + 선택 로그인 (패킷 기반)](prs/318.md) · MERGED · vscodereader
+- 2026-06-29 · [fix(auth): 로그인 자동입력 진단에 readOnly·preventDefault 관측 추가](prs/319.md) · MERGED · vscodereader
+- 2026-06-29 · [fix(auth): [진단] 로그인 게이트 OPEN 순간 네트워크/안티봇 스냅샷 로그](prs/320.md) · MERGED · vscodereader
+- 2026-06-29 · [fix(auth): [진단] 로그인 게이트 OPEN 순간 자동화/CDP 지문 로그](prs/321.md) · MERGED · vscodereader
+- 2026-06-29 · [fix(auth): 스텔스를 Navigator.prototype에 정의 — webdriver own-property 탐지 흔적 제거](prs/322.md) · MERGED · vscodereader
+- 2026-06-29 · [fix(auth): [진단] 수동입력 모드 (PSTMACRO_LOGIN_MANUAL) — 환경 vs 합성입력 격리](prs/323.md) · MERGED · vscodereader
+- 2026-06-29 · [feat(admin): Admin–하위 원격제어 시스템(중앙서버·에이전트·Admin웹) — 계정분배·로그인·게시명령·예약](prs/324.md) · MERGED · vscodereader
+- 2026-06-29 · [fix(posts): 게시 안정화 — 미분류 실패 에러처리·약관 자동동의·대기초과 재시도·큐 가시성](prs/325.md) · MERGED · vscodereader
+- 2026-06-29 · [fix(posts): 대기초과 재시도를 '차단 감지까지 끈질기게'로 확대](prs/326.md) · MERGED · vscodereader
+- 2026-06-29 · [fix(posts): 안 되던 게시 기능을 실제로 되게 — 쿠키/디스크IO/동의하기](prs/327.md) · MERGED · vscodereader
+- 2026-06-29 · [fix(posts): 동의하기 버튼 추측-클릭 폴백 제거 (오클릭 위험 R1)](prs/328.md) · MERGED · vscodereader
+- 2026-06-29 · [fix(posts): 동의하기를 금융서비스 가입 URL 이동으로(패킷 분석) — 체크박스 폴백 보존](prs/329.md) · MERGED · vscodereader
+- 2026-06-29 · [fix(auth): 계정 잠금 감지 문구 교정 — 현행 '보호(잠금) 조치중' 페이지 못 잡던 버그](prs/330.md) · MERGED · vscodereader
+- 2026-06-30 · [fix(posts): getProfile 전송 실패를 '로그인·잠금' 아닌 '네트워크 끊김'으로 — 재시도+source 노출](prs/331.md) · MERGED · vscodereader
+- 2026-06-30 · [chore: 실수로 커밋된 Zone.Identifier 메타파일 제거 + gitignore](prs/332.md) · MERGED · vscodereader
+- 2026-06-30 · [test(posts): 전송 재시도 루프·네트워크 분류 테스트 backfill (#331 후속)](prs/333.md) · MERGED · vscodereader
+- 2026-06-30 · [fix(posts): 프로필 상태 조회 500은 재시도 말고 즉시 실패](prs/334.md) · MERGED · vscodereader
+- 2026-06-30 · [fix(posts): 종토 재시도 30→9회 + 프로필상태 500도 재시도 대상으로](prs/335.md) · MERGED · vscodereader
+- 2026-06-30 · [fix(posts): 일시적 네트워크 끊김(10060/10053/10054)도 9회 재시도 대상으로](prs/336.md) · MERGED · vscodereader
+- 2026-06-30 · [fix(auth): CDP 소켓 중단(10053/10054/10060) 시 재접속 후 재시도](prs/337.md) · MERGED · vscodereader
+- 2026-06-30 · [fix(posts): 종토 게시 계정별 시작 로그 추가 (안 보이던 계정 추적)](prs/338.md) · MERGED · vscodereader
+- 2026-06-30 · [fix(queue): 종토 계정 병렬 수를 하드코딩(4) 대신 사용자 '최대 작동 가능 작업 수'로](prs/339.md) · MERGED · vscodereader
+- 2026-06-30 · [fix(notifications): 알림 패널 폴링 2초→400ms (결과 즉시화)](prs/340.md) · MERGED · vscodereader
+- 2026-06-30 · [fix(queue): 종토 재시도 중 UI에 '재시도중 N/M' 표시](prs/341.md) · MERGED · vscodereader
+- 2026-06-30 · [fix(posts): 종토 HTTP 500/서버오류는 재시도 말고 빨리 실패](prs/342.md) · MERGED · vscodereader
+- 2026-06-30 · [fix(queue): 종토방 미시도 계정 큐에서 빼지 말고 차례까지 재대기](prs/343.md) · MERGED · vscodereader
+- 2026-06-30 · [fix(post): 종토방 게시 실제 API 호출·브라우저 네트워크 진단 로그 추가](prs/344.md) · MERGED · vscodereader
+- 2026-06-30 · [fix(queue): 나눠서 게시 시 큐 ID 충돌로 계정·종목이 증발하던 버그 수정](prs/349.md) · MERGED · vscodereader
+- 2026-06-30 · [fix(post): 종토방 "동의하기"(네이버페이 가입) 패킷 복원 + 죽은 코드 정리](prs/350.md) · MERGED · vscodereader
+- 2026-06-30 · [fix(auth): 로그인 시 웹 컨텐츠로 포커스 이동해 캡차 빈도 완화](prs/351.md) · MERGED · vscodereader
+- 2026-06-30 · [test(posts): 종토방 특정 게시글 댓글 다중 URL 회귀 테스트](prs/352.md) · MERGED · vscodereader
+
+## 2026-07
+
+- 2026-07-01 · [feat(posts): 글 관리 '좋아요' 버튼 — 특정 게시글에 선택 계정들이 API로 좋아요](prs/354.md) · MERGED · vscodereader
+- 2026-07-01 · [chore: 로컬 대화기록·프롬프트·요청 드롭파일 gitignore](prs/355.md) · MERGED · vscodereader
+- 2026-07-01 · [fix(post): 네이버페이 가입 '완료' 오판 수정 (로그인/약관 페이지로 튕기면 미완료)](prs/356.md) · MERGED · vscodereader
+- 2026-07-01 · [feat(posts): 좋아요 — 링크 여러 개(칩 입력) + 완료 토스트](prs/357.md) · MERGED · vscodereader
+- 2026-07-01 · [fix(posts): 특정 게시글 댓글 링크 여러 개가 1개로 줄던 버그 (백엔드 저장 누락)](prs/358.md) · MERGED · vscodereader
+- 2026-07-01 · [fix(queue): 안 눌러도 펼쳐지고 하나 누르면 같은 것들이 다 펼쳐지던 큐 상세 버그](prs/359.md) · MERGED · vscodereader
+- 2026-07-01 · [fix(post): 종토방 댓글 계정별 3초 간격 스로틀 (도배방지·In process 회피)](prs/360.md) · MERGED · vscodereader
+- 2026-07-01 · [fix(posts): 좋아요도 npay 금융서비스 가입(동의하기) 먼저 — 미가입 계정 반응 400 수정](prs/361.md) · MERGED · vscodereader
+- 2026-07-01 · [fix(auth): chrome 종료 확인 근거를 로그에 노출 — kill 결과·wait ExitStatus·프로필 삭제](prs/362.md) · MERGED · vscodereader
+- 2026-07-01 · [fix(post): npay 필수약관 콜백 따라가기 + 동의 Y + 프로필 상태 500 진단 프로브](prs/363.md) · MERGED · vscodereader
+- 2026-07-01 · [fix(auth): 로그인 직후 브라우저로 npay 가입 완료 — 미가입 계정 프로필 상태 500 근본수정](prs/364.md) · MERGED · vscodereader
+- 2026-07-01 · [fix(queue): 종토 429(요청 과다)를 오류가 아니라 대기초과(재시도)로 — 계정 안 죽이고 최종결과로 판단](prs/365.md) · MERGED · vscodereader
+- 2026-07-01 · [fix(post): 프로필 상태 500을 상황별로 구분 — 계정 보호조치 vs npay 미완료 vs 그 외](prs/366.md) · MERGED · vscodereader
+- 2026-07-01 · [fix(logging): 게시·로그인 네이버 원문 로그 전면화 + 좋아요 알림 + 로그인 npay 제거](prs/367.md) · MERGED · vscodereader
+- 2026-07-01 · [fix(post): 미가입 계정 npay 약관동의를 패킷 쿠키 누적으로 완료 — 프로필 500 근본수정](prs/368.md) · MERGED · vscodereader
+- 2026-07-01 · [fix(post): 종토 요청을 브라우저와 일치시켜 네이버 봇탐지(UMON) 403/500 해소](prs/369.md) · MERGED · vscodereader
+- 2026-07-01 · [refactor(post): 불필요한 API 호출 축소](prs/371.md) · MERGED · vscodereader
+- 2026-07-01 · [refactor(post): 불필요한 API 호출 및 패킷과 1대1 대조](prs/372.md) · MERGED · vscodereader
+- 2026-07-01 · [fix(auth,post): 전체 패킷과 1대1 매치](prs/373.md) · MERGED · vscodereader
+- 2026-07-01 · [fix(post): 모든 요청 헤더를 성공 패킷과 1대1 매치](prs/374.md) · MERGED · vscodereader
+- 2026-07-01 · [fix(post): npay 가입 후 회전된 세션 쿠키를 반영해 프로필 status 500 해결](prs/375.md) · MERGED · vscodereader
+- 2026-07-02 · [fix(login): hidden 창 키드롭 수정 + 키/네트워크 진단 + CDP 트레이스](prs/376.md) · MERGED · vscodereader
+- 2026-07-02 · [fix(admin): 계정 분배 즉시 반영 + 통신로그 스크롤바·위치 유지](prs/377.md) · MERGED · vscodereader
+- 2026-07-02 · [feat(login): 수동추가 — 사람이 직접 로그인, 쿠키는 자동로그인과 동일 저장 + 계정 자동 추가](prs/378.md) · MERGED · vscodereader
+- 2026-07-02 · [feat(admin): 게시 명령 화면 설계서 + UI 구현(종토 확정, 카페/블로그/밴드 버튼)](prs/379.md) · MERGED · vscodereader
+- 2026-07-02 · [feat: ADB 선택화 + Chrome 프로세스 트리 종료/게시완료 신호 + 쿠키만료 열](prs/380.md) · MERGED · vscodereader
+- 2026-07-02 · [feat(post): 게시 패킷 요청+응답 전체 원문 와이어 트레이스(기본 ON)](prs/381.md) · MERGED · vscodereader
+- 2026-07-03 · [fix(like): 좋아요 전용 흐름 분리 — npay 쿠키 훼손 회귀 수정](prs/382.md) · MERGED · vscodereader
+- 2026-07-03 · [fix(like): 좋아요 실패를 차단(비활성)/세션만료(재로그인)로 구분 + 계정 상태 전환](prs/383.md) · MERGED · vscodereader
+- 2026-07-03 · [fix(like): 차단/만료를 form 원문으로 판정 + 상태 반영(loginId 매칭)](prs/384.md) · MERGED · vscodereader
+- 2026-07-03 · [feat(login): 수동추가 시 ADB 연결되면 IP 한 번 회전 후 로그인창](prs/385.md) · MERGED · vscodereader
+- 2026-07-03 · [feat(admin): 게시 명령 화면 UI (종토 확정, 카페/블로그/밴드 버튼만)](prs/386.md) · CLOSED · vscodereader
+- 2026-07-03 · [fix(post): 실명인증 미완 계정 프로필 생성 실패 시 사유 명확화](prs/387.md) · MERGED · vscodereader
+- 2026-07-03 · [fix(post): 실명인증 realNameCheck 확정 + 차단 원문 + 죽은계정 쿠키숨김](prs/388.md) · MERGED · vscodereader
+- 2026-07-07 · [fix(post): 게시 요청 UA에서 HeadlessChrome 제거](prs/389.md) · MERGED · vscodereader
+- 2026-07-07 · [chore(auth): 로그인 CDP 네트워크 원문 로깅 옵트인 게이트](prs/390.md) · MERGED · vscodereader
+- 2026-07-07 · [feat(posts): 종목토론방 싫어요 기능 추가](prs/392.md) · MERGED · vscodereader
+- 2026-07-07 · [fix(auth): 로그인 Accept-Language를 navigator.languages 위조본과 일치](prs/393.md) · MERGED · vscodereader
+- 2026-07-07 · [fix(auth): 로그인 스텔스 webdriver/languages override 제거(실험 B)](prs/394.md) · CLOSED · vscodereader
+- 2026-07-07 · [fix(auth): 로그인 IP 회전에 dwell·앞대역(/16) 검증·재토글(실험 A)](prs/395.md) · CLOSED · vscodereader
+- 2026-07-08 · [feat(auth): 로그인 UA·Client Hints 판마다 최신 실존 크롬으로 일관 로테이션(캡차 실험)](prs/396.md) · CLOSED · vscodereader
+- 2026-07-08 · [feat(auth): 로그인 UA 로테이션 + wasm 차단 실험 스위치](prs/397.md) · MERGED · vscodereader
+- 2026-07-09 · [feat(login): 로그인 wasm 차단 기본 활성화 + 계정 보류 수동 설정](prs/399.md) · MERGED · vscodereader
+- 2026-07-09 · [feat(posts): 조회수 부스트 — 시크릿창 껐다켰다 반복](prs/401.md) · MERGED · vscodereader
+- 2026-07-09 · [fix(posts): 조회수 부스트 — 창이 완전 로딩 전에 닫히던 문제 수정](prs/402.md) · MERGED · vscodereader
+- 2026-07-09 · [feat(posts): 종토 특정글 전체 댓글 게시 + 나눠서 게시(댓글 분배)](prs/404.md) · CLOSED · vscodereader
+- 2026-07-09 · [feat(login): 로그인 지문·행동 재료 트레이스(PSTMACRO_FP_TRACE, 기본 OFF)](prs/406.md) · MERGED · vscodereader
+- 2026-07-10 · [feat(forum): 종토 게시 코어 기능 일괄 반영 (닉네임 랜덤·글 수정·나눠서 게시·크롬 제거)](prs/407.md) · MERGED · vscodereader
+- 2026-07-10 · [fix(forum): 나눠서게시 댓글 전량 분배 + 내용변경 제목입력 흰화면 수정](prs/408.md) · MERGED · vscodereader
+- 2026-07-10 · [feat(forum): 내용변경 edit 백그라운드 분리 + 원글/수정 2단계 알림·토스트](prs/409.md) · MERGED · vscodereader
+- 2026-07-13 · [feat(pstmacro): 세션 개선 — 내용변경 흰화면·edit실패 알림·raw 로그·닉네임회전·잔여횟수·forum-only 게이트](prs/411.md) · MERGED · vscodereader
+- 2026-07-13 · [chore: ignore local Design_Doc/, error_log/, logo/ folders](prs/412.md) · MERGED · vscodereader
+- 2026-07-13 · [fix(band): 밴드 로그인 네이버 OAuth 재작성 + 게시 안정화](prs/413.md) · MERGED · vscodereader
+- 2026-07-14 · [feat(report): 종목토론방 글 신고하기 (링크n×계정m, 비차단)](prs/414.md) · MERGED · vscodereader
+- 2026-07-14 · [fix(build): admin.html 빌드 엔트리를 조건부로 — master 빌드 복구](prs/415.md) · MERGED · vscodereader
+- 2026-07-14 · [feat(blog): 네이버 블로그 발행 기반 이식 (write_client·작성기·커맨드)](prs/416.md) · MERGED · vscodereader
+- 2026-07-14 · [feat(blog): 네이버 편집기식 툴바·블록 편집기 (사진·스티커·링크·파일·일정·소스코드·장소 + 서식)](prs/417.md) · MERGED · vscodereader
+- 2026-07-14 · [fix(report): 신고 경로에 와이어샤크식 원문 로그 전면 배선](prs/418.md) · MERGED · vscodereader
+- 2026-07-14 · [fix(blog): 발행 존재확인 게이트 제거·SeOptions referer 수정](prs/419.md) · MERGED · vscodereader
+- 2026-07-14 · [fix(blog): 편집기 세션·업로드 실측 수정 + 편집기 빈칸 UX·발행 알림](prs/420.md) · MERGED · vscodereader
+- 2026-07-14 · [fix(report): by-item 필수 파라미터 누락(400) 수정](prs/421.md) · MERGED · vscodereader
+- 2026-07-14 · [fix(report): 토큰 크롬에 계정 로그인 쿠키 주입(로그인 페이지 리다이렉트 방지)](prs/422.md) · MERGED · vscodereader
+- 2026-07-14 · [fix(blog): 발행 'not acceptable' 수정(text 정렬 스키마) + 실제 사진 업로드(upphoto)](prs/423.md) · MERGED · vscodereader
+- 2026-07-14 · [fix(blog): 링크 발행 'not acceptable'(서명 URL) + 발행 결과 알림창 기록](prs/424.md) · MERGED · vscodereader
+- 2026-07-14 · [fix(blog): 공개범위 무시·비공개 강제 수정 (editorSource 누락)](prs/425.md) · MERGED · vscodereader
+- 2026-07-14 · [feat(admin): 게시 종류에 '블로그 새글' 추가(→제목/본문 작성기)](prs/426.md) · MERGED · vscodereader
+- 2026-07-14 · [fix(report): ncaptcha 토큰 스크랩 대신 브라우저가 직접 제출(WASM 캡차 대응)](prs/427.md) · MERGED · vscodereader
+- 2026-07-14 · [fix(report): 제출 버튼 오클릭 수정(btn_submit '신고하기' 정확 클릭)](prs/428.md) · MERGED · vscodereader
+- 2026-07-14 · [fix(report): 선택한 신고 사유가 웹에 반영(React 라디오 확실 선택+순서 폴백)](prs/429.md) · MERGED · vscodereader
+- 2026-07-15 · [fix(report): 신고 단건조회·크롬 자동종료·사유 자동선택 + 블로그 openType 전체공개 교정 + Admin 원격 미디어 + 서버 Cloud Run 준비](prs/432.md) · MERGED · vscodereader
+- 2026-07-15 · [ci: add cloud run deploy workflow and gcp setup scripts](prs/433.md) · MERGED · vscodereader
+- 2026-07-15 · [fix(clip): 프로필 생성을 죽은 graphql → creatorhub REST로 교체 (404 수정)](prs/434.md) · MERGED · vscodereader
+- 2026-07-15 · [fix(cafe): 배포 후 버그 — 최신 댓글이 지정 게시판(menu) 무시하고 카페 전체에 달리던 문제](prs/435.md) · MERGED · vscodereader
+- 2026-07-16 · [fix(login): 네이버 v4 로그인 폼 대응 — 셀렉터만 갱신(내부 불변)](prs/436.md) · MERGED · vscodereader
+- 2026-07-16 · [fix: 원격제어 분배 지연 + Admin UX(분배 버튼·미리보기 제거·계정상태 다기기)](prs/437.md) · MERGED · vscodereader
+- 2026-07-16 · [fix(band): 로그인 폼 네이버 재사용(v4 멈춤 해결)+동의 보강 / feat(admin): 계정상태 하위별 색구분](prs/438.md) · MERGED · vscodereader
+- 2026-07-20 · [feat(admin): 통신 로그 일자별 필터 — 3단 종속 목록형(컴퓨터→날짜)](prs/440.md) · MERGED · vscodereader
+- 2026-07-20 · [feat(remote-control): 하위 기기 안정 식별 — 같은 PC=같은 기기(machine_id upsert)](prs/442.md) · MERGED · vscodereader
+- 2026-07-20 · [fix(admin): 통신 로그 초기 화면 비움(대량 로그 즉시 렌더 방지)](prs/443.md) · MERGED · vscodereader
+- 2026-07-20 · [feat(admin): 통신로그 기기 2단 필터 — 하위com → 등록 이력(이름·날짜순)](prs/445.md) · MERGED · vscodereader
+- 2026-07-20 · [feat(admin): 게시명령 종토 종목 자동/수동 선택 분기 — 데스크톱 종목선택 모달 공유 재사용](prs/447.md) · MERGED · vscodereader
+- 2026-07-20 · [fix(server): 결과보고에서 삭제된 기기의 고아 리포트 숨김](prs/448.md) · MERGED · vscodereader

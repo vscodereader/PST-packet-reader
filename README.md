@@ -1,65 +1,14 @@
-# pstmacro
+# PST-packet-reader
 
-![CI](https://github.com/beyondsoft-kr/pstmacro/actions/workflows/ci.yml/badge.svg)
-![Tauri build](https://github.com/beyondsoft-kr/pstmacro/actions/workflows/tauri-build.yml/badge.svg)
-![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+원본 `pstmacro`의 코드·Git 이력·브랜치와 개인 개발 기록을 보존한 비공개 저장소임.
 
-Tauri + React + TypeScript desktop app.
+- [프로젝트 개요·기술별 실제 적용](portfolio/PROJECT.md)
+- [전체 PR 목록](portfolio/PR-INDEX.md)
+- [개인 작업 월별 이력](portfolio/TIMELINE.md)
+- [Git 커밋 전체](portfolio/COMMITS.md)
+- [브랜치·태그 목록](portfolio/BRANCHES.md)
+- [진행 중 로컬 작업](portfolio/WORK-IN-PROGRESS.md)
+- [복사 검증·환경 파일 제외·SHA 대응](portfolio/MIGRATION.md)
+- [원래 README](portfolio/ORIGINAL-README.md)
 
-Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
-(enforced by commitlint). Branch naming and Claude task automation are
-documented in [CLAUDE.md](./CLAUDE.md).
-
-## Recommended IDE Setup
-
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
-
-## Scripts
-
-```bash
-pnpm dev              # Vite dev server
-pnpm build            # tsc + Vite production build
-pnpm tauri dev        # Tauri dev with desktop shell
-pnpm tauri build      # Tauri release build
-
-pnpm lint             # ESLint check
-pnpm lint:fix         # ESLint autofix
-pnpm lint:css         # Stylelint check
-pnpm format           # Prettier write
-pnpm format:check     # Prettier check (CI)
-pnpm typecheck        # tsc --noEmit
-
-pnpm test             # Vitest single run
-pnpm test:watch       # Vitest watch
-pnpm test:ui          # Vitest UI
-pnpm test:coverage    # Vitest with coverage
-```
-
-`pnpm install` runs the `prepare` script which initializes Husky; the `.husky/_/` directory is auto-generated and gitignored by Husky.
-
-### Rust (src-tauri)
-
-```bash
-cd src-tauri
-cargo fmt              # format Rust sources
-cargo clippy           # lint
-```
-
-## Commit message convention
-
-Commits are validated by commitlint (`@commitlint/config-conventional`) via a
-`commit-msg` hook. Use the [Conventional Commits](https://www.conventionalcommits.org/)
-format:
-
-```
-<type>(<optional scope>): <subject>
-```
-
-Common types: `feat`, `fix`, `chore`, `refactor`, `docs`, `test`, `build`, `ci`, `perf`, `style`.
-
-## VS Code
-
-Opening the workspace in VS Code prompts to install the recommended extensions
-(`.vscode/extensions.json`) — Prettier, ESLint, Stylelint, EditorConfig, Tauri,
-rust-analyzer, Vitest Explorer. Workspace settings enable auto-save (1s delay),
-format-on-save with Prettier, and ESLint/Stylelint autofix on save.
+문서 기본 화면은 `portfolio` 브랜치이며 원래 `master` 및 다른 브랜치는 별도로 보존함. Bambi 웹은 `develop`, 앱은 `mobile`과 진행 중 기능 브랜치를 함께 확인해야 함.
