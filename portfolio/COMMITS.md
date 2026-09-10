@@ -4,6 +4,7 @@
 
 | SHA | 일시 | Git author | 제목 | 본인 분류 |
 |---|---|---|---|---|
+| `f0e5a9908d3ae62132ee69bb5b00686a020036b1` | 2026-09-10T14:30:19+09:00 | vscodereader | docs: archive project technology, contribution evidence and branch inventory | 확인 계정 |
 | `6415ae30729376d97aaae2a7d3459cb9f63f9bfc` | 2026-09-10T14:25:55+09:00 | vscodereader | archive: preserve uncommitted worktree snapshot (environment files excluded) | 확인 계정 |
 | `3fb89b91d088a434b2fdd864c93262a3c72f0f2e` | 2026-09-10T14:25:46+09:00 | vscodereader | archive: preserve uncommitted worktree snapshot (environment files excluded) | 확인 계정 |
 | `473472a9c1db406739cb4d891c4642c5d5331437` | 2026-09-10T14:25:32+09:00 | vscodereader | archive: preserve uncommitted worktree snapshot (environment files excluded) | 확인 계정 |
