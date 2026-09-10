@@ -422,7 +422,6 @@
 | `refs/heads/local-snapshot/worktree-agent-aa0eb3feb4b4169cc` | `adb20b760d460529fe7cc9e2c56c2f3e84ffd521` |
 | `refs/heads/local-snapshot/worktree-agent-af00169a0cc81a58f` | `f82147efacab91fdaf2902e99df47a63c45648d1` |
 | `refs/heads/master` | `53e2e96690be201e0caf7b39203311e764297cf6` |
-| `refs/heads/portfolio` | `d2b5fe4d6a4d9277273aa5ccb188c68c29100779` |
 | `refs/heads/wip-snapshot/chore/core-to-master` | `6415ae30729376d97aaae2a7d3459cb9f63f9bfc` |
 | `refs/heads/wip-snapshot/docs/admin-remote-control-design` | `3fb89b91d088a434b2fdd864c93262a3c72f0f2e` |
 | `refs/heads/wip-snapshot/feat/wasm-fetch-block-experiment` | `0487ab95f175d11448ea8d6d11c496732dd878e2` |
