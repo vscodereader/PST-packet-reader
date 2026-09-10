@@ -1,0 +1,25 @@
+[ pstmacro Admin 서버 — 하위 COM 실행법 (아무것도 설치 불필요) ]
+
+폴더 구성:
+  pstmacro-server\
+    ├─ pstmacro-server.exe   (서버 + Admin UI 서빙)
+    └─ dist\                 (Admin 웹 화면 — exe 옆에 그대로 둘 것)
+
+■ 실행 순서
+ 1) pstmacro-server.exe 더블클릭
+     → 콘솔에 "listening on 0.0.0.0:8080" 뜨면 정상 (DB/설치 불필요, 메모리 저장)
+     → 방화벽 팝업 뜨면 "액세스 허용"
+ 2) Edge 열고 주소창에  http://localhost:8080
+     → Admin 로그인:  아이디 Superadmin  /  비번 Superadmin
+     → 첫 로그인 시 비번 변경
+ 3) Admin [기기 연결] → "기기코드 발급"
+ 4) 에이전트 앱(pstmacro.exe) 실행 → [기기 등록]
+     서버 주소:  http://localhost:8080
+     기기코드 :  위 3)에서 발급한 코드
+ 5) Admin [계정 분배] → 이 기기로 분배
+     → 에이전트가 로컬 ADB로 로그인 실행 → [결과 보고]에서 확인
+
+■ 참고
+ - 전부 이 PC 안에서만(localhost) 도는 테스트라 포트개방/TLS/DB 전부 불필요.
+ - 서버 끄기: 콘솔 창 닫기.
+ - 혹시 exe 실행 시 "vcruntime140.dll 없음" 뜨면 → "Microsoft Visual C++ 재배포 패키지(x64)" 설치.
